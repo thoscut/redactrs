@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use redact_booking::{BookingMatcher, CsvBookingLoader};
 use redact_core::{
-    resolve_conflicts, Action, BlockedRegion, BookingLoader, Extractor, MatchType, RedactError,
-    Rect, Redaction, Region, Renderer, Result, ReviewFile, ReviewInput, Source, TextRun,
+    resolve_conflicts, Action, BlockedRegion, BookingLoader, Extractor, MatchType, Rect,
+    RedactError, Redaction, Region, Renderer, Result, ReviewFile, ReviewInput, Source, TextRun,
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::{
@@ -319,7 +319,12 @@ impl AppState {
 
     /// Legt eine manuelle Region an, aktiviert sie und wählt sie aus.
     /// Gibt den Index der neuen Region zurück.
-    pub fn add_manual_region(&mut self, page: usize, rect: Rect, reason: impl Into<String>) -> usize {
+    pub fn add_manual_region(
+        &mut self,
+        page: usize,
+        rect: Rect,
+        reason: impl Into<String>,
+    ) -> usize {
         let region = Region::new(
             page,
             rect,
@@ -710,11 +715,10 @@ mod tests {
             .all(|a| a.color == RegionColor::AutoPattern && a.enabled));
 
         // Negativtreffer künstlich ergänzen und Farbzuordnung prüfen.
-        state
-            .regions
-            .push(AnnotatedRegion::new(negative_region(0, Rect::new(
-                0.0, 0.0, 10.0, 10.0,
-            ))));
+        state.regions.push(AnnotatedRegion::new(negative_region(
+            0,
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+        )));
         let last = state.regions.last().unwrap();
         assert_eq!(last.color, RegionColor::AutoBookingNeg);
         assert!(!last.enabled);
@@ -759,11 +763,10 @@ mod tests {
     #[test]
     fn negative_region_cannot_be_enabled() {
         let mut state = AppState::new();
-        state
-            .regions
-            .push(AnnotatedRegion::new(negative_region(0, Rect::new(
-                0.0, 0.0, 10.0, 10.0,
-            ))));
+        state.regions.push(AnnotatedRegion::new(negative_region(
+            0,
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+        )));
         assert!(!state.regions[0].enabled);
         assert!(!state.set_enabled(0, true));
         assert!(!state.regions[0].enabled);
@@ -778,11 +781,10 @@ mod tests {
     #[test]
     fn pattern_region_toggles_normally() {
         let mut state = AppState::new();
-        state
-            .regions
-            .push(AnnotatedRegion::new(pattern_region(0, Rect::new(
-                0.0, 0.0, 10.0, 10.0,
-            ))));
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+        )));
         assert!(state.regions[0].enabled);
         assert!(state.toggle_enabled(0));
         assert!(!state.regions[0].enabled);
@@ -793,16 +795,14 @@ mod tests {
     #[test]
     fn enabled_redactions_respect_negative_list() {
         let mut state = AppState::new();
-        state
-            .regions
-            .push(AnnotatedRegion::new(pattern_region(0, Rect::new(
-                10.0, 10.0, 50.0, 20.0,
-            ))));
-        state
-            .regions
-            .push(AnnotatedRegion::new(negative_region(0, Rect::new(
-                0.0, 0.0, 100.0, 30.0,
-            ))));
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(10.0, 10.0, 50.0, 20.0),
+        )));
+        state.regions.push(AnnotatedRegion::new(negative_region(
+            0,
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+        )));
 
         // Der Pattern-Treffer wird zu 100 % von der Negativregion überdeckt.
         assert!(state.enabled_redactions().is_empty());
@@ -813,20 +813,16 @@ mod tests {
         state.add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "bewusst");
         let redactions = state.enabled_redactions();
         assert_eq!(redactions.len(), 1);
-        assert!(matches!(
-            redactions[0].region.source,
-            Source::Manual { .. }
-        ));
+        assert!(matches!(redactions[0].region.source, Source::Manual { .. }));
     }
 
     #[test]
     fn disabled_regions_are_not_exported() {
         let mut state = AppState::new();
-        state
-            .regions
-            .push(AnnotatedRegion::new(pattern_region(0, Rect::new(
-                10.0, 10.0, 50.0, 20.0,
-            ))));
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(10.0, 10.0, 50.0, 20.0),
+        )));
         assert_eq!(state.enabled_redactions().len(), 1);
         assert!(state.set_enabled(0, false));
         assert!(state.enabled_redactions().is_empty());
@@ -835,11 +831,10 @@ mod tests {
     #[test]
     fn action_is_carried_into_redactions() {
         let mut state = AppState::new();
-        state
-            .regions
-            .push(AnnotatedRegion::new(pattern_region(0, Rect::new(
-                10.0, 10.0, 50.0, 20.0,
-            ))));
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(10.0, 10.0, 50.0, 20.0),
+        )));
         assert!(state.set_action(0, Action::Replace("[IBAN]".into())));
         let redactions = state.enabled_redactions();
         assert_eq!(redactions[0].action, Action::Replace("[IBAN]".into()));
@@ -862,8 +857,15 @@ mod tests {
         let bytes = std::fs::read(&out).unwrap();
         let doc = redact_pdf::load_from_bytes(&bytes).unwrap();
         let runs = PdfExtractor::new().extract(&doc).unwrap();
-        let text: String = runs.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(!text.contains("DE89"), "IBAN steht noch im Dokument: {text}");
+        let text: String = runs
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !text.contains("DE89"),
+            "IBAN steht noch im Dokument: {text}"
+        );
         assert!(!text.contains("DE02"));
         // Nicht getroffener Text bleibt erhalten.
         assert!(text.contains("Musterbank"));
@@ -872,11 +874,39 @@ mod tests {
         let log: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&audit).unwrap()).unwrap();
         assert_eq!(log["metadata_stripped"], serde_json::json!(true));
-        assert!(log["redactions"].as_array().unwrap().len() >= 1);
+        assert!(!log["redactions"].as_array().unwrap().is_empty());
         assert_eq!(log["redactions"][0]["page"], serde_json::json!(1));
         assert_eq!(log["input"]["sha256"], serde_json::json!(""));
         assert!(log["timestamp"].as_str().unwrap().ends_with('Z'));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_is_byte_identical_to_the_cli_pipeline() {
+        let mut state = loaded_state();
+        state.analyze(&["iban_de".to_string()], None).unwrap();
+        state.add_manual_region(1, Rect::new(70.0, 700.0, 250.0, 715.0), "Adresse");
+
+        let dir = temp_dir("identical");
+        let gui_out = dir.join("gui.pdf");
+        state.export(&gui_out, None).unwrap();
+
+        // Derselbe Ablauf wie in `redact-cli`: schwärzen (Padding 1.0, die
+        // Vorgabe der CLI) → Metadaten strippen → schreiben.
+        let cli_out = dir.join("cli.pdf");
+        let mut doc = redact_pdf::load_from_bytes(&redact_pdf::testing::demo_statement()).unwrap();
+        PdfRedactor::with_padding(1.0)
+            .apply_with_report(&mut doc, &state.enabled_redactions())
+            .unwrap();
+        strip_metadata(&mut doc);
+        PdfRenderer::new().render(&doc, &cli_out).unwrap();
+
+        assert_eq!(
+            std::fs::read(&gui_out).unwrap(),
+            std::fs::read(&cli_out).unwrap(),
+            "GUI- und CLI-Ausgabe müssen Byte für Byte übereinstimmen"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -920,17 +950,19 @@ mod tests {
             assert_eq!(a.action, b.action);
             assert_eq!(a.color, b.color);
         }
-        assert_eq!(restored.to_review_file().items, state.to_review_file().items);
+        assert_eq!(
+            restored.to_review_file().items,
+            state.to_review_file().items
+        );
     }
 
     #[test]
     fn review_file_never_enables_a_negative_hit() {
         let mut state = AppState::new();
-        state
-            .regions
-            .push(AnnotatedRegion::new(negative_region(0, Rect::new(
-                0.0, 0.0, 10.0, 10.0,
-            ))));
+        state.regions.push(AnnotatedRegion::new(negative_region(
+            0,
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+        )));
         let mut review = state.to_review_file();
         // Von Hand manipulierte Datei: `enabled` steht auf true.
         review.items[0].enabled = true;
@@ -984,7 +1016,10 @@ mod tests {
 
     #[test]
     fn audit_log_shape_matches_cli_format() {
-        let redaction = Redaction::new(pattern_region(0, Rect::new(1.0, 2.0, 3.0, 4.0)), Action::Blackout);
+        let redaction = Redaction::new(
+            pattern_region(0, Rect::new(1.0, 2.0, 3.0, 4.0)),
+            Action::Blackout,
+        );
         let blocked = vec![BlockedRegion {
             page: 1,
             rect: Rect::new(0.0, 0.0, 5.0, 5.0),
@@ -1008,7 +1043,10 @@ mod tests {
         assert_eq!(log["input"]["sha256"], serde_json::json!(""));
         assert_eq!(log["output"]["path"], serde_json::json!("out.pdf"));
         assert_eq!(log["redactions"][0]["page"], serde_json::json!(1));
-        assert_eq!(log["redactions"][0]["action"], serde_json::json!("blackout"));
+        assert_eq!(
+            log["redactions"][0]["action"],
+            serde_json::json!("blackout")
+        );
         assert_eq!(log["redactions"][0]["source"], serde_json::json!("auto"));
         assert_eq!(
             log["redactions"][0]["rect"],
