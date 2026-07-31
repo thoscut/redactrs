@@ -324,13 +324,34 @@ Alle Abweichungen sind bewusst:
 | `is_regex` in der Buchungsliste | wird abgelehnt, Verweis auf `--patterns-config` | Hält `redact-booking` abhängigkeitsfrei; echte Regexe gehören ohnehin in die Musterkonfiguration. |
 | — | zusätzlich: Annotationen entfernen, Bilder-Warnung, `--json`, `--write-demo`, Prüfsummen-Validatoren | Lücken, die beim Umsetzen sichtbar wurden. |
 
+## Stand der Akzeptanzkriterien
+
+| Kriterium | Stand | Nachweis |
+|-----------|-------|----------|
+| 10 Seiten in unter 2 s (ohne OCR) | erfüllt | 10 Seiten, 450 Zeilen, 1350 Schwärzungen in ca. 70 ms (`examples/gen10.rs`) |
+| Deutsche IBAN wird zuverlässig erkannt | erfüllt | Muster mit mod-97-Prüfung; gruppiert und ungruppiert getestet |
+| Negativliste blockiert Schwärzung zuverlässig | erfüllt | `negative_list_prevents_redaction` prüft am fertigen PDF, dass die geschützte IBAN erhalten bleibt und die ungeschützte verschwindet |
+| Copy-Paste liefert keinen sensitiven Text | erfüllt | `redaction_removes_text_from_content_stream`: nach dem Lauf ist der Text nicht mehr extrahierbar |
+| Audit-Log mit SHA-256 beider Dateien | erfüllt | `review_then_apply_roundtrip` |
+| Aussagekräftige Fehler bei kaputten PDFs | erfüllt | `rejects_broken_pdf_with_clear_message` |
+| Manuelle Regionen (JSON) werden angewendet | erfüllt | `manual_regions_are_applied` |
+| Metadaten im Ausgabe-PDF entfernt | erfüllt | `metadata_is_stripped` |
+| GUI: Rechtecke ziehen, Treffer abwählen, Export | umgesetzt | Logik als reine Funktionen getestet; das Fensterverhalten selbst ist nicht automatisiert prüfbar |
+| GUI-Binary unter 30 MB | erfüllt | Linux 13 MB, Windows 7,4 MB (Release, gestrippt) |
+| Export der GUI identisch zur CLI | erfüllt | Test vergleicht beide Ausgaben byteweise |
+
+Nicht umgesetzt (laut Konzept §11 außerhalb des MVP): OCR für gescannte PDFs,
+Entschlüsseln passwortgeschützter PDFs, Batch-Verarbeitung, Plugin-System.
+
 ## Entwicklung
 
 ```bash
-cargo test --workspace                              # alle Tests
+cargo test --workspace                              # alle Tests (191)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
+cargo build --no-default-features                   # ohne GUI
 ./scripts/build-windows.sh                          # Windows-Binary (mingw)
+cargo run --release -p redact-pdf --example gen10 -- gross.pdf 10
 ```
 
 ## Lizenz
