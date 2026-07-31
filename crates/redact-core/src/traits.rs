@@ -6,16 +6,16 @@ use crate::error::Result;
 use crate::geometry::TextRun;
 use crate::model::{BookingEntry, Redaction, Region};
 
-/// Extrahiert Text-Regionen aus einem PDF.
+/// Extrahiert Text aus einem PDF.
+///
+/// **Abweichung vom Ursprungskonzept:** Der Trait liefert `TextRun`s statt
+/// `Region`s. Eine `Region` trägt zwingend eine `Source` — die steht bei der
+/// reinen Extraktion aber noch gar nicht fest, sie entsteht erst durch die
+/// Analyse. `TextRun` transportiert zusätzlich die zeichengenauen Glyph-Boxen,
+/// ohne die sich für einen Regex-Treffer *innerhalb* einer Zeile keine exakte
+/// Bounding-Box berechnen ließe.
 pub trait Extractor: Send + Sync {
-    fn extract(&self, doc: &lopdf::Document) -> Result<Vec<Region>>;
-
-    /// Zeichengenaue Text-Runs (Zeilen) — Basis für Pattern- und Buchungs-Matching.
-    ///
-    /// Die Default-Implementierung liefert nichts; `redact-pdf` überschreibt sie.
-    fn extract_runs(&self, _doc: &lopdf::Document) -> Result<Vec<TextRun>> {
-        Ok(Vec::new())
-    }
+    fn extract(&self, doc: &lopdf::Document) -> Result<Vec<TextRun>>;
 }
 
 /// Analysiert Text-Runs und erzeugt Treffer-Regionen.

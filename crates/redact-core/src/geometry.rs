@@ -53,10 +53,7 @@ impl Rect {
     }
 
     pub fn center(&self) -> Point {
-        Point::new(
-            (self.ll.x + self.ur.x) / 2.0,
-            (self.ll.y + self.ur.y) / 2.0,
-        )
+        Point::new((self.ll.x + self.ur.x) / 2.0, (self.ll.y + self.ur.y) / 2.0)
     }
 
     /// Kleinstes Rechteck, das beide Rechtecke enthält.
@@ -103,7 +100,11 @@ impl Rect {
         let a = self.area();
         if a <= f64::EPSILON {
             // Entartete Rechtecke (z.B. Leerzeichen ohne Höhe): Mittelpunkt prüfen.
-            return if other.contains(self.center()) { 1.0 } else { 0.0 };
+            return if other.contains(self.center()) {
+                1.0
+            } else {
+                0.0
+            };
         }
         self.intersection_area(other) / a
     }
@@ -233,6 +234,9 @@ mod tests {
         ];
         let run = TextRun::new(0, glyphs);
         // 'ä' belegt zwei Bytes, 'x' beginnt daher bei Byte 2.
-        assert_eq!(run.rect_for_byte_range(2, 3).unwrap(), Rect::new(5.0, 0.0, 10.0, 10.0));
+        assert_eq!(
+            run.rect_for_byte_range(2, 3).unwrap(),
+            Rect::new(5.0, 0.0, 10.0, 10.0)
+        );
     }
 }

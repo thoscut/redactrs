@@ -74,12 +74,17 @@ impl Region {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
-    Pattern { pattern_id: String, confidence: f32 },
+    Pattern {
+        pattern_id: String,
+        confidence: f32,
+    },
     Booking {
         booking_id: String,
         match_type: MatchType,
     },
-    Manual { reason: String },
+    Manual {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,21 +123,16 @@ impl Redaction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     /// Schwarzes Rechteck + Text entfernen.
+    #[default]
     Blackout,
     /// Weißes Rechteck + Text entfernen.
     Whiteout,
     /// Text entfernen und durch einen Platzhalter ersetzen (z.B. `[IBAN]`).
     Replace(String),
-}
-
-impl Default for Action {
-    fn default() -> Self {
-        Action::Blackout
-    }
 }
 
 impl Action {
@@ -227,9 +227,7 @@ mod tests {
                 ur: Point::new(10.0, 20.0),
             },
             None,
-            Source::Manual {
-                reason: "x".into(),
-            },
+            Source::Manual { reason: "x".into() },
         );
         assert_eq!(r.rect.ll, Point::new(10.0, 20.0));
         assert_eq!(r.rect.ur, Point::new(50.0, 90.0));
@@ -251,7 +249,10 @@ mod tests {
 
     #[test]
     fn action_serializes_as_lowercase_tag() {
-        assert_eq!(serde_json::to_string(&Action::Blackout).unwrap(), "\"blackout\"");
+        assert_eq!(
+            serde_json::to_string(&Action::Blackout).unwrap(),
+            "\"blackout\""
+        );
         assert_eq!(
             serde_json::to_string(&Action::Replace("[IBAN]".into())).unwrap(),
             "{\"replace\":\"[IBAN]\"}"

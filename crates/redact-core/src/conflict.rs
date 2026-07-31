@@ -171,7 +171,10 @@ mod tests {
                 reason: "Gehalt".into(),
             },
         );
-        let res = resolve_conflicts(vec![manual, negative_region(0, Rect::new(0.0, 0.0, 100.0, 30.0))]);
+        let res = resolve_conflicts(vec![
+            manual,
+            negative_region(0, Rect::new(0.0, 0.0, 100.0, 30.0)),
+        ]);
         assert_eq!(res.redact.len(), 1);
         assert!(res.blocked.is_empty());
     }
