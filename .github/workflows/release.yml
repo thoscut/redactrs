@@ -7,8 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build and release (e.g. v0.1.0)"
+        description: "Tag to build and release (e.g. v0.1.0). Created if it does not exist yet."
         required: true
+        type: string
+      ref:
+        description: "Branch or commit to build from (empty = the tag itself)"
+        required: false
         type: string
 
 env:
@@ -53,7 +57,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.ref || inputs.tag || github.ref }}
 
       # Nur Linux: Build-Abhaengigkeiten fuer eframe/egui (glow, x11,
       # wayland) und rfd.
@@ -152,7 +156,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.ref || inputs.tag || github.ref }}
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -212,6 +216,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: redact-rs ${{ steps.meta.outputs.version }}
           body_path: release-notes.md
           draft: false
