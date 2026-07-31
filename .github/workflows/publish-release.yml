@@ -1,0 +1,70 @@
+name: Publish Release
+
+# Veroeffentlicht einen Release, sobald sich die Datei `.release-version`
+# aendert. Der Tag wird dabei vom Release selbst am gebauten Commit angelegt.
+#
+# Warum nicht einfach einen Tag pushen? In abgeschotteten Umgebungen (CI-Bots,
+# Sandboxes) darf oft nur auf einen bestimmten Branch gepusht werden, und das
+# Ausloesen von workflow_dispatch ueber die API ist gesperrt. Eine
+# Versionsdatei im Repository ist der eine Weg, der immer funktioniert - und
+# gleichzeitig ein gut nachvollziehbarer Ablauf: die Version steht versioniert
+# im Repository, der Release folgt daraus.
+#
+# Ablauf:
+#   1. `.release-version` auf die gewuenschte Version setzen (z.B. 0.2.0)
+#   2. committen und pushen
+#   3. dieser Workflow baut Windows- und Linux-Binaries und veroeffentlicht sie
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - ".release-version"
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Version einlesen
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.read.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Version aus .release-version lesen
+        id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < .release-version)"
+          if [ -z "$VERSION" ]; then
+            echo "::error::.release-version ist leer"
+            exit 1
+          fi
+          # Fuehrendes "v" tolerieren, aber intern immer ohne fuehrendes v rechnen.
+          VERSION="${VERSION#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$VERSION' ist keine gueltige Version (erwartet: 1.2.3)"
+            exit 1
+          fi
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::.release-version ($VERSION) und Cargo.toml ($CARGO_VERSION) stimmen nicht ueberein"
+            exit 1
+          fi
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release wird gebaut fuer v$VERSION"
+
+  release:
+    name: Bauen und veroeffentlichen
+    needs: version
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}
+      ref: ${{ github.sha }}

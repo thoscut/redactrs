@@ -368,6 +368,29 @@ cargo build --no-default-features                   # ohne GUI
 cargo run --release -p redact-pdf --example gen10 -- gross.pdf 10
 ```
 
+## Release bauen
+
+Die Version steht in `.release-version` (und muss zur Version in `Cargo.toml`
+passen). Wird diese Datei geändert und gepusht, baut GitHub Actions die
+Binaries für Windows und Linux, erzeugt `SHA256SUMS` und veröffentlicht den
+Release samt Tag:
+
+```bash
+printf '0.2.0\n' > .release-version
+# Version in Cargo.toml gleichziehen
+git commit -am "Release 0.2.0" && git push
+```
+
+Alternativ genügt ein Tag:
+
+```bash
+git tag -a v0.2.0 -m "redact-rs 0.2.0" && git push origin v0.2.0
+```
+
+Der Weg über die Versionsdatei existiert zusätzlich, weil in abgeschotteten
+Umgebungen häufig nur auf einen bestimmten Branch gepusht werden darf und
+`workflow_dispatch` über die API gesperrt ist.
+
 ## Lizenz
 
 Wahlweise [MIT](LICENSE-MIT) oder [Apache-2.0](LICENSE-APACHE).

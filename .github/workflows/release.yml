@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.1.0). Created if it does not exist yet."
+        required: true
+        type: string
+      ref:
+        description: "Branch or commit to build from (empty = the tag itself)"
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       tag:
