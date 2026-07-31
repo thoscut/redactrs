@@ -8,6 +8,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+redact-core.workspace = true
+redact-pdf.workspace = true
+lopdf.workspace = true
+
 # skrifa liest sowohl TrueType-`glyf` als auch PostScript-`CFF`/`CFF2`.
 # 0.33 ist die letzte Reihe mit rust-version 1.75 (= MSRV des Workspace).
 skrifa = { version = "0.33.2", default-features = false, features = ["std"] }
+# Rasterizer. `png-format` wird nicht gebraucht — wir liefern rohes RGBA8.
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
