@@ -22,6 +22,20 @@ const NUDGE: f64 = 1.0;
 /// Schrittweite mit gedrückter Umschalttaste.
 const NUDGE_FAST: f64 = 10.0;
 
+// Maße der Oberfläche. Ausdrücklich `f32`, siehe die Anmerkung in
+// [`crate::viewer`] zu `float_literal_f32_fallback`.
+
+/// Startbreite der Seitenleiste.
+const SIDEBAR_WIDTH: f32 = 320.0;
+/// Kleinste Breite der Seitenleiste.
+const SIDEBAR_MIN_WIDTH: f32 = 220.0;
+/// Größte Breite der Seitenleiste.
+const SIDEBAR_MAX_WIDTH: f32 = 520.0;
+/// Vertikaler Abstand in der oberen Leiste.
+const BAR_PADDING: f32 = 2.0;
+/// Grober Platzbedarf von Seitenleiste und Leisten für „Einpassen“.
+const CHROME_SIZE: Vec2 = Vec2::new(360.0, 140.0);
+
 /// Zustand der Oberfläche.
 pub struct RedactApp {
     pub state: AppState,
@@ -292,8 +306,8 @@ impl RedactApp {
                 if let Some(preview) = self.selector.preview() {
                     painter.rect_stroke(
                         preview,
-                        0.0,
-                        Stroke::new(1.5, Color32::from_rgb(240, 150, 30)),
+                        viewer::NO_ROUNDING,
+                        Stroke::new(viewer::DRAG_STROKE, Color32::from_rgb(240, 150, 30)),
                     );
                 }
 
@@ -388,8 +402,8 @@ impl eframe::App for RedactApp {
         });
 
         egui::SidePanel::left("sidebar")
-            .default_width(320.0)
-            .width_range(220.0..=520.0)
+            .default_width(SIDEBAR_WIDTH)
+            .width_range(SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH)
             .show(ctx, |ui| {
                 crate::sidebar::show(ui, &mut self.state);
             });

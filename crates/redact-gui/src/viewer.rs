@@ -42,6 +42,31 @@ pub const MIN_FONT_SIZE: f32 = 3.0;
 /// Größte Schriftgröße; verhindert absurde Werte bei kaputten Glyph-Boxen.
 pub const MAX_FONT_SIZE: f32 = 200.0;
 
+// Maße fürs Zeichnen.
+//
+// Alle Werte sind **ausdrücklich** als `f32` deklariert. egui nimmt Rundungen
+// und Strichstärken als `impl Into<Rounding>` bzw. `impl Into<f32>` entgegen;
+// dort kann ein nacktes Fließkomma-Literal nicht auf `f64` zurückfallen, und
+// neuere rustc-Versionen warnen darüber (`float_literal_f32_fallback`).
+// Benannte Konstanten mit Typ vermeiden das ein für alle Mal.
+
+/// Eckenrundung des Seitenblatts.
+pub const SHEET_ROUNDING: f32 = 2.0;
+/// Schwärzungsrechtecke bekommen scharfe Ecken.
+pub const NO_ROUNDING: f32 = 0.0;
+/// Strichstärke der Blattkante.
+pub const SHEET_STROKE: f32 = 1.0;
+/// Strichstärke einer nicht ausgewählten Region.
+pub const REGION_STROKE: f32 = 1.0;
+/// Strichstärke der ausgewählten Region.
+pub const SELECTED_STROKE: f32 = 2.5;
+/// Strichstärke des Rechtecks, das gerade aufgezogen wird.
+pub const DRAG_STROKE: f32 = 1.5;
+/// Kantenlänge der Griffpunkte an den Ecken der Auswahl.
+pub const HANDLE_SIZE: f32 = 5.0;
+/// Versatz des Schlagschattens unter dem Blatt.
+pub const SHADOW_OFFSET: f32 = 4.0;
+
 /// Rechnet ein PDF-Rechteck in Bildschirmkoordinaten um.
 ///
 /// `origin` ist die linke **obere** Ecke des Seitenblatts auf dem Bildschirm.
@@ -147,15 +172,15 @@ impl<'a> PagePreview<'a> {
 
         // Schlagschatten, damit das Blatt vom Hintergrund abhebt.
         painter.rect_filled(
-            sheet.translate(Vec2::new(4.0, 4.0)),
-            2.0,
+            sheet.translate(Vec2::splat(SHADOW_OFFSET)),
+            SHEET_ROUNDING,
             Color32::from_black_alpha(48),
         );
         painter.rect(
             sheet,
-            2.0,
+            SHEET_ROUNDING,
             Color32::WHITE,
-            Stroke::new(1.0, Color32::from_gray(150)),
+            Stroke::new(SHEET_STROKE, Color32::from_gray(150)),
         );
 
         for run in self.runs.iter().filter(|r| r.page == self.page) {
@@ -173,7 +198,7 @@ impl<'a> PagePreview<'a> {
         if size <= MIN_FONT_SIZE {
             // Zu klein für Text — als graue Linie andeuten, damit man sieht,
             // dass dort etwas steht.
-            painter.rect_filled(target, 0.0, Color32::from_gray(190));
+            painter.rect_filled(target, NO_ROUNDING, Color32::from_gray(190));
             return;
         }
 
@@ -207,10 +232,18 @@ pub fn paint_region(
     let (r, g, b) = rgb;
     let color = Color32::from_rgb(r, g, b);
     if enabled {
-        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(r, g, b, 70));
+        painter.rect_filled(
+            rect,
+            NO_ROUNDING,
+            Color32::from_rgba_unmultiplied(r, g, b, 70),
+        );
     }
-    let width = if selected { 2.5 } else { 1.0 };
-    painter.rect_stroke(rect, 0.0, Stroke::new(width, color));
+    let width: f32 = if selected {
+        SELECTED_STROKE
+    } else {
+        REGION_STROKE
+    };
+    painter.rect_stroke(rect, NO_ROUNDING, Stroke::new(width, color));
     if selected {
         // Griffpunkte an den Ecken der Auswahl.
         for corner in [
@@ -220,8 +253,8 @@ pub fn paint_region(
             rect.right_bottom(),
         ] {
             painter.rect_filled(
-                egui::Rect::from_center_size(corner, Vec2::splat(5.0)),
-                0.0,
+                egui::Rect::from_center_size(corner, Vec2::splat(HANDLE_SIZE)),
+                NO_ROUNDING,
                 color,
             );
         }

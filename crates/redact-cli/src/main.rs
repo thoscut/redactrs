@@ -53,6 +53,8 @@ fn dispatch(cli: Cli) -> Result<()> {
     let config = Config {
         input,
         output: cli.output.clone(),
+        output_suffix: cli.output_suffix.clone(),
+        force: cli.force,
         patterns: cli.patterns.clone(),
         no_patterns: cli.no_patterns,
         patterns_config: cli.patterns_config.clone(),
@@ -94,10 +96,7 @@ fn report(outcome: &pipeline::Outcome) {
             println!("Review geschrieben: {path}");
             println!();
             println!("Datei prüfen, `enabled` anpassen und dann anwenden mit:");
-            println!(
-                "  redact-rs {} -o AUSGABE.pdf --apply-review {path}",
-                outcome.input
-            );
+            println!("  redact-rs {} --apply-review {path}", outcome.input);
         }
         None => {
             println!("Schwärzungen:       {}", outcome.redactions);

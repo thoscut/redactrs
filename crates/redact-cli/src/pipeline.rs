@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 
 use redact_booking::{BookingMatcher, CsvBookingLoader};
 use redact_core::{
-    resolve_conflicts, Action, BlockedRegion, BookingLoader, Extractor, RedactError, Redaction,
-    Region, Renderer, Result, ReviewFile, ReviewInput, TextRun,
+    output_path_with_suffix, resolve_conflicts, sibling_path, Action, BlockedRegion, BookingLoader,
+    Extractor, RedactError, Redaction, Region, Renderer, Result, ReviewFile, ReviewInput, TextRun,
+    REVIEW_SUFFIX,
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
@@ -23,6 +24,10 @@ use crate::audit::{sha256_bytes, AuditLog};
 pub struct Config {
     pub input: PathBuf,
     pub output: Option<PathBuf>,
+    /// Namenszusatz, wenn keine Ausgabedatei angegeben wurde.
+    pub output_suffix: String,
+    /// Vorhandene Dateien überschreiben.
+    pub force: bool,
     pub patterns: Vec<String>,
     pub no_patterns: bool,
     pub patterns_config: Option<PathBuf>,
@@ -116,16 +121,8 @@ pub fn run(config: &Config) -> Result<Outcome> {
     outcome.redactions = redactions.len();
     outcome.blocked = outcome.blocked.max(blocked.len());
 
-    let Some(output) = &config.output else {
-        return Err(RedactError::Config(
-            "keine Ausgabedatei angegeben — bitte -o/--output oder --review benutzen".into(),
-        ));
-    };
-    if output == &config.input {
-        return Err(RedactError::Config(
-            "Ausgabe- und Eingabedatei dürfen nicht identisch sein".into(),
-        ));
-    }
+    let output = resolve_output_path(config)?;
+    let output = &output;
 
     // 9. Schwärzung anwenden.
     let report =
@@ -230,11 +227,35 @@ fn verify_review_matches_input(review: &ReviewFile, input: &Path) -> Result<()> 
 }
 
 fn review_target(config: &Config) -> PathBuf {
-    config.review_out.clone().unwrap_or_else(|| {
-        let mut path = config.input.clone();
-        path.set_extension("review.json");
-        path
-    })
+    config
+        .review_out
+        .clone()
+        .unwrap_or_else(|| sibling_path(&config.input, REVIEW_SUFFIX, "json"))
+}
+
+/// Bestimmt die Ausgabedatei.
+///
+/// Ohne `-o` wird neben der Eingabedatei gespeichert — `kontoauszug.pdf` wird
+/// also zu `kontoauszug_geschwaerzt.pdf`. Eine vorhandene Datei wird nur mit
+/// `--force` überschrieben, damit ein zweiter Lauf nicht unbemerkt ein
+/// bereits geprüftes Ergebnis ersetzt.
+fn resolve_output_path(config: &Config) -> Result<PathBuf> {
+    let output = match &config.output {
+        Some(path) => path.clone(),
+        None => output_path_with_suffix(&config.input, &config.output_suffix),
+    };
+    if output == config.input {
+        return Err(RedactError::Config(
+            "Ausgabe- und Eingabedatei dürfen nicht identisch sein".into(),
+        ));
+    }
+    if output.exists() && !config.force {
+        return Err(RedactError::Config(format!(
+            "{} existiert bereits — mit --force überschreiben oder -o anders wählen",
+            output.display()
+        )));
+    }
+    Ok(output)
 }
 
 fn write_json(path: &Path, json: &str) -> Result<()> {

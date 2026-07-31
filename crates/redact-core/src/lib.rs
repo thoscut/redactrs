@@ -13,6 +13,7 @@ pub mod conflict;
 pub mod error;
 pub mod geometry;
 pub mod model;
+pub mod naming;
 pub mod review;
 pub mod traits;
 
@@ -20,6 +21,9 @@ pub use conflict::{negative_rects, resolve_conflicts, BlockedRegion, Resolution}
 pub use error::{RedactError, Result};
 pub use geometry::{bounding_box, Glyph, Point, Rect, TextRun};
 pub use model::{Action, BookingEntry, ListType, MatchType, Redaction, Region, Source};
+pub use naming::{
+    output_path_with_suffix, sibling_path, AUDIT_SUFFIX, DEFAULT_OUTPUT_SUFFIX, REVIEW_SUFFIX,
+};
 pub use review::{ReviewFile, ReviewInput, ReviewItem, REVIEW_FORMAT_VERSION};
 pub use traits::{Analyzer, BookingLoader, Extractor, Redactor, Renderer};
 

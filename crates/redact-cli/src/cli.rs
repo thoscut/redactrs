@@ -19,9 +19,18 @@ pub struct Cli {
     /// Eingabe-PDF.
     pub input: Option<PathBuf>,
 
-    /// Ausgabe-PDF.
+    /// Ausgabe-PDF. Ohne Angabe wird neben der Eingabedatei gespeichert,
+    /// mit dem Zusatz aus `--output-suffix` im Dateinamen.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Namenszusatz für die Ausgabedatei, wenn `-o` fehlt.
+    #[arg(long, value_name = "TEXT", default_value = redact_core::DEFAULT_OUTPUT_SUFFIX)]
+    pub output_suffix: String,
+
+    /// Vorhandene Ausgabedateien überschreiben.
+    #[arg(short, long)]
+    pub force: bool,
 
     /// Zu verwendende Patterns (kommagetrennt, z.B. `iban_de,bic`).
     /// Ohne Angabe werden die standardmäßig aktiven Patterns benutzt.

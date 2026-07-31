@@ -36,11 +36,12 @@ Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
 # Beispiel-Kontoauszug erzeugen
 redact-rs --write-demo kontoauszug.pdf
 
-# Automatisch schwärzen
-redact-rs kontoauszug.pdf -o geschwaerzt.pdf --patterns iban_de,bic,email
+# Automatisch schwärzen — Ergebnis landet als kontoauszug_geschwaerzt.pdf
+# direkt neben der Eingabedatei
+redact-rs kontoauszug.pdf --patterns iban_de,bic,email
 
 # Prüfen, dass wirklich nichts mehr drinsteht
-pdftotext geschwaerzt.pdf - | grep DE89   # → kein Treffer
+pdftotext kontoauszug_geschwaerzt.pdf - | grep DE89   # → kein Treffer
 ```
 
 ## Installation
@@ -68,10 +69,19 @@ sudo apt-get install libgtk-3-dev libxkbcommon-dev libwayland-dev
 
 ## Kommandozeile
 
+Ohne `-o` wird **neben der Eingabedatei** gespeichert: aus `kontoauszug.pdf`
+wird `kontoauszug_geschwaerzt.pdf`. Der Zusatz lässt sich mit
+`--output-suffix` ändern. Eine vorhandene Datei wird nur mit `--force`
+überschrieben — ein zweiter Lauf soll ein bereits geprüftes Ergebnis nicht
+unbemerkt ersetzen. Für `--review` gilt dasselbe Schema
+(`kontoauszug_review.json`).
+
 ```text
 redact-rs [EINGABE.pdf] [OPTIONEN]
 
-  -o, --output <PDF>          Ausgabedatei
+  -o, --output <PDF>          Ausgabedatei (Standard: neben der Eingabe)
+      --output-suffix <TEXT>  Namenszusatz (Standard: _geschwaerzt)
+  -f, --force                 vorhandene Ausgabedatei überschreiben
       --patterns <IDs>        Muster, kommagetrennt (z.B. iban_de,bic)
       --no-patterns           gar keine Muster anwenden
       --patterns-config <F>   eigene Musterkonfiguration (YAML oder JSON)
@@ -232,6 +242,10 @@ JSON-Ein-/Ausgabeformaten 0-basiert.
 redact-rs                          # GUI ohne Dokument
 redact-rs --gui kontoauszug.pdf    # GUI mit vorgeladenem PDF
 ```
+
+Ein PDF lässt sich auch **per Drag & Drop** auf das Fenster ziehen. Beim
+Export ist der Dateiname bereits vorbelegt: dasselbe Verzeichnis wie das
+Original, mit dem Namenszusatz aus dem Feld „Namenszusatz“.
 
 Die GUI (egui/eframe, ein einziges Binary ohne zusätzliche Laufzeit) zeigt die
 Seiten mit allen gefundenen Treffern als farbige Rahmen:

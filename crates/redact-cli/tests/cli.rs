@@ -349,3 +349,60 @@ fn same_input_and_config_produce_identical_output() {
     }
     assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
 }
+
+#[test]
+fn writes_next_to_the_input_when_output_is_omitted() {
+    let dir = workdir("default-output");
+    let input = demo(&dir);
+
+    let out = run(&[input.to_str().unwrap(), "--patterns", "iban_de"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let expected = dir.join("kontoauszug_geschwaerzt.pdf");
+    assert!(
+        expected.exists(),
+        "Standardausgabe fehlt: {}",
+        expected.display()
+    );
+    assert!(!stream_text(&expected).contains("DE89"));
+
+    // Ein zweiter Lauf darf das Ergebnis nicht unbemerkt überschreiben.
+    let again = run(&[input.to_str().unwrap(), "--patterns", "iban_de"]);
+    assert_eq!(again.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("existiert bereits"));
+
+    // Mit --force schon.
+    let forced = run(&[input.to_str().unwrap(), "--patterns", "iban_de", "--force"]);
+    assert!(forced.status.success());
+}
+
+#[test]
+fn output_suffix_is_configurable() {
+    let dir = workdir("suffix");
+    let input = demo(&dir);
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--patterns",
+        "iban_de",
+        "--output-suffix",
+        "_anonym",
+    ]);
+    assert!(out.status.success());
+    assert!(dir.join("kontoauszug_anonym.pdf").exists());
+    assert!(!dir.join("kontoauszug_geschwaerzt.pdf").exists());
+}
+
+#[test]
+fn review_defaults_to_a_sibling_json_file() {
+    let dir = workdir("review-default");
+    let input = demo(&dir);
+
+    let out = run(&[input.to_str().unwrap(), "--review", "--patterns", "iban_de"]);
+    assert!(out.status.success());
+    assert!(dir.join("kontoauszug_review.json").exists());
+}
