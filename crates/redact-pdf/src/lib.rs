@@ -33,14 +33,22 @@ pub mod font;
 pub mod glyphnames;
 pub mod matrix;
 pub mod meta;
+pub mod ops;
 pub mod redact;
 pub mod testing;
 
-pub use content::{scan_page, GlyphItem, ScanResult, ShowItem, ShowRecord, StreamKey};
+pub use content::{
+    interpret, scan_page, ContentSink, GlyphEvent, GlyphItem, ImageEvent, PathEvent, ScanResult,
+    ShowItem, ShowRecord, SinkContext, StreamKey,
+};
 pub use document::{
     load, load_from_bytes, page_box, page_boxes, page_count, save_to_bytes, validate, PdfRenderer,
 };
 pub use extract::PdfExtractor;
 pub use matrix::Matrix;
 pub use meta::{strip_metadata, MetadataReport};
+pub use ops::{
+    page_ops, ClipRef, CodeToGid, DrawOp, FontKind, FontProgram, PageOps, PathSeg, RasterImage,
+    Rgb, Stroke,
+};
 pub use redact::{PdfRedactor, RedactionReport};

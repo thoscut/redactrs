@@ -62,6 +62,20 @@ impl FontInfo {
     pub fn code_width(&self) -> CodeWidth {
         self.charmap.width
     }
+
+    /// Alle bekannten Breiten (Code → Text-Space-Einheiten).
+    ///
+    /// Wird vom Zeichenoperationen-Strom gebraucht, damit der Renderer
+    /// dieselben Vorschübe benutzt wie die Extraktion.
+    pub fn width_map(&self) -> &BTreeMap<u32, f64> {
+        &self.widths
+    }
+
+    /// Breite für Codes, die weder in `/Widths` noch in den Standardmetriken
+    /// stehen.
+    pub fn fallback_width(&self) -> f64 {
+        self.default_width
+    }
 }
 
 /// Lädt alle Fonts aus einem `/Resources`-Dictionary.
@@ -83,6 +97,15 @@ pub fn fonts_from_resources(
         out.insert(name.to_vec(), load_font(doc, dict));
     }
     out
+}
+
+/// Lädt die Metriken eines einzelnen Font-Dictionaries.
+///
+/// Gleicher Code wie in [`fonts_from_resources`], nur für einen einzelnen
+/// Font — der Zeichenoperationen-Strom löst Fonts einzeln (und zwischenge-
+/// speichert) auf.
+pub fn font_from_dict(doc: &Document, font: &Dictionary) -> FontInfo {
+    load_font(doc, font)
 }
 
 fn resolve_dict<'a>(doc: &'a Document, obj: Option<&'a Object>) -> Result<&'a Dictionary, ()> {

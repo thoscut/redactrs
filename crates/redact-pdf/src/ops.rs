@@ -1,0 +1,2354 @@
+//! Vollständiger, aufgelöster Zeichenoperationen-Strom einer Seite.
+//!
+//! Der GUI-Renderer braucht mehr als Textzeilen: Pfade, Farben, Bilder und
+//! Glyphen — und zwar in genau denselben Koordinaten, mit denen auch geschwärzt
+//! wird. Deshalb entsteht [`PageOps`] **nicht** aus einem zweiten Interpreter,
+//! sondern aus derselben Durchlaufschleife wie [`crate::content::scan_page`]:
+//! [`OpsCollector`] ist lediglich eine andere [`ContentSink`].
+//!
+//! Alles ist bereits aufgelöst:
+//!
+//! * Pfadpunkte liegen im User-Space (CTM angewendet),
+//! * Farben sind RGB (CMYK/Graustufen/Indexed sind umgerechnet),
+//! * Glyphen tragen eine Matrix, die Glyph-Space direkt auf User-Space abbildet,
+//! * Bilder sind entpackte RGBA8-Puffer.
+//!
+//! ## Was genähert oder übergangen wird
+//!
+//! * **Clip**: nur der zuletzt gesetzte Pfad wird referenziert; echte
+//!   Schnittmengen verschachtelter Clips werden nicht gebildet.
+//! * **`sh` (Schattierungen)** und Muster (`Pattern`) werden nicht gezeichnet;
+//!   gemusterte Flächen bekommen mittleres Grau.
+//! * **Type3-Fonts** liefern kein Fontprogramm (ihre Glyphen sind selbst
+//!   Content-Streams).
+//! * **Inline-Bilder** werden auf Seitenebene erkannt; in Form-XObjects nicht,
+//!   weil dort die Operationsindizes zur Schwärzung passen müssen.
+//! * **`LZWDecode`/`CCITTFaxDecode`/`JPXDecode`** werden nicht dekodiert,
+//!   sondern durch einen Platzhalter ersetzt (siehe [`PageOps::notes`]).
+
+use std::collections::{BTreeMap, HashMap};
+
+use lopdf::content::{Content, Operation};
+use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
+use redact_core::{Point, Rect, RedactError, Result};
+
+use crate::content::{
+    interpret, ColorSpace, ContentSink, GlyphEvent, ImageEvent, PathEvent, SinkContext, StreamKey,
+};
+use crate::font::{font_from_dict, FontInfo};
+use crate::matrix::Matrix;
+
+/// Obergrenze für dekodierte Bilder (sonst frisst eine kaputte Datei den RAM).
+const MAX_IMAGE_PIXELS: u64 = 40_000_000;
+
+// ---------------------------------------------------------------------------
+// Datentypen
+// ---------------------------------------------------------------------------
+
+/// Eine Farbe im Bereich 0.0..=1.0.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgb {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
+
+impl Rgb {
+    pub const BLACK: Rgb = Rgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+    };
+
+    pub fn new(r: f64, g: f64, b: f64) -> Self {
+        Self {
+            r: r.clamp(0.0, 1.0) as f32,
+            g: g.clamp(0.0, 1.0) as f32,
+            b: b.clamp(0.0, 1.0) as f32,
+        }
+    }
+
+    pub fn gray(v: f64) -> Self {
+        Self::new(v, v, v)
+    }
+
+    /// Als 8-Bit-Tripel, wie es ein Rasterpuffer braucht.
+    pub fn to_u8(self) -> [u8; 3] {
+        [
+            (self.r * 255.0).round().clamp(0.0, 255.0) as u8,
+            (self.g * 255.0).round().clamp(0.0, 255.0) as u8,
+            (self.b * 255.0).round().clamp(0.0, 255.0) as u8,
+        ]
+    }
+}
+
+/// Ein Pfadsegment; alle Punkte liegen im User-Space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathSeg {
+    MoveTo(Point),
+    LineTo(Point),
+    CubicTo(Point, Point, Point),
+    Close,
+}
+
+/// Strichparameter, bereits in User-Space-Einheiten.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stroke {
+    pub color: Rgb,
+    pub width: f64,
+    pub cap: u8,
+    pub join: u8,
+    pub dash: Vec<f64>,
+    pub dash_phase: f64,
+    /// Deckkraft aus `/CA` (0.0..=1.0).
+    pub alpha: f32,
+}
+
+/// Index in [`PageOps::clips`]; gleiche Clip-Pfade werden nur einmal abgelegt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipRef(pub usize);
+
+/// Eine Zeichenoperation.
+#[derive(Debug, Clone)]
+pub enum DrawOp {
+    /// Pfad. `segments` liegen bereits im User-Space (CTM angewendet).
+    Path {
+        segments: Vec<PathSeg>,
+        fill: Option<Rgb>,
+        stroke: Option<Stroke>,
+        even_odd: bool,
+        /// Deckkraft der Füllung aus `/ca`.
+        fill_alpha: f32,
+        clip: Option<ClipRef>,
+    },
+    /// Eine einzelne Glyphe.
+    Glyph {
+        /// Index in [`PageOps::fonts`].
+        font: usize,
+        /// Zeichencode wie im Content-Stream (bei CID-Fonts der CID).
+        code: u32,
+        /// Bildet Glyph-Space (Einheiten pro Em) auf User-Space ab — enthält
+        /// bereits Schriftgröße, `Tz`, `Ts`, `Tm` und CTM.
+        transform: Matrix,
+        fill: Rgb,
+        fill_alpha: f32,
+        /// PDF-Textrendermodus (3 = unsichtbar, z. B. OCR-Ebene).
+        render_mode: u8,
+        clip: Option<ClipRef>,
+    },
+    /// Bild-XObject. `ctm` bildet das Einheitsquadrat (0,0)-(1,1) auf die
+    /// Zielfläche im User-Space ab (PDF-Konvention).
+    Image {
+        /// Index in [`PageOps::images`].
+        image: usize,
+        ctm: Matrix,
+        /// Deckkraft aus `/ca`.
+        alpha: f32,
+        clip: Option<ClipRef>,
+    },
+}
+
+/// Art des eingebetteten Fontprogramms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontKind {
+    TrueType,
+    Cff,
+    Type1,
+    Type3,
+    Unknown,
+}
+
+/// Wie aus einem Zeichencode eine Glyph-ID wird.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CodeToGid {
+    /// Code (bzw. CID) ist bereits die Glyph-ID.
+    Identity,
+    /// Explizite Tabelle aus `/CIDToGIDMap`.
+    Map(BTreeMap<u32, u16>),
+    /// Einfache Fonts: über Glyphnamen bzw. Unicode auflösen.
+    ViaCharCode,
+}
+
+/// Alles, was zum Setzen der Glyphen eines Fonts gebraucht wird.
+#[derive(Debug, Clone)]
+pub struct FontProgram {
+    pub base_font: String,
+    pub kind: FontKind,
+    /// Rohdaten des eingebetteten Fontprogramms
+    /// (`/FontFile`, `/FontFile2`, `/FontFile3`).
+    pub data: Option<Vec<u8>>,
+    /// Einheiten pro Em: 1000 für Type1/CFF, sonst aus dem Fontprogramm.
+    pub units_per_em: f64,
+    pub code_to_gid: CodeToGid,
+    pub is_cid: bool,
+    /// Breite je Code in Text-Space-Einheiten (wie `FontInfo::width`).
+    pub widths: BTreeMap<u32, f64>,
+    pub default_width: f64,
+    /// Für nicht eingebettete Fonts: Code → Unicode, damit ein Ersatzfont
+    /// benutzt werden kann.
+    pub code_to_unicode: BTreeMap<u32, String>,
+    /// `/FontDescriptor /Flags` (Serif, Symbolic, Italic, …).
+    pub flags: u32,
+}
+
+impl FontProgram {
+    /// Notnagel, wenn der Font nicht auflösbar ist — damit keine Glyphe
+    /// verlorengeht.
+    fn fallback(name: &[u8]) -> Self {
+        Self {
+            base_font: String::from_utf8_lossy(name).into_owned(),
+            kind: FontKind::Unknown,
+            data: None,
+            units_per_em: 1000.0,
+            code_to_gid: CodeToGid::ViaCharCode,
+            is_cid: false,
+            widths: BTreeMap::new(),
+            default_width: 0.5,
+            code_to_unicode: BTreeMap::new(),
+            flags: 0,
+        }
+    }
+}
+
+/// Ein entpacktes Bild.
+#[derive(Debug, Clone)]
+pub struct RasterImage {
+    pub width: u32,
+    pub height: u32,
+    /// Entpackte RGBA8-Daten (`width * height * 4`).
+    pub rgba: Vec<u8>,
+    /// `true`, wenn das Bild nicht dekodiert werden konnte und hier nur eine
+    /// Ersatzfläche steht.
+    pub placeholder: bool,
+}
+
+impl RasterImage {
+    /// Einfarbige Fläche (wird als Platzhalter über die Zielfläche gezogen).
+    fn solid(color: [u8; 4], placeholder: bool) -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            rgba: color.to_vec(),
+            placeholder,
+        }
+    }
+}
+
+/// Alles, was zum Zeichnen einer Seite gebraucht wird — bereits aufgelöst.
+#[derive(Debug, Clone)]
+pub struct PageOps {
+    /// Seitenindex (0-basiert).
+    pub page: usize,
+    pub media_box: Rect,
+    /// Seitendrehung in Grad (0/90/180/270) aus `/Rotate`, inklusive Vererbung.
+    /// Sie wird **nicht** angewendet — das ist Sache des Renderers.
+    pub rotate: i64,
+    pub fonts: Vec<FontProgram>,
+    pub images: Vec<RasterImage>,
+    /// Clip-Pfade, auf die [`ClipRef`] zeigt.
+    pub clips: Vec<Vec<PathSeg>>,
+    pub ops: Vec<DrawOp>,
+    /// Hinweise auf genäherte oder übergangene Inhalte.
+    pub notes: Vec<String>,
+}
+
+impl PageOps {
+    fn empty(page: usize, media_box: Rect, rotate: i64) -> Self {
+        Self {
+            page,
+            media_box,
+            rotate,
+            fonts: Vec::new(),
+            images: Vec::new(),
+            clips: Vec::new(),
+            ops: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+
+    /// Anzahl der Glyph-Operationen (praktisch für Tests und Diagnose).
+    pub fn glyph_count(&self) -> usize {
+        self.ops
+            .iter()
+            .filter(|o| matches!(o, DrawOp::Glyph { .. }))
+            .count()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Einstiegspunkt
+// ---------------------------------------------------------------------------
+
+/// Sammelt alle Zeichenoperationen einer Seite (0-basiert).
+pub fn page_ops(doc: &Document, page_index: usize) -> Result<PageOps> {
+    let pages = doc.get_pages();
+    let Some((_, page_id)) = pages.iter().nth(page_index) else {
+        return Err(RedactError::Pdf(format!(
+            "Seite {} existiert nicht",
+            page_index + 1
+        )));
+    };
+    let page_id = *page_id;
+
+    let media_box = crate::document::page_box(doc, page_id);
+    let rotate = page_rotation(doc, page_id);
+
+    let data = doc
+        .get_page_content(page_id)
+        .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
+    let operations = decode_content(&data);
+    let resources = crate::content::page_resources(doc, page_id);
+
+    let mut collector = OpsCollector {
+        out: PageOps::empty(page_index, media_box, rotate),
+        fonts: HashMap::new(),
+        images: HashMap::new(),
+    };
+    interpret(
+        doc,
+        &operations,
+        StreamKey::Page,
+        resources.as_ref(),
+        Matrix::IDENTITY,
+        &mut collector,
+    );
+    Ok(collector.out)
+}
+
+/// `/Rotate` inklusive Vererbung vom Seitenbaum, normiert auf 0/90/180/270.
+pub fn page_rotation(doc: &Document, page_id: ObjectId) -> i64 {
+    let mut current = Some(page_id);
+    let mut depth = 0;
+    while let Some(id) = current {
+        if depth > 32 {
+            break;
+        }
+        depth += 1;
+        let Ok(dict) = doc.get_dictionary(id) else {
+            break;
+        };
+        if let Some(value) = dict
+            .get(b"Rotate")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_i64().ok())
+        {
+            let normalized = value.rem_euclid(360);
+            // Nur die vier erlaubten Werte; alles andere gilt als 0.
+            return if normalized % 90 == 0 { normalized } else { 0 };
+        }
+        current = match dict.get(b"Parent") {
+            Ok(Object::Reference(parent)) => Some(*parent),
+            _ => None,
+        };
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Die Senke
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FontKey {
+    /// Der Regelfall: der Font ist ein indirektes Objekt.
+    Object(ObjectId),
+    /// Direkt eingebettetes Font-Dictionary — nur im eigenen Stream eindeutig.
+    Local(StreamKey, Vec<u8>),
+}
+
+struct OpsCollector {
+    out: PageOps,
+    fonts: HashMap<FontKey, usize>,
+    images: HashMap<ObjectId, usize>,
+}
+
+impl OpsCollector {
+    fn note(&mut self, text: String) {
+        if !self.out.notes.contains(&text) {
+            self.out.notes.push(text);
+        }
+    }
+
+    /// Liefert (und lädt bei Bedarf) den Font zu einem Ressourcennamen.
+    fn font_slot(&mut self, cx: &SinkContext, name: &[u8]) -> usize {
+        let entry = font_entry(cx.doc, cx.resources, name);
+        let key = match &entry {
+            Some((Some(id), _)) => FontKey::Object(*id),
+            _ => FontKey::Local(cx.stream, name.to_vec()),
+        };
+        if let Some(index) = self.fonts.get(&key) {
+            return *index;
+        }
+        let program = match &entry {
+            Some((_, dict)) => load_font_program(cx.doc, dict),
+            None => FontProgram::fallback(name),
+        };
+        let index = self.out.fonts.len();
+        self.out.fonts.push(program);
+        self.fonts.insert(key, index);
+        index
+    }
+
+    fn push_image(&mut self, image: RasterImage) -> usize {
+        let index = self.out.images.len();
+        self.out.images.push(image);
+        index
+    }
+}
+
+impl ContentSink for OpsCollector {
+    fn wants_graphics(&self) -> bool {
+        true
+    }
+
+    fn glyph(&mut self, cx: &SinkContext, event: &GlyphEvent) {
+        let font = self.font_slot(cx, event.font_name);
+        let upem = self.out.fonts[font].units_per_em;
+        let scale = if upem > 0.0 { 1.0 / upem } else { 0.001 };
+        // Glyph-Space → Text-Space → User-Space, in einer Matrix.
+        let transform = Matrix::scale(scale, scale).mul(&event.trm);
+        self.out.ops.push(DrawOp::Glyph {
+            font,
+            code: event.code,
+            transform,
+            fill: event.fill,
+            fill_alpha: event.fill_alpha,
+            render_mode: event.render_mode,
+            clip: event.clip.map(ClipRef),
+        });
+    }
+
+    fn path(&mut self, _cx: &SinkContext, event: &PathEvent) {
+        self.out.ops.push(DrawOp::Path {
+            segments: event.segments.to_vec(),
+            fill: event.fill,
+            stroke: event.stroke.clone(),
+            even_odd: event.even_odd,
+            fill_alpha: event.fill_alpha,
+            clip: event.clip.map(ClipRef),
+        });
+    }
+
+    fn clip(&mut self, _cx: &SinkContext, segments: &[PathSeg], _even_odd: bool) -> Option<usize> {
+        if let Some(index) = self.out.clips.iter().position(|c| c == segments) {
+            return Some(index);
+        }
+        self.out.clips.push(segments.to_vec());
+        Some(self.out.clips.len() - 1)
+    }
+
+    fn image(&mut self, cx: &SinkContext, event: &ImageEvent) {
+        let index = if let Some((dict, data)) = event.inline {
+            let (image, note) = decode_image(cx.doc, cx.resources, dict, data, event.fill);
+            if let Some(note) = note {
+                self.note(format!("Inline-Bild: {note}"));
+            }
+            self.push_image(image)
+        } else {
+            let Some(name) = event.name else {
+                return;
+            };
+            let Some((id, stream)) = image_xobject(cx.doc, cx.resources, name) else {
+                return;
+            };
+            // Stencil-Masken hängen an der aktuellen Füllfarbe und dürfen
+            // deshalb nur zwischengespeichert werden, wenn sie keine sind.
+            let is_mask = stream
+                .dict
+                .get(b"ImageMask")
+                .and_then(Object::as_bool)
+                .unwrap_or(false);
+            let cached = id.filter(|_| !is_mask).and_then(|id| self.images.get(&id));
+            match cached {
+                Some(index) => *index,
+                None => {
+                    let (image, note) = decode_image(
+                        cx.doc,
+                        cx.resources,
+                        &stream.dict,
+                        &stream.content,
+                        event.fill,
+                    );
+                    if let Some(note) = note {
+                        let label = String::from_utf8_lossy(name).into_owned();
+                        self.note(format!("Bild /{label}: {note}"));
+                    }
+                    let index = self.push_image(image);
+                    if let Some(id) = id.filter(|_| !is_mask) {
+                        self.images.insert(id, index);
+                    }
+                    index
+                }
+            }
+        };
+        self.out.ops.push(DrawOp::Image {
+            image: index,
+            ctm: event.ctm,
+            alpha: event.fill_alpha,
+            clip: event.clip.map(ClipRef),
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fonts
+// ---------------------------------------------------------------------------
+
+/// Sucht ein Font-Dictionary in den Ressourcen; gibt zusätzlich seine ObjectId
+/// zurück, damit gleiche Fonts nur einmal geladen werden.
+fn font_entry(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    name: &[u8],
+) -> Option<(Option<ObjectId>, Dictionary)> {
+    let fonts = resources?.get(b"Font").ok()?;
+    let (_, fonts) = doc.dereference(fonts).ok()?;
+    let entry = fonts.as_dict().ok()?.get(name).ok()?;
+    let id = match entry {
+        Object::Reference(id) => Some(*id),
+        _ => None,
+    };
+    let (_, resolved) = doc.dereference(entry).ok()?;
+    Some((id, resolved.as_dict().ok()?.clone()))
+}
+
+fn load_font_program(doc: &Document, dict: &Dictionary) -> FontProgram {
+    let info: FontInfo = font_from_dict(doc, dict);
+    let subtype = dict
+        .get(b"Subtype")
+        .and_then(Object::as_name)
+        .map(|n| n.to_vec())
+        .unwrap_or_default();
+    let is_cid = subtype == b"Type0";
+
+    // Bei Type0 stehen Deskriptor und Fontprogramm im Nachkommen-Font.
+    let descendant = if is_cid {
+        deref(doc, dict.get(b"DescendantFonts").ok())
+            .and_then(|o| o.as_array().ok())
+            .and_then(|a| a.first())
+            .and_then(|o| deref(doc, Some(o)))
+            .and_then(|o| o.as_dict().ok())
+            .cloned()
+    } else {
+        None
+    };
+    let carrier = descendant.as_ref().unwrap_or(dict);
+    let descriptor = deref(doc, carrier.get(b"FontDescriptor").ok())
+        .and_then(|o| o.as_dict().ok())
+        .cloned();
+
+    let (data, mut kind) = embedded_font(doc, descriptor.as_ref());
+    if kind == FontKind::Unknown {
+        kind = match subtype.as_slice() {
+            b"TrueType" => FontKind::TrueType,
+            b"Type1" | b"MMType1" => FontKind::Type1,
+            b"Type3" => FontKind::Type3,
+            _ => FontKind::Unknown,
+        };
+    }
+    if subtype == b"Type3" {
+        kind = FontKind::Type3;
+    }
+
+    let units_per_em = data
+        .as_deref()
+        .and_then(sfnt_units_per_em)
+        .or_else(|| type3_units_per_em(dict))
+        .unwrap_or(1000.0);
+
+    let code_to_gid = if is_cid {
+        match deref(doc, carrier.get(b"CIDToGIDMap").ok()) {
+            Some(Object::Stream(stream)) => stream
+                .decompressed_content()
+                .or_else(|_| stream.get_plain_content())
+                .ok()
+                .map(|bytes| CodeToGid::Map(cid_to_gid_table(&bytes)))
+                .unwrap_or(CodeToGid::Identity),
+            // `/Identity` oder gar nichts: CID ist die Glyph-ID. Bei
+            // CIDFontType0 (CFF) ist das eine Näherung, die für Subsets stimmt.
+            _ => CodeToGid::Identity,
+        }
+    } else {
+        CodeToGid::ViaCharCode
+    };
+
+    let widths = info.width_map().clone();
+    let mut code_to_unicode = BTreeMap::new();
+    if !is_cid {
+        for code in 0u32..256 {
+            let text = info.charmap.text_for(code);
+            if !text.is_empty() && !text.starts_with(crate::encoding::REPLACEMENT) {
+                code_to_unicode.insert(code, text);
+            }
+        }
+    } else if data.is_none() && info.charmap.has_to_unicode() {
+        // Nicht eingebetteter CID-Font: nur so kann ein Ersatzfont helfen.
+        for code in widths.keys() {
+            let text = info.charmap.text_for(*code);
+            if !text.is_empty() && !text.starts_with(crate::encoding::REPLACEMENT) {
+                code_to_unicode.insert(*code, text);
+            }
+        }
+    }
+
+    let flags = descriptor
+        .as_ref()
+        .and_then(|d| d.get(b"Flags").ok())
+        .and_then(|o| o.as_i64().ok())
+        .unwrap_or(0)
+        .max(0) as u32;
+
+    FontProgram {
+        base_font: info.base_font.clone(),
+        kind,
+        data,
+        units_per_em,
+        code_to_gid,
+        is_cid,
+        widths,
+        default_width: info.fallback_width(),
+        code_to_unicode,
+        flags,
+    }
+}
+
+/// Holt das eingebettete Fontprogramm aus dem `/FontDescriptor`.
+fn embedded_font(doc: &Document, descriptor: Option<&Dictionary>) -> (Option<Vec<u8>>, FontKind) {
+    let Some(descriptor) = descriptor else {
+        return (None, FontKind::Unknown);
+    };
+    for (key, kind) in [
+        (&b"FontFile2"[..], FontKind::TrueType),
+        (&b"FontFile3"[..], FontKind::Cff),
+        (&b"FontFile"[..], FontKind::Type1),
+    ] {
+        let Some(Object::Stream(stream)) = deref(doc, descriptor.get(key).ok()) else {
+            continue;
+        };
+        let Ok(data) = stream
+            .decompressed_content()
+            .or_else(|_| stream.get_plain_content())
+        else {
+            continue;
+        };
+        if data.is_empty() {
+            continue;
+        }
+        // `/FontFile3 /Subtype /OpenType` ist ein vollständiges sfnt.
+        let kind = if data.starts_with(b"OTTO")
+            || data.starts_with(&[0x00, 0x01, 0x00, 0x00])
+            || data.starts_with(b"true")
+            || data.starts_with(b"ttcf")
+        {
+            if data.starts_with(b"OTTO") {
+                FontKind::Cff
+            } else {
+                FontKind::TrueType
+            }
+        } else {
+            kind
+        };
+        return (Some(data), kind);
+    }
+    (None, FontKind::Unknown)
+}
+
+/// `unitsPerEm` aus der `head`-Tabelle eines sfnt-Fonts.
+fn sfnt_units_per_em(data: &[u8]) -> Option<f64> {
+    if data.len() < 12 {
+        return None;
+    }
+    let mut base = 0usize;
+    if &data[0..4] == b"ttcf" {
+        base = be_u32(data, 12)? as usize;
+        if base + 12 > data.len() {
+            return None;
+        }
+    } else if !(data.starts_with(&[0x00, 0x01, 0x00, 0x00])
+        || data.starts_with(b"true")
+        || data.starts_with(b"OTTO"))
+    {
+        return None;
+    }
+    let num_tables = be_u16(data, base + 4)? as usize;
+    for i in 0..num_tables {
+        let entry = base + 12 + i * 16;
+        if entry + 16 > data.len() {
+            return None;
+        }
+        if &data[entry..entry + 4] == b"head" {
+            let offset = be_u32(data, entry + 8)? as usize;
+            let upem = be_u16(data, offset + 18)? as f64;
+            return (upem > 0.0).then_some(upem);
+        }
+    }
+    None
+}
+
+/// Type3-Fonts geben ihren Glyph-Space über `/FontMatrix` an.
+fn type3_units_per_em(dict: &Dictionary) -> Option<f64> {
+    let a = dict
+        .get(b"FontMatrix")
+        .and_then(Object::as_array)
+        .ok()?
+        .first()
+        .and_then(as_f64)?;
+    (a.abs() > 1e-9).then(|| 1.0 / a.abs())
+}
+
+fn cid_to_gid_table(bytes: &[u8]) -> BTreeMap<u32, u16> {
+    let mut map = BTreeMap::new();
+    for (cid, pair) in bytes.chunks_exact(2).enumerate() {
+        let gid = ((pair[0] as u16) << 8) | pair[1] as u16;
+        if gid != 0 {
+            map.insert(cid as u32, gid);
+        }
+    }
+    map
+}
+
+// ---------------------------------------------------------------------------
+// Bilder
+// ---------------------------------------------------------------------------
+
+/// Sucht ein Bild-XObject in den Ressourcen.
+///
+/// Gibt eine Referenz zurück — gescannte Seiten bringen zweistellige
+/// Megabyte-Streams mit, die nicht je Platzierung kopiert werden dürfen.
+fn image_xobject<'a>(
+    doc: &'a Document,
+    resources: Option<&'a Dictionary>,
+    name: &[u8],
+) -> Option<(Option<ObjectId>, &'a Stream)> {
+    let xobjects = resources?.get(b"XObject").ok()?;
+    let (_, xobjects) = doc.dereference(xobjects).ok()?;
+    let entry = xobjects.as_dict().ok()?.get(name).ok()?;
+    let id = match entry {
+        Object::Reference(id) => Some(*id),
+        _ => None,
+    };
+    let (_, resolved) = doc.dereference(entry).ok()?;
+    let stream = resolved.as_stream().ok()?;
+    if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Image") {
+        return None;
+    }
+    Some((id, stream))
+}
+
+/// Was nach dem Anwenden der Nicht-Bild-Filter übrigbleibt.
+enum Payload {
+    /// Rohe Abtastwerte.
+    Samples(Vec<u8>),
+    /// JPEG (`DCTDecode`).
+    Jpeg(Vec<u8>),
+    /// JPEG 2000 (`JPXDecode`) — dafür gibt es keinen brauchbaren Rust-Decoder.
+    Jpx,
+    /// Filter, den wir nicht können (`LZWDecode`, `CCITTFaxDecode`, …).
+    Unsupported(String),
+}
+
+/// Dekodiert ein Bild in einen RGBA8-Puffer.
+///
+/// Schlägt irgendetwas fehl, entsteht eine einfarbige Platzhalterfläche — eine
+/// leere Seite wäre genau der Fehler, den wir beheben wollen. Der zweite
+/// Rückgabewert beschreibt in dem Fall, was schiefging.
+fn decode_image(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    dict: &Dictionary,
+    raw: &[u8],
+    fill: Rgb,
+) -> (RasterImage, Option<String>) {
+    let width = dict_int(dict, b"Width", b"W").unwrap_or(0).max(0) as u32;
+    let height = dict_int(dict, b"Height", b"H").unwrap_or(0).max(0) as u32;
+    if width == 0 || height == 0 {
+        return (
+            RasterImage::solid([220, 220, 220, 255], true),
+            Some("Größe fehlt".into()),
+        );
+    }
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return (
+            RasterImage::solid([220, 220, 220, 255], true),
+            Some(format!("zu groß ({width}x{height})")),
+        );
+    }
+
+    let payload = apply_filters(dict, raw);
+    let mask = dict_bool(dict, b"ImageMask", b"IM");
+    let bpc = if mask {
+        1
+    } else {
+        dict_int(dict, b"BitsPerComponent", b"BPC")
+            .unwrap_or(8)
+            .max(1) as usize
+    };
+    let decode: Option<Vec<f64>> = dict
+        .get(b"Decode")
+        .or_else(|_| dict.get(b"D"))
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| {
+            o.as_array()
+                .ok()
+                .map(|a| a.iter().filter_map(as_f64).collect())
+        });
+
+    let mut image = match payload {
+        Payload::Samples(samples) => {
+            if mask {
+                match stencil_to_rgba(width, height, &samples, decode.as_deref(), fill) {
+                    Some(rgba) => RasterImage {
+                        width,
+                        height,
+                        rgba,
+                        placeholder: false,
+                    },
+                    None => {
+                        return (
+                            RasterImage::solid([220, 220, 220, 255], true),
+                            Some("Maskendaten unvollständig".into()),
+                        )
+                    }
+                }
+            } else {
+                let space = dict
+                    .get(b"ColorSpace")
+                    .or_else(|_| dict.get(b"CS"))
+                    .ok()
+                    .map(|o| ColorSpace::resolve(doc, resources, o))
+                    .unwrap_or(ColorSpace::Gray);
+                match samples_to_rgba(width, height, bpc, &space, decode.as_deref(), &samples) {
+                    Some(rgba) => RasterImage {
+                        width,
+                        height,
+                        rgba,
+                        placeholder: false,
+                    },
+                    None => {
+                        return (
+                            RasterImage::solid([220, 220, 220, 255], true),
+                            Some("Abtastwerte unvollständig".into()),
+                        )
+                    }
+                }
+            }
+        }
+        Payload::Jpeg(data) => match decode_jpeg(&data, decode.as_deref()) {
+            Some(image) => image,
+            None => {
+                return (
+                    RasterImage::solid([220, 220, 220, 255], true),
+                    Some("JPEG nicht dekodierbar".into()),
+                )
+            }
+        },
+        Payload::Jpx => {
+            return (
+                RasterImage::solid([128, 128, 128, 255], true),
+                Some("JPXDecode (JPEG 2000) wird nicht dekodiert".into()),
+            )
+        }
+        Payload::Unsupported(filter) => {
+            return (
+                RasterImage::solid([220, 220, 220, 255], true),
+                Some(format!("Filter {filter} wird nicht unterstützt")),
+            )
+        }
+    };
+
+    apply_soft_mask(doc, resources, dict, &mut image);
+    (image, None)
+}
+
+/// Wendet alle Filter an, die keine Bildkompression sind.
+fn apply_filters(dict: &Dictionary, raw: &[u8]) -> Payload {
+    let filters = filter_names(dict);
+    if filters.is_empty() {
+        return Payload::Samples(raw.to_vec());
+    }
+    let mut data = raw.to_vec();
+    for (index, filter) in filters.iter().enumerate() {
+        let params = filter_params(dict, index);
+        data = match filter.as_str() {
+            "FlateDecode" | "Fl" => match inflate(&data) {
+                Some(out) => apply_predictor(out, params.as_ref()),
+                None => return Payload::Unsupported("FlateDecode".into()),
+            },
+            "ASCII85Decode" | "A85" => decode_ascii85(&data),
+            "ASCIIHexDecode" | "AHx" => decode_ascii_hex(&data),
+            "RunLengthDecode" | "RL" => decode_run_length(&data),
+            "DCTDecode" | "DCT" => return Payload::Jpeg(data),
+            "JPXDecode" => return Payload::Jpx,
+            other => return Payload::Unsupported(other.to_string()),
+        };
+    }
+    Payload::Samples(data)
+}
+
+fn filter_names(dict: &Dictionary) -> Vec<String> {
+    let Ok(filter) = dict.get(b"Filter").or_else(|_| dict.get(b"F")) else {
+        return Vec::new();
+    };
+    match filter {
+        Object::Name(name) => vec![String::from_utf8_lossy(name).into_owned()],
+        Object::Array(items) => items
+            .iter()
+            .filter_map(|o| o.as_name().ok())
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn filter_params(dict: &Dictionary, index: usize) -> Option<Dictionary> {
+    let params = dict.get(b"DecodeParms").or_else(|_| dict.get(b"DP")).ok()?;
+    match params {
+        Object::Dictionary(d) if index == 0 => Some(d.clone()),
+        Object::Array(items) => items.get(index).and_then(|o| o.as_dict().ok()).cloned(),
+        _ => None,
+    }
+}
+
+/// PNG-Prädiktoren (`/Predictor >= 10`); der TIFF-Prädiktor 2 wird übergangen.
+fn apply_predictor(data: Vec<u8>, params: Option<&Dictionary>) -> Vec<u8> {
+    let Some(params) = params else {
+        return data;
+    };
+    let predictor = params
+        .get(b"Predictor")
+        .and_then(Object::as_i64)
+        .unwrap_or(1);
+    if !(10..=15).contains(&predictor) {
+        return data;
+    }
+    let columns = params
+        .get(b"Columns")
+        .and_then(Object::as_i64)
+        .unwrap_or(1)
+        .max(1) as usize;
+    let colors = params
+        .get(b"Colors")
+        .and_then(Object::as_i64)
+        .unwrap_or(1)
+        .max(1) as usize;
+    let bits = params
+        .get(b"BitsPerComponent")
+        .and_then(Object::as_i64)
+        .unwrap_or(8)
+        .max(8) as usize;
+    let bytes_per_pixel = (colors * bits / 8).max(1);
+    lopdf::filters::png::decode_frame(&data, bytes_per_pixel, columns).unwrap_or(data)
+}
+
+fn inflate(data: &[u8]) -> Option<Vec<u8>> {
+    use flate2::read::{DeflateDecoder, ZlibDecoder};
+    use std::io::Read;
+
+    // Abgeschnittene Streams sind in freier Wildbahn häufig — was schon
+    // dekodiert ist, wird behalten.
+    let mut out = Vec::new();
+    let _ = ZlibDecoder::new(data).read_to_end(&mut out);
+    if !out.is_empty() {
+        return Some(out);
+    }
+    let mut raw = Vec::new();
+    let _ = DeflateDecoder::new(data).read_to_end(&mut raw);
+    (!raw.is_empty()).then_some(raw)
+}
+
+fn decode_ascii_hex(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() / 2);
+    let mut high: Option<u8> = None;
+    for &byte in data {
+        if byte == b'>' {
+            break;
+        }
+        let Some(value) = (byte as char).to_digit(16) else {
+            continue;
+        };
+        match high.take() {
+            Some(h) => out.push((h << 4) | value as u8),
+            None => high = Some(value as u8),
+        }
+    }
+    if let Some(h) = high {
+        out.push(h << 4);
+    }
+    out
+}
+
+fn decode_ascii85(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut group = [0u8; 5];
+    let mut count = 0;
+    let mut i = 0;
+    // Ein führendes `<~` ist erlaubt.
+    if data.starts_with(b"<~") {
+        i = 2;
+    }
+    while i < data.len() {
+        let byte = data[i];
+        i += 1;
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'~' {
+            break;
+        }
+        if byte == b'z' && count == 0 {
+            out.extend_from_slice(&[0, 0, 0, 0]);
+            continue;
+        }
+        if !(b'!'..=b'u').contains(&byte) {
+            break;
+        }
+        group[count] = byte - b'!';
+        count += 1;
+        if count == 5 {
+            let value = group.iter().fold(0u32, |acc, d| {
+                acc.wrapping_mul(85).wrapping_add(u32::from(*d))
+            });
+            out.extend_from_slice(&value.to_be_bytes());
+            count = 0;
+        }
+    }
+    if count > 0 {
+        for slot in group.iter_mut().skip(count) {
+            *slot = 84;
+        }
+        let value = group.iter().fold(0u32, |acc, d| {
+            acc.wrapping_mul(85).wrapping_add(u32::from(*d))
+        });
+        out.extend_from_slice(&value.to_be_bytes()[..count - 1]);
+    }
+    out
+}
+
+fn decode_run_length(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        let length = data[i];
+        i += 1;
+        match length {
+            128 => break,
+            0..=127 => {
+                let n = length as usize + 1;
+                let end = (i + n).min(data.len());
+                out.extend_from_slice(&data[i..end]);
+                i = end;
+            }
+            _ => {
+                if i < data.len() {
+                    let n = 257 - length as usize;
+                    out.extend(std::iter::repeat(data[i]).take(n));
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `/ImageMask`: 1 Bit je Punkt, gemalt wird in der aktuellen Füllfarbe.
+fn stencil_to_rgba(
+    width: u32,
+    height: u32,
+    samples: &[u8],
+    decode: Option<&[f64]>,
+    fill: Rgb,
+) -> Option<Vec<u8>> {
+    let stride = (width as usize).div_ceil(8);
+    if samples.len() < stride * height as usize {
+        return None;
+    }
+    // Standard `/Decode [0 1]`: die Null malt.
+    let paint_on = decode.and_then(|d| d.first().copied()).unwrap_or(0.0) < 0.5;
+    let [r, g, b] = fill.to_u8();
+    let mut out = vec![0u8; width as usize * height as usize * 4];
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let bit = (samples[y * stride + x / 8] >> (7 - (x % 8))) & 1;
+            let paint = (bit == 0) == paint_on;
+            let offset = (y * width as usize + x) * 4;
+            if paint {
+                out[offset] = r;
+                out[offset + 1] = g;
+                out[offset + 2] = b;
+                out[offset + 3] = 255;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Rohe Abtastwerte → RGBA8.
+fn samples_to_rgba(
+    width: u32,
+    height: u32,
+    bpc: usize,
+    space: &ColorSpace,
+    decode: Option<&[f64]>,
+    samples: &[u8],
+) -> Option<Vec<u8>> {
+    let comps = space.components();
+    if comps == 0 || !matches!(bpc, 1 | 2 | 4 | 8 | 16) {
+        return None;
+    }
+    let stride = (width as usize * comps * bpc).div_ceil(8);
+    if samples.len() < stride * height as usize {
+        return None;
+    }
+    let max = ((1u32 << bpc.min(16)) - 1) as f64;
+    let indexed = matches!(space, ColorSpace::Indexed { .. });
+    let lab = matches!(space, ColorSpace::Lab);
+
+    let mut out = vec![0u8; width as usize * height as usize * 4];
+    let mut values = vec![0.0f64; comps];
+    for y in 0..height as usize {
+        let row = &samples[y * stride..];
+        for x in 0..width as usize {
+            for (c, slot) in values.iter_mut().enumerate() {
+                let raw = read_sample(row, (x * comps + c) * bpc, bpc) as f64;
+                *slot = match decode.and_then(|d| Some((*d.get(2 * c)?, *d.get(2 * c + 1)?))) {
+                    // Bei `Indexed` bildet `/Decode` standardmaessig auf den
+                    // Indexbereich ab, die Formel stimmt also fuer beide Faelle.
+                    Some((dmin, dmax)) => dmin + raw * (dmax - dmin) / max,
+                    None if indexed => raw,
+                    None if lab && c == 0 => raw / max * 100.0,
+                    None => raw / max,
+                };
+            }
+            let rgb = space.to_rgb(&values).to_u8();
+            let offset = (y * width as usize + x) * 4;
+            out[offset..offset + 3].copy_from_slice(&rgb);
+            out[offset + 3] = 255;
+        }
+    }
+    Some(out)
+}
+
+/// Liest einen Abtastwert beliebiger Bittiefe aus einer Zeile.
+fn read_sample(row: &[u8], bit_offset: usize, bpc: usize) -> u32 {
+    match bpc {
+        8 => row.get(bit_offset / 8).copied().unwrap_or(0) as u32,
+        16 => {
+            let i = bit_offset / 8;
+            ((row.get(i).copied().unwrap_or(0) as u32) << 8)
+                | row.get(i + 1).copied().unwrap_or(0) as u32
+        }
+        _ => {
+            let byte = row.get(bit_offset / 8).copied().unwrap_or(0) as u32;
+            let shift = 8 - bpc - (bit_offset % 8);
+            (byte >> shift) & ((1 << bpc) - 1)
+        }
+    }
+}
+
+/// JPEG über `zune-jpeg`. CMYK-JPEGs werden als Adobe-invertiert behandelt.
+fn decode_jpeg(data: &[u8], decode: Option<&[f64]>) -> Option<RasterImage> {
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+    use zune_jpeg::JpegDecoder;
+
+    let mut decoder = JpegDecoder::new(ZCursor::new(data));
+    let pixels = decoder.decode().ok()?;
+    let info = decoder.info()?;
+    let (width, height) = (info.width as u32, info.height as u32);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let count = width as usize * height as usize;
+    let comps = pixels.len() / count.max(1);
+    // `/Decode [1 0 …]` dreht die Werte um.
+    let inverted = decode
+        .and_then(|d| d.first().copied())
+        .map(|v| v > 0.5)
+        .unwrap_or(false);
+
+    let mut rgba = vec![255u8; count * 4];
+    for i in 0..count {
+        let rgb = match comps {
+            1 => {
+                let v = pixels[i];
+                let v = if inverted { 255 - v } else { v };
+                [v, v, v]
+            }
+            3 => {
+                let p = &pixels[i * 3..i * 3 + 3];
+                if inverted {
+                    [255 - p[0], 255 - p[1], 255 - p[2]]
+                } else {
+                    [p[0], p[1], p[2]]
+                }
+            }
+            4 => {
+                let p = &pixels[i * 4..i * 4 + 4];
+                // Adobe speichert CMYK invertiert.
+                let f = |v: u8| {
+                    let x = v as f64 / 255.0;
+                    if inverted {
+                        x
+                    } else {
+                        1.0 - x
+                    }
+                };
+                crate::content::cmyk_to_rgb(f(p[0]), f(p[1]), f(p[2]), f(p[3])).to_u8()
+            }
+            _ => return None,
+        };
+        rgba[i * 4..i * 4 + 3].copy_from_slice(&rgb);
+    }
+    Some(RasterImage {
+        width,
+        height,
+        rgba,
+        placeholder: false,
+    })
+}
+
+/// `/SMask` (Graustufen-Alpha) bzw. `/Mask` (Stencil) auf das Bild anwenden.
+fn apply_soft_mask(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    dict: &Dictionary,
+    image: &mut RasterImage,
+) {
+    let soft = deref(doc, dict.get(b"SMask").ok()).and_then(|o| o.as_stream().ok());
+    let stencil = deref(doc, dict.get(b"Mask").ok()).and_then(|o| o.as_stream().ok());
+    let Some((stream, is_stencil)) = soft
+        .map(|s| (s, false))
+        .or_else(|| stencil.map(|s| (s, true)))
+    else {
+        return;
+    };
+    let (mask, _) = decode_image(doc, resources, &stream.dict, &stream.content, Rgb::BLACK);
+    if mask.placeholder || mask.width == 0 || mask.height == 0 {
+        return;
+    }
+    for y in 0..image.height as usize {
+        // Nächster Nachbar — Maske und Bild dürfen unterschiedlich groß sein.
+        let my = y * mask.height as usize / image.height as usize;
+        for x in 0..image.width as usize {
+            let mx = x * mask.width as usize / image.width as usize;
+            let m = &mask.rgba[(my * mask.width as usize + mx) * 4..];
+            let alpha = if is_stencil {
+                // Bei `/Mask` markiert eine gemalte Fläche das, was wegfällt.
+                if m[3] > 127 {
+                    0
+                } else {
+                    255
+                }
+            } else {
+                m[0]
+            };
+            image.rgba[(y * image.width as usize + x) * 4 + 3] = alpha;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Content-Stream mit Inline-Bildern
+// ---------------------------------------------------------------------------
+
+/// Dekodiert einen Content-Stream und fasst `BI … ID … EI` zu je einer
+/// Operation `BI` mit Dictionary und Rohdaten zusammen.
+///
+/// lopdfs Parser kennt keine Inline-Bilder: die Binärdaten hinter `ID` bringen
+/// ihn aus dem Tritt, der Rest des Streams geht verloren. Deshalb werden die
+/// Blöcke vorher herausgeschnitten und die Teilstücke einzeln geparst.
+pub fn decode_content(data: &[u8]) -> Vec<Operation> {
+    let images = find_inline_images(data);
+    if images.is_empty() {
+        return Content::decode(data)
+            .map(|c| c.operations)
+            .unwrap_or_default();
+    }
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    for (start, end, dict, payload) in images {
+        if start > pos {
+            if let Ok(content) = Content::decode(&data[pos..start]) {
+                out.extend(content.operations);
+            }
+        }
+        out.push(Operation::new(
+            "BI",
+            vec![
+                Object::Dictionary(dict),
+                Object::String(payload, StringFormat::Literal),
+            ],
+        ));
+        pos = end;
+    }
+    if pos < data.len() {
+        if let Ok(content) = Content::decode(&data[pos..]) {
+            out.extend(content.operations);
+        }
+    }
+    out
+}
+
+type InlineImage = (usize, usize, Dictionary, Vec<u8>);
+
+/// Findet alle Inline-Bilder: (Start von `BI`, Ende hinter `EI`, Dict, Daten).
+fn find_inline_images(data: &[u8]) -> Vec<InlineImage> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < data.len() {
+        match data[i] {
+            b'%' => {
+                while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
+                    i += 1;
+                }
+            }
+            b'(' => i = skip_literal_string(data, i),
+            b'<' => {
+                if data.get(i + 1) == Some(&b'<') {
+                    i += 2;
+                } else {
+                    i += 1;
+                    while i < data.len() && data[i] != b'>' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'B' if is_token(data, i, b"BI") => match parse_inline_image(data, i) {
+                Some(image) => {
+                    i = image.1;
+                    out.push(image);
+                }
+                None => i += 2,
+            },
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+fn parse_inline_image(data: &[u8], start: usize) -> Option<InlineImage> {
+    // Dictionary-Teil bis zum `ID`.
+    let mut i = start + 2;
+    let id_pos = loop {
+        if i >= data.len() {
+            return None;
+        }
+        match data[i] {
+            b'(' => i = skip_literal_string(data, i),
+            b'I' if is_token(data, i, b"ID") => break i,
+            _ => i += 1,
+        }
+    };
+
+    let mut source = data[start + 2..id_pos].to_vec();
+    source.extend_from_slice(b" ID");
+    let operands = Content::decode(&source)
+        .ok()?
+        .operations
+        .last()
+        .map(|op| op.operands.clone())?;
+    let mut dict = Dictionary::new();
+    let mut iter = operands.into_iter();
+    while let (Some(Object::Name(key)), Some(value)) = (iter.next(), iter.next()) {
+        dict.set(key, value);
+    }
+
+    // Nach `ID` folgt genau ein Trennzeichen, dann die Binärdaten.
+    let mut begin = id_pos + 2;
+    if data.get(begin).is_some_and(|b| b.is_ascii_whitespace()) {
+        begin += 1;
+    }
+    // `/L` (bzw. `/Length`) gibt die Datenlänge an, wenn vorhanden.
+    let declared = dict
+        .get(b"L")
+        .or_else(|_| dict.get(b"Length"))
+        .ok()
+        .and_then(|o| o.as_i64().ok())
+        .filter(|l| *l >= 0)
+        .map(|l| l as usize);
+    let end_of_data = match declared {
+        Some(len) if begin + len <= data.len() => begin + len,
+        _ => find_ei(data, begin)?,
+    };
+    let payload = data.get(begin..end_of_data)?.to_vec();
+    let after = find_ei_end(data, end_of_data).unwrap_or(data.len());
+    Some((start, after, dict, payload))
+}
+
+/// Sucht das `EI`, das den Bilddatenblock beendet.
+fn find_ei(data: &[u8], from: usize) -> Option<usize> {
+    let mut i = from;
+    while i + 1 < data.len() {
+        if data[i] == b'E'
+            && data[i + 1] == b'I'
+            && i > from
+            && data[i - 1].is_ascii_whitespace()
+            && data
+                .get(i + 2)
+                .map(|b| b.is_ascii_whitespace() || is_delimiter(*b))
+                .unwrap_or(true)
+        {
+            return Some(i - 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_ei_end(data: &[u8], from: usize) -> Option<usize> {
+    let mut i = from;
+    while i + 1 < data.len() {
+        if data[i] == b'E' && data[i + 1] == b'I' {
+            return Some(i + 2);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn skip_literal_string(data: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    let mut depth = 1;
+    while i < data.len() {
+        match data[i] {
+            b'\\' => i += 1,
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Steht an `pos` genau das Token `token` (auf Wortgrenzen)?
+fn is_token(data: &[u8], pos: usize, token: &[u8]) -> bool {
+    if !data[pos..].starts_with(token) {
+        return false;
+    }
+    let before_ok = pos == 0 || data[pos - 1].is_ascii_whitespace() || is_delimiter(data[pos - 1]);
+    let after_ok = data
+        .get(pos + token.len())
+        .map(|b| b.is_ascii_whitespace() || is_delimiter(*b))
+        .unwrap_or(true);
+    before_ok && after_ok
+}
+
+fn is_delimiter(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Kleinkram
+// ---------------------------------------------------------------------------
+
+fn deref<'a>(doc: &'a Document, obj: Option<&'a Object>) -> Option<&'a Object> {
+    let obj = obj?;
+    doc.dereference(obj).map(|(_, o)| o).ok()
+}
+
+fn as_f64(obj: &Object) -> Option<f64> {
+    match obj {
+        Object::Integer(i) => Some(*i as f64),
+        Object::Real(r) => Some(*r as f64),
+        _ => None,
+    }
+}
+
+/// Ganzzahl aus einem Bild-Dictionary; Inline-Bilder benutzen Kurznamen.
+fn dict_int(dict: &Dictionary, long: &[u8], short: &[u8]) -> Option<i64> {
+    dict.get(long)
+        .or_else(|_| dict.get(short))
+        .ok()
+        .and_then(|o| match o {
+            Object::Integer(i) => Some(*i),
+            Object::Real(r) => Some(*r as i64),
+            _ => None,
+        })
+}
+
+fn dict_bool(dict: &Dictionary, long: &[u8], short: &[u8]) -> bool {
+    dict.get(long)
+        .or_else(|_| dict.get(short))
+        .ok()
+        .and_then(|o| o.as_bool().ok())
+        .unwrap_or(false)
+}
+
+fn be_u16(data: &[u8], offset: usize) -> Option<u16> {
+    Some(((*data.get(offset)? as u16) << 8) | *data.get(offset + 1)? as u16)
+}
+
+fn be_u32(data: &[u8], offset: usize) -> Option<u32> {
+    Some(
+        ((*data.get(offset)? as u32) << 24)
+            | ((*data.get(offset + 1)? as u32) << 16)
+            | ((*data.get(offset + 2)? as u32) << 8)
+            | *data.get(offset + 3)? as u32,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::scan_page;
+    use crate::testing::{build_pdf, demo_statement, TextItem};
+    use lopdf::dictionary;
+
+    // -----------------------------------------------------------------
+    // Testgeruest
+    // -----------------------------------------------------------------
+
+    /// Baut ein einseitiges PDF mit vorgegebenem Content-Stream.
+    fn build_doc(
+        content: &[u8],
+        resources: impl FnOnce(&mut Document) -> Dictionary,
+        page_extra: &[(&str, Object)],
+    ) -> Document {
+        let mut doc = Document::with_version("1.5");
+        let resources = resources(&mut doc);
+        let resources_id = doc.add_object(resources);
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.to_vec()));
+        let pages_id = doc.new_object_id();
+        let mut page = dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 200.into(), 200.into()],
+        };
+        for (key, value) in page_extra {
+            page.set(key.as_bytes().to_vec(), value.clone());
+        }
+        let page_id = doc.add_object(page);
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        doc
+    }
+
+    fn ops_of(content: &str) -> PageOps {
+        let doc = build_doc(content.as_bytes(), |_| dictionary! {}, &[]);
+        page_ops(&doc, 0).unwrap()
+    }
+
+    fn paths(page: &PageOps) -> Vec<&DrawOp> {
+        page.ops
+            .iter()
+            .filter(|o| matches!(o, DrawOp::Path { .. }))
+            .collect()
+    }
+
+    fn point(p: Point) -> (f64, f64) {
+        ((p.x * 1e6).round() / 1e6, (p.y * 1e6).round() / 1e6)
+    }
+
+    fn close_to(a: Rgb, r: f32, g: f32, b: f32) -> bool {
+        (a.r - r).abs() < 1e-4 && (a.g - g).abs() < 1e-4 && (a.b - b).abs() < 1e-4
+    }
+
+    fn flate(data: &[u8]) -> Vec<u8> {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    // -----------------------------------------------------------------
+    // Pfade, Farben, Zustand
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rectangle_fill_becomes_one_path_with_user_space_corners() {
+        let page = ops_of("0.2 0.4 0.6 rg 10 20 30 40 re f");
+        let ops = paths(&page);
+        assert_eq!(ops.len(), 1);
+        let DrawOp::Path {
+            segments,
+            fill,
+            stroke,
+            even_odd,
+            ..
+        } = ops[0]
+        else {
+            unreachable!()
+        };
+        assert!(stroke.is_none());
+        assert!(!even_odd);
+        assert!(close_to(fill.unwrap(), 0.2, 0.4, 0.6));
+        assert_eq!(segments.len(), 5);
+        assert_eq!(
+            segments
+                .iter()
+                .filter_map(|s| match s {
+                    PathSeg::MoveTo(p) | PathSeg::LineTo(p) => Some(point(*p)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![(10.0, 20.0), (40.0, 20.0), (40.0, 60.0), (10.0, 60.0)]
+        );
+        assert_eq!(segments.last(), Some(&PathSeg::Close));
+    }
+
+    #[test]
+    fn cm_scaling_and_translation_reaches_the_path_points() {
+        let page = ops_of("2 0 0 2 5 5 cm 10 10 20 20 re f");
+        let DrawOp::Path { segments, .. } = paths(&page)[0] else {
+            unreachable!()
+        };
+        assert_eq!(point_of(&segments[0]), (25.0, 25.0));
+        assert_eq!(point_of(&segments[2]), (65.0, 65.0));
+    }
+
+    fn point_of(seg: &PathSeg) -> (f64, f64) {
+        match seg {
+            PathSeg::MoveTo(p) | PathSeg::LineTo(p) => point(*p),
+            PathSeg::CubicTo(_, _, p) => point(*p),
+            PathSeg::Close => (f64::NAN, f64::NAN),
+        }
+    }
+
+    #[test]
+    fn q_and_capital_q_restore_color_line_width_and_clip() {
+        let page = ops_of(
+            "q 5 w 1 0 0 rg 0 0 10 10 re W n \
+             0 0 5 5 re f Q \
+             0 0 5 5 re S",
+        );
+        let ops = paths(&page);
+        assert_eq!(ops.len(), 2);
+
+        let DrawOp::Path { fill, clip, .. } = ops[0] else {
+            unreachable!()
+        };
+        assert!(close_to(fill.unwrap(), 1.0, 0.0, 0.0));
+        assert_eq!(*clip, Some(ClipRef(0)));
+
+        let DrawOp::Path {
+            fill, stroke, clip, ..
+        } = ops[1]
+        else {
+            unreachable!()
+        };
+        assert!(fill.is_none(), "S faerbt nicht");
+        let stroke = stroke.as_ref().unwrap();
+        assert!(
+            close_to(stroke.color, 0.0, 0.0, 0.0),
+            "Farbe zurueckgesetzt"
+        );
+        assert_eq!(stroke.width, 1.0, "Linienbreite zurueckgesetzt");
+        assert_eq!(*clip, None, "Clip nach Q wieder weg");
+    }
+
+    #[test]
+    fn even_odd_flag_comes_from_the_star_operators() {
+        assert!(!matches!(
+            paths(&ops_of("0 0 9 9 re f"))[0],
+            DrawOp::Path { even_odd: true, .. }
+        ));
+        assert!(matches!(
+            paths(&ops_of("0 0 9 9 re f*"))[0],
+            DrawOp::Path { even_odd: true, .. }
+        ));
+        assert!(matches!(
+            paths(&ops_of("0 0 9 9 re B*"))[0],
+            DrawOp::Path { even_odd: true, .. }
+        ));
+    }
+
+    #[test]
+    fn gray_and_cmyk_are_converted_to_rgb() {
+        let page = ops_of("0.5 g 0 0 1 1 re f 0 1 1 0 k 0 0 1 1 re f 0 0 0 0.5 K 0 0 1 1 re S");
+        let ops = paths(&page);
+        let DrawOp::Path { fill, .. } = ops[0] else {
+            unreachable!()
+        };
+        assert!(close_to(fill.unwrap(), 0.5, 0.5, 0.5));
+
+        let DrawOp::Path { fill, .. } = ops[1] else {
+            unreachable!()
+        };
+        // (1-c)(1-k) mit c=0, m=y=1, k=0 ergibt reines Rot.
+        assert!(close_to(fill.unwrap(), 1.0, 0.0, 0.0));
+
+        let DrawOp::Path { stroke, .. } = ops[2] else {
+            unreachable!()
+        };
+        assert!(close_to(stroke.as_ref().unwrap().color, 0.5, 0.5, 0.5));
+    }
+
+    #[test]
+    fn indexed_and_separation_color_spaces_are_approximated() {
+        let doc = build_doc(
+            b"/Pal cs 1 sc 0 0 1 1 re f /Sep cs 1 scn 0 0 1 1 re f",
+            |_| {
+                dictionary! {
+                    "ColorSpace" => dictionary! {
+                        "Pal" => vec![
+                            Object::Name(b"Indexed".to_vec()),
+                            Object::Name(b"DeviceRGB".to_vec()),
+                            Object::Integer(1),
+                            Object::String(vec![0, 0, 0, 0, 0, 255], StringFormat::Literal),
+                        ],
+                        "Sep" => vec![
+                            Object::Name(b"Separation".to_vec()),
+                            Object::Name(b"Spot".to_vec()),
+                            Object::Name(b"DeviceGray".to_vec()),
+                        ],
+                    },
+                }
+            },
+            &[],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        let ops = paths(&page);
+        let DrawOp::Path { fill, .. } = ops[0] else {
+            unreachable!()
+        };
+        assert!(close_to(fill.unwrap(), 0.0, 0.0, 1.0), "Index 1 = Blau");
+        let DrawOp::Path { fill, .. } = ops[1] else {
+            unreachable!()
+        };
+        assert!(
+            close_to(fill.unwrap(), 0.0, 0.0, 0.0),
+            "volle Tinte = Schwarz"
+        );
+    }
+
+    #[test]
+    fn bezier_curve_survives_as_cubic_with_its_control_points() {
+        let page = ops_of("10 10 m 20 30 40 30 50 10 c S");
+        let DrawOp::Path { segments, .. } = paths(&page)[0] else {
+            unreachable!()
+        };
+        assert_eq!(segments[0], PathSeg::MoveTo(Point::new(10.0, 10.0)));
+        assert_eq!(
+            segments[1],
+            PathSeg::CubicTo(
+                Point::new(20.0, 30.0),
+                Point::new(40.0, 30.0),
+                Point::new(50.0, 10.0)
+            )
+        );
+    }
+
+    #[test]
+    fn v_and_y_curves_use_the_implicit_control_points() {
+        let page = ops_of("10 10 m 20 30 30 10 v 40 40 50 50 y S");
+        let DrawOp::Path { segments, .. } = paths(&page)[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            segments[1],
+            PathSeg::CubicTo(
+                Point::new(10.0, 10.0),
+                Point::new(20.0, 30.0),
+                Point::new(30.0, 10.0)
+            )
+        );
+        assert_eq!(
+            segments[2],
+            PathSeg::CubicTo(
+                Point::new(40.0, 40.0),
+                Point::new(50.0, 50.0),
+                Point::new(50.0, 50.0)
+            )
+        );
+    }
+
+    #[test]
+    fn clip_is_stored_once_and_referenced_by_the_following_ops() {
+        let page = ops_of("q 0 0 10 10 re W n 1 1 2 2 re f 1 1 2 2 re f Q 1 1 2 2 re f");
+        assert_eq!(page.clips.len(), 1);
+        assert_eq!(page.clips[0].len(), 5);
+        let ops = paths(&page);
+        assert!(matches!(
+            ops[0],
+            DrawOp::Path {
+                clip: Some(ClipRef(0)),
+                ..
+            }
+        ));
+        assert!(matches!(ops[1], DrawOp::Path { clip: Some(_), .. }));
+        assert!(matches!(ops[2], DrawOp::Path { clip: None, .. }));
+    }
+
+    #[test]
+    fn line_width_and_dash_are_scaled_into_user_space() {
+        let page = ops_of("3 0 0 3 0 0 cm 2 w [4 2] 1 d 1 J 1 j 0 0 5 5 re S");
+        let DrawOp::Path { stroke, .. } = paths(&page)[0] else {
+            unreachable!()
+        };
+        let stroke = stroke.as_ref().unwrap();
+        assert_eq!(stroke.width, 6.0);
+        assert_eq!(stroke.dash, vec![12.0, 6.0]);
+        assert_eq!(stroke.dash_phase, 3.0);
+        assert_eq!((stroke.cap, stroke.join), (1, 1));
+    }
+
+    #[test]
+    fn ext_gstate_supplies_line_width_and_alpha() {
+        let doc = build_doc(
+            b"/GS1 gs 0 0 5 5 re B",
+            |_| {
+                dictionary! {
+                    "ExtGState" => dictionary! {
+                        "GS1" => dictionary! { "LW" => 7, "ca" => 0.25, "CA" => 0.5 },
+                    },
+                }
+            },
+            &[],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        let DrawOp::Path {
+            stroke, fill_alpha, ..
+        } = paths(&page)[0]
+        else {
+            unreachable!()
+        };
+        assert!((fill_alpha - 0.25).abs() < 1e-6);
+        let stroke = stroke.as_ref().unwrap();
+        assert_eq!(stroke.width, 7.0);
+        assert!((stroke.alpha - 0.5).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------
+    // Text
+    // -----------------------------------------------------------------
+
+    /// Anti-Drift: die Glyph-Matrix muss auf denselben Ursprung abbilden, den
+    /// `scan_page` fuer dieselbe Glyphe meldet. Waeren das zwei getrennte
+    /// Rechenwege, wuerde genau hier die Schwaerzung verrutschen.
+    #[test]
+    fn glyph_transform_origin_matches_scan_page_exactly() {
+        let bytes = demo_statement();
+        let doc = crate::document::load_from_bytes(&bytes).unwrap();
+        let page_id = *doc.get_pages().values().next().unwrap();
+
+        let scan = scan_page(&doc, page_id).unwrap();
+        let expected: Vec<Point> = scan
+            .shows
+            .iter()
+            .flat_map(|s| s.glyphs())
+            // Nur das erste Teilzeichen eines Codes traegt die Originalbytes.
+            .filter(|g| !g.bytes.is_empty())
+            .map(|g| g.origin)
+            .collect();
+
+        let page = page_ops(&doc, 0).unwrap();
+        let actual: Vec<Point> = page
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                DrawOp::Glyph { transform, .. } => Some(transform.apply(0.0, 0.0)),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!expected.is_empty());
+        assert_eq!(expected.len(), actual.len());
+        for (a, b) in expected.iter().zip(&actual) {
+            assert_eq!(a.x, b.x, "X-Ursprung weicht ab");
+            assert_eq!(a.y, b.y, "Y-Ursprung weicht ab");
+        }
+    }
+
+    #[test]
+    fn demo_statement_yields_a_glyph_for_every_character() {
+        let bytes = demo_statement();
+        let doc = crate::document::load_from_bytes(&bytes).unwrap();
+        for page_index in 0..2 {
+            let page = page_ops(&doc, page_index).unwrap();
+            let scan_glyphs = {
+                let page_id = *doc.get_pages().values().nth(page_index).unwrap();
+                scan_page(&doc, page_id)
+                    .unwrap()
+                    .shows
+                    .iter()
+                    .flat_map(|s| s.glyphs())
+                    .filter(|g| !g.bytes.is_empty())
+                    .count()
+            };
+            assert!(scan_glyphs > 100);
+            assert_eq!(page.glyph_count(), scan_glyphs);
+            assert_eq!(page.fonts.len(), 1);
+            assert_eq!(page.fonts[0].base_font, "Helvetica");
+            assert_eq!(page.fonts[0].units_per_em, 1000.0);
+        }
+    }
+
+    #[test]
+    fn glyph_transform_maps_glyph_space_to_user_space() {
+        let bytes = build_pdf(&[vec![TextItem::new(72.0, 700.0, 12.0, "A")]]);
+        let doc = crate::document::load_from_bytes(&bytes).unwrap();
+        let page = page_ops(&doc, 0).unwrap();
+        let DrawOp::Glyph {
+            transform,
+            code,
+            render_mode,
+            fill,
+            ..
+        } = &page.ops[0]
+        else {
+            panic!("keine Glyphe");
+        };
+        assert_eq!(*code, u32::from(b'A'));
+        assert_eq!(*render_mode, 0);
+        assert!(close_to(*fill, 0.0, 0.0, 0.0));
+        // 1000 Glyph-Einheiten entsprechen bei 12 pt genau der Schriftgroesse.
+        let origin = transform.apply(0.0, 0.0);
+        let em = transform.apply(1000.0, 0.0);
+        assert!((origin.x - 72.0).abs() < 1e-9 && (origin.y - 700.0).abs() < 1e-9);
+        assert!((em.x - 84.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn invisible_text_keeps_its_render_mode() {
+        let doc = build_doc(
+            b"BT /F1 12 Tf 3 Tr 10 10 Td (Hi) Tj ET",
+            |doc| {
+                let font = doc.add_object(dictionary! {
+                    "Type" => "Font",
+                    "Subtype" => "Type1",
+                    "BaseFont" => "Helvetica",
+                });
+                dictionary! { "Font" => dictionary! { "F1" => font } }
+            },
+            &[],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        assert_eq!(page.glyph_count(), 2);
+        assert!(page
+            .ops
+            .iter()
+            .all(|o| matches!(o, DrawOp::Glyph { render_mode: 3, .. })));
+    }
+
+    #[test]
+    fn form_xobject_contents_appear_with_the_form_matrix() {
+        let doc = build_doc(
+            b"1 0 0 1 5 5 cm /Fx1 Do",
+            |doc| {
+                let form = doc.add_object(Stream::new(
+                    dictionary! {
+                        "Type" => "XObject",
+                        "Subtype" => "Form",
+                        "BBox" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+                        "Matrix" => vec![1.into(), 0.into(), 0.into(), 1.into(), 100.into(), 100.into()],
+                    },
+                    b"0 0 10 10 re f".to_vec(),
+                ));
+                dictionary! { "XObject" => dictionary! { "Fx1" => form } }
+            },
+            &[],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        let DrawOp::Path { segments, .. } = paths(&page)[0] else {
+            unreachable!()
+        };
+        // Form-Matrix (100/100) und CTM der Seite (5/5) wirken zusammen.
+        assert_eq!(point_of(&segments[0]), (105.0, 105.0));
+        assert_eq!(point_of(&segments[2]), (115.0, 115.0));
+    }
+
+    // -----------------------------------------------------------------
+    // Bilder
+    // -----------------------------------------------------------------
+
+    fn doc_with_image(content: &[u8], dict: Dictionary, data: Vec<u8>) -> Document {
+        build_doc(
+            content,
+            move |doc| {
+                let image = doc.add_object(Stream::new(dict, data));
+                dictionary! { "XObject" => dictionary! { "Im1" => image } }
+            },
+            &[],
+        )
+    }
+
+    #[test]
+    fn image_mask_is_painted_in_the_current_fill_color() {
+        let doc = doc_with_image(
+            b"1 0 0 rg 100 0 0 100 10 20 cm /Im1 Do",
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 2,
+                "Height" => 2,
+                "ImageMask" => true,
+            },
+            // Zeile 0: links malen, Zeile 1: rechts malen.
+            vec![0b0100_0000, 0b1000_0000],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        assert_eq!(page.images.len(), 1);
+        let image = &page.images[0];
+        assert!(!image.placeholder);
+        assert_eq!((image.width, image.height), (2, 2));
+        assert_eq!(&image.rgba[0..4], &[255, 0, 0, 255]);
+        assert_eq!(image.rgba[7], 0, "zweiter Punkt ist durchsichtig");
+        assert_eq!(image.rgba[11], 0);
+        assert_eq!(&image.rgba[12..16], &[255, 0, 0, 255]);
+
+        let DrawOp::Image { ctm, image, .. } = &page.ops[0] else {
+            panic!("kein Bild")
+        };
+        assert_eq!(*image, 0);
+        assert_eq!(point(ctm.apply(0.0, 0.0)), (10.0, 20.0));
+        assert_eq!(point(ctm.apply(1.0, 1.0)), (110.0, 120.0));
+    }
+
+    #[test]
+    fn eight_bit_rgb_flate_image_decodes_to_the_expected_pixels() {
+        let pixels = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+        let doc = doc_with_image(
+            b"100 0 0 100 0 0 cm /Im1 Do",
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 2,
+                "Height" => 2,
+                "BitsPerComponent" => 8,
+                "ColorSpace" => "DeviceRGB",
+                "Filter" => "FlateDecode",
+            },
+            flate(&pixels),
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        let image = &page.images[0];
+        assert!(!image.placeholder);
+        assert_eq!(
+            image.rgba,
+            vec![
+                255, 0, 0, 255, //
+                0, 255, 0, 255, //
+                0, 0, 255, 255, //
+                255, 255, 255, 255,
+            ]
+        );
+    }
+
+    #[test]
+    fn one_bit_gray_image_decodes_black_and_white() {
+        // Genau der Fall, den gescannte Seiten benutzen.
+        let doc = doc_with_image(
+            b"10 0 0 10 0 0 cm /Im1 Do",
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 4,
+                "Height" => 1,
+                "BitsPerComponent" => 1,
+                "ColorSpace" => "DeviceGray",
+            },
+            vec![0b1010_0000],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        let rgba = &page.images[0].rgba;
+        assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
+        assert_eq!(&rgba[4..8], &[0, 0, 0, 255]);
+        assert_eq!(&rgba[8..12], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn undecodable_image_yields_a_placeholder_instead_of_an_error() {
+        let doc = doc_with_image(
+            b"10 0 0 10 0 0 cm /Im1 Do",
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 8,
+                "Height" => 8,
+                "BitsPerComponent" => 8,
+                "ColorSpace" => "DeviceGray",
+                "Filter" => "JPXDecode",
+            },
+            vec![0x00, 0x01, 0x02],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        assert_eq!(page.images.len(), 1);
+        assert!(page.images[0].placeholder);
+        assert_eq!(page.images[0].rgba, vec![128, 128, 128, 255]);
+        assert!(page.notes.iter().any(|n| n.contains("JPXDecode")));
+        assert!(matches!(page.ops[0], DrawOp::Image { .. }));
+    }
+
+    #[test]
+    fn broken_samples_still_produce_a_placeholder() {
+        let doc = doc_with_image(
+            b"10 0 0 10 0 0 cm /Im1 Do",
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 100,
+                "Height" => 100,
+                "BitsPerComponent" => 8,
+                "ColorSpace" => "DeviceRGB",
+            },
+            vec![1, 2, 3],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        assert!(page.images[0].placeholder);
+        assert!(!page.notes.is_empty());
+    }
+
+    #[test]
+    fn soft_mask_becomes_the_alpha_channel() {
+        let mut doc = Document::with_version("1.5");
+        let smask = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 2,
+                "Height" => 1,
+                "BitsPerComponent" => 8,
+                "ColorSpace" => "DeviceGray",
+            },
+            vec![0, 255],
+        ));
+        let image = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 2,
+                "Height" => 1,
+                "BitsPerComponent" => 8,
+                "ColorSpace" => "DeviceRGB",
+                "SMask" => smask,
+            },
+            vec![10, 20, 30, 40, 50, 60],
+        ));
+        let doc = build_doc(
+            b"1 0 0 1 0 0 cm /Im1 Do",
+            move |target| {
+                // Objekte in das Zieldokument uebernehmen.
+                for (id, object) in doc.objects.iter() {
+                    target.objects.insert(*id, object.clone());
+                }
+                target.max_id = target.max_id.max(doc.max_id);
+                dictionary! { "XObject" => dictionary! { "Im1" => image } }
+            },
+            &[],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        assert_eq!(page.images[0].rgba[3], 0);
+        assert_eq!(page.images[0].rgba[7], 255);
+    }
+
+    #[test]
+    fn inline_image_is_decoded_and_does_not_truncate_the_stream() {
+        let mut content = b"q 20 0 0 20 0 0 cm BI /W 2 /H 1 /CS /RGB /BPC 8 ID ".to_vec();
+        content.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
+        content.extend_from_slice(b"\nEI Q 0 0 5 5 re f");
+
+        let doc = build_doc(&content, |_| dictionary! {}, &[]);
+        let page = page_ops(&doc, 0).unwrap();
+        assert_eq!(page.images.len(), 1);
+        assert_eq!(page.images[0].rgba, vec![255, 0, 0, 255, 0, 0, 255, 255]);
+        // Der Pfad hinter dem Inline-Bild darf nicht verlorengehen.
+        assert_eq!(paths(&page).len(), 1);
+        assert!(matches!(page.ops[0], DrawOp::Image { .. }));
+    }
+
+    #[test]
+    fn inline_image_scanner_ignores_bi_inside_strings() {
+        let found = find_inline_images(b"(BI ID EI) Tj 0 0 1 1 re f");
+        assert!(found.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Seitenattribute
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rotate_is_reported_including_inheritance() {
+        let doc = build_doc(b"", |_| dictionary! {}, &[("Rotate", Object::Integer(90))]);
+        let page = page_ops(&doc, 0).unwrap();
+        assert_eq!(page.rotate, 90);
+        assert_eq!(page.page, 0);
+        assert_eq!(page.media_box, Rect::new(0.0, 0.0, 200.0, 200.0));
+
+        // Geerbt vom /Pages-Knoten und negativ angegeben.
+        let mut doc = build_doc(b"", |_| dictionary! {}, &[]);
+        let pages_id = *doc
+            .objects
+            .iter()
+            .find(|(_, o)| {
+                o.as_dict()
+                    .map(|d| d.get(b"Type").and_then(Object::as_name).ok() == Some(b"Pages"))
+                    .unwrap_or(false)
+            })
+            .map(|(id, _)| id)
+            .unwrap();
+        if let Some(Object::Dictionary(d)) = doc.objects.get_mut(&pages_id) {
+            d.set("Rotate", Object::Integer(-90));
+        }
+        assert_eq!(page_ops(&doc, 0).unwrap().rotate, 270);
+    }
+
+    #[test]
+    fn unknown_page_index_is_an_error() {
+        let doc = build_doc(b"", |_| dictionary! {}, &[]);
+        assert!(page_ops(&doc, 7).is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // Eingebettete Fonts
+    // -----------------------------------------------------------------
+
+    /// Minimaler sfnt-Font mit genau einer `head`-Tabelle.
+    fn sfnt_with_units_per_em(upem: u16) -> Vec<u8> {
+        let mut data = vec![0u8; 12];
+        data[0..4].copy_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+        data[4..6].copy_from_slice(&1u16.to_be_bytes()); // numTables
+        data.extend_from_slice(b"head");
+        data.extend_from_slice(&[0, 0, 0, 0]); // checkSum
+        data.extend_from_slice(&28u32.to_be_bytes()); // offset
+        data.extend_from_slice(&54u32.to_be_bytes()); // length
+        let mut head = vec![0u8; 54];
+        head[18..20].copy_from_slice(&upem.to_be_bytes());
+        data.extend_from_slice(&head);
+        data
+    }
+
+    #[test]
+    fn embedded_truetype_font_reports_its_units_per_em() {
+        let doc = build_doc(
+            b"BT /F1 10 Tf 20 30 Td (A) Tj ET",
+            |doc| {
+                let file =
+                    doc.add_object(Stream::new(dictionary! {}, sfnt_with_units_per_em(2048)));
+                let descriptor = doc.add_object(dictionary! {
+                    "Type" => "FontDescriptor",
+                    "FontName" => "Testfont",
+                    "Flags" => 34,
+                    "FontFile2" => file,
+                });
+                let font = doc.add_object(dictionary! {
+                    "Type" => "Font",
+                    "Subtype" => "TrueType",
+                    "BaseFont" => "Testfont",
+                    "FirstChar" => 65,
+                    "Widths" => vec![Object::Integer(600)],
+                    "FontDescriptor" => descriptor,
+                });
+                dictionary! { "Font" => dictionary! { "F1" => font } }
+            },
+            &[],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        let program = &page.fonts[0];
+        assert_eq!(program.kind, FontKind::TrueType);
+        assert_eq!(program.units_per_em, 2048.0);
+        assert_eq!(program.flags, 34);
+        assert!(!program.is_cid);
+        assert_eq!(program.code_to_gid, CodeToGid::ViaCharCode);
+        assert_eq!(program.widths.get(&65), Some(&0.6));
+        assert_eq!(
+            program.code_to_unicode.get(&65).map(String::as_str),
+            Some("A")
+        );
+        assert!(program.data.is_some());
+
+        // Der Glyph-Space richtet sich nach den 2048 Einheiten des Fonts.
+        let DrawOp::Glyph { transform, .. } = &page.ops[0] else {
+            panic!("keine Glyphe")
+        };
+        let origin = transform.apply(0.0, 0.0);
+        let em = transform.apply(2048.0, 0.0);
+        assert!((origin.x - 20.0).abs() < 1e-9 && (origin.y - 30.0).abs() < 1e-9);
+        assert!((em.x - 30.0).abs() < 1e-9, "2048 Einheiten = 10 pt");
+    }
+
+    #[test]
+    fn cid_font_uses_two_byte_codes_and_the_cid_to_gid_table() {
+        let doc = build_doc(
+            b"BT /F1 12 Tf 0 0 Td <00030004> Tj ET",
+            |doc| {
+                let map = doc.add_object(Stream::new(
+                    dictionary! {},
+                    // CID 3 -> GID 7, CID 4 -> GID 9
+                    vec![0, 0, 0, 0, 0, 0, 0, 7, 0, 9],
+                ));
+                let descriptor = doc.add_object(dictionary! {
+                    "Type" => "FontDescriptor",
+                    "FontName" => "CIDfont",
+                    "Flags" => 4,
+                });
+                let descendant = doc.add_object(dictionary! {
+                    "Type" => "Font",
+                    "Subtype" => "CIDFontType2",
+                    "BaseFont" => "CIDfont",
+                    "DW" => 1000,
+                    "W" => vec![
+                        Object::Integer(3),
+                        Object::Array(vec![Object::Integer(500), Object::Integer(500)]),
+                    ],
+                    "CIDToGIDMap" => map,
+                    "FontDescriptor" => descriptor,
+                });
+                let font = doc.add_object(dictionary! {
+                    "Type" => "Font",
+                    "Subtype" => "Type0",
+                    "BaseFont" => "CIDfont",
+                    "Encoding" => "Identity-H",
+                    "DescendantFonts" => vec![Object::Reference(descendant)],
+                });
+                dictionary! { "Font" => dictionary! { "F1" => font } }
+            },
+            &[],
+        );
+        let page = page_ops(&doc, 0).unwrap();
+        let program = &page.fonts[0];
+        assert!(program.is_cid);
+        assert_eq!(program.default_width, 1.0);
+        let CodeToGid::Map(table) = &program.code_to_gid else {
+            panic!("keine CIDToGID-Tabelle")
+        };
+        assert_eq!(table.get(&3), Some(&7));
+        assert_eq!(table.get(&4), Some(&9));
+
+        let codes: Vec<u32> = page
+            .ops
+            .iter()
+            .filter_map(|o| match o {
+                DrawOp::Glyph { code, .. } => Some(*code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(codes, vec![3, 4]);
+        // Vorschub: 500/1000 * 12 pt zwischen den beiden Glyphen.
+        let DrawOp::Glyph { transform, .. } = &page.ops[1] else {
+            unreachable!()
+        };
+        assert!((transform.apply(0.0, 0.0).x - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn shading_operator_does_not_break_the_stream() {
+        let page = ops_of("/Sh1 sh 0 0 5 5 re f");
+        assert_eq!(paths(&page).len(), 1);
+    }
+}
