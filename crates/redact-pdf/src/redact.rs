@@ -22,7 +22,7 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 use redact_core::{Rect, RedactError, Redaction, Redactor, Result};
 
-use crate::content::{scan_page, ShowItem, ShowRecord, StreamKey};
+use crate::content::{ScanResult, ShowItem, ShowRecord, StreamKey};
 use crate::matrix::Matrix;
 
 /// Ab welchem Überdeckungsgrad ein Zeichen als geschwärzt gilt.
@@ -120,6 +120,19 @@ impl PdfRedactor {
         redactions: &[Redaction],
     ) -> Result<RedactionReport> {
         let mut report = RedactionReport::default();
+        // Auch bei „0 Schwärzungen“ muss der Nutzer erfahren, dass die Datei
+        // eine Vorgeschichte hat: was in einer früheren Revision stand, ist
+        // beim Laden mitgekommen.
+        if crate::document::has_incremental_history(doc) {
+            report.warnings.push(
+                "Die Eingabedatei besteht aus mehreren inkrementellen Revisionen (/Prev). \
+                 Frühere Fassungen können Text enthalten, den eine spätere Revision nur \
+                 überschrieben hat — etwa eine bereits in einem anderen Werkzeug \
+                 vorgenommene Schwärzung. Die Ausgabe wird als eine einzige Revision ohne \
+                 Vorgeschichte geschrieben; prüfen Sie das Ergebnis trotzdem."
+                    .to_string(),
+            );
+        }
         if redactions.is_empty() {
             return Ok(report);
         }
@@ -141,7 +154,7 @@ impl PdfRedactor {
                 .filter(|r| !r.is_empty())
                 .collect();
 
-            let scan = scan_page(doc, *page_id)?;
+            let scan = scan_page_complete(doc, *page_id)?;
             let mut page_plans: BTreeMap<usize, Plan> = BTreeMap::new();
 
             for record in &scan.shows {
@@ -183,14 +196,13 @@ impl PdfRedactor {
         let data = doc
             .get_page_content(page_id)
             .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
-        let content = Content::decode(&data)
-            .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht dekodierbar: {e}")))?;
+        let decoded = crate::ops::decode_content(&data);
 
-        let mut operations = rewrite_operations(&content.operations, plans);
+        let mut operations = rewrite_operations(&decoded, plans);
 
         // Grafikzustand auf den Ausgangszustand zurückfahren, damit die
         // Rechtecke im unveränderten User-Space liegen.
-        let (base_ctm, depth) = crate::content::trailing_state(&content.operations);
+        let (base_ctm, depth) = crate::content::trailing_state(&decoded);
         for _ in 0..depth {
             operations.push(Operation::new("Q", vec![]));
         }
@@ -228,9 +240,7 @@ impl PdfRedactor {
         }
         operations.push(Operation::new("Q", vec![]));
 
-        let encoded = Content { operations }
-            .encode()
-            .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht kodierbar: {e}")))?;
+        let encoded = encode_operations(&operations)?;
 
         if needs_font {
             add_placeholder_font(doc, page_id)?;
@@ -243,6 +253,114 @@ impl Redactor for PdfRedactor {
     fn apply(&self, doc: &mut Document, redactions: &[Redaction]) -> Result<()> {
         self.apply_with_report(doc, redactions).map(|_| ())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Content-Streams mit Inline-Bildern
+// ---------------------------------------------------------------------------
+
+/// Scannt eine Seite — anders als [`crate::content::scan_page`] mit einer
+/// Dekodierung, die Inline-Bilder übersteht.
+///
+/// `lopdf::content::Content::decode` kennt kein `BI … ID … EI`: die Binärdaten
+/// hinter dem `ID` bringen den Parser aus dem Tritt, alles dahinter fehlt im
+/// Operationsstrom. Für die Schwärzung heißt das doppelt Ärger — der Text
+/// dahinter wird nicht gefunden (Leck) und beim Neuschreiben nicht wieder
+/// ausgegeben (Datenverlust). [`crate::ops::decode_content`] schneidet die
+/// Bilder vorher heraus; [`crate::content::interpret`] führt denselben
+/// Zustand wie `scan_page`.
+fn scan_page_complete(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
+    let data = doc
+        .get_page_content(page_id)
+        .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
+    let operations = crate::ops::decode_content(&data);
+    let resources = crate::content::page_resources(doc, page_id);
+    let mut result = ScanResult::default();
+    crate::content::interpret(
+        doc,
+        &operations,
+        StreamKey::Page,
+        resources.as_ref(),
+        Matrix::IDENTITY,
+        &mut result,
+    );
+    Ok(result)
+}
+
+/// Kodiert einen Operationsstrom zurück in Streambytes.
+///
+/// Gegenstück zu [`crate::ops::decode_content`]: dort wird ein Inline-Bild zu
+/// einer Pseudo-Operation `BI` mit Dictionary und Rohdaten zusammengefasst.
+/// `Content::encode` würde daraus `<<…>> (…) BI` machen — syntaktischer
+/// Unsinn, den kein Betrachter mehr liest. Deshalb werden die Bilder hier von
+/// Hand geschrieben und nur die Abschnitte dazwischen von lopdf kodiert.
+fn encode_operations(operations: &[Operation]) -> Result<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut chunk: Vec<Operation> = Vec::new();
+
+    for op in operations {
+        match inline_image_operands(op) {
+            Some((dict, data)) => {
+                flush_chunk(&mut chunk, &mut out)?;
+                out.extend_from_slice(&encode_inline_image(dict, data)?);
+            }
+            None => chunk.push(op.clone()),
+        }
+    }
+    flush_chunk(&mut chunk, &mut out)?;
+    Ok(out)
+}
+
+fn flush_chunk(chunk: &mut Vec<Operation>, out: &mut Vec<u8>) -> Result<()> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+    let operations = std::mem::take(chunk);
+    let encoded = Content { operations }
+        .encode()
+        .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht kodierbar: {e}")))?;
+    out.extend_from_slice(&encoded);
+    out.push(b'\n');
+    Ok(())
+}
+
+/// Erkennt die Pseudo-Operation, die `decode_content` für ein Inline-Bild baut.
+fn inline_image_operands(op: &Operation) -> Option<(&Dictionary, &[u8])> {
+    if op.operator != "BI" {
+        return None;
+    }
+    match (op.operands.first(), op.operands.get(1)) {
+        (Some(Object::Dictionary(dict)), Some(Object::String(data, _))) => {
+            Some((dict, data.as_slice()))
+        }
+        _ => None,
+    }
+}
+
+/// Schreibt ein Inline-Bild als `BI … ID … EI`.
+fn encode_inline_image(dict: &Dictionary, data: &[u8]) -> Result<Vec<u8>> {
+    // Die Schlüssel-Wert-Paare stehen im Stream unmittelbar vor dem `ID` —
+    // also genau in der Form, die lopdf für die Operanden einer Operation
+    // `ID` erzeugt.
+    let mut operands: Vec<Object> = Vec::with_capacity(dict.len() * 2);
+    for (key, value) in dict.iter() {
+        operands.push(Object::Name(key.clone()));
+        operands.push(value.clone());
+    }
+    let header = Content {
+        operations: vec![Operation::new("ID", operands)],
+    }
+    .encode()
+    .map_err(|e| RedactError::Pdf(format!("Inline-Bild nicht kodierbar: {e}")))?;
+
+    let mut out = Vec::with_capacity(header.len() + data.len() + 8);
+    out.extend_from_slice(b"BI ");
+    out.extend_from_slice(&header);
+    // Genau ein Trennzeichen zwischen `ID` und den Bilddaten.
+    out.push(b' ');
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\nEI\n");
+    Ok(out)
 }
 
 /// Welche Glyphen einer Text-Operation liegen im Schwärzungsbereich?
@@ -505,12 +623,9 @@ fn rewrite_form(
             .or_else(|_| stream.get_plain_content())
             .map_err(|e| RedactError::Pdf(e.to_string()))?
     };
-    let content = Content::decode(&data)
-        .map_err(|e| RedactError::Pdf(format!("XObject nicht dekodierbar: {e}")))?;
-    let operations = rewrite_operations(&content.operations, plans);
-    let encoded = Content { operations }
-        .encode()
-        .map_err(|e| RedactError::Pdf(e.to_string()))?;
+    let decoded = crate::ops::decode_content(&data);
+    let operations = rewrite_operations(&decoded, plans);
+    let encoded = encode_operations(&operations)?;
 
     if let Ok(Object::Stream(stream)) = doc.get_object_mut(form_id) {
         stream.set_plain_content(encoded);
@@ -606,6 +721,404 @@ fn rect_from_object(obj: &Object) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lopdf::dictionary;
+    use redact_core::{Action, Region, Source};
+
+    /// Das Geheimnis, das die Audit-Szenarien verstecken.
+    const SECRET: &str = "DE89 3704 0044 0532 0130 00";
+
+    // -----------------------------------------------------------------------
+    // Werkzeug: Dokumente aus dem Audit nachbauen
+    // -----------------------------------------------------------------------
+
+    struct Fixture {
+        doc: Document,
+        page_id: ObjectId,
+        resources_id: ObjectId,
+        font_id: ObjectId,
+    }
+
+    /// Eine Seite mit Helvetica/WinAnsi und leerem Content-Stream.
+    fn fixture() -> Fixture {
+        let mut doc = Document::with_version("1.5");
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let content_id = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1_i64,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        Fixture {
+            doc,
+            page_id,
+            resources_id,
+            font_id,
+        }
+    }
+
+    impl Fixture {
+        fn set_content(&mut self, raw: &[u8]) {
+            let id = match self
+                .doc
+                .get_dictionary(self.page_id)
+                .unwrap()
+                .get(b"Contents")
+            {
+                Ok(Object::Reference(id)) => *id,
+                other => panic!("kein Content-Verweis: {other:?}"),
+            };
+            self.doc.objects.insert(
+                id,
+                Object::Stream(Stream::new(dictionary! {}, raw.to_vec())),
+            );
+        }
+
+        fn redact(&mut self, redactions: &[Redaction]) -> (RedactionReport, Vec<u8>) {
+            let report = PdfRedactor::new()
+                .apply_with_report(&mut self.doc, redactions)
+                .expect("Schwärzung");
+            crate::meta::strip_metadata(&mut self.doc);
+            let bytes = crate::document::save_to_bytes(&self.doc).expect("Speichern");
+            (report, bytes)
+        }
+    }
+
+    /// Textzeilen bei x = 72, y = 700, Zeilenabstand 15.
+    fn text_ops(lines: &[&str]) -> Vec<u8> {
+        let mut out = String::from("BT\n/F1 10 Tf\n72 700 Td\n");
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                out.push_str("0 -15 Td\n");
+            }
+            out.push_str(&format!("({line}) Tj\n"));
+        }
+        out.push_str("ET\n");
+        out.into_bytes()
+    }
+
+    /// Ein winziges Graustufen-Inline-Bild; die Rohdaten hinter `ID` sind
+    /// genau das, woran `Content::decode` scheitert.
+    fn inline_image_ops() -> Vec<u8> {
+        let mut raw = Vec::from(&b"q 20 0 0 20 300 780 cm\n"[..]);
+        raw.extend_from_slice(b"BI /W 2 /H 2 /CS /G /BPC 8 ID ");
+        raw.extend_from_slice(&[0x00, 0xff, 0x7f, 0x30]);
+        raw.extend_from_slice(b" EI Q\n");
+        raw
+    }
+
+    /// Deckt beide Textzeilen ab (y = 700 und y = 685).
+    fn whole_text_area() -> Redaction {
+        manual(Rect::new(40.0, 600.0, 560.0, 760.0))
+    }
+
+    fn manual(rect: Rect) -> Redaction {
+        Redaction::new(
+            Region::new(
+                0,
+                rect,
+                None,
+                Source::Manual {
+                    reason: "Audit".into(),
+                },
+            ),
+            Action::Blackout,
+        )
+    }
+
+    #[track_caller]
+    fn assert_no_leak(bytes: &[u8], needle: &str, what: &str) {
+        let hits = crate::leaks(bytes, needle);
+        assert!(
+            hits.is_empty(),
+            "{what}: „{needle}“ steht noch {} mal in der Ausgabe:\n{}",
+            hits.len(),
+            hits.join("\n")
+        );
+    }
+
+    #[track_caller]
+    fn assert_present(bytes: &[u8], needle: &str, what: &str) {
+        assert!(
+            !crate::leaks(bytes, needle).is_empty(),
+            "{what}: „{needle}“ ist aus der Datei verschwunden"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C1 — Inline-Bilder zerreißen den Content-Stream
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn inline_image_survives_decode_and_encode_unchanged() {
+        let raw = inline_image_ops();
+        let ops = crate::ops::decode_content(&raw);
+        assert!(
+            ops.iter().any(|op| op.operator == "BI"),
+            "Inline-Bild nicht erkannt: {ops:?}"
+        );
+        let encoded = encode_operations(&ops).unwrap();
+        // Zweiter Durchlauf: gleiche Operationen, gleiche Bilddaten.
+        let again = crate::ops::decode_content(&encoded);
+        let payload = |ops: &[Operation]| {
+            ops.iter()
+                .find_map(|op| inline_image_operands(op).map(|(_, d)| d.to_vec()))
+        };
+        assert_eq!(payload(&ops), payload(&again));
+        assert_eq!(payload(&again), Some(vec![0x00, 0xff, 0x7f, 0x30]));
+        assert_eq!(encode_operations(&again).unwrap(), encoded);
+    }
+
+    #[test]
+    fn text_behind_an_inline_image_is_found_and_redacted() {
+        let mut f = fixture();
+        let mut raw = inline_image_ops();
+        raw.extend_from_slice(&text_ops(&[
+            "Kontoinhaber: Max Mustermann",
+            &format!("IBAN: {SECRET}"),
+        ]));
+        f.set_content(&raw);
+
+        let (report, out) = f.redact(&[whole_text_area()]);
+        assert!(
+            report.removed_glyphs > 0,
+            "hinter dem Inline-Bild wurde kein Zeichen gefunden"
+        );
+        assert_no_leak(&out, SECRET, "Inline-Bild vor Text");
+    }
+
+    #[test]
+    fn text_behind_an_inline_image_is_not_thrown_away() {
+        // Der Datenverlust ist die zweite Hälfte des Defekts: geschwärzt wird
+        // nur die IBAN-Zeile, alles andere muss stehen bleiben.
+        let mut f = fixture();
+        let mut raw = inline_image_ops();
+        raw.extend_from_slice(&text_ops(&[
+            "Kontoinhaber: Max Mustermann",
+            &format!("IBAN: {SECRET}"),
+        ]));
+        f.set_content(&raw);
+
+        let (_, out) = f.redact(&[manual(Rect::new(40.0, 678.0, 560.0, 696.0))]);
+        assert_no_leak(&out, SECRET, "nur die IBAN-Zeile geschwärzt");
+        assert_present(&out, "Kontoinhaber", "unbeteiligter Text hinter dem Bild");
+    }
+
+    #[test]
+    fn the_output_has_no_dangling_inline_image() {
+        let mut f = fixture();
+        let mut raw = inline_image_ops();
+        raw.extend_from_slice(&text_ops(&[&format!("IBAN: {SECRET}")]));
+        f.set_content(&raw);
+        let (_, out) = f.redact(&[whole_text_area()]);
+
+        let doc = crate::document::load_from_bytes(&out).expect("Ausgabe ladbar");
+        let page_id = *doc.get_pages().values().next().unwrap();
+        let content = doc.get_page_content(page_id).expect("Content lesbar");
+        let text = String::from_utf8_lossy(&content);
+        assert_eq!(
+            text.matches("BI").count(),
+            text.matches("EI").count(),
+            "Inline-Bild ohne Abschluss:\n{text}"
+        );
+        // Und der Strom ist wieder vollständig dekodierbar.
+        let ops = crate::ops::decode_content(&content);
+        assert!(ops.iter().any(|op| op.operator == "BI"));
+    }
+
+    #[test]
+    fn iban_inside_a_form_xobject_behind_an_inline_image_is_redacted() {
+        let mut f = fixture();
+        let form_content = format!("BT\n/F1 10 Tf\n72 640 Td\n(IBAN: {SECRET}) Tj\nET\n");
+        let font_id = f.font_id;
+        let form_id = f.doc.add_object(Object::Stream(
+            Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+                    "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+                },
+                form_content.into_bytes(),
+            )
+            .with_compression(false),
+        ));
+        f.doc
+            .get_dictionary_mut(f.resources_id)
+            .unwrap()
+            .set("XObject", dictionary! { "Fm0" => form_id });
+
+        let mut raw = text_ops(&["Kontoinhaber: Max Mustermann"]);
+        raw.extend_from_slice(&inline_image_ops());
+        raw.extend_from_slice(b"q /Fm0 Do Q\n");
+        f.set_content(&raw);
+
+        let (_, out) = f.redact(&[whole_text_area()]);
+        assert_no_leak(&out, SECRET, "Form-XObject hinter Inline-Bild");
+    }
+
+    // -----------------------------------------------------------------------
+    // C2 — verwaiste Objekte
+    // -----------------------------------------------------------------------
+
+    /// Legt eine Annotation mit Appearance-Stream an. `intersecting` steuert,
+    /// ob ihr `/Rect` in den geschwärzten Bereich ragt.
+    fn with_annotation(f: &mut Fixture, intersecting: bool) {
+        let font_id = f.font_id;
+        let ap_content = format!("BT\n/F1 8 Tf\n0 4 Td\n(Notiz: {SECRET}) Tj\nET\n");
+        let ap_id = f.doc.add_object(Object::Stream(
+            Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 240.into(), 20.into()],
+                    "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+                },
+                ap_content.into_bytes(),
+            )
+            .with_compression(false),
+        ));
+        let rect = if intersecting {
+            vec![72.into(), 680.into(), 312.into(), 700.into()]
+        } else {
+            vec![400.into(), 100.into(), 540.into(), 120.into()]
+        };
+        let annot_id = f.doc.add_object(Object::Dictionary(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "FreeText",
+            "Rect" => rect,
+            "F" => 4_i64,
+            "AP" => dictionary! { "N" => ap_id },
+        }));
+        f.doc
+            .get_dictionary_mut(f.page_id)
+            .unwrap()
+            .set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
+    }
+
+    #[test]
+    fn appearance_stream_of_a_removed_annotation_is_gone() {
+        let mut f = fixture();
+        f.set_content(&text_ops(&[
+            "Kontoinhaber: Max Mustermann",
+            &format!("IBAN: {SECRET}"),
+        ]));
+        with_annotation(&mut f, true);
+
+        let (report, out) = f.redact(&[whole_text_area()]);
+        assert_eq!(report.removed_annotations, 1);
+        assert_no_leak(&out, SECRET, "/AP der entfernten Annotation");
+    }
+
+    #[test]
+    fn a_non_overlapping_annotation_keeps_its_appearance_stream() {
+        // Gegenprobe und bewusste Grenze: diese Annotation liegt außerhalb
+        // jeder Schwärzung, bleibt also referenziert — der Erreichbarkeitslauf
+        // darf sie gerade *nicht* anfassen. Ihr `/AP` trägt das Geheimnis
+        // weiter. Das ist kein Fehler des Aufräumens, sondern eine Lücke der
+        // Analyse: der Extraktor liest Appearance-Streams nicht, deshalb
+        // entsteht für diese Stelle gar keine Schwärzung.
+        let mut f = fixture();
+        f.set_content(&text_ops(&[
+            "Kontoinhaber: Max Mustermann",
+            &format!("IBAN: {SECRET}"),
+        ]));
+        with_annotation(&mut f, false);
+
+        let (report, out) = f.redact(&[whole_text_area()]);
+        assert_eq!(report.removed_annotations, 0);
+        assert_present(&out, SECRET, "/AP einer nicht überlappenden Annotation");
+    }
+
+    #[test]
+    fn struct_elem_below_the_removed_root_does_not_survive() {
+        let mut f = fixture();
+        f.set_content(&text_ops(&[
+            "Kontoinhaber: Max Mustermann",
+            &format!("IBAN: {SECRET}"),
+        ]));
+        let elem_id = f.doc.add_object(Object::Dictionary(dictionary! {
+            "Type" => "StructElem",
+            "S" => "Span",
+            "ActualText" => Object::string_literal(SECRET),
+            "Alt" => Object::string_literal(format!("Kontonummer {SECRET}")),
+        }));
+        let root_id = f.doc.add_object(Object::Dictionary(dictionary! {
+            "Type" => "StructTreeRoot",
+            "K" => vec![Object::Reference(elem_id)],
+        }));
+        let catalog_id = match f.doc.trailer.get(b"Root").unwrap() {
+            Object::Reference(id) => *id,
+            _ => unreachable!(),
+        };
+        f.doc
+            .get_dictionary_mut(catalog_id)
+            .unwrap()
+            .set("StructTreeRoot", Object::Reference(root_id));
+
+        let (_, out) = f.redact(&[whole_text_area()]);
+        assert_no_leak(&out, SECRET, "/StructElem /ActualText");
+    }
+
+    // -----------------------------------------------------------------------
+    // C3 — inkrementelle Vorversionen
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_incremental_history_is_reported_even_without_redactions() {
+        let mut f = fixture();
+        f.set_content(&text_ops(&["Kontoinhaber: Max Mustermann"]));
+        f.doc.trailer.set("Prev", Object::Integer(4711));
+
+        let report = PdfRedactor::new()
+            .apply_with_report(&mut f.doc, &[])
+            .expect("Schwärzung");
+        assert_eq!(report.removed_glyphs, 0);
+        assert_eq!(
+            report.warnings.len(),
+            1,
+            "keine Warnung zur Vorgeschichte: {:?}",
+            report.warnings
+        );
+        assert!(report.warnings[0].contains("/Prev"));
+    }
+
+    #[test]
+    fn a_document_without_history_gets_no_warning() {
+        let mut f = fixture();
+        f.set_content(&text_ops(&["Kontoinhaber: Max Mustermann"]));
+        let report = PdfRedactor::new()
+            .apply_with_report(&mut f.doc, &[])
+            .expect("Schwärzung");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bestehende Zusicherungen zum Neuaufbau der Text-Operationen
+    // -----------------------------------------------------------------------
 
     fn plan(hidden: Vec<bool>) -> Plan {
         Plan {

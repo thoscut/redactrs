@@ -1,23 +1,51 @@
 //! End-to-End: PDF bauen → Text finden → schwärzen → prüfen, dass er weg ist.
 //!
-//! Das ist der wichtigste Test des Projekts. Er belegt das Akzeptanzkriterium
-//! „Copy-Paste aus geschwärztem PDF liefert keinen sensitiven Text“.
+//! ## Zwei Orakel, bewusst getrennt
+//!
+//! * Der **eigene Extraktor** belegt genau eine Sache: der *Seiteninhalt* ist
+//!   sauber. Mehr nicht. Wovor der Extraktor blind ist, das schwärzt das
+//!   Werkzeug auch nicht — und genau das sähe ein extraktorbasierter Test dann
+//!   ebenfalls nicht. Das ist ein Zirkelschluss, und Testnamen, die hier mehr
+//!   behaupten, lügen.
+//! * [`redact_pdf::leaks`] durchsucht die geschriebene Datei auf allen Ebenen
+//!   (Rohbytes, alle Streams dekodiert, Objekt-Streams, sämtliche
+//!   Zeichenketten, beide String-Kodierungen). Nur das belegt das
+//!   Akzeptanzkriterium „Copy-Paste aus dem geschwärzten PDF liefert keinen
+//!   sensitiven Text“ — denn „Copy-Paste“ heißt in der Praxis: irgendein
+//!   fremdes Werkzeug, nicht unser eigenes.
 
 use redact_core::{Action, Extractor, Redaction, Redactor, Region, Source, TextRun};
 use redact_pdf::testing::{build_pdf, demo_statement, TextItem};
-use redact_pdf::{load_from_bytes, save_to_bytes, strip_metadata, PdfExtractor, PdfRedactor};
+use redact_pdf::{
+    leaks, load_from_bytes, save_to_bytes, strip_metadata, PdfExtractor, PdfRedactor,
+};
 
 fn extract_text(bytes: &[u8]) -> Vec<TextRun> {
     let doc = load_from_bytes(bytes).expect("PDF ladbar");
     PdfExtractor::new().extract(&doc).expect("Extraktion")
 }
 
-fn all_text(bytes: &[u8]) -> String {
+/// Was der **eigene** Extraktor aus dem Seiteninhalt holt.
+///
+/// Kein Leck-Orakel: das kann nur belegen, dass der Content-Stream sauber ist.
+fn extractor_text(bytes: &[u8]) -> String {
     extract_text(bytes)
         .iter()
         .map(|r| r.text.clone())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Das ehrliche Orakel: `needle` darf nirgends in der Datei mehr vorkommen.
+#[track_caller]
+fn assert_no_leak(bytes: &[u8], needle: &str) {
+    let hits = leaks(bytes, needle);
+    assert!(
+        hits.is_empty(),
+        "„{needle}“ steht noch {} mal in der Datei:\n{}",
+        hits.len(),
+        hits.join("\n")
+    );
 }
 
 /// Sucht ein Textstück und baut daraus eine Schwärzung.
@@ -79,14 +107,17 @@ fn extracts_text_with_positions() {
     assert_eq!(headline.glyphs.len(), headline.text.chars().count());
 }
 
+/// Belegt **nur**, dass der Content-Stream sauber ist — gemessen mit dem
+/// eigenen Extraktor. Der Beweis, dass in der Datei nichts mehr steht, ist
+/// [`redaction_leaves_no_trace_in_the_file`].
 #[test]
-fn redaction_removes_text_from_content_stream() {
+fn redaction_removes_text_from_the_extracted_content_stream() {
     let pdf = demo_statement();
     let runs = extract_text(&pdf);
     let redaction = redaction_for(&runs, "DE89 3704 0044 0532 0130 00");
 
     let redacted = redact(&pdf, &[redaction]);
-    let text = all_text(&redacted);
+    let text = extractor_text(&redacted);
 
     assert!(
         !text.contains("DE89"),
@@ -97,6 +128,22 @@ fn redaction_removes_text_from_content_stream() {
     assert!(text.contains("Musterbank AG"), "Kontext verloren:\n{text}");
     assert!(text.contains("COBADEFFXXX"), "BIC verloren:\n{text}");
     assert!(text.contains("IBAN:"), "Label sollte bleiben:\n{text}");
+}
+
+/// Der eigentliche Beweis für das Akzeptanzkriterium: nach der Schwärzung
+/// steht die IBAN **nirgends** mehr in der Datei.
+#[test]
+fn redaction_leaves_no_trace_in_the_file() {
+    let pdf = demo_statement();
+    let runs = extract_text(&pdf);
+    let redaction = redaction_for(&runs, "DE89 3704 0044 0532 0130 00");
+
+    let redacted = redact(&pdf, &[redaction]);
+
+    assert_no_leak(&redacted, "DE89 3704 0044 0532 0130 00");
+    assert_no_leak(&redacted, "DE89");
+    // Gegenprobe: unbeteiligter Text muss erhalten bleiben.
+    assert!(extractor_text(&redacted).contains("Musterbank AG"));
 }
 
 #[test]
@@ -115,11 +162,7 @@ fn surrounding_text_keeps_its_position() {
         .map(|g| (g.ch, g.rect.ll.x))
         .collect();
 
-    assert!(
-        !after_runs[0].text.contains('B'),
-        "B ist noch da: {}",
-        after_runs[0].text
-    );
+    assert_no_leak(&redacted, "BBBB");
 
     // Jedes verbliebene C muss exakt dort stehen, wo es vorher stand.
     let c_before: Vec<f64> = before
@@ -154,13 +197,12 @@ fn multiple_redactions_across_pages() {
     );
 
     let redacted = redact(&pdf, &redactions);
-    let text = all_text(&redacted);
-    assert!(!text.contains("DE89"));
-    assert!(!text.contains("DE02"));
-    assert!(!text.contains("example.org"));
+    assert_no_leak(&redacted, "DE89");
+    assert_no_leak(&redacted, "DE02");
+    assert_no_leak(&redacted, "example.org");
     assert!(
-        text.contains("Steuer-ID"),
-        "Seite 2 sonst unversehrt:\n{text}"
+        extractor_text(&redacted).contains("Steuer-ID"),
+        "Seite 2 sonst unversehrt"
     );
 }
 
@@ -178,10 +220,11 @@ fn whiteout_and_replace_also_remove_the_text() {
         let mut r = redaction_for(&runs, "DE89 3704 0044");
         r.action = action.clone();
         let redacted = redact(&pdf, &[r]);
-        let text = all_text(&redacted);
+        let hits = leaks(&redacted, "DE89");
         assert!(
-            !text.contains("DE89"),
-            "{action:?} hat den Text nicht entfernt: {text}"
+            hits.is_empty(),
+            "{action:?} hat den Text nicht entfernt:\n{}",
+            hits.join("\n")
         );
     }
 }
@@ -189,16 +232,12 @@ fn whiteout_and_replace_also_remove_the_text() {
 #[test]
 fn metadata_is_stripped() {
     let pdf = demo_statement();
-    assert!(String::from_utf8_lossy(&pdf).contains("Kontoauszug Max Mustermann"));
+    assert!(!leaks(&pdf, "Kontoauszug Max Mustermann").is_empty());
 
     let runs = extract_text(&pdf);
     let redacted = redact(&pdf, &[redaction_for(&runs, "DE89 3704 0044 0532 0130 00")]);
-    let raw = String::from_utf8_lossy(&redacted);
-    assert!(
-        !raw.contains("Kontoauszug Max Mustermann"),
-        "Titel noch im PDF"
-    );
-    assert!(!raw.contains("redact-rs testing"), "Producer noch im PDF");
+    assert_no_leak(&redacted, "Kontoauszug Max Mustermann");
+    assert_no_leak(&redacted, "redact-rs testing");
 }
 
 #[test]

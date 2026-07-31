@@ -14,30 +14,59 @@ name: Publish Release
 #   1. `.release-version` auf die gewuenschte Version setzen (z.B. 0.2.0)
 #   2. committen und pushen
 #   3. dieser Workflow baut Windows- und Linux-Binaries und veroeffentlicht sie
+#
+# WELCHE BRANCHES DAS DUERFEN
+# Frueher stand hier `branches: ["**"]`. Damit legte *jeder* Push auf
+# *irgendeinen* Branch, der .release-version beruehrt, einen Tag an und
+# veroeffentlichte einen oeffentlichen Release - auch aus einem Arbeitsbranch
+# mit halbfertigem Stand. Die Umgehung oben braucht aber nur *einen*
+# erlaubten Branch, nicht alle. Es bleiben deshalb:
+#
+#   * der Default-Branch  - der regulaere Weg
+#   * claude/**           - die Arbeitsbranches der Sandbox, damit die
+#                           Umgehung weiter funktioniert
+#
+# Der `branches`-Filter ist die erste Schranke; die `if`-Bedingungen an den
+# Jobs sind die zweite und pruefen zusaetzlich gegen den *tatsaechlichen*
+# Default-Branch des Repositories (der Filter kann das nicht). Releases
+# ausserhalb des Default-Branches werden ausserdem als Vorabversion
+# gekennzeichnet.
 
 on:
   push:
     branches:
-      - "**"
+      - main
+      - master
+      - "claude/**"
     paths:
       - ".release-version"
 
 permissions:
   contents: read
 
+concurrency:
+  group: publish-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   version:
     name: Version einlesen
-    runs-on: ubuntu-latest
+    if: >-
+      github.ref_name == github.event.repository.default_branch
+      || startsWith(github.ref_name, 'claude/')
+    runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.read.outputs.tag }}
+      prerelease: ${{ steps.read.outputs.prerelease }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Version aus .release-version lesen
         id: read
         shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           VERSION="$(tr -d '[:space:]' < .release-version)"
@@ -51,20 +80,34 @@ jobs:
             echo "::error::'$VERSION' ist keine gueltige Version (erwartet: 1.2.3)"
             exit 1
           fi
-          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          if [ "$VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::.release-version ($VERSION) und Cargo.toml ($CARGO_VERSION) stimmen nicht ueberein"
-            exit 1
+          # Der Abgleich mit der Version des Crates passiert im Job `verify`
+          # von release.yml ueber `cargo metadata`. Die frueher hier
+          # stehende grep/sed-Pruefung auf Cargo.toml lieferte bei
+          # fehlgeschlagenem sed die komplette Zeile zurueck statt zu
+          # scheitern - und sah nur das Workspace-Manifest, nicht das Crate,
+          # aus dem das Binary entsteht.
+          if [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            PRERELEASE="false"
+          else
+            PRERELEASE="true"
+            echo "::notice::Release aus '$GITHUB_REF_NAME' (nicht Default-Branch) - wird als Vorabversion veroeffentlicht."
           fi
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Release wird gebaut fuer v$VERSION"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Release wird gebaut fuer v$VERSION (prerelease=$PRERELEASE)"
 
   release:
     name: Bauen und veroeffentlichen
     needs: version
+    if: >-
+      github.ref_name == github.event.repository.default_branch
+      || startsWith(github.ref_name, 'claude/')
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.version.outputs.tag }}
       ref: ${{ github.sha }}
+      prerelease: ${{ needs.version.outputs.prerelease == 'true' }}

@@ -28,6 +28,9 @@ pub struct FontInfo {
     /// Breiten je Code in Text-Space-Einheiten (also bereits durch 1000 geteilt).
     widths: BTreeMap<u32, f64>,
     default_width: f64,
+    /// Ob `default_width` aus einem im Dokument **erklärten** `/DW` bzw.
+    /// `/MissingWidth` stammt (und nicht bloß aus dem Vorgabewert).
+    explicit_default_width: bool,
     /// Oberkante über der Grundlinie, in Text-Space-Einheiten.
     pub ascent: f64,
     /// Unterkante unter der Grundlinie (negativ).
@@ -41,6 +44,7 @@ impl Default for FontInfo {
             charmap: CharMap::one_byte(win_ansi_encoding()),
             widths: BTreeMap::new(),
             default_width: DEFAULT_WIDTH,
+            explicit_default_width: false,
             ascent: DEFAULT_ASCENT,
             descent: DEFAULT_DESCENT,
         }
@@ -49,9 +53,20 @@ impl Default for FontInfo {
 
 impl FontInfo {
     /// Breite eines Glyphen in Text-Space-Einheiten (1.0 = Schriftgröße).
+    ///
+    /// Reihenfolge: `/Widths` bzw. `/W` — dann eine im Dokument **erklärte**
+    /// Vorgabebreite (`/DW`, `/MissingWidth`) — dann erst die Schätzung aus
+    /// dem Fontnamen. Die Namensschätzung darf nicht gewinnen: sie liefert
+    /// für ASCII 32..126 immer einen Wert und würde ein `/DW 600` still
+    /// verdrängen. Der Stift liefe dann pro Zeichen um 0,044 em vor, und die
+    /// x-Sortierung der Extraktion vertauscht Glyphen über getrennt
+    /// positionierte Runs hinweg.
     pub fn width(&self, code: u32, text: &str) -> f64 {
         if let Some(w) = self.widths.get(&code) {
             return *w;
+        }
+        if self.explicit_default_width {
+            return self.default_width;
         }
         if let Some(w) = standard_font_width(&self.base_font, text) {
             return w;
@@ -248,12 +263,14 @@ fn load_type0(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
         return;
     };
 
-    info.default_width = cid_font
-        .get(b"DW")
-        .ok()
-        .and_then(as_f64)
-        .map(|w| w / 1000.0)
-        .unwrap_or(1.0);
+    match cid_font.get(b"DW").ok().and_then(as_f64) {
+        Some(dw) => {
+            info.default_width = dw / 1000.0;
+            info.explicit_default_width = true;
+        }
+        // Ohne `/DW` gilt laut PDF 32000-1 (9.7.4.3) 1000.
+        None => info.default_width = 1.0,
+    }
 
     if let Some(Object::Array(w)) = deref(doc, cid_font.get(b"W").ok()) {
         parse_cid_widths(doc, w, &mut info.widths);
@@ -312,6 +329,7 @@ fn load_descriptor(doc: &Document, descriptor: Option<&Object>, info: &mut FontI
     }
     if let Some(mw) = desc.get(b"MissingWidth").ok().and_then(as_f64) {
         info.default_width = mw / 1000.0;
+        info.explicit_default_width = true;
     }
 }
 
@@ -408,6 +426,7 @@ fn standard_font_width(base_font: &str, text: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lopdf::dictionary;
 
     #[test]
     fn standard_widths_are_plausible() {
@@ -434,6 +453,81 @@ mod tests {
         };
         info.widths.insert(77, 0.9);
         assert_eq!(info.width(77, "M"), 0.9);
+    }
+
+    // -----------------------------------------------------------------------
+    // K4 — im Dokument erklärte Vorgabebreiten schlagen die Namensschätzung
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn explicit_dw_beats_the_standard_metrics_guess() {
+        // Type0-Font mit `/DW 600`, aber ohne `/W`: die Ziffern sind 0,6 breit,
+        // nicht 0,556 wie bei Helvetica.
+        let mut doc = Document::new();
+        let descendant = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "CIDFontType2",
+            "BaseFont" => "ABCDEF+Helvetica",
+            "DW" => 600,
+        });
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type0",
+            "BaseFont" => "ABCDEF+Helvetica",
+            "Encoding" => "Identity-H",
+            "DescendantFonts" => vec![Object::Reference(descendant)],
+        };
+        let info = font_from_dict(&doc, &font);
+        assert_eq!(info.width(b'4' as u32, "4"), 0.6);
+    }
+
+    #[test]
+    fn missing_width_beats_the_standard_metrics_guess() {
+        let mut doc = Document::new();
+        let descriptor = doc.add_object(dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => "ABCDEF+Helvetica",
+            "MissingWidth" => 600,
+        });
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "ABCDEF+Helvetica",
+            "FontDescriptor" => Object::Reference(descriptor),
+        };
+        let info = font_from_dict(&doc, &font);
+        assert_eq!(info.width(b'4' as u32, "4"), 0.6);
+    }
+
+    #[test]
+    fn widths_array_still_wins_over_an_explicit_default() {
+        let mut doc = Document::new();
+        let descriptor = doc.add_object(dictionary! {
+            "Type" => "FontDescriptor",
+            "MissingWidth" => 600,
+        });
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "Helvetica",
+            "FirstChar" => 52_i64,
+            "Widths" => vec![Object::Integer(900)],
+            "FontDescriptor" => Object::Reference(descriptor),
+        };
+        let info = font_from_dict(&doc, &font);
+        assert_eq!(info.width(b'4' as u32, "4"), 0.9);
+    }
+
+    #[test]
+    fn without_an_explicit_default_the_standard_metrics_still_apply() {
+        let doc = Document::new();
+        let font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        };
+        let info = font_from_dict(&doc, &font);
+        assert_eq!(info.width(b'4' as u32, "4"), 0.556);
     }
 
     #[test]

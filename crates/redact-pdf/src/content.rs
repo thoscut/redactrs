@@ -39,6 +39,14 @@ use crate::ops::{PathSeg, Rgb, Stroke};
 /// Maximale Rekursionstiefe für verschachtelte Form-XObjects.
 const MAX_FORM_DEPTH: usize = 8;
 
+/// Ab welchem Anteil unlesbarer Zeichen ein Font ohne `/ToUnicode` gemeldet
+/// wird.
+const UNREADABLE_RATIO: f64 = 0.3;
+
+/// So viele Zeichen müssen mindestens vorliegen, bevor der Anteil zählt —
+/// sonst schlägt eine einzelne Sonderglyphe schon Alarm.
+const UNREADABLE_MIN_GLYPHS: usize = 4;
+
 /// Aus welchem Stream ein Datensatz stammt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StreamKey {
@@ -46,6 +54,40 @@ pub enum StreamKey {
     Page,
     /// Ein Form-XObject.
     Form(ObjectId),
+}
+
+/// Lage einer Glyphe auf ihrer Grundlinie — bereits im User-Space, also nach
+/// `Tm`, `Tz`, `Ts` und CTM.
+///
+/// Die Extraktion darf keine achsenparallele Leserichtung unterstellen: bei
+/// gedrehtem Text läuft die Grundlinie schräg oder senkrecht, und eine
+/// Gruppierung nach `origin.y` zerlegt jede Zeile in Einzelzeichen. Ebenso
+/// wenig darf sie den Zeichenabstand aus den Kästen ableiten — eine gesetzte
+/// Laufweite (`Tc`) steckt bereits im [`GlyphItem::displacement`] und wäre
+/// sonst nicht von einer echten Wortlücke zu unterscheiden.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Baseline {
+    /// Einheitsvektor der Schreibrichtung im User-Space.
+    pub direction: Point,
+    /// Vorschub bis zur nächsten Glyphe, entlang [`Baseline::direction`].
+    /// Enthält Glyphenbreite, `Tc`, `Tw` und `Tz`.
+    pub advance: f64,
+    /// Höhe des Glyphenkastens senkrecht zur Grundlinie.
+    pub height: f64,
+    /// Breite des Leerzeichens dieses Fonts, entlang der Schreibrichtung.
+    /// `0.0`, wenn der Font keine brauchbare Auskunft gibt.
+    pub space_width: f64,
+}
+
+impl Default for Baseline {
+    fn default() -> Self {
+        Self {
+            direction: Point::new(1.0, 0.0),
+            advance: 0.0,
+            height: 0.0,
+            space_width: 0.0,
+        }
+    }
 }
 
 /// Ein einzelnes gesetztes Zeichen.
@@ -61,6 +103,8 @@ pub struct GlyphItem {
     pub origin: Point,
     /// Vorschub im Textraum vor Anwendung von `Tm`/CTM.
     pub displacement: f64,
+    /// Grundlinien-Geometrie im User-Space.
+    pub baseline: Baseline,
 }
 
 /// Bestandteil einer Text-Ausgabe-Operation.
@@ -100,6 +144,10 @@ pub struct ScanResult {
     pub shows: Vec<ShowRecord>,
     /// Wie oft ein Form-XObject auf dieser Seite gezeichnet wurde.
     pub form_placements: BTreeMap<ObjectId, usize>,
+    /// Befunde, die den Nutzer erreichen müssen — allen voran Fonts, deren
+    /// Text sich nicht dekodieren lässt. Aus solchem Text kann die Analyse
+    /// nichts erkennen; ohne Warnung hielte man die Datei für sauber.
+    pub warnings: Vec<String>,
 }
 
 impl ContentSink for ScanResult {
@@ -109,6 +157,12 @@ impl ContentSink for ScanResult {
 
     fn form(&mut self, id: ObjectId) {
         *self.form_placements.entry(id).or_insert(0) += 1;
+    }
+
+    fn warn(&mut self, message: String) {
+        if !self.warnings.contains(&message) {
+            self.warnings.push(message);
+        }
     }
 }
 
@@ -188,6 +242,8 @@ pub trait ContentSink {
     }
     /// Ein Form-XObject wurde platziert.
     fn form(&mut self, _id: ObjectId) {}
+    /// Ein Befund, der den Nutzer erreichen muss (siehe [`ScanResult::warnings`]).
+    fn warn(&mut self, _message: String) {}
 }
 
 #[derive(Debug, Clone)]
@@ -499,6 +555,59 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
     Ok(result)
 }
 
+/// Zählt je Font, wie viel des dekodierten Textes unbrauchbar ist.
+///
+/// Ein Identity-H-Subset ohne `/ToUnicode` lässt sich nicht dekodieren: die
+/// CIDs sind reine Glyphnummern. Der Identity-Rückfall in
+/// [`crate::encoding::CharMap::text_for`] macht daraus Steuerzeichen, die
+/// Analyse findet nichts, und die Schwärzung meldet Erfolg — an einer Datei,
+/// in der alles stehen geblieben ist. Genau dieser Fall muss laut werden.
+#[derive(Debug, Default)]
+struct FontDecodeStats {
+    /// (Ressourcenname, `/BaseFont`) → (Zeichen gesamt, davon unlesbar)
+    per_font: BTreeMap<(Vec<u8>, String), (usize, usize)>,
+}
+
+impl FontDecodeStats {
+    fn record(&mut self, font_name: &[u8], font: &FontInfo, text: &str) {
+        // Fonts mit /ToUnicode sagen selbst, was ihre Codes bedeuten.
+        if font.charmap.has_to_unicode() {
+            return;
+        }
+        let entry = self
+            .per_font
+            .entry((font_name.to_vec(), font.base_font.clone()))
+            .or_insert((0, 0));
+        entry.0 += 1;
+        if text.chars().any(|c| c == crate::encoding::REPLACEMENT) {
+            entry.1 += 1;
+        }
+    }
+
+    fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for ((resource, base_font), (total, unreadable)) in &self.per_font {
+            if *total < UNREADABLE_MIN_GLYPHS {
+                continue;
+            }
+            if (*unreadable as f64) < *total as f64 * UNREADABLE_RATIO {
+                continue;
+            }
+            let name = if base_font.is_empty() {
+                String::from_utf8_lossy(resource).into_owned()
+            } else {
+                base_font.clone()
+            };
+            out.push(format!(
+                "Font „{name}“ hat kein /ToUnicode; sein Text lässt sich nicht \
+                 dekodieren. Muster können darin nicht erkannt werden — diese \
+                 Seite wurde möglicherweise nicht vollständig geschwärzt."
+            ));
+        }
+        out
+    }
+}
+
 /// Führt einen bereits dekodierten Operationsstrom durch den Interpreter.
 ///
 /// Damit können Aufrufer den Stream selbst dekodieren (z. B. um Inline-Bilder
@@ -514,6 +623,7 @@ pub fn interpret(
 ) {
     let fonts = fonts_from_resources(doc, resources);
     let mut visiting = HashSet::new();
+    let mut stats = FontDecodeStats::default();
     scan_operations(
         doc,
         operations,
@@ -523,8 +633,12 @@ pub fn interpret(
         initial_ctm,
         0,
         &mut visiting,
+        &mut stats,
         sink,
     );
+    for warning in stats.warnings() {
+        sink.warn(warning);
+    }
 }
 
 /// Sammelt das (ggf. geerbte) `/Resources`-Dictionary einer Seite.
@@ -570,6 +684,7 @@ fn scan_operations(
     initial_ctm: Matrix,
     depth: usize,
     visiting: &mut HashSet<ObjectId>,
+    stats: &mut FontDecodeStats,
     sink: &mut dyn ContentSink,
 ) {
     let graphics = sink.wants_graphics();
@@ -673,6 +788,7 @@ fn scan_operations(
                     &mut tm,
                     &cx,
                     &op.operator,
+                    stats,
                     sink,
                     graphics,
                 );
@@ -918,6 +1034,7 @@ fn scan_operations(
                     form_matrix.mul(&state.ctm),
                     depth + 1,
                     visiting,
+                    stats,
                     sink,
                 );
                 visiting.remove(&form_id);
@@ -1059,6 +1176,7 @@ fn show_text(
     tm: &mut Matrix,
     cx: &SinkContext,
     operator: &str,
+    stats: &mut FontDecodeStats,
     sink: &mut dyn ContentSink,
     emit_glyphs: bool,
 ) -> Option<ShowRecord> {
@@ -1078,11 +1196,15 @@ fn show_text(
         other => elements.push(other.clone()),
     }
 
+    // Die Leerzeichenbreite des Fonts ist der Maßstab für „echte Lücke“.
+    let space_width = font.width(32, " ");
+
     let mut items = Vec::new();
     for element in &elements {
         match element {
             Object::String(bytes, _) => {
                 for (code, text, nbytes) in font.charmap.decode(bytes) {
+                    stats.record(&ts.font_name, &font, &text);
                     let w0 = font.width(code, &text);
                     let is_space = nbytes == 1 && code == 32;
                     let displacement = (w0 * ts.font_size
@@ -1098,9 +1220,17 @@ fn show_text(
                         0.0,
                         ts.rise,
                     );
-                    let trm = param.mul(&tm.mul(&state.ctm));
+                    // Textraum → User-Space; daraus stammt die Schreibrichtung.
+                    let text_to_user = tm.mul(&state.ctm);
+                    let trm = param.mul(&text_to_user);
                     let rect = glyph_rect(&trm, w0, font.ascent, font.descent);
                     let origin = trm.apply(0.0, 0.0);
+                    let baseline = baseline_of(
+                        &text_to_user,
+                        displacement,
+                        (font.ascent - font.descent) * ts.font_size,
+                        space_width * ts.font_size * ts.h_scale,
+                    );
 
                     if emit_glyphs {
                         sink.glyph(
@@ -1128,6 +1258,7 @@ fn show_text(
                             rect,
                             origin,
                             displacement,
+                            baseline,
                         }));
                     } else {
                         let bytes_for_code = raw_code_bytes(bytes, &font, code, nbytes);
@@ -1151,6 +1282,10 @@ fn show_text(
                                 rect: sub,
                                 origin,
                                 displacement: if i == 0 { displacement } else { 0.0 },
+                                baseline: Baseline {
+                                    advance: if i == 0 { baseline.advance } else { 0.0 },
+                                    ..baseline
+                                },
                             }));
                         }
                     }
@@ -1184,6 +1319,34 @@ fn raw_code_bytes(_source: &[u8], _font: &FontInfo, code: u32, nbytes: usize) ->
     match nbytes {
         2 => vec![(code >> 8) as u8, (code & 0xFF) as u8],
         _ => vec![(code & 0xFF) as u8],
+    }
+}
+
+/// Rechnet die Grundlinien-Geometrie einer Glyphe in den User-Space.
+///
+/// `text_to_user` ist `Tm × CTM`, bildet also den Textraum ab. Die
+/// Schreibrichtung ist das Bild der Textraum-x-Achse, die Zeilenhöhe wird
+/// senkrecht dazu gemessen — nur so bleibt beides bei gedrehtem Text richtig.
+fn baseline_of(
+    text_to_user: &Matrix,
+    displacement: f64,
+    em_height: f64,
+    space_width: f64,
+) -> Baseline {
+    let along = (text_to_user.a, text_to_user.b);
+    let scale_x = along.0.hypot(along.1);
+    let scale_y = text_to_user.c.hypot(text_to_user.d);
+    if scale_x < 1e-12 {
+        return Baseline {
+            height: em_height.abs() * scale_y,
+            ..Baseline::default()
+        };
+    }
+    Baseline {
+        direction: Point::new(along.0 / scale_x, along.1 / scale_x),
+        advance: displacement * scale_x,
+        height: em_height.abs() * scale_y,
+        space_width: space_width * scale_x,
     }
 }
 
@@ -1253,9 +1416,97 @@ pub fn trailing_state(operations: &[Operation]) -> (Matrix, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lopdf::{dictionary, Stream, StringFormat};
 
     fn ops(src: &[u8]) -> Vec<Operation> {
         Content::decode(src).unwrap().operations
+    }
+
+    /// Baut ein einseitiges PDF um ein beliebiges Font-Dictionary (`/F1`).
+    ///
+    /// Das Font-Dictionary wird erst gebaut, wenn das Dokument existiert —
+    /// so kann es auf eigene Objekte (etwa eine `/ToUnicode`-CMap) verweisen.
+    fn page_with_font(
+        font: impl FnOnce(&mut Document) -> Dictionary,
+        content: Vec<u8>,
+    ) -> (Document, ObjectId) {
+        let mut doc = Document::with_version("1.5");
+        let font = font(&mut doc);
+        let font_id = doc.add_object(font);
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1_i64,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        (doc, page_id)
+    }
+
+    /// Identity-H-Subset, dessen CIDs bei 1 durchnummeriert sind.
+    fn identity_subset_font(with_to_unicode: bool) -> impl FnOnce(&mut Document) -> Dictionary {
+        move |doc: &mut Document| {
+            let mut font = dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type0",
+                "BaseFont" => "ABCDEF+Arial",
+                "Encoding" => "Identity-H",
+            };
+            if with_to_unicode {
+                let cmap = b"/CIDInit /ProcSet findresource begin
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 beginbfrange <0001> <0016> <0041> endbfrange
+endcmap"
+                    .to_vec();
+                let id = doc.add_object(Stream::new(dictionary! {}, cmap));
+                font.set("ToUnicode", Object::Reference(id));
+            }
+            font
+        }
+    }
+
+    /// `BT /F1 10 Tf … Tj ET` mit CIDs 1..=n als Zweibyte-Codes.
+    fn identity_content(cids: &[u16]) -> Vec<u8> {
+        let bytes: Vec<u8> = cids.iter().flat_map(|c| c.to_be_bytes()).collect();
+        Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), Object::Real(10.0)]),
+                Operation::new(
+                    "Tm",
+                    vec![
+                        1.into(),
+                        0.into(),
+                        0.into(),
+                        1.into(),
+                        Object::Real(72.0),
+                        Object::Real(700.0),
+                    ],
+                ),
+                Operation::new("Tj", vec![Object::String(bytes, StringFormat::Hexadecimal)]),
+                Operation::new("ET", vec![]),
+            ],
+        }
+        .encode()
+        .unwrap()
     }
 
     #[test]
@@ -1273,5 +1524,113 @@ mod tests {
         let r = glyph_rect(&trm, 0.5, 0.75, -0.25);
         assert!((r.width() - 10.0).abs() < 1e-9);
         assert!((r.height() - 5.0).abs() < 1e-9);
+    }
+
+    // -----------------------------------------------------------------------
+    // K3 — Identity-H ohne /ToUnicode darf nicht still Müll liefern
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn identity_font_without_to_unicode_warns_loudly() {
+        let cids: Vec<u16> = (1..=22).collect();
+        let (doc, page_id) = page_with_font(identity_subset_font(false), identity_content(&cids));
+        let scan = scan_page(&doc, page_id).expect("Scan");
+
+        // Vorbedingung: der dekodierte Text ist tatsächlich unbrauchbar.
+        let text: String = scan
+            .shows
+            .iter()
+            .flat_map(|s| s.glyphs())
+            .map(|g| g.text.as_str())
+            .collect();
+        assert!(
+            text.chars().filter(|c| *c == '\u{FFFD}').count() * 2 > text.chars().count(),
+            "Testdaten taugen nicht, der Text ist lesbar: {text:?}"
+        );
+
+        assert!(
+            scan.warnings.iter().any(|w| w.contains("ToUnicode")),
+            "keine Warnung trotz undekodierbarem Font: {:?}",
+            scan.warnings
+        );
+    }
+
+    #[test]
+    fn identity_font_with_to_unicode_stays_quiet() {
+        let cids: Vec<u16> = (1..=22).collect();
+        let (doc, page_id) = page_with_font(identity_subset_font(true), identity_content(&cids));
+        let scan = scan_page(&doc, page_id).expect("Scan");
+        assert!(
+            scan.warnings.is_empty(),
+            "unerwartete Warnung: {:?}",
+            scan.warnings
+        );
+    }
+
+    #[test]
+    fn an_explicit_dw_drives_the_pen_not_the_font_name() {
+        // Type0-Font mit `/DW 600` und `/ToUnicode`: die Namensschätzung
+        // („Helvetica“, Ziffern 0,556) darf den Vorschub nicht bestimmen,
+        // sonst läuft der Stift pro Zeichen um 0,44 pt voraus und die
+        // x-Sortierung der Extraktion vertauscht Glyphen.
+        let font = |doc: &mut Document| {
+            let cmap = b"/CIDInit /ProcSet findresource begin
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 beginbfrange <0001> <000A> <0030> endbfrange
+endcmap"
+                .to_vec();
+            let to_unicode = doc.add_object(Stream::new(dictionary! {}, cmap));
+            let descendant = doc.add_object(dictionary! {
+                "Type" => "Font",
+                "Subtype" => "CIDFontType2",
+                "BaseFont" => "ABCDEF+Helvetica",
+                "DW" => 600,
+            });
+            dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type0",
+                "BaseFont" => "ABCDEF+Helvetica",
+                "Encoding" => "Identity-H",
+                "DescendantFonts" => vec![Object::Reference(descendant)],
+                "ToUnicode" => Object::Reference(to_unicode),
+            }
+        };
+        let (doc, page_id) = page_with_font(font, identity_content(&[1, 2, 3, 4]));
+        let scan = scan_page(&doc, page_id).expect("Scan");
+        let glyphs: Vec<_> = scan.shows.iter().flat_map(|s| s.glyphs()).collect();
+        assert_eq!(glyphs.len(), 4);
+        assert_eq!(
+            glyphs.iter().map(|g| g.text.as_str()).collect::<String>(),
+            "0123"
+        );
+        for (i, g) in glyphs.iter().enumerate() {
+            // 10 pt × 0,6 em = 6,0 pt je Zeichen.
+            assert!(
+                (g.origin.x - (72.0 + 6.0 * i as f64)).abs() < 1e-6,
+                "Glyphe {i} steht bei {}, erwartet {}",
+                g.origin.x,
+                72.0 + 6.0 * i as f64
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_win_ansi_font_produces_no_warning() {
+        let font = |_: &mut Document| {
+            dictionary! {
+                "Type" => "Font",
+                "Subtype" => "Type1",
+                "BaseFont" => "Helvetica",
+                "Encoding" => "WinAnsiEncoding",
+            }
+        };
+        let content = b"BT /F1 10 Tf 1 0 0 1 72 700 Tm (Kontonummer 4711000) Tj ET".to_vec();
+        let (doc, page_id) = page_with_font(font, content);
+        let scan = scan_page(&doc, page_id).expect("Scan");
+        assert!(
+            scan.warnings.is_empty(),
+            "unerwartete Warnung: {:?}",
+            scan.warnings
+        );
     }
 }

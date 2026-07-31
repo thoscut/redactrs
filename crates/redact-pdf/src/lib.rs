@@ -25,6 +25,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod audit_bytes;
 pub mod content;
 pub mod document;
 pub mod encoding;
@@ -37,6 +38,7 @@ pub mod ops;
 pub mod redact;
 pub mod testing;
 
+pub use audit_bytes::leaks;
 pub use content::{
     interpret, scan_page, ContentSink, GlyphEvent, GlyphItem, ImageEvent, PathEvent, ScanResult,
     ShowItem, ShowRecord, SinkContext, StreamKey,

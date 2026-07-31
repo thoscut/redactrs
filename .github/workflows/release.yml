@@ -1,5 +1,16 @@
 name: Release
 
+# Baut die Release-Artefakte und veroeffentlicht sie als GitHub-Release.
+#
+# Zwei Wege fuehren hierher:
+#   * `push` eines Tags `v*`   - der Tag existiert bereits
+#   * `workflow_call` aus publish-release.yml bzw. `workflow_dispatch` -
+#     der Tag wird erst vom Release selbst angelegt
+#
+# Beide Wege durchlaufen zwingend den Job `verify`. Vorher konnte der
+# Tag-Weg an der Versionspruefung vorbei: `git tag v9.9.9` erzeugte ein
+# Archiv namens `redact-rs-9.9.9-...`, dessen Binary sich als 0.1.0 meldete.
+
 on:
   push:
     tags:
@@ -14,6 +25,11 @@ on:
         description: "Branch or commit to build from (empty = the tag itself)"
         required: false
         type: string
+      prerelease:
+        description: "Als Vorabversion kennzeichnen (fuer Releases ausserhalb des Default-Branches)"
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       tag:
@@ -24,6 +40,11 @@ on:
         description: "Branch or commit to build from (empty = the tag itself)"
         required: false
         type: string
+      prerelease:
+        description: "Als Vorabversion kennzeichnen"
+        required: false
+        default: false
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,26 +53,26 @@ env:
 permissions:
   contents: read
 
+# Ein Release darf sich nicht selbst ueberholen. `cancel-in-progress: false`
+# ist hier Absicht: einen halb veroeffentlichten Release abzubrechen waere
+# schlimmer als zu warten.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  build:
-    name: Build ${{ matrix.suffix }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            suffix: x86_64-windows
-            bin: redact-rs.exe
-            ext: zip
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            suffix: x86_64-linux
-            bin: redact-rs
-            ext: tar.gz
+  # -------------------------------------------------------------------------
+  # 1. Pruefen, bevor irgendetwas gebaut oder veroeffentlicht wird.
+  # -------------------------------------------------------------------------
+  verify:
+    name: Version und Tag pruefen
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      channel: ${{ steps.toolchain.outputs.channel }}
     steps:
-      - name: Resolve tag and version
+      - name: Tag und Version bestimmen
         id: meta
         shell: bash
         env:
@@ -60,28 +81,180 @@ jobs:
           set -euo pipefail
           TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
           VERSION="${TAG#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$TAG' ergibt keine gueltige Version (erwartet: v1.2.3)"
+            exit 1
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building tag=$TAG version=$VERSION"
+          echo "Release wird gebaut fuer tag=$TAG version=$VERSION"
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.ref || inputs.tag || github.ref }}
 
-      # Nur Linux: Build-Abhaengigkeiten fuer eframe/egui (glow, x11,
-      # wayland) und rfd.
-      - name: Install Linux GUI build dependencies
-        if: runner.os == 'Linux'
+      - name: Rust-Channel aus rust-toolchain.toml lesen
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHANNEL="$(python3 - << 'PY'
+          import sys, tomllib
+          with open("rust-toolchain.toml", "rb") as fh:
+              data = tomllib.load(fh)
+          channel = data.get("toolchain", {}).get("channel")
+          if not channel:
+              sys.exit("rust-toolchain.toml: [toolchain] channel fehlt")
+          print(channel)
+          PY
+          )"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "Gepinnte Toolchain: $CHANNEL"
+
+      - name: Rust-Toolchain installieren
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master @ 2026-07-16
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Version gegen das Crate pruefen
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Bewusst ueber `cargo metadata` und nicht per grep/sed auf
+          # Cargo.toml: die alte grep-Pruefung lieferte bei fehlgeschlagenem
+          # sed die komplette Zeile zurueck statt zu scheitern, und sie sah
+          # ohnehin nur das Workspace-Manifest, nicht das Crate, aus dem das
+          # Binary entsteht.
+          CRATE_VERSION="$(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -er '
+                  [ .packages[] | select(.name == "redact-cli") | .version ]
+                  | if length == 1 then .[0]
+                    else error("redact-cli nicht eindeutig in cargo metadata gefunden")
+                    end'
+          )"
+          echo "Tag        : $TAG"
+          echo "redact-cli : $CRATE_VERSION"
+          if [ "$VERSION" != "$CRATE_VERSION" ]; then
+            echo "::error::Tag $TAG verlangt Version $VERSION, das Crate redact-cli meldet aber $CRATE_VERSION. Der Release wuerde ein Binary mit falscher Versionsangabe ausliefern."
+            exit 1
+          fi
+          # .release-version ist der zweite Weg, einen Release auszuloesen.
+          # Beide Angaben muessen dasselbe sagen, sonst haengt es davon ab,
+          # welchen Weg jemand gerade genommen hat.
+          if [ -f .release-version ]; then
+            FILE_VERSION="$(tr -d '[:space:]' < .release-version)"
+            FILE_VERSION="${FILE_VERSION#v}"
+            if [ "$FILE_VERSION" != "$CRATE_VERSION" ]; then
+              echo "::error::.release-version ($FILE_VERSION) und redact-cli ($CRATE_VERSION) stimmen nicht ueberein"
+              exit 1
+            fi
+          fi
+
+      - name: Sicherstellen, dass nichts ueberschrieben wird
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          # softprops/action-gh-release arbeitet als Upsert: ein zweiter Lauf
+          # ersetzt die Assets eines bestehenden Releases. Da die Archive
+          # frueher nicht reproduzierbar waren, aenderten sich damit die
+          # Pruefsummen eines *bereits veroeffentlichten* Releases - Nutzer,
+          # die ihre Downloads gegen SHA256SUMS pruefen, haetten das als
+          # Manipulation gesehen. Deshalb hier hart abbrechen.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::Fuer $TAG existiert bereits ein Release. Ein erneuter Lauf wuerde dessen Artefakte und Pruefsummen ersetzen. Wenn das gewollt ist: Release vorher manuell loeschen, sonst eine neue Version vergeben."
+            exit 1
+          fi
+          # Auf dem Tag-Weg existiert der Tag naturgemaess schon. Auf dem
+          # Datei-Weg legt ihn erst der Release an - existiert er dort
+          # bereits, zeigt er moeglicherweise auf einen anderen Commit als
+          # den, den wir gerade bauen.
+          if [ "$REF_TYPE" != "tag" ]; then
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2>&1; then
+              echo "::error::Tag $TAG existiert bereits, soll auf diesem Weg aber erst angelegt werden. Bitte die Version erhoehen."
+              exit 1
+            fi
+          fi
+          echo "Weder Release noch (zu erzeugender) Tag vorhanden - in Ordnung."
+
+  # -------------------------------------------------------------------------
+  # 2. Bauen.
+  # -------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.suffix }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Runner-Images sind bewusst festgenagelt: `ubuntu-latest` und
+          # `windows-latest` wandern und aendern damit Compiler-Umgebung,
+          # Systembibliotheken und glibc-Anforderung unter uns weg.
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            suffix: x86_64-windows
+            bin: redact-rs.exe
+            ext: zip
+            features: ""
+            variant: "CLI + GUI"
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            suffix: x86_64-linux
+            bin: redact-rs
+            ext: tar.gz
+            features: ""
+            variant: "CLI + GUI"
+          # Statisch gegen musl gelinkte CLI ohne GUI. Der glibc-Build
+          # verlangt eine glibc, die auf Debian 12, RHEL/Alma/Rocky 8 und 9
+          # sowie Ubuntu 22.04 nicht vorhanden ist - also genau bei der
+          # Zielgruppe (Behoerden, Kanzleien, Steuerberater). Dieses
+          # Artefakt laeuft dort ohne Systemvoraussetzungen.
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            suffix: x86_64-linux-musl
+            bin: redact-rs
+            ext: tar.gz
+            features: "--no-default-features"
+            variant: "nur CLI, statisch"
+    steps:
+      # Muss vor dem Checkout laufen: auf Windows-Runnern steht
+      # core.autocrlf global auf true. Sonst landen README/LICENSE mit CRLF
+      # im ZIP und mit LF im Tarball - und scripts/*.sh liessen sich unter
+      # Git-Bash nicht ausfuehren.
+      - name: Zeilenenden nicht umschreiben
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref || inputs.tag || github.ref }}
+
+      # Nur der glibc-Build enthaelt die GUI (eframe/egui mit glow, x11,
+      # wayland) und braucht dafuer Entwicklungspakete. libgtk-3-dev und
+      # libssl-dev waren hier frueher gelistet, obwohl weder gtk/glib/cairo
+      # noch openssl-sys im Abhaengigkeitsgraphen vorkommen - rfd 0.15 geht
+      # ueber das XDG-Portal via D-Bus (ashpd/zbus).
+      - name: Linux-Build-Abhaengigkeiten der GUI installieren
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
-            libgtk-3-dev \
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
             libwayland-dev \
-            libssl-dev \
             libx11-dev \
             libxcursor-dev \
             libxrandr-dev \
@@ -90,148 +263,260 @@ jobs:
             libegl1-mesa-dev \
             libfontconfig1-dev
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Rust-Toolchain installieren
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master @ 2026-07-16
         with:
+          toolchain: ${{ needs.verify.outputs.channel }}
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release-${{ matrix.target }}
+      # Bewusst KEIN Swatinem/rust-cache in diesem Workflow: ein
+      # veroeffentlichtes Artefakt soll aus einem sauberen Baum entstehen und
+      # nicht aus einem Cache, den sich andere Laeufe und Branches teilen.
+      # In ci.yml bleibt der Cache selbstverstaendlich erhalten.
 
-      - name: Build redact-rs
-        run: cargo build --release --target ${{ matrix.target }} -p redact-cli
-
-      - name: Stage package contents
+      - name: redact-rs bauen
         shell: bash
-        env:
-          ARCHIVE: redact-rs-${{ steps.meta.outputs.version }}-${{ matrix.suffix }}.${{ matrix.ext }}
         run: |
           set -euo pipefail
+          cargo build --release --locked \
+            --target "${{ matrix.target }}" \
+            -p redact-cli ${{ matrix.features }}
+
+      - name: Paketinhalt zusammenstellen
+        id: stage
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          BIN: ${{ matrix.bin }}
+          SUFFIX: ${{ matrix.suffix }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          ARCHIVE="redact-rs-${VERSION}-${SUFFIX}.${EXT}"
           rm -rf staging
           mkdir -p staging
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" staging/
+          cp "target/${TARGET}/release/${BIN}" staging/
           for f in README.md LICENSE-MIT LICENSE-APACHE LICENSE; do
             if [ -f "$f" ]; then cp "$f" staging/; fi
           done
+          # SIL Open Font License 1.1. Die egui-Standardschriften
+          # (epaint_default_fonts) sind im GUI-Binary eingebettet, und
+          # crates/redact-render bringt eigene OFL-Schriften mit. Die OFL
+          # verlangt, dass ihr Text mitgeliefert wird - deshalb liegt er
+          # jedem Archiv bei, auch dem reinen CLI-Archiv.
+          OFL="crates/redact-render/assets/fonts/LICENSE-OFL.txt"
+          if [ -f "$OFL" ]; then
+            cp "$OFL" staging/LICENSE-OFL.txt
+          else
+            echo "::error::$OFL fehlt - die Schriftlizenz muss mit ausgeliefert werden"
+            exit 1
+          fi
           if [ -d examples ]; then
             cp -r examples staging/examples
           else
-            echo "::warning::no examples/ directory found - archive will not contain examples"
+            echo "::warning::kein Verzeichnis examples/ gefunden - das Archiv enthaelt keine Beispiele"
           fi
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           ls -la staging
 
-      - name: Create zip archive (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path staging/* -DestinationPath "$env:ARCHIVE" -CompressionLevel Optimal
-
-      - name: Create tar.gz archive (Linux)
-        if: runner.os == 'Linux'
+      - name: Reproduzierbares Archiv erzeugen
         shell: bash
         run: |
           set -euo pipefail
-          tar -czf "$ARCHIVE" -C staging .
+          bash scripts/make-archive.sh staging "$ARCHIVE"
 
-      - name: Upload archive
-        uses: actions/upload-artifact@v4
+      # Das Archiv ist jetzt reproduzierbar, aber der interessante Teil ist
+      # das Binary selbst. Wer nachbauen will, vergleicht diesen Hash - er
+      # haengt an keiner Verpackung.
+      - name: Pruefsumme des rohen Binaries
+        shell: bash
+        env:
+          BIN: ${{ matrix.bin }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          set -euo pipefail
+          HASH="$(sha256sum "staging/${BIN}" | cut -d' ' -f1)"
+          printf '%s  %s/%s\n' "$HASH" "$SUFFIX" "$BIN" > "binhash-${SUFFIX}.txt"
+          cat "binhash-${SUFFIX}.txt"
+
+      # Die tatsaechlich benoetigte glibc aus dem gebauten Binary ablesen,
+      # statt sie in den Release-Notizen zu behaupten.
+      - name: Benoetigte glibc ermitteln
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BIN: ${{ matrix.bin }}
+        run: |
+          set -euo pipefail
+          GLIBC_MIN="$(
+            objdump -T "target/${TARGET}/release/${BIN}" \
+              | sed -nE 's/.*GLIBC_([0-9]+(\.[0-9]+)+).*/\1/p' \
+              | sort -V | tail -n1
+          )"
+          if [ -z "$GLIBC_MIN" ]; then
+            echo "::warning::konnte die benoetigte glibc-Version nicht ermitteln"
+            GLIBC_MIN="unbekannt"
+          fi
+          echo "$GLIBC_MIN" > glibc-min.txt
+          echo "benoetigte glibc: $GLIBC_MIN"
+
+      - name: Artefakte hochladen
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ matrix.suffix }}
-          path: ${{ env.ARCHIVE }}
+          path: |
+            ${{ env.ARCHIVE }}
+            binhash-${{ matrix.suffix }}.txt
+            glibc-min.txt
           if-no-files-found: error
           retention-days: 7
 
+  # -------------------------------------------------------------------------
+  # 3. Veroeffentlichen.
+  # -------------------------------------------------------------------------
   release:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
+    name: GitHub Release veroeffentlichen
+    needs: [verify, build]
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
+      # Fuer actions/attest-build-provenance: OIDC-Token zum Signieren und
+      # das Recht, die Attestierung am Repository zu hinterlegen.
+      id-token: write
+      attestations: write
     steps:
-      - name: Resolve tag and version
-        id: meta
-        shell: bash
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.ref || inputs.tag || github.ref }}
 
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+      - name: Build-Artefakte herunterladen
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           pattern: release-*
           merge-multiple: true
 
-      - name: Generate SHA256SUMS
-        id: sums
+      - name: Pruefsummen erzeugen
         shell: bash
         run: |
           set -euo pipefail
           cd dist
           ls -la
           shopt -s nullglob
-          files=(redact-rs-*)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::no release archives were downloaded"
+          archives=(redact-rs-*)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::es wurden keine Release-Archive heruntergeladen"
             exit 1
           fi
-          sha256sum "${files[@]}" > SHA256SUMS
+          # LC_ALL=C, damit die Reihenfolge der Zeilen nicht von der Locale
+          # des Runners abhaengt - sonst sieht SHA256SUMS je nach Image
+          # anders aus, obwohl sich nichts geaendert hat.
+          mapfile -t archives < <(printf '%s\n' "${archives[@]}" | LC_ALL=C sort)
+          sha256sum "${archives[@]}" > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Build release notes
+          binhashes=(binhash-*.txt)
+          if [ ${#binhashes[@]} -eq 0 ]; then
+            echo "::error::keine Binary-Pruefsummen gefunden"
+            exit 1
+          fi
+          LC_ALL=C sort -k2 -- "${binhashes[@]}" > SHA256SUMS-BINARIES
+          cat SHA256SUMS-BINARIES
+
+      # Signierte SLSA-Herkunftsaussage: bindet jedes Archiv an dieses
+      # Repository, diesen Workflow und diesen Commit. Damit laesst sich von
+      # aussen pruefen, dass eine Datei wirklich aus diesem Build stammt -
+      # unabhaengig davon, wer Schreibrechte auf Releases hat.
+      - name: Provenienz erzeugen
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: 'dist/redact-rs-*'
+
+      - name: Release-Notizen erzeugen
         shell: bash
         env:
-          VERSION: ${{ steps.meta.outputs.version }}
-          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
+          GLIBC_MIN="unbekannt"
+          if [ -f dist/glibc-min.txt ]; then
+            GLIBC_MIN="$(tr -d '[:space:]' < dist/glibc-min.txt)"
+          fi
           {
             echo "## redact-rs ${VERSION}"
             echo
+            if [ "$PRERELEASE" = "true" ]; then
+              echo "> **Vorabversion.** Dieser Release wurde nicht vom"
+              echo "> Default-Branch gebaut und ist entsprechend gekennzeichnet."
+              echo
+            fi
             echo "Vorkompilierte Binaries von \`redact-rs\` (Tag \`${TAG}\`)."
             echo
             echo "### Artefakte"
             echo
-            echo "| Datei | Plattform |"
-            echo "| --- | --- |"
-            echo "| \`redact-rs-${VERSION}-x86_64-windows.zip\` | Windows x86_64 (MSVC) |"
-            echo "| \`redact-rs-${VERSION}-x86_64-linux.tar.gz\` | Linux x86_64 (glibc) |"
-            echo "| \`SHA256SUMS\` | Pruefsummen aller Artefakte |"
+            echo "| Datei | Plattform | Inhalt |"
+            echo "| --- | --- | --- |"
+            echo "| \`redact-rs-${VERSION}-x86_64-windows.zip\` | Windows x86_64 (MSVC) | CLI + GUI |"
+            echo "| \`redact-rs-${VERSION}-x86_64-linux.tar.gz\` | Linux x86_64, glibc >= ${GLIBC_MIN} | CLI + GUI |"
+            echo "| \`redact-rs-${VERSION}-x86_64-linux-musl.tar.gz\` | Linux x86_64, statisch (musl) | nur CLI |"
+            echo "| \`SHA256SUMS\` | | Pruefsummen der Archive |"
+            echo "| \`SHA256SUMS-BINARIES\` | | Pruefsummen der entpackten Binaries |"
+            echo
+            echo "### Welches Archiv?"
+            echo
+            echo "Das glibc-Archiv setzt **glibc ${GLIBC_MIN} oder neuer** voraus."
+            echo "Aeltere, aber verbreitete Systeme - Debian 12, RHEL/Alma/Rocky 8"
+            echo "und 9, Ubuntu 22.04 - erfuellen das nicht. Dort das"
+            echo "**musl-Archiv** verwenden: statisch gelinkt, ohne"
+            echo "Systemvoraussetzungen, dafuer ohne grafische Oberflaeche."
             echo
             echo "### SHA-256"
+            echo
+            echo "Archive:"
             echo
             echo '```'
             cat dist/SHA256SUMS
             echo '```'
             echo
+            echo "Entpackte Binaries (unabhaengig von der Verpackung):"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS-BINARIES
+            echo '```'
+            echo
             echo "Pruefen mit \`sha256sum -c SHA256SUMS\` (Linux) bzw."
             echo "\`Get-FileHash <datei> -Algorithm SHA256\` (PowerShell)."
+            echo
+            echo "### Herkunft pruefen"
+            echo
+            echo "Zu jedem Archiv gibt es eine signierte SLSA-Herkunftsaussage."
+            echo "Damit laesst sich nachweisen, dass die Datei aus diesem"
+            echo "Repository und diesem Workflow stammt:"
+            echo
+            echo '```bash'
+            echo "gh attestation verify redact-rs-${VERSION}-x86_64-linux.tar.gz \\"
+            echo "  --repo ${GITHUB_REPOSITORY}"
+            echo '```'
           } > release-notes.md
           cat release-notes.md
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+      - name: Release veroeffentlichen
+        uses: softprops/action-gh-release@62c96d0c4e8a889135c1f3a25910db8dbe0e85f7 # v2.3.4
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          name: redact-rs ${{ steps.meta.outputs.version }}
+          tag_name: ${{ needs.verify.outputs.tag }}
+          target_commitish: ${{ inputs.ref || github.sha }}
+          name: redact-rs ${{ needs.verify.outputs.version }}
           body_path: release-notes.md
           draft: false
-          prerelease: false
+          prerelease: ${{ inputs.prerelease || false }}
           fail_on_unmatched_files: true
           files: |
             dist/redact-rs-*
             dist/SHA256SUMS
+            dist/SHA256SUMS-BINARIES

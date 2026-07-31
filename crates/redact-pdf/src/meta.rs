@@ -4,10 +4,20 @@
 //! „Kontoauszug_Mustermann_DE89…“ als Titel steht. Entfernt werden:
 //!
 //! * das komplette `/Info`-Dictionary aus dem Trailer,
-//! * der XMP-Metadatenstrom `/Metadata` aus dem Katalog,
+//! * der XMP-Metadatenstrom `/Metadata` aus Katalog **und** Seiten,
 //! * `/PieceInfo` (anwendungsspezifische Zusatzdaten) aus Katalog und Seiten,
-//! * die Dokumentstruktur `/StructTreeParent` je Seite sowie `/Names`-Bäume,
-//!   die Textinhalte spiegeln können.
+//! * die Dokumentstruktur — `/StructTreeRoot` samt `/MarkInfo` im Katalog und
+//!   `/StructParents` je Seite; der `/K`-Baum darunter (mit `/ActualText` und
+//!   `/Alt`, die den Seitentext spiegeln) verwaist damit und fällt beim
+//!   Erreichbarkeitslauf in [`crate::document::save_to_bytes`] weg,
+//! * der `/Names`-Baum des Katalogs. Er trägt benannte Ziele, JavaScript und
+//!   eingebettete Dateien — allesamt Texttransporte. Preis: benannte Sprünge
+//!   innerhalb des Dokuments funktionieren danach nicht mehr. Das ist die
+//!   sichere Richtung.
+//!
+//! Was hier nur dereferenziert wird, verschwindet nicht automatisch aus der
+//! Datei: `lopdf` schreibt beim Speichern alles, was in `doc.objects` steht.
+//! Den Rest erledigt [`crate::document::prune_unreachable`].
 
 use lopdf::{Document, Object, ObjectId};
 
@@ -18,6 +28,8 @@ pub struct MetadataReport {
     pub xmp_removed: bool,
     pub piece_info_removed: usize,
     pub struct_tree_removed: bool,
+    /// `/Names`-Bäume (benannte Ziele, JavaScript, eingebettete Dateien).
+    pub names_removed: usize,
 }
 
 impl MetadataReport {
@@ -26,6 +38,7 @@ impl MetadataReport {
             || self.xmp_removed
             || self.piece_info_removed > 0
             || self.struct_tree_removed
+            || self.names_removed > 0
     }
 }
 
@@ -71,6 +84,20 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
                 report.struct_tree_removed = true;
             }
             catalog.remove(b"MarkInfo");
+            // `/Names` — benannte Ziele, JavaScript, eingebettete Dateien.
+            if let Ok(Object::Reference(id)) = catalog.get(b"Names") {
+                to_delete.push(*id);
+            }
+            if catalog.remove(b"Names").is_some() {
+                report.names_removed += 1;
+            }
+            // `/Dests` ist der alte, gleichwertige Weg zu benannten Zielen.
+            if let Ok(Object::Reference(id)) = catalog.get(b"Dests") {
+                to_delete.push(*id);
+            }
+            if catalog.remove(b"Dests").is_some() {
+                report.names_removed += 1;
+            }
         }
         for id in to_delete {
             doc.objects.remove(&id);
@@ -89,7 +116,14 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
                 report.piece_info_removed += 1;
             }
             page.remove(b"StructParents");
-            page.remove(b"Metadata");
+            // Seiten-XMP: die Id muss mit auf die Löschliste, sonst bleibt der
+            // Strom als verwaistes Objekt in der Datei stehen.
+            if let Ok(Object::Reference(id)) = page.get(b"Metadata") {
+                to_delete.push(*id);
+            }
+            if page.remove(b"Metadata").is_some() {
+                report.xmp_removed = true;
+            }
         }
         for id in to_delete {
             doc.objects.remove(&id);
@@ -173,5 +207,84 @@ mod tests {
         strip_metadata(&mut doc);
         let second = strip_metadata(&mut doc);
         assert!(!second.anything_removed());
+    }
+
+    const SECRET: &str = "DE89 3704 0044 0532 0130 00";
+
+    fn catalog_of(doc: &Document) -> ObjectId {
+        match doc.trailer.get(b"Root").unwrap() {
+            Object::Reference(id) => *id,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn page_metadata_object_is_deleted_not_just_dereferenced() {
+        let mut doc = doc_with_info();
+        let xmp = doc.add_object(Object::Stream(lopdf::Stream::new(
+            dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+            format!("<x:xmpmeta><dc:title>Kontoauszug {SECRET}</dc:title></x:xmpmeta>")
+                .into_bytes(),
+        )));
+        let page_id = *doc.get_pages().values().next().unwrap();
+        doc.get_dictionary_mut(page_id)
+            .unwrap()
+            .set("Metadata", Object::Reference(xmp));
+
+        let report = strip_metadata(&mut doc);
+        assert!(report.xmp_removed);
+        assert!(
+            !doc.objects.contains_key(&xmp),
+            "das Seiten-XMP steht weiterhin als verwaistes Objekt in der Datei"
+        );
+    }
+
+    #[test]
+    fn names_tree_is_removed_as_the_module_documentation_promises() {
+        let mut doc = doc_with_info();
+        let names = doc.add_object(Object::Dictionary(dictionary! {
+            "Dests" => dictionary! {
+                "Names" => vec![
+                    Object::string_literal("konto"),
+                    Object::string_literal(SECRET),
+                ],
+            },
+        }));
+        let catalog_id = catalog_of(&doc);
+        doc.get_dictionary_mut(catalog_id)
+            .unwrap()
+            .set("Names", Object::Reference(names));
+
+        let report = strip_metadata(&mut doc);
+        assert_eq!(report.names_removed, 1);
+        assert!(!doc.objects.contains_key(&names));
+        assert!(doc
+            .get_dictionary(catalog_id)
+            .unwrap()
+            .get(b"Names")
+            .is_err());
+
+        let bytes = crate::document::save_to_bytes(&doc).unwrap();
+        assert!(
+            crate::leaks(&bytes, SECRET).is_empty(),
+            "{:?}",
+            crate::leaks(&bytes, SECRET)
+        );
+    }
+
+    #[test]
+    fn old_style_dests_dictionary_is_removed_too() {
+        let mut doc = doc_with_info();
+        let dests = doc.add_object(Object::Dictionary(dictionary! {
+            "konto" => Object::string_literal(SECRET),
+        }));
+        let catalog_id = catalog_of(&doc);
+        doc.get_dictionary_mut(catalog_id)
+            .unwrap()
+            .set("Dests", Object::Reference(dests));
+
+        let report = strip_metadata(&mut doc);
+        assert_eq!(report.names_removed, 1);
+        assert!(!doc.objects.contains_key(&dests));
     }
 }

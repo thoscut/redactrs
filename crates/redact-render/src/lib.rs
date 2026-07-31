@@ -29,6 +29,10 @@
 //!
 //! gefolgt vom Umschreiben der `name`-Tabelle auf die neuen Familiennamen.
 
+#![forbid(unsafe_code)]
+
 pub mod fonts;
+pub mod raster;
 
 pub use fonts::{FontCache, GlyphFont, GlyphKey, Outline, Seg};
+pub use raster::{PageRenderer, RenderOptions, RenderedPage};

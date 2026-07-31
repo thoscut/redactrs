@@ -1,0 +1,120 @@
+# cargo-deny Konfiguration fuer redact-rs.
+#
+# Geprueft wird in CI (siehe .github/workflows/ci.yml, Job "supply-chain"):
+#   cargo deny check advisories licenses bans sources
+#
+# Lokal identisch:
+#   cargo install --locked cargo-deny
+#   cargo deny check
+#
+# Hinweis zur Schema-Version: diese Datei ist fuer cargo-deny 0.20.x
+# geschrieben (dort sind die frueheren `version = 2`-Schluessel unter
+# [advisories]/[licenses] entfallen). Die CI installiert deshalb eine
+# festgelegte Version.
+
+[graph]
+# Nur die Ziele pruefen, die wir auch ausliefern. Ohne diese Liste wuerde
+# cargo-deny auch Abhaengigkeiten fuer z.B. wasm/redox melden, die nie
+# gebaut werden.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+# Optionale Features (pdfium) sind nicht Teil der Release-Artefakte.
+all-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Sicherheitsmeldungen (RustSec)
+# ---------------------------------------------------------------------------
+[advisories]
+# Zurueckgezogene ("yanked") Crate-Versionen sind ein Fehler, kein Hinweis.
+yanked = "deny"
+unmaintained = "workspace"
+
+ignore = [
+    # ------------------------------------------------------------------
+    # BEFRISTET. Nicht dauerhaft stehen lassen.
+    #
+    # RUSTSEC-2026-0187 - lopdf 0.34: Stack Overflow (Absturz) beim Parsen
+    # tief verschachtelter PDF-Objektstrukturen. Da redact-rs genau das tut,
+    # was die Meldung beschreibt - fremde, potenziell praeparierte PDFs
+    # einlesen - ist das relevant und nicht bloss theoretisch.
+    #
+    # Behoben ab lopdf 0.42. Das Update ist ein eigener Vorgang (API-Bruch
+    # zwischen 0.34 und 0.42, betrifft crates/redact-pdf) und laeuft
+    # ausserhalb dieser Build-Haertung.
+    #
+    # Der Eintrag steht hier ausschliesslich, damit die CI nicht dauerhaft
+    # rot ist und echte *neue* Meldungen nicht im Rauschen untergehen.
+    # Beim Anheben von lopdf auf >= 0.42 ersatzlos loeschen.
+    { id = "RUSTSEC-2026-0187", reason = "lopdf 0.34: Stack Overflow bei tief verschachtelten PDFs; behoben ab lopdf 0.42, Update ist ein separater Vorgang. Diesen Eintrag beim lopdf-Update ersatzlos entfernen." },
+]
+
+# ---------------------------------------------------------------------------
+# Lizenzen
+# ---------------------------------------------------------------------------
+[licenses]
+# Alles, was im Abhaengigkeitsgraphen tatsaechlich vorkommt (ermittelt ueber
+# `cargo metadata`), und nichts darueber hinaus. Neue Lizenzen sollen
+# auffallen, nicht durchrutschen.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    # SIL Open Font License 1.1 - gilt fuer die mitgelieferten Schriften in
+    # crates/redact-render/assets/fonts/ und fuer die Standardschriften in
+    # epaint_default_fonts. Die OFL verlangt, dass ihr Text mitgeliefert
+    # wird; die Release-Workflows legen LICENSE-OFL.txt deshalb ins Archiv.
+    "OFL-1.1",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+# `r-efi` ist "MIT OR Apache-2.0 OR LGPL-2.1-or-later" - die ODER-Verknuepfung
+# ist ueber MIT erfuellt, LGPL wird bewusst *nicht* erlaubt.
+
+[[licenses.exceptions]]
+# epaint_default_fonts ist "(MIT OR Apache-2.0) AND OFL-1.1 AND
+# LicenseRef-UFL-1.0". Die Ubuntu Font Licence gilt nur fuer dieses eine
+# Crate (Ubuntu-Light in den egui-Standardschriften) und wird deshalb nicht
+# global erlaubt.
+name = "epaint_default_fonts"
+allow = ["LicenseRef-UFL-1.0"]
+
+# ---------------------------------------------------------------------------
+# Doppelte Versionen
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+# "warn" statt "deny", und das ist eine bewusste Kroete:
+# Die Workspace-internen Pfad-Abhaengigkeiten (redact-core & Co.) haben keine
+# Versionsangabe und zaehlen damit als Wildcard. `allow-wildcard-paths`
+# greift dafuer nicht, weil cargo-deny die Crates als veroeffentlichbar
+# ansieht - sie tragen kein `publish = false`. Sobald in den
+# crates/*/Cargo.toml `publish = false` steht (die Crates gehen ohnehin nicht
+# nach crates.io), kann hier "deny" stehen und der Eintrag unten entfallen.
+wildcards = "warn"
+allow-wildcard-paths = true
+
+# ---------------------------------------------------------------------------
+# Bezugsquellen
+# ---------------------------------------------------------------------------
+[sources]
+# Alles muss von crates.io kommen. Kein git-Dependency, keine fremde
+# Registry - beides waere ein Einfallstor, das in Cargo.lock leicht
+# uebersehen wird.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

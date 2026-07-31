@@ -1,0 +1,40 @@
+# Gepinnte Rust-Toolchain fuer redact-rs.
+#
+# WARUM DIESE DATEI (und nicht nur ein `toolchain:`-Eintrag in der CI)?
+# Ohne Pinning baut jeder Lauf mit dem jeweils aktuellen `stable`. Damit
+# aendert sich der Compiler unter uns weg, und zwei Laeufe desselben Commits
+# koennen unterschiedliche Binaries erzeugen. Ein veroeffentlichtes Artefakt
+# soll aber aus einer benennbaren Toolchain stammen.
+#
+# WIE DAS MIT `dtolnay/rust-toolchain` ZUSAMMENSPIELT
+# Ein frueherer Anlauf hat auf diese Datei verzichtet, weil die Action
+# `rustup default <toolchain>` setzt und eine Toolchain-Datei diese Vorgabe
+# ueberstimmt. Das stimmt - rustup wertet in dieser Reihenfolge aus:
+#
+#   1. `cargo +<toolchain> ...`        (Kommandozeile)
+#   2. $RUSTUP_TOOLCHAIN               (Umgebungsvariable)
+#   3. `rustup override` (Verzeichnis)
+#   4. rust-toolchain.toml             <- diese Datei
+#   5. `rustup default`                <- was die Action setzt
+#
+# Die Datei gewinnt also immer gegen die Action. Genau deshalb ist sie hier
+# die *einzige* Quelle der Wahrheit: die Workflows lesen `channel` aus dieser
+# Datei aus und geben ihn an die Action weiter. Die Action installiert damit
+# exakt die Toolchain, die rustup anschliessend ohnehin auswaehlt - kein
+# Auseinanderlaufen moeglich, und die Targets der Release-Matrix
+# (x86_64-pc-windows-msvc, x86_64-unknown-linux-musl) werden fuer die
+# richtige Toolchain nachinstalliert.
+#
+# Der MSRV-Job in ci.yml muss bewusst eine *andere* Toolchain verwenden und
+# setzt dafuer $RUSTUP_TOOLCHAIN (Stufe 2) - das ueberstimmt diese Datei
+# gezielt und nur dort.
+#
+# Nicht verwechseln: `channel` ist die Toolchain, mit der gebaut wird.
+# `rust-version` in Cargo.toml (derzeit 1.75) ist die aelteste Toolchain, die
+# wir zu unterstuetzen versprechen; die prueft der MSRV-Job.
+#
+# Beim Anheben: Wert hier aendern, sonst nichts - CI und Release ziehen nach.
+
+[toolchain]
+channel = "1.94.1"
+profile = "minimal"

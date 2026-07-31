@@ -10,6 +10,25 @@
 # (x86_64-pc-windows-msvc) auf einem echten Windows-Runner gebaut
 # (siehe .github/workflows/release.yml). Die Eintraege hier sind fuer
 # lokale Cross-Builds gedacht (scripts/build-windows.sh).
+#
+# ---------------------------------------------------------------------------
+# Statische Linux-CLI (x86_64-unknown-linux-musl)
+#
+# Der glibc-Build der CLI verlangt eine recht neue glibc und laeuft damit
+# nicht auf Debian 12, RHEL/Alma/Rocky 8+9 oder Ubuntu 22.04. Der Release
+# liefert deshalb zusaetzlich ein statisch gegen musl gelinktes CLI-Archiv
+# aus. Lokal nachbauen:
+#
+#     rustup target add x86_64-unknown-linux-musl
+#     cargo build --release --locked \
+#         --target x86_64-unknown-linux-musl \
+#         -p redact-cli --no-default-features
+#
+# Es ist bewusst *kein* [target.x86_64-unknown-linux-musl]-Abschnitt noetig:
+# ohne die GUI (--no-default-features) hat der Abhaengigkeitsgraph keine
+# C-Anteile, und rustc linkt mit der mitgelieferten musl-libc selbst
+# (static-pie). Weder musl-tools noch ein eigener Linker werden gebraucht.
+# ---------------------------------------------------------------------------
 
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::glyphnames::glyph_name_to_char;
+use crate::glyphnames::glyph_name_to_text;
 
 /// Ersatzzeichen für Codes, die sich nicht auflösen lassen. Es wird bewusst
 /// eingesetzt, damit die Zeichenanzahl (und damit die Glyph-Indizes) stimmt.
@@ -35,6 +35,9 @@ pub struct CharMap {
     pub width: CodeWidth,
     /// Basis-Tabelle für Einbyte-Encodings (Index = Code).
     simple: Option<Box<[Option<char>; 256]>>,
+    /// `/Differences`-Einträge, die für mehr als ein Zeichen stehen
+    /// (Ligaturen wie `uni00660069`). Sie passen nicht in `simple`.
+    ligatures: BTreeMap<u32, String>,
     /// Aus `/ToUnicode` gewonnene Zuordnung; hat Vorrang vor `simple`.
     to_unicode: BTreeMap<u32, String>,
 }
@@ -44,6 +47,7 @@ impl CharMap {
         Self {
             width: CodeWidth::One,
             simple: Some(Box::new(table)),
+            ligatures: BTreeMap::new(),
             to_unicode: BTreeMap::new(),
         }
     }
@@ -52,6 +56,7 @@ impl CharMap {
         Self {
             width: CodeWidth::Two,
             simple: None,
+            ligatures: BTreeMap::new(),
             to_unicode: BTreeMap::new(),
         }
     }
@@ -65,10 +70,31 @@ impl CharMap {
     }
 
     /// Wendet `/Differences` auf die Basis-Tabelle an.
+    ///
+    /// Nur **aufgelöste** Namen werden übernommen. Subset-Fonts führen ihre
+    /// Glyphen häufig als `g42`, `cid17` oder `.notdef` auf; solche Namen
+    /// sagen nichts über das Zeichen aus. Sie durften früher die gültige
+    /// Zuordnung der Basistabelle überschreiben — der Code wurde damit
+    /// unlesbar, obwohl WinAnsi ihn kannte.
     pub fn apply_differences(&mut self, diffs: &[(u8, String)]) {
-        if let Some(table) = self.simple.as_mut() {
-            for (code, name) in diffs {
-                table[*code as usize] = glyph_name_to_char(name);
+        let Some(table) = self.simple.as_mut() else {
+            return;
+        };
+        for (code, name) in diffs {
+            let Some(text) = glyph_name_to_text(name) else {
+                continue;
+            };
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => {
+                    table[*code as usize] = Some(c);
+                    self.ligatures.remove(&(*code as u32));
+                }
+                (Some(_), Some(_)) => {
+                    // Ligatur: mehrere Zeichen passen nicht in die Tabelle.
+                    self.ligatures.insert(*code as u32, text);
+                }
+                _ => {}
             }
         }
     }
@@ -79,6 +105,9 @@ impl CharMap {
             if !s.is_empty() {
                 return s.clone();
             }
+        }
+        if let Some(s) = self.ligatures.get(&code) {
+            return s.clone();
         }
         if let Some(table) = &self.simple {
             if code < 256 {
@@ -350,8 +379,8 @@ fn apply_bfrange(map: &mut BTreeMap<u32, String>, lo: u32, hi: u32, dst: &Token)
             }
         }
         Token::Name(name) => {
-            if let Some(c) = glyph_name_to_char(name) {
-                map.insert(lo, c.to_string());
+            if let Some(text) = glyph_name_to_text(name) {
+                map.insert(lo, text);
             }
         }
         _ => {}
@@ -361,7 +390,7 @@ fn apply_bfrange(map: &mut BTreeMap<u32, String>, lo: u32, hi: u32, dst: &Token)
 fn token_to_text(t: &Token) -> Option<String> {
     match t {
         Token::Hex(bytes) => utf16_to_string(&hex_to_utf16(bytes)),
-        Token::Name(name) => glyph_name_to_char(name).map(|c| c.to_string()),
+        Token::Name(name) => glyph_name_to_text(name),
         _ => None,
     }
 }
@@ -546,6 +575,39 @@ mod tests {
         let mut cm = CharMap::one_byte(win_ansi_encoding());
         cm.apply_differences(&[(65, "germandbls".to_string())]);
         assert_eq!(cm.text_for(65), "ß");
+    }
+
+    // -----------------------------------------------------------------------
+    // K8 — `/Differences` darf gültige Zuordnungen nicht löschen
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unresolvable_difference_name_keeps_the_base_mapping() {
+        // Subset-Fonts führen ihre Glyphen oft als `g42`/`cid17` auf. Solche
+        // Namen sagen nichts über das Zeichen aus — die Basistabelle bleibt
+        // die bessere Auskunft.
+        let mut cm = CharMap::one_byte(win_ansi_encoding());
+        cm.apply_differences(&[
+            (0x80, "g42".to_string()),
+            (0x92, "cid17".to_string()),
+            (0xE4, ".notdef".to_string()),
+        ]);
+        assert_eq!(cm.text_for(0x80), "€");
+        assert_eq!(cm.text_for(0x92), "\u{2019}");
+        assert_eq!(cm.text_for(0xE4), "ä");
+    }
+
+    #[test]
+    fn ligature_difference_name_keeps_both_characters() {
+        let mut cm = CharMap::one_byte(win_ansi_encoding());
+        cm.apply_differences(&[(1, "uni00660069".to_string())]);
+        assert_eq!(cm.text_for(1), "fi");
+    }
+
+    #[test]
+    fn bfrange_with_a_ligature_name_keeps_both_characters() {
+        let r = parse_to_unicode(b"1 beginbfrange <0001> <0001> /uni00660069 endbfrange");
+        assert_eq!(r.map.get(&1).map(String::as_str), Some("fi"));
     }
 
     #[test]

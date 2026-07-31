@@ -6,41 +6,76 @@
 //! Unbekannte Namen liefern `None`; der Aufrufer setzt dann ein
 //! Ersatzzeichen ein, damit die Zeichen-Indizes trotzdem stimmen.
 
-/// Löst einen Glyphnamen in ein Zeichen auf.
+/// Löst einen Glyphnamen in seinen Text auf.
 ///
-/// Unterstützt zusätzlich die algorithmischen Namensformen `uniXXXX`,
-/// `uXXXX[XX]` sowie Suffixe wie `a.sc` oder `one.oldstyle`.
-pub fn glyph_name_to_char(name: &str) -> Option<char> {
+/// Anders als [`glyph_name_to_char`] kann das Ergebnis mehrere Zeichen
+/// umfassen: `uni00660069` ist die Ligatur „fi“ und steht für *zwei*
+/// Buchstaben. Wer davon nur den ersten übernimmt, verliert das „i“ — und mit
+/// ihm womöglich den Treffer.
+pub fn glyph_name_to_text(name: &str) -> Option<String> {
     if let Some(c) = lookup(name) {
-        return Some(c);
+        return Some(c.to_string());
     }
 
-    // uniXXXX (eine oder mehrere UTF-16-Einheiten — wir nehmen die erste)
-    if let Some(hex) = name.strip_prefix("uni") {
-        if hex.len() >= 4 && hex.is_char_boundary(4) {
-            if let Ok(cp) = u32::from_str_radix(&hex[..4], 16) {
-                return char::from_u32(cp);
-            }
-        }
+    // uniXXXX — eine oder mehrere UTF-16-Einheiten.
+    if let Some(text) = uni_name_to_text(name) {
+        return Some(text);
     }
 
-    // uXXXX bis uXXXXXX
+    // uXXXX bis uXXXXXX — genau ein Codepoint.
     if let Some(hex) = name.strip_prefix('u') {
         if (4..=6).contains(&hex.len()) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
             if let Ok(cp) = u32::from_str_radix(hex, 16) {
-                return char::from_u32(cp);
+                return char::from_u32(cp).map(|c| c.to_string());
             }
         }
     }
 
-    // Varianten-Suffix abschneiden: "a.sc" -> "a"
+    // Varianten-Suffix abschneiden: "a.sc" -> "a", "uni0066.alt" -> "f".
     if let Some((base, _)) = name.split_once('.') {
         if !base.is_empty() {
-            return lookup(base);
+            return glyph_name_to_text(base);
         }
     }
 
     None
+}
+
+/// `uniXXXX`, `uniXXXXXXXX`, … — beliebig viele UTF-16-Einheiten.
+///
+/// Surrogatpaare werden dabei korrekt zusammengesetzt.
+fn uni_name_to_text(name: &str) -> Option<String> {
+    let hex = name.strip_prefix("uni")?;
+    if hex.is_empty() || hex.len() % 4 != 0 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let units: Vec<u16> = hex
+        .as_bytes()
+        .chunks(4)
+        .filter_map(|c| u16::from_str_radix(std::str::from_utf8(c).ok()?, 16).ok())
+        .collect();
+    if units.len() * 4 != hex.len() {
+        return None;
+    }
+    let text = String::from_utf16(&units).ok()?;
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// Löst einen Glyphnamen in ein *einzelnes* Zeichen auf.
+///
+/// Unterstützt zusätzlich die algorithmischen Namensformen `uniXXXX`,
+/// `uXXXX[XX]` sowie Suffixe wie `a.sc` oder `one.oldstyle`. Namen, die für
+/// mehrere Zeichen stehen (Ligaturen), liefern `None` — dafür ist
+/// [`glyph_name_to_text`] zuständig.
+pub fn glyph_name_to_char(name: &str) -> Option<char> {
+    let text = glyph_name_to_text(name)?;
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    chars.next().is_none().then_some(first)
 }
 
 fn lookup(name: &str) -> Option<char> {
@@ -253,6 +288,15 @@ mod tests {
         assert_eq!(glyph_name_to_char("uni0041"), Some('A'));
         assert_eq!(glyph_name_to_char("u20AC"), Some('€'));
         assert_eq!(glyph_name_to_char("a.sc"), Some('a'));
+    }
+
+    #[test]
+    fn multi_unit_uni_names_keep_every_character() {
+        // `uni00660069` ist die Ligatur „fi“ — das „i“ darf nicht verloren gehen.
+        assert_eq!(glyph_name_to_text("uni00660069").as_deref(), Some("fi"));
+        assert_eq!(glyph_name_to_text("uni0041").as_deref(), Some("A"));
+        assert_eq!(glyph_name_to_text("adieresis").as_deref(), Some("ä"));
+        assert_eq!(glyph_name_to_text("g42"), None);
     }
 
     #[test]
