@@ -18,6 +18,13 @@
 //! gewöhnlichen Funktionen, die ohne Fenster und ohne Grafikkontext getestet
 //! werden. Die egui-Module rufen sie nur auf.
 //!
+//! ## Dateien öffnen
+//!
+//! Über „PDF öffnen …“ oder per Ziehen und Ablegen auf das Fenster. Was mit
+//! einer Menge abgelegter Dateien geschieht, entscheidet [`classify_drop`] —
+//! eine reine Funktion, damit das Verhalten (erste PDF gewinnt, Nicht-PDFs
+//! werden abgelehnt) ohne Maus prüfbar ist.
+//!
 //! ## Vorschau ohne Rasterizer
 //!
 //! Die Seitendarstellung rastert das PDF **nicht**. Sie zeichnet ein weißes
@@ -42,7 +49,7 @@ pub mod sidebar;
 pub mod state;
 pub mod viewer;
 
-pub use app::RedactApp;
+pub use app::{classify_drop, is_pdf_name, DropAction, RedactApp};
 pub use selector::{hit_test, RectangleSelector};
 pub use state::{AnnotatedRegion, AppState, RegionColor};
 pub use viewer::{pdf_to_screen, screen_to_pdf, PagePreview};
@@ -93,7 +100,7 @@ mod tests {
 
     #[test]
     fn window_constants_match_the_specification() {
-        assert_eq!(WINDOW_SIZE, [1280.0, 860.0]);
+        assert_eq!(WINDOW_SIZE, [1280.0_f32, 860.0_f32]);
         assert_eq!(WINDOW_TITLE, "redact-rs");
     }
 

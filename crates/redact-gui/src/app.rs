@@ -710,4 +710,211 @@ mod tests {
         assert!(app.error.is_some());
         assert!(!app.state.is_loaded());
     }
+
+    // ------------------------------------------------------- Ablegen (Drop)
+
+    /// Abgelegte Datei mit Pfad (Desktop-Build).
+    fn dropped_path(path: &str) -> egui::DroppedFile {
+        egui::DroppedFile {
+            path: Some(PathBuf::from(path)),
+            ..Default::default()
+        }
+    }
+
+    /// Abgelegte Datei nur mit Namen und Inhalt (Web-Build).
+    fn dropped_bytes(name: &str, mime: &str, bytes: &[u8]) -> egui::DroppedFile {
+        egui::DroppedFile {
+            path: None,
+            name: name.to_string(),
+            mime: mime.to_string(),
+            bytes: Some(std::sync::Arc::from(bytes)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pdf_names_are_recognised_case_insensitively() {
+        assert!(is_pdf_name("a.pdf"));
+        assert!(is_pdf_name("A.PDF"));
+        assert!(is_pdf_name("/daten/Konto.Pdf"));
+        assert!(!is_pdf_name("a.png"));
+        assert!(!is_pdf_name("pdf"));
+        assert!(!is_pdf_name(""));
+    }
+
+    #[test]
+    fn classify_drop_picks_the_first_pdf_and_counts_the_rest() {
+        assert_eq!(classify_drop(&[]), DropAction::Nothing);
+
+        assert_eq!(
+            classify_drop(&[dropped_path("/daten/a.pdf")]),
+            DropAction::Open {
+                path: PathBuf::from("/daten/a.pdf"),
+                ignored: 0,
+            }
+        );
+
+        // Die erste PDF gewinnt, alles Weitere wird gezählt.
+        let files = [
+            dropped_path("/daten/notiz.txt"),
+            dropped_path("/daten/b.PDF"),
+            dropped_path("/daten/c.pdf"),
+        ];
+        assert_eq!(
+            classify_drop(&files),
+            DropAction::Open {
+                path: PathBuf::from("/daten/b.PDF"),
+                ignored: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_drop_rejects_non_pdf_files() {
+        let files = [
+            dropped_path("/daten/bild.png"),
+            dropped_path("/daten/x.csv"),
+        ];
+        match classify_drop(&files) {
+            DropAction::Rejected { names } => {
+                assert_eq!(names.len(), 2);
+                assert!(names[0].contains("bild.png"));
+            }
+            other => panic!("Ablehnung erwartet, war {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_drop_handles_the_web_case_without_a_path() {
+        // Nur Name und Inhalt — so liefert der Web-Build ab.
+        let files = [dropped_bytes("auszug.pdf", "", b"%PDF-1.5")];
+        assert_eq!(
+            classify_drop(&files),
+            DropAction::OpenBytes {
+                name: "auszug.pdf".to_string(),
+                bytes: std::sync::Arc::from(&b"%PDF-1.5"[..]),
+                ignored: 0,
+            }
+        );
+
+        // Auch am MIME-Typ erkennbar, wenn der Name nichts hergibt.
+        let by_mime = [dropped_bytes("auszug", "application/pdf", b"%PDF-1.5")];
+        assert!(matches!(
+            classify_drop(&by_mime),
+            DropAction::OpenBytes { .. }
+        ));
+
+        // Weder Pfad noch Inhalt ist unbrauchbar.
+        let empty = [egui::DroppedFile {
+            name: "auszug.pdf".to_string(),
+            ..Default::default()
+        }];
+        assert!(matches!(classify_drop(&empty), DropAction::Rejected { .. }));
+    }
+
+    #[test]
+    fn apply_drop_opens_a_pdf_from_bytes_and_notes_ignored_files() {
+        let mut app = RedactApp::new(vec!["iban_de".to_string()]);
+        app.apply_drop(DropAction::OpenBytes {
+            name: "auszug.pdf".to_string(),
+            bytes: std::sync::Arc::from(&redact_pdf::testing::demo_statement()[..]),
+            ignored: 2,
+        });
+
+        assert!(app.state.is_loaded());
+        assert!(app.error.is_none());
+        assert!(!app.state.regions.is_empty());
+        assert!(
+            app.state.status.contains("2 weitere"),
+            "Statuszeile: {}",
+            app.state.status
+        );
+        // Der Name wird als Pfad übernommen, damit Namensvorschläge greifen.
+        assert_eq!(
+            app.state.suggested_output_path().unwrap(),
+            PathBuf::from("auszug_geschwaerzt.pdf")
+        );
+    }
+
+    #[test]
+    fn apply_drop_reports_rejected_files_without_loading() {
+        let mut app = RedactApp::default();
+        app.apply_drop(DropAction::Rejected {
+            names: vec!["/daten/bild.png".to_string()],
+        });
+        assert!(!app.state.is_loaded());
+        assert!(app.error.is_none(), "Ablehnung ist kein Fehler");
+        assert!(app.state.status.contains("Keine PDF-Datei"));
+        assert!(app.state.status.contains("bild.png"));
+    }
+
+    #[test]
+    fn apply_drop_does_nothing_for_an_empty_drop() {
+        let mut app = RedactApp::default();
+        let before = app.state.status.clone();
+        app.apply_drop(DropAction::Nothing);
+        assert_eq!(app.state.status, before);
+    }
+
+    /// Rauchtest ohne Bildschirm: der Ablege-Hinweis wird nur gezeichnet,
+    /// solange Dateien schweben — und stürzt dabei nicht ab.
+    #[test]
+    fn drop_hint_paints_only_while_files_hover() {
+        let mut app = RedactApp {
+            central_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(800.0, 600.0),
+            )),
+            ..RedactApp::default()
+        };
+
+        let ctx = egui::Context::default();
+        let shapes = |input: egui::RawInput, app: &RedactApp| -> usize {
+            ctx.run(input, |ctx| app.paint_drop_hint(ctx)).shapes.len()
+        };
+        let hovering = |count: usize| egui::RawInput {
+            hovered_files: vec![egui::HoveredFile::default(); count],
+            ..Default::default()
+        };
+
+        // Ohne schwebende Dateien wird nichts gezeichnet …
+        let idle = shapes(egui::RawInput::default(), &app);
+        // … mit schwebenden Dateien dagegen schon.
+        assert!(shapes(hovering(1), &app) > idle);
+        assert!(shapes(hovering(3), &app) > idle);
+
+        // Ohne bekannte Fläche wird ebenfalls nichts gezeichnet.
+        app.central_rect = None;
+        assert_eq!(shapes(hovering(1), &app), idle);
+    }
+
+    /// `handle_dropped_files` liest die Rohdaten aus dem Kontext.
+    #[test]
+    fn handle_dropped_files_reads_the_raw_input() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            dropped_files: vec![dropped_path("/gibt/es/nicht.pdf")],
+            ..Default::default()
+        };
+        let app = std::cell::RefCell::new(RedactApp::default());
+        let _ = ctx.run(input, |ctx| app.borrow_mut().handle_dropped_files(ctx));
+
+        // Der Pfad existiert nicht — das muss als Fehler in der Statuszeile
+        // ankommen, nicht als Absturz.
+        let app = app.borrow();
+        assert!(app.error.is_some());
+        assert!(!app.state.is_loaded());
+    }
+
+    #[test]
+    fn apply_drop_reports_a_broken_pdf_through_the_status_line() {
+        let mut app = RedactApp::default();
+        app.apply_drop(DropAction::OpenBytes {
+            name: "kaputt.pdf".to_string(),
+            bytes: std::sync::Arc::from(&b"kein PDF"[..]),
+            ignored: 0,
+        });
+        assert!(!app.state.is_loaded());
+        assert!(app.error.is_some());
+    }
 }

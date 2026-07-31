@@ -309,7 +309,7 @@ mod tests {
         let origins = [Pos2::new(0.0, 0.0), Pos2::new(37.0, 91.0)];
 
         for page_box in boxes {
-            for zoom in [0.5f32, 1.0, 2.5] {
+            for zoom in [0.5_f32, 1.0_f32, 2.5_f32] {
                 for origin in origins {
                     for rect in rects {
                         let screen = pdf_to_screen(&rect, &page_box, zoom, origin);
@@ -436,7 +436,7 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             let origin = Pos2::new(12.0, 12.0);
-            for zoom in [0.05f32, 1.0, 2.5] {
+            for zoom in [0.05_f32, 1.0_f32, 2.5_f32] {
                 // 0.05 erzwingt den Zweig „zu klein für Text“.
                 PagePreview::new(0, &page_box, &runs, zoom).paint(ui.painter(), origin);
             }
