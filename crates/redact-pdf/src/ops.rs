@@ -283,9 +283,13 @@ impl PageOps {
 pub fn page_ops(doc: &Document, page_index: usize) -> Result<PageOps> {
     let pages = doc.get_pages();
     let Some((_, page_id)) = pages.iter().nth(page_index) else {
+        // `saturating_add`, weil `page_index` aus fremder Hand kommt: bei
+        // `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build über und
+        // löste eine Panic aus — ausgerechnet in dem Zweig, der einen Fehler
+        // sauber melden soll.
         return Err(RedactError::Pdf(format!(
             "Seite {} existiert nicht",
-            page_index + 1
+            page_index.saturating_add(1)
         )));
     };
     let page_id = *page_id;

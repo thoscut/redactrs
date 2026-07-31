@@ -203,6 +203,10 @@ jobs:
             target: x86_64-pc-windows-msvc
             suffix: x86_64-windows
             bin: redact-rs.exe
+            # Zweites Binary, nur unter Windows sinnvoll: dieselbe Oberflaeche
+            # ohne das schwarze Konsolenfenster dahinter (Subsystem
+            # "windows"). `redact-rs.exe` bleibt die Konsolenfassung.
+            gui_bin: redact-rs-gui.exe
             ext: zip
             features: ""
             variant: "CLI + GUI"
@@ -289,6 +293,7 @@ jobs:
           VERSION: ${{ needs.verify.outputs.version }}
           TARGET: ${{ matrix.target }}
           BIN: ${{ matrix.bin }}
+          GUI_BIN: ${{ matrix.gui_bin }}
           SUFFIX: ${{ matrix.suffix }}
           EXT: ${{ matrix.ext }}
         run: |
@@ -297,6 +302,16 @@ jobs:
           rm -rf staging
           mkdir -p staging
           cp "target/${TARGET}/release/${BIN}" staging/
+          # Fensterfassung, wo die Matrix eine vorsieht (derzeit nur Windows).
+          # Fehlt sie dort, ist der Build kaputt - dann abbrechen statt ein
+          # unvollstaendiges Archiv zu veroeffentlichen.
+          if [ -n "${GUI_BIN}" ]; then
+            if [ ! -f "target/${TARGET}/release/${GUI_BIN}" ]; then
+              echo "::error::${GUI_BIN} wurde nicht gebaut"
+              exit 1
+            fi
+            cp "target/${TARGET}/release/${GUI_BIN}" staging/
+          fi
           for f in README.md LICENSE-MIT LICENSE-APACHE LICENSE; do
             if [ -f "$f" ]; then cp "$f" staging/; fi
           done
@@ -334,11 +349,15 @@ jobs:
         shell: bash
         env:
           BIN: ${{ matrix.bin }}
+          GUI_BIN: ${{ matrix.gui_bin }}
           SUFFIX: ${{ matrix.suffix }}
         run: |
           set -euo pipefail
-          HASH="$(sha256sum "staging/${BIN}" | cut -d' ' -f1)"
-          printf '%s  %s/%s\n' "$HASH" "$SUFFIX" "$BIN" > "binhash-${SUFFIX}.txt"
+          : > "binhash-${SUFFIX}.txt"
+          for b in "${BIN}" ${GUI_BIN:+"${GUI_BIN}"}; do
+            HASH="$(sha256sum "staging/${b}" | cut -d' ' -f1)"
+            printf '%s  %s/%s\n' "$HASH" "$SUFFIX" "$b" >> "binhash-${SUFFIX}.txt"
+          done
           cat "binhash-${SUFFIX}.txt"
 
       # Die tatsaechlich benoetigte glibc aus dem gebauten Binary ablesen,
@@ -462,11 +481,19 @@ jobs:
             echo
             echo "| Datei | Plattform | Inhalt |"
             echo "| --- | --- | --- |"
-            echo "| \`redact-rs-${VERSION}-x86_64-windows.zip\` | Windows x86_64 (MSVC) | CLI + GUI |"
+            echo "| \`redact-rs-${VERSION}-x86_64-windows.zip\` | Windows x86_64 (MSVC) | \`redact-rs.exe\` (Konsole) + \`redact-rs-gui.exe\` (Fenster) |"
             echo "| \`redact-rs-${VERSION}-x86_64-linux.tar.gz\` | Linux x86_64, glibc >= ${GLIBC_MIN} | CLI + GUI |"
             echo "| \`redact-rs-${VERSION}-x86_64-linux-musl.tar.gz\` | Linux x86_64, statisch (musl) | nur CLI |"
             echo "| \`SHA256SUMS\` | | Pruefsummen der Archive |"
             echo "| \`SHA256SUMS-BINARIES\` | | Pruefsummen der entpackten Binaries |"
+            echo
+            echo "### Windows: zwei Programme, eine Anwendung"
+            echo
+            echo "\`redact-rs-gui.exe\` ist die zum Doppelklicken - sie oeffnet"
+            echo "nur das Fenster, ohne die schwarze Konsole dahinter, und"
+            echo "nimmt ein PDF entgegen, das man auf ihr Symbol zieht."
+            echo "\`redact-rs.exe\` ist die Konsolenfassung mit allen Optionen"
+            echo "und der einzige Weg zu Ausgaben auf stdout."
             echo
             echo "### Welches Archiv?"
             echo

@@ -2656,6 +2656,7 @@ dependencies = [
  "redact-gui",
  "redact-patterns",
  "redact-pdf",
+ "rfd",
  "serde",
  "serde_json",
  "sha2",
@@ -2685,6 +2686,7 @@ dependencies = [
  "redact-render",
  "rfd",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
