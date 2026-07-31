@@ -37,4 +37,10 @@
 
 [toolchain]
 channel = "1.94.1"
+# `minimal` bringt weder rustfmt noch clippy mit. Da diese Datei jede andere
+# Vorgabe ausser der Kommandozeile ueberstimmt, waere damit die Gate-Pruefung
+# `cargo clippy ... && cargo fmt --check` fuer jeden, der das Projekt frisch
+# auscheckt, nicht mehr ausfuehrbar - nur noch ueber `cargo +stable`. Beide
+# Komponenten gehoeren deshalb dazu.
 profile = "minimal"
+components = ["rustfmt", "clippy"]
