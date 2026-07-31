@@ -1,0 +1,15 @@
+[package]
+name = "redact-patterns"
+description = "Built-in and user-configurable regex patterns for redact-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+redact-core.workspace = true
+fancy-regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true

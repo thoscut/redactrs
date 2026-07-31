@@ -1,0 +1,13 @@
+[package]
+name = "redact-booking"
+description = "Booking list (allow/deny list) matching for redact-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+redact-core.workspace = true
+csv.workspace = true
+serde.workspace = true

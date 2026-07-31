@@ -1,0 +1,30 @@
+[package]
+name = "redact-cli"
+description = "Command line interface for redact-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "redact-rs"
+path = "src/main.rs"
+
+[features]
+default = ["gui"]
+gui = ["dep:redact-gui"]
+
+[dependencies]
+redact-core.workspace = true
+redact-pdf.workspace = true
+redact-patterns.workspace = true
+redact-booking.workspace = true
+redact-gui = { workspace = true, optional = true }
+
+lopdf.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+chrono.workspace = true
