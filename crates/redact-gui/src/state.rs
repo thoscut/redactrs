@@ -12,8 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use redact_booking::{BookingMatcher, CsvBookingLoader};
 use redact_core::{
-    resolve_conflicts, Action, BlockedRegion, BookingLoader, Extractor, MatchType, Rect,
-    RedactError, Redaction, Region, Renderer, Result, ReviewFile, ReviewInput, Source, TextRun,
+    output_path_with_suffix, resolve_conflicts, sibling_path, Action, BlockedRegion, BookingLoader,
+    Extractor, MatchType, Rect, RedactError, Redaction, Region, Renderer, Result, ReviewFile,
+    ReviewInput, Source, TextRun, AUDIT_SUFFIX, DEFAULT_OUTPUT_SUFFIX, REVIEW_SUFFIX,
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::{
@@ -160,6 +161,13 @@ pub struct AppState {
     pub regions: Vec<AnnotatedRegion>,
     pub selected_region: Option<usize>,
     pub booking_path: Option<PathBuf>,
+    /// Namenszusatz für die vorgeschlagene Ausgabedatei.
+    ///
+    /// Aus `kontoauszug.pdf` wird mit dem Standardwert
+    /// `kontoauszug_geschwaerzt.pdf`. Bewusst Zustand und keine Konstante — der
+    /// Zusatz ist in der Oberfläche änderbar und soll später auch aus einer
+    /// Einstellungsdatei bzw. von `--output-suffix` kommen können.
+    pub output_suffix: String,
     /// Statuszeile.
     pub status: String,
     pub warnings: Vec<String>,
@@ -177,6 +185,7 @@ impl Default for AppState {
             regions: Vec::new(),
             selected_region: None,
             booking_path: None,
+            output_suffix: DEFAULT_OUTPUT_SUFFIX.to_string(),
             status: "Kein Dokument geladen".to_string(),
             warnings: Vec::new(),
         }
@@ -449,6 +458,51 @@ impl AppState {
                 Redaction::new(region, action)
             })
             .collect()
+    }
+
+    // ------------------------------------------------------- Dateinamen
+
+    /// Vorschlag für die Ausgabedatei: **neben dem Original**, mit
+    /// [`AppState::output_suffix`] am Dateinamen-Stamm.
+    ///
+    /// `None`, solange kein Dokument geladen ist. Der Vorschlag ist nie mit dem
+    /// Eingabepfad identisch — dafür sorgt [`output_path_with_suffix`], das bei
+    /// leerem Zusatz auf den Standard zurückfällt.
+    pub fn suggested_output_path(&self) -> Option<PathBuf> {
+        self.pdf_path
+            .as_ref()
+            .map(|input| output_path_with_suffix(input, &self.output_suffix))
+    }
+
+    /// Vorschlag für die Review-Datei: neben dem Original, `…_review.json`.
+    pub fn suggested_review_path(&self) -> Option<PathBuf> {
+        self.pdf_path
+            .as_ref()
+            .map(|input| sibling_path(input, REVIEW_SUFFIX, "json"))
+    }
+
+    /// Audit-Log zu einer Ausgabedatei: gleiches Verzeichnis, gleicher Stamm,
+    /// Zusatz `_audit`, Endung `.json`.
+    ///
+    /// Das Log gehört immer neben die Datei, die es beschreibt — wandert die
+    /// Ausgabe in ein anderes Verzeichnis, wandert das Log mit.
+    pub fn audit_path_for(out: &Path) -> PathBuf {
+        sibling_path(out, AUDIT_SUFFIX, "json")
+    }
+
+    /// Vorschlag für das Audit-Log zur vorgeschlagenen Ausgabedatei.
+    pub fn suggested_audit_path(&self) -> Option<PathBuf> {
+        self.suggested_output_path()
+            .map(|out| Self::audit_path_for(&out))
+    }
+
+    /// Verzeichnis, in dem Dateidialoge starten sollen.
+    pub fn dialog_directory(&self) -> Option<PathBuf> {
+        self.pdf_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(|d| d.to_path_buf())
     }
 
     // ---------------------------------------------------------------- Export
@@ -978,6 +1032,116 @@ mod tests {
         assert_eq!(review.input.pages, 2);
         assert_eq!(review.input.sha256, "");
         assert_eq!(review.input.path, "demo.pdf");
+    }
+
+    #[test]
+    fn suggested_output_path_sits_next_to_the_input() {
+        let mut state = AppState::new();
+        assert_eq!(state.output_suffix, DEFAULT_OUTPUT_SUFFIX);
+        // Ohne Dokument gibt es keinen Vorschlag.
+        assert_eq!(state.suggested_output_path(), None);
+        assert_eq!(state.suggested_review_path(), None);
+        assert_eq!(state.suggested_audit_path(), None);
+        assert_eq!(state.dialog_directory(), None);
+
+        state
+            .load_bytes(
+                &redact_pdf::testing::demo_statement(),
+                Some(PathBuf::from("/daten/kontoauszug.pdf")),
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.suggested_output_path().unwrap(),
+            PathBuf::from("/daten/kontoauszug_geschwaerzt.pdf")
+        );
+        assert_eq!(
+            state.suggested_review_path().unwrap(),
+            PathBuf::from("/daten/kontoauszug_review.json")
+        );
+        assert_eq!(
+            state.suggested_audit_path().unwrap(),
+            PathBuf::from("/daten/kontoauszug_geschwaerzt_audit.json")
+        );
+        assert_eq!(state.dialog_directory().unwrap(), PathBuf::from("/daten"));
+    }
+
+    #[test]
+    fn suggested_output_path_honours_a_custom_suffix() {
+        let mut state = AppState::new();
+        state
+            .load_bytes(
+                &redact_pdf::testing::demo_statement(),
+                Some(PathBuf::from("/daten/kontoauszug.pdf")),
+            )
+            .unwrap();
+
+        state.output_suffix = "_anonym".to_string();
+        assert_eq!(
+            state.suggested_output_path().unwrap(),
+            PathBuf::from("/daten/kontoauszug_anonym.pdf")
+        );
+
+        // Leerer Zusatz fällt auf den Standard zurück, damit das Original
+        // niemals überschrieben wird.
+        state.output_suffix = String::new();
+        assert_eq!(
+            state.suggested_output_path().unwrap(),
+            PathBuf::from("/daten/kontoauszug_geschwaerzt.pdf")
+        );
+    }
+
+    #[test]
+    fn suggested_output_path_handles_a_missing_extension() {
+        let mut state = AppState::new();
+        state
+            .load_bytes(
+                &redact_pdf::testing::demo_statement(),
+                Some(PathBuf::from("/daten/kontoauszug")),
+            )
+            .unwrap();
+        assert_eq!(
+            state.suggested_output_path().unwrap(),
+            PathBuf::from("/daten/kontoauszug_geschwaerzt.pdf")
+        );
+    }
+
+    #[test]
+    fn suggested_output_path_never_equals_the_input() {
+        let inputs = [
+            "/daten/kontoauszug.pdf",
+            "kontoauszug.pdf",
+            "/daten/ohne_endung",
+            "/daten/.pdf",
+        ];
+        let suffixes = ["", "   ", "_geschwaerzt", "_x", "_anonym"];
+        for input in inputs {
+            let mut state = AppState::new();
+            state
+                .load_bytes(
+                    &redact_pdf::testing::demo_statement(),
+                    Some(PathBuf::from(input)),
+                )
+                .unwrap();
+            for suffix in suffixes {
+                state.output_suffix = suffix.to_string();
+                let out = state.suggested_output_path().unwrap();
+                assert_ne!(
+                    out,
+                    PathBuf::from(input),
+                    "Vorschlag darf die Eingabe nicht überschreiben ({input}, {suffix:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn audit_path_follows_the_chosen_output() {
+        // Wählt die Nutzerin ein anderes Verzeichnis, wandert das Log mit.
+        assert_eq!(
+            AppState::audit_path_for(Path::new("/woanders/final.pdf")),
+            PathBuf::from("/woanders/final_audit.json")
+        );
     }
 
     #[test]

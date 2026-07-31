@@ -18,6 +18,15 @@ use crate::state::{AppState, RegionColor};
 /// Information, um die es geht.
 pub const COLOR_DOT: &str = "●";
 
+/// Breite des Eingabefelds für den Namenszusatz.
+///
+/// Ausdrücklich `f32` — siehe die Anmerkung in [`crate::viewer`] zu
+/// `float_literal_f32_fallback`.
+const SUFFIX_FIELD_WIDTH: f32 = 120.0;
+
+/// Höhe der Seitenliste.
+const PAGE_LIST_HEIGHT: f32 = 64.0;
+
 /// Farbe einer Region als egui-Farbe.
 pub fn dot_color(color: RegionColor) -> Color32 {
     let (r, g, b) = color.rgb();
@@ -26,6 +35,9 @@ pub fn dot_color(color: RegionColor) -> Color32 {
 
 /// Zeichnet die gesamte Seitenleiste.
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
+    output_name(ui, state);
+    ui.separator();
+
     ui.heading("Seiten");
     pages(ui, state);
     ui.separator();
@@ -44,6 +56,28 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         });
 }
 
+/// Namenszusatz der Ausgabedatei samt Vorschau des Ergebnisses.
+fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.horizontal(|ui| {
+        ui.label("Namenszusatz");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.output_suffix)
+                .desired_width(SUFFIX_FIELD_WIDTH)
+                .hint_text(redact_core::DEFAULT_OUTPUT_SUFFIX),
+        )
+        .on_hover_text(
+            "Wird an den Dateinamen der Ausgabe angehängt. \
+             Leer bedeutet: Standardzusatz, damit das Original nie überschrieben wird.",
+        );
+    });
+
+    let suggestion = state
+        .suggested_output_path()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "— kein Dokument geladen —".to_string());
+    ui.label(RichText::new(suggestion).small().weak());
+}
+
 fn pages(ui: &mut egui::Ui, state: &mut AppState) {
     let count = state.page_count();
     if count == 0 {
@@ -52,7 +86,7 @@ fn pages(ui: &mut egui::Ui, state: &mut AppState) {
     }
     egui::ScrollArea::horizontal()
         .id_salt("page_list")
-        .max_height(64.0)
+        .max_height(PAGE_LIST_HEIGHT)
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for page in 0..count {

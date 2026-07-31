@@ -36,6 +36,140 @@ const BAR_PADDING: f32 = 2.0;
 /// Grober Platzbedarf von Seitenleiste und Leisten für „Einpassen“.
 const CHROME_SIZE: Vec2 = Vec2::new(360.0, 140.0);
 
+// Maße des Hinweises beim Ziehen von Dateien über das Fenster.
+
+/// Abstand des gestrichelten Rahmens zum Rand des Hauptbereichs.
+const DROP_MARGIN: f32 = 16.0;
+/// Strichstärke des gestrichelten Rahmens.
+const DROP_STROKE: f32 = 3.0;
+/// Länge eines Strichs des gestrichelten Rahmens.
+const DROP_DASH: f32 = 12.0;
+/// Länge einer Lücke des gestrichelten Rahmens.
+const DROP_GAP: f32 = 8.0;
+/// Eckenrundung der Abdunklung.
+const DROP_ROUNDING: f32 = 6.0;
+/// Schriftgröße des Hinweistextes.
+const DROP_FONT_SIZE: f32 = 28.0;
+
+/// Farbe des Ablege-Hinweises (dasselbe Orange wie manuelle Regionen).
+const DROP_ACCENT: Color32 = Color32::from_rgb(240, 150, 30);
+
+/// Baut einen Speichern-Dialog mit Verzeichnis- und Namensvorgabe.
+///
+/// `suggested` liefert beides; fehlt es (kein Dokument geladen), wird
+/// `fallback_name` benutzt. `rfd` nimmt für den Dateinamen nur den reinen
+/// Namen entgegen, das Verzeichnis kommt getrennt über `set_directory`.
+fn save_dialog(
+    title: &str,
+    filter_name: &str,
+    extensions: &[&str],
+    directory: Option<PathBuf>,
+    suggested: Option<PathBuf>,
+    fallback_name: &str,
+) -> rfd::FileDialog {
+    let name = suggested
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| fallback_name.to_string());
+
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter(filter_name, extensions)
+        .set_title(title)
+        .set_file_name(name);
+
+    // Verzeichnis des Vorschlags hat Vorrang, sonst das des Originals.
+    let dir = suggested
+        .as_ref()
+        .and_then(|p| p.parent())
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| d.to_path_buf())
+        .or(directory);
+    if let Some(dir) = dir {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog
+}
+
+/// Was mit den auf das Fenster gezogenen Dateien geschehen soll.
+///
+/// Reine Datenentscheidung — dadurch lässt sich das Verhalten ohne Fenster,
+/// ohne Maus und ohne echtes Ablegen testen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DropAction {
+    /// Es wurde nichts (Brauchbares) abgelegt.
+    Nothing,
+    /// Diese Datei öffnen. `ignored` weitere Dateien wurden übergangen.
+    Open { path: PathBuf, ignored: usize },
+    /// Nur Inhalt ohne Pfad — so liefert der Web-Build ab. Über
+    /// [`AppState::load_bytes`] laden.
+    OpenBytes {
+        name: String,
+        bytes: std::sync::Arc<[u8]>,
+        ignored: usize,
+    },
+    /// Nichts davon war ein PDF.
+    Rejected { names: Vec<String> },
+}
+
+/// Heißt diese Datei auf `.pdf` (Groß-/Kleinschreibung egal)?
+pub fn is_pdf_name(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+}
+
+/// Anzeigename einer abgelegten Datei.
+fn dropped_name(file: &egui::DroppedFile) -> String {
+    match &file.path {
+        Some(path) => path.display().to_string(),
+        None if !file.name.is_empty() => file.name.clone(),
+        None => "(unbenannt)".to_string(),
+    }
+}
+
+/// Entscheidet, was mit einer Menge abgelegter Dateien passiert.
+///
+/// Es wird die **erste** PDF-Datei geöffnet; alle weiteren Dateien werden
+/// gezählt und in der Statuszeile erwähnt. Ist keine PDF-Datei dabei, kommt
+/// [`DropAction::Rejected`] mit den Namen zurück — geladen wird dann nichts.
+pub fn classify_drop(files: &[egui::DroppedFile]) -> DropAction {
+    if files.is_empty() {
+        return DropAction::Nothing;
+    }
+
+    let position = files.iter().position(|f| match &f.path {
+        Some(path) => is_pdf_name(&path.to_string_lossy()),
+        // Web-Build: kein Pfad, dafür Name und Inhalt.
+        None => is_pdf_name(&f.name) || f.mime == "application/pdf",
+    });
+
+    let Some(index) = position else {
+        return DropAction::Rejected {
+            names: files.iter().map(dropped_name).collect(),
+        };
+    };
+
+    let ignored = files.len() - 1;
+    let file = &files[index];
+    match (&file.path, &file.bytes) {
+        (Some(path), _) => DropAction::Open {
+            path: path.clone(),
+            ignored,
+        },
+        (None, Some(bytes)) => DropAction::OpenBytes {
+            name: file.name.clone(),
+            bytes: bytes.clone(),
+            ignored,
+        },
+        // Weder Pfad noch Inhalt — damit lässt sich nichts anfangen.
+        (None, None) => DropAction::Rejected {
+            names: vec![dropped_name(file)],
+        },
+    }
+}
+
 /// Zustand der Oberfläche.
 pub struct RedactApp {
     pub state: AppState,
@@ -44,6 +178,9 @@ pub struct RedactApp {
     pub pattern_ids: Vec<String>,
     /// Letzte Fehlermeldung; wird als roter Text in der Statuszeile gezeigt.
     error: Option<String>,
+    /// Fläche des Hauptbereichs im letzten Frame — Grundlage für den
+    /// Ablege-Hinweis, der über allem liegt.
+    central_rect: Option<egui::Rect>,
 }
 
 impl Default for RedactApp {
@@ -59,6 +196,7 @@ impl RedactApp {
             selector: RectangleSelector::new(),
             pattern_ids,
             error: None,
+            central_rect: None,
         }
     }
 
@@ -97,8 +235,56 @@ impl RedactApp {
         self.report(result);
     }
 
+    /// Öffnet ein aus dem Speicher abgelegtes PDF (Web-Build ohne Pfad).
+    pub fn open_bytes_and_analyze(&mut self, bytes: &[u8], name: &str) {
+        let path = (!name.is_empty()).then(|| PathBuf::from(name));
+        let ids = self.pattern_ids.clone();
+        let booking = self.state.booking_path.clone();
+        let result = self
+            .state
+            .load_bytes(bytes, path)
+            .and_then(|()| self.state.analyze(&ids, booking.as_deref()).map(|_| ()));
+        self.report(result);
+    }
+
+    /// Führt die Entscheidung aus, die [`classify_drop`] getroffen hat.
+    pub fn apply_drop(&mut self, action: DropAction) {
+        match action {
+            DropAction::Nothing => {}
+            DropAction::Open { path, ignored } => {
+                self.open_and_analyze(path);
+                self.note_ignored(ignored);
+            }
+            DropAction::OpenBytes {
+                name,
+                bytes,
+                ignored,
+            } => {
+                self.open_bytes_and_analyze(&bytes, &name);
+                self.note_ignored(ignored);
+            }
+            DropAction::Rejected { names } => {
+                self.error = None;
+                self.state.status = format!(
+                    "Keine PDF-Datei abgelegt — übergangen: {}",
+                    names.join(", ")
+                );
+            }
+        }
+    }
+
+    /// Ergänzt die Statuszeile um die Zahl der übergangenen Dateien.
+    fn note_ignored(&mut self, ignored: usize) {
+        if ignored > 0 {
+            self.state.status = format!(
+                "{} ({ignored} weitere Datei(en) ignoriert)",
+                self.state.status
+            );
+        }
+    }
+
     fn export_to(&mut self, out: PathBuf) {
-        let audit = out.with_extension("audit.json");
+        let audit = AppState::audit_path_for(&out);
         match self.state.export(&out, Some(&audit)) {
             Ok(report) => {
                 self.error = None;
@@ -137,11 +323,13 @@ impl RedactApp {
             }
 
             if ui.button("Buchungsliste …").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
+                let mut dialog = rfd::FileDialog::new()
                     .add_filter("CSV", &["csv"])
-                    .set_title("Buchungsliste laden")
-                    .pick_file()
-                {
+                    .set_title("Buchungsliste laden");
+                if let Some(dir) = self.state.dialog_directory() {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(path) = dialog.pick_file() {
                     self.state.booking_path = Some(path);
                     self.analyze();
                 }
@@ -153,21 +341,17 @@ impl RedactApp {
                 .add_enabled(loaded, egui::Button::new("Exportieren …"))
                 .clicked()
             {
-                let suggested = self
-                    .state
-                    .pdf_path
-                    .as_ref()
-                    .and_then(|p| {
-                        p.file_stem()
-                            .map(|s| format!("{}_geschwaerzt.pdf", s.to_string_lossy()))
-                    })
-                    .unwrap_or_else(|| "geschwaerzt.pdf".to_string());
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PDF", &["pdf"])
-                    .set_file_name(suggested)
-                    .set_title("Geschwärztes PDF speichern")
-                    .save_file()
-                {
+                // Vorgabe: neben dem Original, Stamm + Namenszusatz.
+                let suggested = self.state.suggested_output_path();
+                let dialog = save_dialog(
+                    "Geschwärztes PDF speichern",
+                    "PDF",
+                    &["pdf"],
+                    self.state.dialog_directory(),
+                    suggested,
+                    "geschwaerzt.pdf",
+                );
+                if let Some(path) = dialog.save_file() {
                     self.export_to(path);
                 }
             }
@@ -176,11 +360,15 @@ impl RedactApp {
                 .add_enabled(loaded, egui::Button::new("Review speichern …"))
                 .clicked()
             {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("JSON", &["json"])
-                    .set_file_name("review.json")
-                    .save_file()
-                {
+                let dialog = save_dialog(
+                    "Review-Datei speichern",
+                    "JSON",
+                    &["json"],
+                    self.state.dialog_directory(),
+                    self.state.suggested_review_path(),
+                    "review.json",
+                );
+                if let Some(path) = dialog.save_file() {
                     let result = self
                         .state
                         .to_review_file()
@@ -191,10 +379,13 @@ impl RedactApp {
             }
 
             if ui.button("Review laden …").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
+                let mut dialog = rfd::FileDialog::new()
                     .add_filter("JSON", &["json"])
-                    .pick_file()
-                {
+                    .set_title("Review-Datei laden");
+                if let Some(dir) = self.state.dialog_directory() {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(path) = dialog.pick_file() {
                     let result = std::fs::read_to_string(&path)
                         .map_err(redact_core::RedactError::from)
                         .and_then(|data| ReviewFile::from_json(&data))
@@ -215,7 +406,7 @@ impl RedactApp {
             }
             if ui.button("Einpassen").clicked() {
                 let page_box = self.state.current_page_box();
-                let available = ui.ctx().screen_rect().size() - Vec2::new(360.0, 140.0);
+                let available = ui.ctx().screen_rect().size() - CHROME_SIZE;
                 self.state.set_zoom(viewer::fit_zoom(available, &page_box));
             }
         });
@@ -338,6 +529,65 @@ impl RedactApp {
         }
     }
 
+    /// Nimmt auf das Fenster gezogene Dateien entgegen.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        self.apply_drop(classify_drop(&dropped));
+    }
+
+    /// Zeigt an, dass hier abgelegt werden darf, solange Dateien über dem
+    /// Fenster schweben.
+    ///
+    /// Gezeichnet wird auf der Vordergrundebene, damit der Hinweis über
+    /// Seitenleiste und Seitenvorschau liegt.
+    fn paint_drop_hint(&self, ctx: &egui::Context) {
+        let hovering = ctx.input(|i| i.raw.hovered_files.len());
+        if hovering == 0 {
+            return;
+        }
+        let Some(area) = self.central_rect else {
+            return;
+        };
+
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("drop_hint"),
+        ));
+
+        // Abdunkeln, damit der Hinweis nicht im Seiteninhalt untergeht.
+        painter.rect_filled(area, DROP_ROUNDING, Color32::from_black_alpha(160));
+
+        // Gestrichelter Rahmen aus vier Kanten.
+        let frame = area.shrink(DROP_MARGIN);
+        let stroke = Stroke::new(DROP_STROKE, DROP_ACCENT);
+        let corners = [
+            frame.left_top(),
+            frame.right_top(),
+            frame.right_bottom(),
+            frame.left_bottom(),
+            frame.left_top(),
+        ];
+        for edge in corners.windows(2) {
+            painter.extend(egui::Shape::dashed_line(edge, stroke, DROP_DASH, DROP_GAP));
+        }
+
+        let text = if hovering > 1 {
+            format!("{hovering} Dateien hier ablegen — die erste PDF wird geöffnet")
+        } else {
+            "PDF hier ablegen".to_string()
+        };
+        painter.text(
+            frame.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(DROP_FONT_SIZE),
+            Color32::WHITE,
+        );
+    }
+
     fn handle_keys(&mut self, ctx: &egui::Context) {
         let (delete, escape, left, right, up, down, page_up, page_down, shift) = ctx.input(|i| {
             (
@@ -389,12 +639,13 @@ impl RedactApp {
 
 impl eframe::App for RedactApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_dropped_files(ctx);
         self.handle_keys(ctx);
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.add_space(2.0);
+            ui.add_space(BAR_PADDING);
             self.top_bar(ui);
-            ui.add_space(2.0);
+            ui.add_space(BAR_PADDING);
         });
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
@@ -409,17 +660,24 @@ impl eframe::App for RedactApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            self.central_rect = Some(ui.max_rect());
             if self.state.is_loaded() {
                 self.page_view(ui);
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label(
-                        RichText::new("Kein Dokument geladen.\n\n„PDF öffnen …“ oben links.")
-                            .weak(),
+                        RichText::new(
+                            "Kein Dokument geladen.\n\n\
+                             „PDF öffnen …“ oben links — oder eine PDF-Datei hier ablegen.",
+                        )
+                        .weak(),
                     );
                 });
             }
         });
+
+        // Zuletzt, damit der Hinweis über allem liegt.
+        self.paint_drop_hint(ctx);
     }
 }
 
