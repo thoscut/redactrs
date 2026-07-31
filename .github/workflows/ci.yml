@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test / Lint (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # eframe/egui (glow + x11 + wayland) und rfd brauchen unter Linux
+      # ein paar Entwicklungspakete. Das meiste wird zwar zur Laufzeit
+      # per dlopen geladen, aber pkg-config/GTK werden von einigen
+      # build.rs-Skripten trotzdem abgefragt.
+      - name: Install Linux GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-3-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libssl-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            libfontconfig1-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  build-windows:
+    name: Build (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Volle Feature-Menge inkl. GUI: unter MSVC bringen eframe/egui/rfd
+      # ihre Windows-Abhaengigkeiten selbst mit, es sind keine
+      # Systempakete noetig.
+      - name: Build redact-rs (release)
+        run: cargo build --release -p redact-cli
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Upload redact-rs.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: redact-rs-windows-x86_64
+          path: target/release/redact-rs.exe
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,222 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.1.0)"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.suffix }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: x86_64-windows
+            bin: redact-rs.exe
+            ext: zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: x86_64-linux
+            bin: redact-rs
+            ext: tar.gz
+    steps:
+      - name: Resolve tag and version
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building tag=$TAG version=$VERSION"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Nur Linux: Build-Abhaengigkeiten fuer eframe/egui (glow, x11,
+      # wayland) und rfd.
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-3-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libssl-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            libfontconfig1-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build redact-rs
+        run: cargo build --release --target ${{ matrix.target }} -p redact-cli
+
+      - name: Stage package contents
+        shell: bash
+        env:
+          ARCHIVE: redact-rs-${{ steps.meta.outputs.version }}-${{ matrix.suffix }}.${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          rm -rf staging
+          mkdir -p staging
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" staging/
+          for f in README.md LICENSE-MIT LICENSE-APACHE LICENSE; do
+            if [ -f "$f" ]; then cp "$f" staging/; fi
+          done
+          if [ -d examples ]; then
+            cp -r examples staging/examples
+          else
+            echo "::warning::no examples/ directory found - archive will not contain examples"
+          fi
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          ls -la staging
+
+      - name: Create zip archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path staging/* -DestinationPath "$env:ARCHIVE" -CompressionLevel Optimal
+
+      - name: Create tar.gz archive (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "$ARCHIVE" -C staging .
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.suffix }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve tag and version
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        id: sums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+          shopt -s nullglob
+          files=(redact-rs-*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no release archives were downloaded"
+            exit 1
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Build release notes
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## redact-rs ${VERSION}"
+            echo
+            echo "Vorkompilierte Binaries von \`redact-rs\` (Tag \`${TAG}\`)."
+            echo
+            echo "### Artefakte"
+            echo
+            echo "| Datei | Plattform |"
+            echo "| --- | --- |"
+            echo "| \`redact-rs-${VERSION}-x86_64-windows.zip\` | Windows x86_64 (MSVC) |"
+            echo "| \`redact-rs-${VERSION}-x86_64-linux.tar.gz\` | Linux x86_64 (glibc) |"
+            echo "| \`SHA256SUMS\` | Pruefsummen aller Artefakte |"
+            echo
+            echo "### SHA-256"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+            echo
+            echo "Pruefen mit \`sha256sum -c SHA256SUMS\` (Linux) bzw."
+            echo "\`Get-FileHash <datei> -Algorithm SHA256\` (PowerShell)."
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: redact-rs ${{ steps.meta.outputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/redact-rs-*
+            dist/SHA256SUMS
