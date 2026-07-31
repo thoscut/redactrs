@@ -1,0 +1,13 @@
+[package]
+name = "redact-render"
+description = "Glyph outline extraction and rasterization for the redact-rs page preview"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# skrifa liest sowohl TrueType-`glyf` als auch PostScript-`CFF`/`CFF2`.
+# 0.33 ist die letzte Reihe mit rust-version 1.75 (= MSRV des Workspace).
+skrifa = { version = "0.33.2", default-features = false, features = ["std"] }
