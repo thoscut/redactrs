@@ -3,17 +3,70 @@
 //! Bewusst streng: verschlüsselte oder strukturell kaputte Dateien werden
 //! abgelehnt statt repariert. Eine „reparierte“ Datei könnte Inhalte enthalten,
 //! die der Analyse entgehen — und damit ungeschwärzt durchrutschen.
+//!
+//! ## Eingaben sind nicht vertrauenswürdig
+//!
+//! Ein PDF kommt von dem, dessen Daten wir schwärzen sollen — also genau von
+//! der Seite, die ein Interesse daran haben kann, dass das Werkzeug abstürzt
+//! oder die Maschine lahmlegt. Deshalb läuft vor dem Parsen eine
+//! [`prescan`]-Vorprüfung über die Rohbytes, und alles, was geschrieben wird,
+//! geht durch den einen Schreibpfad [`write_file`].
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use lopdf::{Document, Object, ObjectId};
 use redact_core::{Rect, RedactError, Renderer, Result};
 
+// ---------------------------------------------------------------------------
+// Grenzen für nicht vertrauenswürdige Eingaben
+// ---------------------------------------------------------------------------
+
+/// Obergrenzen, mit denen fremde PDFs gelesen werden.
+///
+/// Die Werte sind bewusst großzügig gegenüber echten Dokumenten und trotzdem
+/// weit unterhalb dessen, was die Maschine in die Knie zwingt. Wer sie ändert,
+/// sollte die Messungen in `SECURITY.md` kennen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Maximale Verschachtelungstiefe von `[` bzw. `<<` in den Rohbytes.
+    ///
+    /// `lopdf` parst rekursiv; ab einigen hundert Ebenen (Debug-Build) bzw.
+    /// einigen tausend (Release) läuft der Stack über und der Prozess bricht
+    /// mit SIGABRT ab — siehe RUSTSEC-2026-0187.
+    pub max_nesting_depth: usize,
+    /// Summe der **entpackten** Bytes über alle Streams der Datei.
+    pub max_decompressed_bytes: u64,
+    /// Davon: die Streams, die anschließend als PDF-Syntax geparst werden
+    /// (Objekt-Streams und Content-Streams).
+    ///
+    /// Diese Streams sind der teure Teil: aus einem Byte Content-Stream werden
+    /// im Speicher rund 60 Byte `lopdf::content::Operation`. Deshalb hat diese
+    /// Klasse ein eigenes, sehr viel engeres Budget als der Rest (Bilder,
+    /// Schriften, eingebettete Dateien), der nur gespeichert wird.
+    pub max_parsed_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_nesting_depth: 128,
+            max_decompressed_bytes: 1024 * 1024 * 1024,
+            max_parsed_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
 /// Lädt ein PDF von der Platte und prüft es.
 pub fn load(path: &Path) -> Result<Document> {
+    load_with_limits(path, &Limits::default())
+}
+
+/// Wie [`load`], aber mit eigenen Grenzen.
+pub fn load_with_limits(path: &Path, limits: &Limits) -> Result<Document> {
     let bytes = std::fs::read(path)?;
-    load_from_bytes(&bytes).map_err(|e| match e {
+    load_from_bytes_with_limits(&bytes, limits).map_err(|e| match e {
         RedactError::Pdf(msg) => RedactError::Pdf(format!("{}: {msg}", path.display())),
         other => other,
     })
@@ -21,6 +74,11 @@ pub fn load(path: &Path) -> Result<Document> {
 
 /// Lädt ein PDF aus dem Speicher (es werden keine temporären Dateien angelegt).
 pub fn load_from_bytes(bytes: &[u8]) -> Result<Document> {
+    load_from_bytes_with_limits(bytes, &Limits::default())
+}
+
+/// Wie [`load_from_bytes`], aber mit eigenen Grenzen.
+pub fn load_from_bytes_with_limits(bytes: &[u8], limits: &Limits) -> Result<Document> {
     if !bytes.starts_with(b"%PDF-") {
         // Manche Dateien haben ein paar Bytes Vorspann — das ist zulässig,
         // aber der Header muss in den ersten 1024 Bytes auftauchen.
@@ -32,11 +90,497 @@ pub fn load_from_bytes(bytes: &[u8]) -> Result<Document> {
         }
     }
 
+    // Vorprüfung der Rohbytes — muss *vor* `load_mem` laufen, denn dort läuft
+    // der Stack über, bevor irgendein Rückgabewert entsteht.
+    prescan(bytes, limits)?;
+
     let doc = Document::load_mem(bytes)
         .map_err(|e| RedactError::Pdf(format!("Datei nicht lesbar: {e}")))?;
 
     validate(&doc)?;
     Ok(doc)
+}
+
+// ---------------------------------------------------------------------------
+// Vorprüfung der Rohbytes
+// ---------------------------------------------------------------------------
+
+/// Rohgröße, bis zu der ein Stream mit einem Nicht-Flate-Filter ausgepackt
+/// wird. Darüber lehnen wir ab, statt einem fremden Dekoder ein unbegrenztes
+/// Speicherbudget zu geben.
+const MAX_LEGACY_STREAM_BYTES: usize = 16 * 1024 * 1024;
+
+/// Anteil nicht druckbarer Bytes, ab dem eine Nutzlast als Binärdaten gilt.
+const BINARY_RATIO: f64 = 0.10;
+
+/// Tiefengrenze für Nutzlasten, die wie Binärdaten aussehen.
+///
+/// Auch sie werden gezählt — sonst genügte es, einen Content-Stream mit
+/// Rauschen zu spicken, um die Prüfung zu umgehen. Weil in Binärdaten aber
+/// zufällig unpaarige `[`-Bytes vorkommen, ist die Grenze hier höher.
+///
+/// Belegt: über einen 6,2-MB-Stream aus gleichverteilten Zufallsbytes kommt
+/// die Zählung auf Tiefe 61; echte Schriften, Bilder und Farbprofile blieben
+/// im Test unter 30. `lopdf` läuft (Debug-Build) erst oberhalb von 500 Ebenen
+/// über den Stack — 256 liegt zwischen beidem.
+const MAX_BINARY_NESTING_DEPTH: usize = 256;
+
+/// Prüft die Rohbytes einer Datei, *bevor* `lopdf` sie zu sehen bekommt.
+///
+/// Zwei Dinge werden gemessen:
+///
+/// 1. **Verschachtelungstiefe.** `lopdf` parst rekursiv. Ein PDF mit 200 000
+///    offenen `[` beendet den Prozess mit SIGABRT, bevor irgendein Fehlerwert
+///    entstehen kann (RUSTSEC-2026-0187). Ein Fehler nach dem Absturz nützt
+///    niemandem — die Prüfung muss davor laufen.
+/// 2. **Entpackte Gesamtgröße.** Ein 400-kB-PDF, dessen Content-Stream sich
+///    auf 200 MB aufbläht, belegt beim Parsen zweistellige Gigabytes.
+///
+/// Untersucht werden auch die *ausgepackten* Streams — die Verschachtelung
+/// lässt sich sonst trivial in einem komprimierten Objekt- oder Content-Stream
+/// verstecken.
+pub fn prescan(bytes: &[u8], limits: &Limits) -> Result<()> {
+    let mut scan = Prescan {
+        limits,
+        decompressed: 0,
+        parsed: 0,
+    };
+    scan.walk(bytes, true, limits.max_nesting_depth)
+}
+
+fn check_depth(depth: usize, limit: usize) -> Result<()> {
+    if depth > limit {
+        return Err(RedactError::Pdf(format!(
+            "Verschachtelungstiefe über {limit} — die Datei wird abgelehnt. \
+             Tief verschachtelte Objektstrukturen bringen den PDF-Parser zum \
+             Stapelüberlauf (RUSTSEC-2026-0187); eine solche Datei ist kein \
+             normales Dokument."
+        )));
+    }
+    Ok(())
+}
+
+struct Prescan<'a> {
+    limits: &'a Limits,
+    decompressed: u64,
+    parsed: u64,
+}
+
+impl Prescan<'_> {
+    /// Läuft über einen Byte-Bereich und zählt die Klammertiefe.
+    ///
+    /// Zeichenketten, Kommentare und (in Content-Streams) eingebettete Bilder
+    /// werden übersprungen — dort steht Nutzlast, keine Struktur. `streams`
+    /// steuert, ob `stream … endstream` als Nutzlast behandelt wird; das gilt
+    /// nur für die Datei selbst, nicht für bereits ausgepackte Streams.
+    ///
+    /// `limit` ist die zulässige Tiefe — für Binärnutzlast höher, siehe
+    /// [`MAX_BINARY_NESTING_DEPTH`].
+    fn walk(&mut self, bytes: &[u8], streams: bool, limit: usize) -> Result<()> {
+        let mut i = 0usize;
+        let mut depth = 0usize;
+        // Anfang des äußersten Dictionaries — das ist der Kopf des Streams,
+        // der gleich folgen kann.
+        let mut dict_start = 0usize;
+        let mut dict_end = 0usize;
+
+        while i < bytes.len() {
+            match bytes[i] {
+                b'%' => i = skip_to_eol(bytes, i),
+                b'(' => i = skip_literal_string(bytes, i),
+                b'<' if bytes.get(i + 1) == Some(&b'<') => {
+                    if depth == 0 {
+                        dict_start = i;
+                    }
+                    depth += 1;
+                    check_depth(depth, limit)?;
+                    i += 2;
+                }
+                b'<' => i = skip_hex_string(bytes, i),
+                b'>' if bytes.get(i + 1) == Some(&b'>') => {
+                    depth = depth.saturating_sub(1);
+                    i += 2;
+                    if depth == 0 {
+                        dict_end = i;
+                    }
+                }
+                b'[' => {
+                    depth += 1;
+                    check_depth(depth, limit)?;
+                    i += 1;
+                }
+                b']' => {
+                    depth = depth.saturating_sub(1);
+                    i += 1;
+                }
+                b's' if streams && depth == 0 && keyword_at(bytes, i, b"stream") => {
+                    let start = payload_start(bytes, i + b"stream".len());
+                    let end = find_from(bytes, b"endstream", start).unwrap_or(bytes.len());
+                    let dict = if dict_end > dict_start && dict_end <= i {
+                        &bytes[dict_start..dict_end]
+                    } else {
+                        &[][..]
+                    };
+                    self.account(dict, &bytes[start..end.max(start)])?;
+                    i = end;
+                }
+                // Eingebettetes Bild in einem Content-Stream: zwischen `ID`
+                // und `EI` stehen rohe Bilddaten, keine Syntax.
+                b'B' if !streams && keyword_at(bytes, i, b"BI") => {
+                    i = skip_inline_image(bytes, i);
+                }
+                _ => i += 1,
+            }
+        }
+        Ok(())
+    }
+
+    /// Verbucht einen Stream und untersucht ihn, wenn er später geparst wird.
+    fn account(&mut self, dict: &[u8], payload: &[u8]) -> Result<()> {
+        let filters = filter_names(dict);
+        // Nur diese Filter kann `lopdf` auspacken. Alles andere (DCT, JPX,
+        // CCITT, JBIG2, RunLength, Unbekanntes) wird nie zu PDF-Syntax und
+        // kann folglich auch keine Verschachtelung verstecken.
+        let decodable = filters.iter().all(|f| {
+            matches!(
+                f.as_slice(),
+                b"FlateDecode" | b"LZWDecode" | b"ASCII85Decode"
+            )
+        });
+
+        if !decodable {
+            return self.charge(payload.len() as u64, false);
+        }
+
+        let total_room = self
+            .limits
+            .max_decompressed_bytes
+            .saturating_sub(self.decompressed);
+        let parsed_room = self.limits.max_parsed_bytes.saturating_sub(self.parsed);
+        // Solange das Dictionary nichts Gegenteiliges sagt, könnte hier
+        // PDF-Syntax stehen — dann gilt sofort das engere Budget, und die
+        // Bombe fliegt auf, bevor sie 16 MB belegt hat.
+        let maybe_syntax = !marked_binary(dict);
+        let room = if maybe_syntax {
+            total_room.min(parsed_room)
+        } else {
+            total_room
+        };
+
+        let mut decoded = self.decode(&filters, payload, room)?;
+        if let Some((data, true)) = &decoded {
+            if maybe_syntax && looks_binary(data) {
+                // Doch Binärdaten. Für die zählt nur das große Budget, also
+                // noch einmal messen — sonst wären sie zu klein verbucht.
+                decoded = self.decode(&filters, payload, total_room)?;
+            }
+        }
+
+        let data = decoded
+            .as_ref()
+            .map(|(d, _)| d.as_slice())
+            .unwrap_or(payload);
+        let binary = looks_binary(data);
+        let syntax = maybe_syntax && !binary;
+        self.charge(data.len() as u64, syntax)?;
+
+        // Bilddaten sind der einzige Fall, in dem das Überspringen *belegbar*
+        // ist: `lopdf::Stream::decompressed_content` verweigert Streams mit
+        // `/Subtype /Image`, sie werden also nie zu Objekten oder Operatoren.
+        // Alles andere wird gezählt — sonst genügte ein `/Length1` im
+        // Dictionary, um die Tiefenprüfung zu umgehen.
+        if !is_image(dict) {
+            let limit = if binary {
+                MAX_BINARY_NESTING_DEPTH
+            } else {
+                self.limits.max_nesting_depth
+            };
+            self.walk(data, false, limit)?;
+        }
+        Ok(())
+    }
+
+    /// Packt einen Stream aus — speicherbegrenzt.
+    ///
+    /// `FlateDecode` läuft über einen begrenzten Leser und kann deshalb nie
+    /// mehr belegen als `room`. `ASCII85Decode` schrumpft. `LZWDecode`
+    /// überlassen wir `lopdf`, begrenzen dafür aber die Rohgröße.
+    ///
+    /// Der zweite Rückgabewert sagt, ob `room` erreicht wurde — die Nutzlast
+    /// ist dann abgeschnitten und nur noch als „mindestens so groß“ zu lesen.
+    fn decode(
+        &self,
+        filters: &[Vec<u8>],
+        payload: &[u8],
+        room: u64,
+    ) -> Result<Option<(Vec<u8>, bool)>> {
+        if filters.is_empty() {
+            return Ok(None);
+        }
+        let legacy = filters.iter().any(|f| f.as_slice() != b"FlateDecode");
+        if legacy && payload.len() > MAX_LEGACY_STREAM_BYTES {
+            return Err(RedactError::Pdf(format!(
+                "Stream mit Altlast-Filter ({}) ist mit {} Bytes zu groß \
+                 (Grenze {} Bytes). Solche Streams werden nicht ausgepackt, \
+                 weil sich ihr Speicherbedarf nicht vorab begrenzen lässt.",
+                filters
+                    .iter()
+                    .map(|f| String::from_utf8_lossy(f).into_owned())
+                    .collect::<Vec<_>>()
+                    .join("+"),
+                payload.len(),
+                MAX_LEGACY_STREAM_BYTES
+            )));
+        }
+
+        let mut data = payload.to_vec();
+        let mut truncated = false;
+        for filter in filters {
+            data = match filter.as_slice() {
+                b"FlateDecode" => match inflate_bounded(&data, room) {
+                    Some((out, hit)) => {
+                        truncated |= hit;
+                        out
+                    }
+                    // Kaputter oder verschlüsselter Stream: nicht auspackbar,
+                    // also wird er auch nicht geparst.
+                    None => return Ok(None),
+                },
+                other => match lopdf_decode(other, &data) {
+                    Some(out) => out,
+                    None => return Ok(None),
+                },
+            };
+        }
+        Ok(Some((data, truncated)))
+    }
+
+    fn charge(&mut self, size: u64, syntax: bool) -> Result<()> {
+        self.decompressed = self.decompressed.saturating_add(size);
+        if self.decompressed > self.limits.max_decompressed_bytes {
+            return Err(RedactError::Pdf(format!(
+                "entpackte Streams überschreiten das Budget von {} MB. \
+                 Das ist das Muster einer Dekompressionsbombe: eine kleine \
+                 Datei, die sich beim Öffnen vervielfacht.",
+                self.limits.max_decompressed_bytes / (1024 * 1024)
+            )));
+        }
+        if syntax {
+            self.parsed = self.parsed.saturating_add(size);
+            if self.parsed > self.limits.max_parsed_bytes {
+                return Err(RedactError::Pdf(format!(
+                    "die zu parsenden Streams (Seiteninhalt, Objekt-Streams) \
+                     überschreiten das Budget von {} MB. Beim Parsen wird \
+                     daraus ein Vielfaches an Arbeitsspeicher.",
+                    self.limits.max_parsed_bytes / (1024 * 1024)
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Entpackt mit `flate2` und bricht ab, sobald `limit` überschritten ist.
+///
+/// Der zweite Rückgabewert meldet, dass die Grenze erreicht wurde. Belegt wird
+/// nie mehr als `limit + 1` Byte — deshalb kann eine Dekompressionsbombe hier
+/// nichts ausrichten.
+fn inflate_bounded(data: &[u8], limit: u64) -> Option<(Vec<u8>, bool)> {
+    let mut out = Vec::new();
+    let reader = flate2::read::ZlibDecoder::new(data);
+    if reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut out)
+        .is_err()
+    {
+        return None;
+    }
+    let truncated = out.len() as u64 > limit;
+    Some((out, truncated))
+}
+
+/// Auspacken über `lopdf` — für die Filter, die wir nicht selbst können.
+fn lopdf_decode(filter: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+    let mut dict = lopdf::Dictionary::new();
+    dict.set("Filter", Object::Name(filter.to_vec()));
+    lopdf::Stream::new(dict, data.to_vec())
+        .decompressed_content()
+        .ok()
+}
+
+/// Filternamen aus den Rohbytes eines Stream-Dictionaries.
+fn filter_names(dict: &[u8]) -> Vec<Vec<u8>> {
+    let Some(pos) = find_from(dict, b"/Filter", 0) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut i = pos + b"/Filter".len();
+    // Hinter `/Filter` steht entweder ein Name oder ein Array von Namen.
+    // Beides endet spätestens am nächsten Schlüssel oder am Ende.
+    while i < dict.len() {
+        match dict[i] {
+            b'/' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < dict.len() && !is_delimiter(dict[end]) && !is_whitespace(dict[end]) {
+                    end += 1;
+                }
+                out.push(dict[start..end].to_vec());
+                i = end;
+                // Ein einzelner Name (kein Array) beendet die Liste.
+                if out.len() == 1 && !dict[pos..start].contains(&b'[') {
+                    break;
+                }
+            }
+            b']' | b'>' => break,
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// Ist das ein Bild-Stream?
+///
+/// Für die gilt eine belegbare Aussage: `lopdf` weigert sich, sie auszupacken
+/// (`Stream::decompressed_content` liefert `Error::Type`, sobald `/Subtype`
+/// gleich `/Image` ist). Ihr Inhalt wird deshalb nie zu Objekten oder
+/// Operatoren und kann auch keine Verschachtelung verstecken.
+fn is_image(dict: &[u8]) -> bool {
+    find_from(dict, b"/Image", 0).is_some()
+}
+
+/// Sagt das Dictionary, dass hier Nutzlast statt Syntax liegt?
+///
+/// Wird nur für die *Buchhaltung* benutzt: solche Streams zählen gegen das
+/// große Budget, nicht gegen das enge für geparste Bytes. Für die
+/// Tiefenprüfung taugt das Dictionary nicht als Kriterium — ein Angreifer
+/// schreibt sich jeden dieser Schlüssel selbst hinein.
+fn marked_binary(dict: &[u8]) -> bool {
+    const MARKERS: &[&[u8]] = &[
+        b"/Image",
+        b"/XRef",
+        b"/Metadata",
+        b"/EmbeddedFile",
+        b"/Length1",
+        b"/Type1C",
+        b"/CIDFontType0C",
+        b"/OpenType",
+    ];
+    MARKERS.iter().any(|m| find_from(dict, m, 0).is_some())
+}
+
+/// Notbremse für Streams, die das Dictionary nicht als Binärdaten ausweist.
+fn looks_binary(data: &[u8]) -> bool {
+    let sample = &data[..data.len().min(64 * 1024)];
+    if sample.is_empty() {
+        return false;
+    }
+    let odd = sample
+        .iter()
+        .filter(|b| !matches!(b, 9 | 10 | 12 | 13 | 32..=126))
+        .count();
+    odd as f64 / sample.len() as f64 > BINARY_RATIO
+}
+
+fn is_whitespace(b: u8) -> bool {
+    matches!(b, 0 | 9 | 10 | 12 | 13 | 32)
+}
+
+fn is_delimiter(b: u8) -> bool {
+    matches!(
+        b,
+        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+    )
+}
+
+/// Steht an `i` das Schlüsselwort `kw`, sauber abgegrenzt?
+fn keyword_at(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
+    if !bytes[i..].starts_with(kw) {
+        return false;
+    }
+    let before_ok = i == 0 || is_whitespace(bytes[i - 1]) || is_delimiter(bytes[i - 1]);
+    let after_ok = match bytes.get(i + kw.len()) {
+        Some(b) => is_whitespace(*b) || is_delimiter(*b),
+        None => true,
+    };
+    before_ok && after_ok
+}
+
+fn skip_to_eol(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' {
+        i += 1;
+    }
+    i
+}
+
+/// Überspringt eine literale Zeichenkette `( … )` samt Escapes und
+/// geschachtelten Klammern.
+fn skip_literal_string(bytes: &[u8], mut i: usize) -> usize {
+    i += 1;
+    let mut nesting = 1usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'(' => {
+                nesting += 1;
+                i += 1;
+            }
+            b')' => {
+                nesting -= 1;
+                i += 1;
+                if nesting == 0 {
+                    return i;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+fn skip_hex_string(bytes: &[u8], mut i: usize) -> usize {
+    i += 1;
+    while i < bytes.len() && bytes[i] != b'>' {
+        i += 1;
+    }
+    i.saturating_add(1).min(bytes.len())
+}
+
+/// Überspringt ein eingebettetes Bild (`BI … ID <Rohdaten> EI`).
+fn skip_inline_image(bytes: &[u8], i: usize) -> usize {
+    let Some(id) = (i..bytes.len()).find(|&p| keyword_at(bytes, p, b"ID")) else {
+        return i + 2;
+    };
+    let data = id + 3;
+    let mut p = data;
+    while p < bytes.len() {
+        if is_whitespace(bytes[p]) && keyword_at(bytes, p + 1, b"EI") {
+            return p + 3;
+        }
+        p += 1;
+    }
+    bytes.len()
+}
+
+/// Erste Datenposition hinter dem Schlüsselwort `stream`.
+fn payload_start(bytes: &[u8], mut i: usize) -> usize {
+    if bytes.get(i) == Some(&b'\r') {
+        i += 1;
+    }
+    if bytes.get(i) == Some(&b'\n') {
+        i += 1;
+    }
+    i
+}
+
+fn find_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || from >= haystack.len() {
+        return None;
+    }
+    haystack[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| p + from)
 }
 
 /// Strukturelle Mindestanforderungen.
@@ -244,26 +788,257 @@ pub fn save_to_bytes(doc: &Document) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
+// ---------------------------------------------------------------------------
+// Der eine Schreibpfad
+// ---------------------------------------------------------------------------
+
+/// Wie eine Ausgabedatei angelegt wird.
+///
+/// Alles, was redact-rs schreibt — geschwärztes PDF, Review-Datei, Audit-Log,
+/// Beispieldatei —, geht durch [`write_file`] und damit durch diese Optionen.
+/// Vorher hatte jeder Schreibvorgang seine eigenen Regeln, und drei von vier
+/// haben die `--force`-Prüfung schlicht übersprungen.
+#[derive(Debug, Clone, Default)]
+pub struct WriteOptions {
+    /// Eine vorhandene Zieldatei überschreiben.
+    pub force: bool,
+    /// Die Datei nur für den Eigentümer lesbar anlegen (Unix: Modus 0600).
+    ///
+    /// Für Review-Datei und Audit-Log: dort stehen die *gefundenen*
+    /// Geheimnisse im Klartext.
+    pub private: bool,
+    /// Dateien, die unter keinen Umständen überschrieben werden dürfen —
+    /// allen voran die Eingabedatei.
+    pub protect: Vec<PathBuf>,
+}
+
+impl WriteOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn force(mut self, force: bool) -> Self {
+        self.force = force;
+        self
+    }
+
+    pub fn private(mut self, private: bool) -> Self {
+        self.private = private;
+        self
+    }
+
+    pub fn protect(mut self, path: impl Into<PathBuf>) -> Self {
+        self.protect.push(path.into());
+        self
+    }
+}
+
+/// Ein geprüftes Schreibziel: Verzeichnis kanonisiert, Dateiname getrennt.
+#[derive(Debug, Clone)]
+pub struct Target {
+    /// Kanonisiertes Elternverzeichnis (Symlinks und `..` aufgelöst).
+    pub dir: PathBuf,
+    /// Der Dateiname für sich.
+    pub name: std::ffi::OsString,
+}
+
+impl Target {
+    pub fn path(&self) -> PathBuf {
+        self.dir.join(&self.name)
+    }
+}
+
+/// Prüft ein Schreibziel, ohne zu schreiben.
+///
+/// Damit kann die Verarbeitungskette *vor* der eigentlichen Arbeit abbrechen,
+/// statt erst nach dem Schwärzen zu merken, dass das Ziel nicht taugt.
+/// [`write_file`] prüft danach noch einmal — dazwischen kann sich die Platte
+/// geändert haben.
+pub fn check_target(path: &Path, options: &WriteOptions) -> Result<Target> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| {
+            RedactError::Config(format!(
+                "{} ist kein Dateiname, sondern ein Verzeichnispfad",
+                path.display()
+            ))
+        })?
+        .to_os_string();
+
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    if !parent.exists() {
+        std::fs::create_dir_all(&parent)?;
+    }
+    // Kanonisiert wird nur das Verzeichnis. Auf die Zieldatei selbst darf
+    // `canonicalize` nicht angewendet werden: es folgt Symlinks, und genau
+    // die wollen wir erkennen statt ihnen zu folgen.
+    let dir = std::fs::canonicalize(&parent).map_err(|e| {
+        RedactError::Config(format!(
+            "Ausgabeverzeichnis {} nicht benutzbar: {e}",
+            parent.display()
+        ))
+    })?;
+    let target = Target { dir, name };
+    let full = target.path();
+
+    // Zuerst die Identitätsprüfung: „das ist deine Eingabedatei“ ist die
+    // nützlichere Auskunft als „existiert bereits“, und sie gilt auch mit
+    // `--force`.
+    for protected in &options.protect {
+        if same_file(&full, protected) {
+            return Err(RedactError::Config(format!(
+                "Ausgabe- und Eingabedatei sind identisch ({} ist {}). \
+                 Ein Schwärzungslauf, der sein eigenes Original überschreibt, \
+                 ist nicht rückgängig zu machen — auch nicht mit --force.",
+                path.display(),
+                protected.display()
+            )));
+        }
+    }
+
+    match std::fs::symlink_metadata(&full) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(RedactError::Config(format!(
+                    "{} ist ein symbolischer Link. redact-rs schreibt nicht durch \
+                     Links hindurch — sonst landet die Ausgabe irgendwo anders, \
+                     womöglich in einer Systemdatei. Bitte ein echtes Ziel angeben.",
+                    full.display()
+                )));
+            }
+            if !meta.file_type().is_file() {
+                return Err(RedactError::Config(format!(
+                    "{} ist keine gewöhnliche Datei",
+                    full.display()
+                )));
+            }
+            if !options.force {
+                return Err(RedactError::Config(format!(
+                    "{} existiert bereits — mit --force überschreiben oder -o anders wählen",
+                    full.display()
+                )));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(RedactError::Config(format!(
+                "{} nicht prüfbar: {e}",
+                full.display()
+            )))
+        }
+    }
+
+    Ok(target)
+}
+
+/// Sind das zwei Namen für dieselbe Datei?
+///
+/// Der Pfadvergleich allein trägt nicht: `./in.pdf`, `dir/../in.pdf`, ein
+/// absoluter Pfad, ein Hardlink und — auf Dateisystemen ohne
+/// Groß-/Kleinschreibung — `IN.PDF` bezeichnen alle dieselbe Datei, sehen aber
+/// verschieden aus. Deshalb wird zuerst über die Dateiidentität verglichen und
+/// nur ersatzweise über den kanonisierten Pfad.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return ma.dev() == mb.dev() && ma.ino() == mb.ino();
+        }
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb || eq_ignore_case(&ca, &cb),
+        _ => a == b,
+    }
+}
+
+/// Vergleich ohne Rücksicht auf Groß-/Kleinschreibung — für Dateisysteme, die
+/// selbst keine macht (NTFS, APFS in der Voreinstellung).
+fn eq_ignore_case(a: &Path, b: &Path) -> bool {
+    let (a, b) = (a.to_string_lossy(), b.to_string_lossy());
+    a.len() == b.len() && a.to_lowercase() == b.to_lowercase()
+}
+
+/// Schreibt eine Datei — der einzige Weg, auf dem redact-rs etwas ablegt.
+///
+/// * Ziel geprüft: kein Symlink, nicht die Eingabedatei, vorhandene Datei nur
+///   mit `force`.
+/// * Angelegt wird eine temporäre Datei **im selben Verzeichnis** mit
+///   `create_new(true)` — das ist `O_CREAT | O_EXCL` und folgt keinem Symlink.
+/// * Sichtbar wird das Ergebnis erst durch `rename`, also in einem Schritt.
+///   Ein abgebrochener Lauf hinterlässt keine halbe Ausgabedatei.
+pub fn write_file(path: &Path, bytes: &[u8], options: &WriteOptions) -> Result<()> {
+    let target = check_target(path, options)?;
+    let full = target.path();
+
+    let temp = target.dir.join(format!(
+        ".{}.redact-{}-{}.tmp",
+        target.name.to_string_lossy(),
+        std::process::id(),
+        next_temp_counter()
+    ));
+
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Review-Datei und Audit-Log enthalten die gefundenen Geheimnisse im
+        // Klartext. Sie dürfen nie mit den Vorgaberechten entstehen.
+        open.mode(if options.private { 0o600 } else { 0o644 });
+    }
+
+    let write = (|| -> std::io::Result<()> {
+        let mut file = open.open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, &full)
+    })();
+
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&temp);
+        return Err(RedactError::Io(e));
+    }
+    Ok(())
+}
+
+fn next_temp_counter() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Schreibt das Dokument als neue Datei.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PdfRenderer;
+///
+/// Die Voreinstellung überschreibt ein vorhandenes Ziel (so verhält sich die
+/// grafische Oberfläche, die vorher selbst fragt). Die Kommandozeile setzt
+/// über [`PdfRenderer::with_options`] ihre eigenen Regeln — dort entscheidet
+/// `--force`.
+#[derive(Debug, Clone, Default)]
+pub struct PdfRenderer {
+    options: WriteOptions,
+}
 
 impl PdfRenderer {
     pub fn new() -> Self {
-        Self
+        Self {
+            options: WriteOptions::new().force(true),
+        }
+    }
+
+    pub fn with_options(options: WriteOptions) -> Self {
+        Self { options }
     }
 }
 
 impl Renderer for PdfRenderer {
     fn render(&self, doc: &Document, path: &Path) -> Result<()> {
         let bytes = save_to_bytes(doc)?;
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        std::fs::write(path, bytes)?;
-        Ok(())
+        write_file(path, &bytes, &self.options)
     }
 }
 
@@ -277,6 +1052,227 @@ mod tests {
         let err = load_from_bytes(b"hello world").unwrap_err();
         assert!(matches!(err, RedactError::Pdf(_)));
         assert!(err.to_string().contains("%PDF-"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Vorprüfung der Rohbytes
+    // -----------------------------------------------------------------------
+
+    fn scan(bytes: &[u8]) -> Result<()> {
+        prescan(bytes, &Limits::default())
+    }
+
+    #[test]
+    fn deep_nesting_is_rejected() {
+        let deep = format!("{}{}", "[".repeat(1000), "]".repeat(1000));
+        let err = scan(deep.as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("Verschachtelungstiefe"));
+        // Dictionaries zählen genauso.
+        let deep = format!("{}{}", "<<".repeat(1000), ">>".repeat(1000));
+        assert!(scan(deep.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn ordinary_nesting_passes() {
+        assert!(scan(&crate::testing::demo_statement()).is_ok());
+        assert!(scan(&crate::testing::minimal_pdf("Hallo Welt")).is_ok());
+        let nested = format!("{}{}", "[".repeat(64), "]".repeat(64));
+        assert!(scan(nested.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn brackets_inside_strings_do_not_count() {
+        // In einer Zeichenkette ist `[` ein Zeichen, keine Struktur. Ohne
+        // diese Unterscheidung würde jedes Dokument mit eckigen Klammern im
+        // Text irgendwann fälschlich abgelehnt.
+        let text = format!("({}) Tj", "[".repeat(1000));
+        assert!(scan(text.as_bytes()).is_ok());
+        // Escapte Klammern dürfen den Überspringer nicht aus dem Tritt bringen.
+        let text = format!("(a\\)b{}) Tj", "[".repeat(1000));
+        assert!(scan(text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn a_comment_is_not_structure() {
+        let text = format!("% {}\n", "[".repeat(1000));
+        assert!(scan(text.as_bytes()).is_ok());
+    }
+
+    /// Baut ein Ein-Objekt-PDF-Fragment mit einem Stream.
+    fn with_stream(dict: &str, payload: &[u8]) -> Vec<u8> {
+        let mut raw = format!(
+            "%PDF-1.7\n1 0 obj\n<< {dict} /Length {} >>\nstream\n",
+            payload.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(payload);
+        raw.extend_from_slice(b"\nendstream\nendobj\n");
+        raw
+    }
+
+    #[test]
+    fn binary_stream_payload_is_not_read_as_structure() {
+        // Schriftprogramme, Farbprofile und Bilddaten enthalten `[`-Bytes rein
+        // zufällig. Würden sie als Struktur gezählt, wäre bei genügend großen
+        // Streams der Fehlalarm garantiert.
+        let payload: Vec<u8> = (0..40_000u32).map(|i| (i * 37 % 256) as u8).collect();
+        assert!(scan(&with_stream("/Subtype /Image", &payload)).is_ok());
+        assert!(scan(&with_stream("/Length1 4711", &payload)).is_ok());
+        // Auch ohne Marker: die Notbremse erkennt Binärdaten am Byteprofil.
+        assert!(scan(&with_stream("/N 3", &payload)).is_ok());
+    }
+
+    #[test]
+    fn deep_nesting_in_an_uncompressed_content_stream_is_caught() {
+        // Der Seiteninhalt wird geparst — dort zählt die Tiefe sehr wohl.
+        let payload = format!("{}{}", "[".repeat(1000), "]".repeat(1000));
+        let err = scan(&with_stream("", payload.as_bytes())).unwrap_err();
+        assert!(err.to_string().contains("Verschachtelungstiefe"));
+    }
+
+    #[test]
+    fn an_inline_image_does_not_confuse_the_scanner() {
+        // Zwischen `ID` und `EI` stehen rohe Bilddaten. Sie dürfen weder als
+        // Struktur gezählt noch den Rest des Streams verschlucken.
+        let mut payload = b"BT ET q 1 0 0 1 0 0 cm BI /W 8 /H 8 /BPC 8 ID ".to_vec();
+        payload.extend(std::iter::repeat(b'[').take(1000));
+        payload.extend_from_slice(b" EI Q\n[(a) 1 (b)] TJ\n");
+        assert!(scan(&with_stream("", &payload)).is_ok());
+    }
+
+    #[test]
+    fn the_stream_budget_is_enforced() {
+        use lopdf::{dictionary, Stream};
+
+        let mut stream = Stream::new(dictionary! {}, vec![b'x'; 4 * 1024 * 1024]);
+        stream.compress().unwrap();
+        let mut raw = format!(
+            "%PDF-1.7\n1 0 obj\n<< /Filter /FlateDecode /Length {} >>\nstream\n",
+            stream.content.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(&stream.content);
+        raw.extend_from_slice(b"\nendstream\nendobj\n");
+
+        let tight = Limits {
+            max_parsed_bytes: 1024 * 1024,
+            ..Limits::default()
+        };
+        let err = prescan(&raw, &tight).unwrap_err();
+        assert!(err.to_string().contains("Budget"), "{err}");
+        // Mit dem Vorgabebudget passt derselbe Stream.
+        assert!(prescan(&raw, &Limits::default()).is_ok());
+    }
+
+    #[test]
+    fn filters_are_read_from_the_dictionary() {
+        assert_eq!(filter_names(b"<< /Length 10 >>"), Vec::<Vec<u8>>::new());
+        assert_eq!(
+            filter_names(b"<< /Filter /FlateDecode /Length 10 >>"),
+            vec![b"FlateDecode".to_vec()]
+        );
+        assert_eq!(
+            filter_names(b"<< /Filter [/ASCII85Decode /FlateDecode] >>"),
+            vec![b"ASCII85Decode".to_vec(), b"FlateDecode".to_vec()]
+        );
+    }
+
+    #[test]
+    fn binary_streams_are_recognised() {
+        assert!(marked_binary(b"<< /Subtype /Image /Width 10 >>"));
+        assert!(marked_binary(b"<< /Length1 4711 >>"));
+        assert!(!marked_binary(b"<< /Length 10 >>"));
+        assert!(looks_binary(&[0u8, 1, 2, 3, 4, 5, 6, 7]));
+        assert!(!looks_binary(b"BT /F1 12 Tf (Hallo) Tj ET"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Schreibpfad
+    // -----------------------------------------------------------------------
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "redact-doc-{}-{name}-{}",
+            std::process::id(),
+            next_temp_counter()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn writing_creates_the_file_atomically() {
+        let dir = scratch("atomic");
+        let target = dir.join("a.txt");
+        write_file(&target, b"eins", &WriteOptions::new()).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"eins");
+
+        // Ohne `force` bleibt das Vorhandene stehen.
+        let err = write_file(&target, b"zwei", &WriteOptions::new()).unwrap_err();
+        assert!(err.to_string().contains("existiert bereits"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"eins");
+
+        write_file(&target, b"zwei", &WriteOptions::new().force(true)).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"zwei");
+
+        // Keine Reste im Verzeichnis.
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 1, "Reste: {entries:?}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_protected_file_is_never_overwritten() {
+        let dir = scratch("protect");
+        let input = dir.join("in.pdf");
+        std::fs::write(&input, b"original").unwrap();
+
+        for alias in [
+            input.clone(),
+            dir.join(".").join("in.pdf"),
+            dir.join("unter").join("..").join("in.pdf"),
+        ] {
+            std::fs::create_dir_all(dir.join("unter")).unwrap();
+            let options = WriteOptions::new().force(true).protect(input.clone());
+            let err = write_file(&alias, b"weg", &options).unwrap_err();
+            assert!(err.to_string().contains("identisch"), "{alias:?}: {err}");
+            assert_eq!(std::fs::read(&input).unwrap(), b"original");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_refused_and_the_target_stays_untouched() {
+        let dir = scratch("symlink");
+        let victim = dir.join("fremd.txt");
+        std::fs::write(&victim, b"fremder inhalt").unwrap();
+        let link = dir.join("ziel.txt");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        for options in [WriteOptions::new(), WriteOptions::new().force(true)] {
+            let err = write_file(&link, b"ueberschrieben", &options).unwrap_err();
+            assert!(err.to_string().contains("symbolischer Link"), "{err}");
+        }
+        assert_eq!(std::fs::read(&victim).unwrap(), b"fremder inhalt");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("mode");
+        let target = dir.join("geheim.json");
+        write_file(&target, b"{}", &WriteOptions::new().private(true)).unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

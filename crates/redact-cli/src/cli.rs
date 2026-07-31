@@ -81,6 +81,29 @@ pub struct Cli {
     #[arg(long, default_value_t = 1.0)]
     pub padding: f64,
 
+    /// Obergrenze für die Summe aller entpackten Streams einer Eingabedatei.
+    ///
+    /// Schutz gegen Dekompressionsbomben: eine kleine Datei, die sich beim
+    /// Öffnen vervielfacht.
+    #[arg(long, value_name = "MB", default_value_t = 1024)]
+    pub max_decompressed_mb: u64,
+
+    /// Davon: Obergrenze für die Streams, die geparst werden
+    /// (Seiteninhalt und Objekt-Streams).
+    ///
+    /// Aus einem Byte Seiteninhalt werden beim Parsen rund 60 Byte
+    /// Arbeitsspeicher — deshalb ist diese Grenze deutlich enger.
+    #[arg(long, value_name = "MB", default_value_t = 16)]
+    pub max_parsed_mb: u64,
+
+    /// Obergrenze für die Zahl der Trefferkandidaten in einer Datei.
+    ///
+    /// Die Konfliktauflösung wächst quadratisch mit dieser Zahl; ohne Grenze
+    /// genügt eine kleine Datei mit sehr vielen Treffern, um die Maschine
+    /// stundenlang zu beschäftigen.
+    #[arg(long, value_name = "N", default_value_t = 100_000)]
+    pub max_candidates: usize,
+
     /// Grafische Oberfläche starten.
     #[arg(long)]
     pub gui: bool,
@@ -110,6 +133,18 @@ pub enum ActionArg {
     Whiteout,
     /// Weißes Rechteck mit Ersatztext.
     Replace,
+}
+
+impl Cli {
+    /// Grenzen, mit denen fremde PDFs gelesen werden.
+    pub fn limits(&self) -> redact_pdf::document::Limits {
+        let mb = |n: u64| n.saturating_mul(1024 * 1024);
+        redact_pdf::document::Limits {
+            max_decompressed_bytes: mb(self.max_decompressed_mb),
+            max_parsed_bytes: mb(self.max_parsed_mb),
+            ..redact_pdf::document::Limits::default()
+        }
+    }
 }
 
 impl ActionArg {

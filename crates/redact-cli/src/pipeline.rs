@@ -15,6 +15,7 @@ use redact_core::{
     REVIEW_SUFFIX,
 };
 use redact_patterns::PatternMatcher;
+use redact_pdf::document::{check_target, load_with_limits, write_file, Limits, WriteOptions};
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
 use crate::audit::{sha256_bytes, AuditLog};
@@ -39,6 +40,10 @@ pub struct Config {
     pub audit_log: Option<PathBuf>,
     pub action: Action,
     pub padding: f64,
+    /// Obergrenzen für die Eingabedatei (siehe `SECURITY.md`).
+    pub limits: Limits,
+    /// Obergrenze für die Zahl der Trefferkandidaten (Zeitbremse).
+    pub max_candidates: usize,
 }
 
 /// Ergebnis eines Laufs — Grundlage für die Ausgabe auf der Konsole.
@@ -67,8 +72,15 @@ pub fn run(config: &Config) -> Result<Outcome> {
         ..Default::default()
     };
 
+    // 0. Alle Schreibziele *vor* der Arbeit prüfen.
+    //
+    // Sonst merkt man erst nach dem Schwärzen, dass das Ziel die Eingabedatei
+    // ist — und bei `--force` wäre das Original dann schon weg. Geprüft wird
+    // hier, geschrieben später; `write_file` prüft ein zweites Mal.
+    let plan = plan_outputs(config)?;
+
     // 1. PDF laden (streng geprüft, keine Reparaturversuche).
-    let mut doc = redact_pdf::load(&config.input)?;
+    let mut doc = load_with_limits(&config.input, &config.limits)?;
     outcome.pages = redact_pdf::page_count(&doc);
 
     // 2./3./4./5. Analyse — oder eine bereits geprüfte Review-Datei.
@@ -87,6 +99,7 @@ pub fn run(config: &Config) -> Result<Outcome> {
 
             let candidates = collect_regions(config, &runs)?;
             outcome.candidates = candidates.len();
+            check_candidate_budget(config, candidates.len())?;
 
             let resolution = resolve_conflicts(candidates);
             outcome.blocked = resolution.blocked.len();
@@ -104,7 +117,7 @@ pub fn run(config: &Config) -> Result<Outcome> {
                     resolution.redact,
                     resolution.blocked,
                 );
-                write_json(&path, &review.to_json()?)?;
+                write_file(&path, review.to_json()?.as_bytes(), &secret_options(config))?;
                 outcome.review_out = Some(path.display().to_string());
                 return Ok(outcome);
             }
@@ -121,8 +134,10 @@ pub fn run(config: &Config) -> Result<Outcome> {
     outcome.redactions = redactions.len();
     outcome.blocked = outcome.blocked.max(blocked.len());
 
-    let output = resolve_output_path(config)?;
-    let output = &output;
+    let output = plan
+        .output
+        .as_ref()
+        .expect("ohne --review steht das Ausgabeziel fest");
 
     // 9. Schwärzung anwenden.
     let report =
@@ -135,7 +150,7 @@ pub fn run(config: &Config) -> Result<Outcome> {
     redact_pdf::strip_metadata(&mut doc);
 
     // 11. Ausgabe schreiben.
-    PdfRenderer::new().render(&doc, output)?;
+    PdfRenderer::with_options(output_options(config)).render(&doc, output)?;
     outcome.output = Some(output.display().to_string());
 
     // 12. Audit-Log.
@@ -147,11 +162,32 @@ pub fn run(config: &Config) -> Result<Outcome> {
             &blocked,
             &report.warnings,
         )?;
-        log.write(path)?;
+        log.write(path, &secret_options(config).protect(output.clone()))?;
         outcome.audit_log = Some(path.display().to_string());
     }
 
     Ok(outcome)
+}
+
+/// Zeitbremse: die Konfliktauflösung wächst quadratisch mit der Trefferzahl.
+///
+/// Gemessen (Release, 500 Seiten × 88 Zeilen aus einer 212-kB-Datei): 264 000
+/// Treffer kosten 133 s, 52 800 Treffer 4,7 s — Vervierfachung bei
+/// Verdopplung. Ursache ist `dedup` in `redact-core::conflict`, das jede
+/// Region gegen alle bereits behaltenen prüft. Solange das so ist, braucht die
+/// Kette eine Obergrenze, sonst reicht eine knappe Megabyte-Datei, um die
+/// Maschine eine Stunde zu beschäftigen.
+fn check_candidate_budget(config: &Config, candidates: usize) -> Result<()> {
+    if candidates > config.max_candidates {
+        return Err(RedactError::Config(format!(
+            "{candidates} Trefferkandidaten überschreiten die Obergrenze von {}. \
+             Die Konfliktauflösung wächst quadratisch; eine solche Datei würde \
+             die Maschine über Gebühr beschäftigen. Mit --max-candidates lässt \
+             sich die Grenze anheben, wenn die Datei wirklich so aussieht.",
+            config.max_candidates
+        )));
+    }
+    Ok(())
 }
 
 /// Schritte 3–5: manuelle Regionen, Buchungsliste, Patterns.
@@ -236,36 +272,62 @@ fn review_target(config: &Config) -> PathBuf {
 /// Bestimmt die Ausgabedatei.
 ///
 /// Ohne `-o` wird neben der Eingabedatei gespeichert — `kontoauszug.pdf` wird
-/// also zu `kontoauszug_geschwaerzt.pdf`. Eine vorhandene Datei wird nur mit
-/// `--force` überschrieben, damit ein zweiter Lauf nicht unbemerkt ein
-/// bereits geprüftes Ergebnis ersetzt.
-fn resolve_output_path(config: &Config) -> Result<PathBuf> {
-    let output = match &config.output {
+/// also zu `kontoauszug_geschwaerzt.pdf`.
+fn output_path(config: &Config) -> PathBuf {
+    match &config.output {
         Some(path) => path.clone(),
         None => output_path_with_suffix(&config.input, &config.output_suffix),
-    };
-    if output == config.input {
-        return Err(RedactError::Config(
-            "Ausgabe- und Eingabedatei dürfen nicht identisch sein".into(),
-        ));
     }
-    if output.exists() && !config.force {
-        return Err(RedactError::Config(format!(
-            "{} existiert bereits — mit --force überschreiben oder -o anders wählen",
-            output.display()
-        )));
-    }
-    Ok(output)
 }
 
-fn write_json(path: &Path, json: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
+/// Schreibregeln für die Ausgabe-PDF.
+///
+/// Eine vorhandene Datei wird nur mit `--force` überschrieben, damit ein
+/// zweiter Lauf nicht unbemerkt ein bereits geprüftes Ergebnis ersetzt. Die
+/// Eingabedatei ist immer geschützt — auch mit `--force`.
+fn output_options(config: &Config) -> WriteOptions {
+    WriteOptions::new()
+        .force(config.force)
+        .protect(config.input.clone())
+}
+
+/// Schreibregeln für Review-Datei und Audit-Log.
+///
+/// Wie die Ausgabe, zusätzlich aber `private`: in beiden Dateien stehen die
+/// gefundenen Geheimnisse im Klartext. Unter Unix entstehen sie mit Modus 0600.
+fn secret_options(config: &Config) -> WriteOptions {
+    output_options(config).private(true)
+}
+
+/// Alle Schreibziele eines Laufs, vorab geprüft.
+struct OutputPlan {
+    output: Option<PathBuf>,
+}
+
+/// Prüft die Schreibziele, bevor gerechnet wird.
+///
+/// Bis hierher hatte jeder Ausgabeweg seine eigene (oder gar keine) Prüfung:
+/// `--write-demo`, `--review-out` und `--audit-log` haben `--force` schlicht
+/// ignoriert, und der Vergleich „Ausgabe == Eingabe“ verglich rohe Pfade und
+/// war damit über `./in.pdf`, `dir/../in.pdf` oder einen Symlink zu umgehen.
+fn plan_outputs(config: &Config) -> Result<OutputPlan> {
+    if config.review {
+        check_target(&review_target(config), &secret_options(config))?;
+        return Ok(OutputPlan { output: None });
     }
-    std::fs::write(path, json)?;
-    Ok(())
+
+    let output = output_path(config);
+    let target = check_target(&output, &output_options(config))?;
+
+    if let Some(path) = &config.audit_log {
+        // Das Audit-Log darf weder die Eingabe noch die frisch geschriebene
+        // Ausgabe treffen.
+        check_target(path, &secret_options(config).protect(target.path()))?;
+    }
+
+    Ok(OutputPlan {
+        output: Some(output),
+    })
 }
 
 /// Zusätzlich verfügbare Blocker-Informationen für die Ausgabe.

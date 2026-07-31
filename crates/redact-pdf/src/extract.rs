@@ -206,12 +206,10 @@ impl PdfExtractor {
             if index > 0 {
                 let p = &items[index - 1];
                 let extra = extras[index - 1];
-                let _ = (extra, pitch);
-                let avg: f64 =
-                    items.iter().map(|g| g.rect.width().abs()).sum::<f64>() / items.len() as f64;
-                let threshold = (avg * 0.28).max(0.5);
-                let extra = item.rect.ll.x - p.rect.ur.x;
-                let pitch = 0.0;
+                // Ein Leerzeichen liegt vor, wenn der Überschuss — nach Abzug
+                // eines etwaigen Rastervorschubs — mindestens die halbe
+                // Leerzeichenbreite dieses Fonts erreicht.
+                let threshold = space_width_of(p) * self.space_ratio;
                 let last_is_space = glyphs.last().map(|g| g.ch == ' ').unwrap_or(true);
                 if extra - pitch > threshold && !last_is_space {
                     glyphs.push(Glyph {

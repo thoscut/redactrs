@@ -576,3 +576,495 @@ fn canary_binary_still_leaks_the_iban_outside_the_page_content() {
     // Der sichtbare Seitentext selbst ist geschwärzt — das Leck sitzt daneben.
     assert!(!visible_text(&output).contains("DE89"));
 }
+
+// ---------------------------------------------------------------------------
+// Härtung gegen bösartige Eingaben und gegen Schreiben an falsche Stellen
+//
+// Jeder Test hier gehört zu einem reproduzierten Befund. Sie sind bewusst
+// End-to-End: die Frage ist nicht, ob eine Funktion einen Fehler liefert,
+// sondern ob das *Binary* mit einer Meldung stehen bleibt statt abzustürzen.
+// ---------------------------------------------------------------------------
+
+/// Baut ein PDF mit `nest` offenen `[` in einem Objekt, das vom Katalog aus
+/// erreichbar ist. `lopdf 0.34` parst rekursiv und läuft dabei über den Stack.
+fn deeply_nested_pdf(nest: usize) -> Vec<u8> {
+    let deep: Vec<u8> = "[".repeat(nest).into_bytes();
+    let closing: Vec<u8> = "]".repeat(nest).into_bytes();
+    let mut body: Vec<(u32, Vec<u8>)> = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R /Junk 5 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, b"<< /Length 5 >>\nstream\nBT ET\nendstream".to_vec()),
+    ];
+    let mut junk = deep;
+    junk.extend_from_slice(&closing);
+    body.push((5, junk));
+    assemble_pdf(&body)
+}
+
+/// Fügt Objekte zu einer Datei mit klassischer xref-Tabelle zusammen.
+fn assemble_pdf(body: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (id, data) in body {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", body.len() + 1).as_bytes());
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            body.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// Ein PDF, dessen Content-Stream sich um ein Vielfaches aufbläht.
+///
+/// Auf der Platte wenige Dutzend Kilobyte, im Speicher `megabytes` MB — und
+/// beim Parsen ein Vielfaches davon, weil aus jedem Operator eine eigene
+/// `Operation` mit Vektor wird.
+fn decompression_bomb(megabytes: usize) -> Vec<u8> {
+    use lopdf::{dictionary, Document, Object, Stream};
+
+    let unit = b"0 0 0 rg\n";
+    let mut content = Vec::with_capacity(megabytes * 1024 * 1024 + unit.len());
+    while content.len() < megabytes * 1024 * 1024 {
+        content.extend_from_slice(unit);
+    }
+
+    let mut doc = Document::with_version("1.5");
+    let mut stream = Stream::new(dictionary! {}, content);
+    stream.compress().expect("komprimierbar");
+    let content_id = doc.add_object(stream);
+    let pages_id = doc.new_object_id();
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+        "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1_i64,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog_id);
+
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).expect("speicherbar");
+    bytes
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// Ein Absturz ist kein Fehlerwert. Exit 134 (SIGABRT) hieße Stapelüberlauf
+/// oder gescheiterte Speicheranforderung — genau das soll nicht mehr passieren.
+#[track_caller]
+fn assert_clean_refusal(out: &Output, needle: &str) {
+    assert!(
+        !out.status.success(),
+        "die Datei wurde angenommen, obwohl sie abgelehnt gehört"
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(134),
+        "Abbruch statt Fehlermeldung (SIGABRT)"
+    );
+    assert!(
+        out.status.code().is_some(),
+        "durch ein Signal beendet statt mit einem Rückgabewert"
+    );
+    let err = stderr(out);
+    assert!(
+        err.contains(needle),
+        "Meldung nennt „{needle}“ nicht: {err}"
+    );
+}
+
+// --- A1: Verschachtelungstiefe ---------------------------------------------
+
+#[test]
+fn deep_nesting_is_refused_instead_of_crashing() {
+    let dir = workdir("deep-nesting");
+    let input = dir.join("tief.pdf");
+    std::fs::write(&input, deeply_nested_pdf(200_000)).unwrap();
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+    ]);
+    assert_clean_refusal(&out, "Verschachtelungstiefe");
+    assert!(!dir.join("out.pdf").exists(), "trotz Abbruch geschrieben");
+}
+
+#[test]
+fn deep_nesting_hidden_in_a_compressed_stream_is_also_refused() {
+    // Die Verschachtelung in einem komprimierten Objekt-Stream zu verstecken
+    // ist der offensichtliche nächste Versuch — die Rohbytes der Datei zeigen
+    // sie dann nicht mehr.
+    use lopdf::{dictionary, Stream};
+
+    let dir = workdir("deep-nesting-objstm");
+    let inner = format!("{}{}", "[".repeat(50_000), "]".repeat(50_000));
+    let payload = format!("6 0 {inner} ");
+    let mut stream = Stream::new(
+        dictionary! { "Type" => "ObjStm", "N" => 1_i64, "First" => 4_i64 },
+        payload.into_bytes(),
+    );
+    stream.compress().expect("komprimierbar");
+    let mut header = format!(
+        "<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length {} >>\nstream\n",
+        stream.content.len()
+    )
+    .into_bytes();
+    header.extend_from_slice(&stream.content);
+    header.extend_from_slice(b"\nendstream");
+
+    let body: Vec<(u32, Vec<u8>)> = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R /Junk 6 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, b"<< /Length 5 >>\nstream\nBT ET\nendstream".to_vec()),
+        (5, header),
+    ];
+    let input = dir.join("tief_objstm.pdf");
+    std::fs::write(&input, assemble_pdf(&body)).unwrap();
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+    ]);
+    assert_clean_refusal(&out, "Verschachtelungstiefe");
+}
+
+#[test]
+fn ordinary_nesting_is_still_accepted() {
+    // Gegenprobe: die Grenze darf normale Dokumente nicht treffen.
+    let dir = workdir("shallow-nesting");
+    let input = dir.join("flach.pdf");
+    std::fs::write(&input, deeply_nested_pdf(40)).unwrap();
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+// --- B1: Dekompressionsbombe ------------------------------------------------
+
+#[test]
+fn a_decompression_bomb_is_refused_with_a_message() {
+    let dir = workdir("bomb");
+    let input = dir.join("bombe.pdf");
+    let bytes = decompression_bomb(20);
+    std::fs::write(&input, &bytes).unwrap();
+    assert!(
+        bytes.len() < 1024 * 1024,
+        "Testdatei ist keine Bombe: {} Bytes auf der Platte",
+        bytes.len()
+    );
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+    ]);
+    assert_clean_refusal(&out, "Budget");
+}
+
+#[test]
+fn the_stream_budget_can_be_raised_deliberately() {
+    // Die Grenze ist eine Voreinstellung, keine Mauer — wer weiß, was er tut,
+    // hebt sie an.
+    let dir = workdir("bomb-override");
+    let input = dir.join("gross.pdf");
+    std::fs::write(&input, decompression_bomb(20)).unwrap();
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+        "--max-parsed-mb",
+        "64",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+// --- B2: Zeitbremse ---------------------------------------------------------
+
+#[test]
+fn too_many_candidates_are_refused() {
+    let dir = workdir("candidates");
+    let input = demo(&dir);
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+        "--max-candidates",
+        "1",
+    ]);
+    assert_clean_refusal(&out, "Trefferkandidaten");
+    assert_eq!(out.status.code(), Some(2));
+}
+
+// --- A2: Schreibpfad --------------------------------------------------------
+
+#[test]
+fn the_input_is_protected_in_every_spelling() {
+    let dir = workdir("aliases");
+    let input = demo(&dir);
+    let sub = dir.join("unter");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let mut aliases: Vec<PathBuf> = vec![
+        // absolut
+        input.clone(),
+        // über einen Umweg zurück
+        sub.join("..").join("kontoauszug.pdf"),
+        // mit führendem ./
+        dir.join(".").join("kontoauszug.pdf"),
+    ];
+    // Ein Symlink auf die Eingabe ist derselbe Inhalt unter anderem Namen.
+    #[cfg(unix)]
+    {
+        let link = dir.join("zeigt_auf_eingabe.pdf");
+        std::os::unix::fs::symlink(&input, &link).unwrap();
+        aliases.push(link);
+        // Ein Hardlink ebenfalls — und den erkennt kein Pfadvergleich.
+        let hard = dir.join("hardlink.pdf");
+        std::fs::hard_link(&input, &hard).unwrap();
+        aliases.push(hard);
+    }
+
+    let before = std::fs::read(&input).unwrap();
+    for alias in aliases {
+        // Auch mit --force: das Original ist nicht wiederherstellbar.
+        let out = run(&[
+            input.to_str().unwrap(),
+            "-o",
+            alias.to_str().unwrap(),
+            "--force",
+        ]);
+        assert!(
+            !out.status.success(),
+            "„{}“ hat die Eingabedatei überschrieben",
+            alias.display()
+        );
+        assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+        assert_eq!(
+            std::fs::read(&input).unwrap(),
+            before,
+            "die Eingabedatei wurde über „{}“ verändert",
+            alias.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn writing_through_a_symlink_fails() {
+    let dir = workdir("symlink-out");
+    let input = demo(&dir);
+    let victim = dir.join("fremde_datei.txt");
+    std::fs::write(&victim, b"das hier gehoert jemand anderem").unwrap();
+    let link = dir.join("ausgabe.pdf");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+    for force in [&[][..], &["--force"][..]] {
+        let mut args = vec![input.to_str().unwrap(), "-o", link.to_str().unwrap()];
+        args.extend_from_slice(force);
+        let out = run(&args);
+        assert!(!out.status.success(), "Schreiben durch den Link erlaubt");
+        assert!(
+            stderr(&out).contains("symbolischer Link"),
+            "{}",
+            stderr(&out)
+        );
+    }
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        b"das hier gehoert jemand anderem",
+        "die Zieldatei des Links wurde überschrieben"
+    );
+}
+
+#[test]
+fn write_demo_respects_force() {
+    let dir = workdir("demo-force");
+    let target = dir.join("beispiel.pdf");
+    std::fs::write(&target, b"vorhanden").unwrap();
+
+    let out = run(&["--write-demo", target.to_str().unwrap()]);
+    assert!(!out.status.success(), "hat ohne --force überschrieben");
+    assert_eq!(std::fs::read(&target).unwrap(), b"vorhanden");
+
+    let out = run(&["--write-demo", target.to_str().unwrap(), "--force"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(std::fs::read(&target).unwrap().starts_with(b"%PDF-"));
+}
+
+#[test]
+fn review_out_respects_force() {
+    let dir = workdir("review-force");
+    let input = demo(&dir);
+    let target = dir.join("review.json");
+    std::fs::write(&target, b"{\"vorhanden\":true}").unwrap();
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        target.to_str().unwrap(),
+    ]);
+    assert!(!out.status.success(), "hat ohne --force überschrieben");
+    assert_eq!(std::fs::read(&target).unwrap(), b"{\"vorhanden\":true}");
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        target.to_str().unwrap(),
+        "--force",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn audit_log_respects_force() {
+    let dir = workdir("audit-force");
+    let input = demo(&dir);
+    let target = dir.join("audit.json");
+    std::fs::write(&target, b"{\"vorhanden\":true}").unwrap();
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+        "--audit-log",
+        target.to_str().unwrap(),
+    ]);
+    assert!(!out.status.success(), "hat ohne --force überschrieben");
+    assert_eq!(std::fs::read(&target).unwrap(), b"{\"vorhanden\":true}");
+    assert!(
+        !dir.join("out.pdf").exists(),
+        "das PDF wurde geschrieben, obwohl das Audit-Log das Ziel blockiert — \
+         die Prüfung muss vor der Arbeit laufen"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn review_and_audit_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = workdir("modes");
+    let input = demo(&dir);
+    let review = dir.join("review.json");
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        review.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let mode = std::fs::metadata(&review).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "Review-Datei mit Modus {mode:o} — sie enthält die Fundstellen im Klartext"
+    );
+
+    let audit = dir.join("audit.json");
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+        "--audit-log",
+        audit.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let mode = std::fs::metadata(&audit).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "Audit-Log mit Modus {mode:o}");
+}
+
+#[test]
+fn a_failed_run_leaves_no_temporary_file_behind() {
+    // Geschrieben wird über eine temporäre Datei im Zielverzeichnis. Bleibt
+    // sie liegen, steht dort ungeschützt ein Teilergebnis.
+    let dir = workdir("no-temp");
+    let input = demo(&dir);
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp") || n.starts_with('.'))
+        .collect();
+    assert!(leftovers.is_empty(), "Reste geblieben: {leftovers:?}");
+}
+
+#[test]
+fn deep_nesting_cannot_hide_behind_a_binary_looking_stream() {
+    // Naheliegender Umgehungsversuch: den Content-Stream so aussehen lassen
+    // wie Binärdaten (Rauschen, dazu ein /Length1 im Dictionary, das sonst nur
+    // in Schriftprogrammen steht), damit die Vorprüfung ihn für Nutzlast hält.
+    // Geparst wird er trotzdem — also muss er auch geprüft werden.
+    let dir = workdir("binary-disguise");
+    let mut payload: Vec<u8> = (0..20_000u32).map(|i| (i * 61 % 256) as u8).collect();
+    payload.extend(std::iter::repeat(b'[').take(2_000));
+    payload.extend(std::iter::repeat(b']').take(2_000));
+
+    let mut stream =
+        format!("<< /Length1 4711 /Length {} >>\nstream\n", payload.len()).into_bytes();
+    stream.extend_from_slice(&payload);
+    stream.extend_from_slice(b"\nendstream");
+
+    let body: Vec<(u32, Vec<u8>)> = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, stream),
+    ];
+    let input = dir.join("getarnt.pdf");
+    std::fs::write(&input, assemble_pdf(&body)).unwrap();
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+    ]);
+    assert_clean_refusal(&out, "Verschachtelungstiefe");
+}

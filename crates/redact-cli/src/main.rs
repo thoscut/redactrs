@@ -34,7 +34,14 @@ fn dispatch(cli: Cli) -> Result<()> {
     }
 
     if let Some(path) = &cli.write_demo {
-        std::fs::write(path, redact_pdf::testing::demo_statement())?;
+        // Auch die Beispieldatei geht durch den zentralen Schreibpfad. Vorher
+        // hat sie `--force` ignoriert und wäre über einen Symlink an eine
+        // beliebige Stelle geschrieben worden.
+        redact_pdf::document::write_file(
+            path,
+            &redact_pdf::testing::demo_statement(),
+            &redact_pdf::document::WriteOptions::new().force(cli.force),
+        )?;
         println!("Beispiel-PDF geschrieben: {}", path.display());
         return Ok(());
     }
@@ -66,6 +73,8 @@ fn dispatch(cli: Cli) -> Result<()> {
         audit_log: cli.audit_log.clone(),
         action: cli.action.to_action(&cli.replace_with),
         padding: cli.padding,
+        limits: cli.limits(),
+        max_candidates: cli.max_candidates,
     };
 
     let outcome = pipeline::run(&config)?;

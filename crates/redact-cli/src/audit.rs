@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use redact_core::{BlockedRegion, Rect, Redaction, Result};
+use redact_pdf::document::{write_file, WriteOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -100,10 +101,14 @@ impl AuditLog {
         })
     }
 
-    pub fn write(&self, path: &Path) -> Result<()> {
+    /// Schreibt das Log über den zentralen Schreibpfad.
+    ///
+    /// Das Log nennt jede gefundene Stelle im Klartext — es gehört deshalb
+    /// unter Unix mit Modus 0600 angelegt und darf keine fremde Datei
+    /// überschreiben. Beides steckt in `options`.
+    pub fn write(&self, path: &Path, options: &WriteOptions) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        write_file(path, json.as_bytes(), options)
     }
 }
 
