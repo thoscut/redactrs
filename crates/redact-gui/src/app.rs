@@ -4,15 +4,25 @@
 //! Dieses Modul ist absichtlich dünn. Es übersetzt Klicks und Tastendrücke in
 //! Aufrufe von [`AppState`] und zeichnet dessen Inhalt — mehr nicht. Alles,
 //! was ohne Bildschirm prüfbar sein muss, liegt in [`crate::state`],
-//! [`crate::viewer`] und [`crate::selector`].
+//! [`crate::viewer`], [`crate::render`] und [`crate::selector`] — und, was die
+//! Tastatur angeht, in [`key_commands`].
+//!
+//! ## Rückfragen vor Datenverlust
+//!
+//! Fenster schließen, ein zweites PDF öffnen, eine Datei ablegen oder ein
+//! Review laden warf bisher alle von Hand gezogenen Rechtecke kommentarlos weg.
+//! Alle vier Wege laufen jetzt über [`RedactApp::may_discard`]; beim Schließen
+//! wird zusätzlich [`egui::ViewportCommand::CancelClose`] geschickt, solange
+//! nicht bestätigt wurde.
 
 use std::path::PathBuf;
 
 use egui::{Color32, Key, Pos2, RichText, Stroke, Vec2};
 use redact_core::ReviewFile;
 
+use crate::render::PageCache;
 use crate::selector::{hit_test, RectangleSelector};
-use crate::state::{AppState, MAX_ZOOM, MIN_ZOOM};
+use crate::state::{AppState, HitSummary, RegionColor, MAX_ZOOM, MIN_ZOOM};
 use crate::viewer::{self, PagePreview};
 
 /// Rand zwischen Scrollbereich und Seitenblatt.
@@ -51,8 +61,11 @@ const DROP_ROUNDING: f32 = 6.0;
 /// Schriftgröße des Hinweistextes.
 const DROP_FONT_SIZE: f32 = 28.0;
 
-/// Farbe des Ablege-Hinweises (dasselbe Orange wie manuelle Regionen).
-const DROP_ACCENT: Color32 = Color32::from_rgb(240, 150, 30);
+/// Farbe des Ablege-Hinweises — dasselbe Orange wie manuelle Regionen.
+fn drop_accent() -> Color32 {
+    let (r, g, b) = RegionColor::Manual.rgb();
+    Color32::from_rgb(r, g, b)
+}
 
 /// Baut einen Speichern-Dialog mit Verzeichnis- und Namensvorgabe.
 ///
@@ -170,6 +183,158 @@ pub fn classify_drop(files: &[egui::DroppedFile]) -> DropAction {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tastatur
+// ---------------------------------------------------------------------------
+
+/// Die gedrückten Tasten eines Bildes, als reine Daten.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeyState {
+    pub delete: bool,
+    pub escape: bool,
+    pub left: bool,
+    pub right: bool,
+    pub up: bool,
+    pub down: bool,
+    pub page_up: bool,
+    pub page_down: bool,
+    pub shift: bool,
+    /// Liegt der Eingabefokus in einem Textfeld?
+    pub text_focus: bool,
+}
+
+/// Was ein Tastendruck bewirken soll.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum KeyCommand {
+    /// Auswahl aufheben und einen laufenden Ziehvorgang abbrechen.
+    Deselect,
+    DeleteSelected,
+    /// Ausgewählte Region verschieben (PDF-User-Space, Y zeigt nach oben).
+    Move {
+        dx: f64,
+        dy: f64,
+    },
+    PrevPage,
+    NextPage,
+}
+
+/// Übersetzt gedrückte Tasten in Befehle.
+///
+/// **Der Fokus entscheidet zuerst.** Vorher las die Oberfläche die Tasten
+/// global aus, ohne zu prüfen, wo die Eingabe hingehört. Ergebnis: die
+/// Rücktaste im Feld „Ersetzen“ löschte die ausgewählte Region — ohne
+/// Rückfrage, ohne Rückgängig —, die Pfeiltasten verschoben sie beim
+/// Textcursor-Bewegen um 1 bzw. 10 pt, und Escape ließ das Feld mitten im Wort
+/// verschwinden. Steht der Fokus in einem Textfeld, gehören die Tasten dorthin
+/// und **nirgendwo sonst hin**.
+pub fn key_commands(keys: KeyState, has_selection: bool) -> Vec<KeyCommand> {
+    if keys.text_focus {
+        return Vec::new();
+    }
+
+    let mut commands = Vec::new();
+    if keys.escape {
+        commands.push(KeyCommand::Deselect);
+    }
+    if keys.delete && has_selection {
+        commands.push(KeyCommand::DeleteSelected);
+    }
+
+    let step = if keys.shift { NUDGE_FAST } else { NUDGE };
+    // Escape hebt die Auswahl auf — danach sind die Pfeiltasten wieder für das
+    // Blättern zuständig.
+    let selected = has_selection && !keys.escape;
+    if selected {
+        // Y zeigt im PDF nach oben — „Pfeil hoch“ erhöht also y.
+        if keys.left {
+            commands.push(KeyCommand::Move { dx: -step, dy: 0.0 });
+        }
+        if keys.right {
+            commands.push(KeyCommand::Move { dx: step, dy: 0.0 });
+        }
+        if keys.up {
+            commands.push(KeyCommand::Move { dx: 0.0, dy: step });
+        }
+        if keys.down {
+            commands.push(KeyCommand::Move { dx: 0.0, dy: -step });
+        }
+    } else {
+        if keys.left {
+            commands.push(KeyCommand::PrevPage);
+        }
+        if keys.right {
+            commands.push(KeyCommand::NextPage);
+        }
+    }
+    // Bild auf/ab blättert immer, auch mit ausgewählter Region.
+    if keys.page_up {
+        commands.push(KeyCommand::PrevPage);
+    }
+    if keys.page_down {
+        commands.push(KeyCommand::NextPage);
+    }
+    commands
+}
+
+// ---------------------------------------------------------------------------
+// Rückfragen
+// ---------------------------------------------------------------------------
+
+/// Muss vor dem Schließen des Fensters nachgefragt werden?
+///
+/// Reine Entscheidung, damit sie ohne Fenster prüfbar ist.
+pub fn needs_close_confirmation(has_manual_work: bool, already_confirmed: bool) -> bool {
+    has_manual_work && !already_confirmed
+}
+
+/// Text der Rückfrage. `what` beschreibt, was gleich passiert.
+pub fn discard_question(regions: usize, what: &str) -> String {
+    format!(
+        "Es sind {regions} Schwärzung(en) von Hand bearbeitet oder gezeichnet worden. \
+         {what} verwirft sie. Es gibt kein Rückgängig.\n\n\
+         Tipp: „Review speichern …“ sichert den Stand als Datei.\n\n\
+         Trotzdem fortfahren?"
+    )
+}
+
+/// Meldung nach einem geglückten Export.
+///
+/// Zwei Dinge, die früher nur als Sprechblase oder gar nicht auftauchten,
+/// stehen jetzt im Text:
+///
+/// * **die erste Warnung** des Schwärzers — etwa „Bild nur überdeckt“. Das ist
+///   kein Randdetail, sondern die Aussage, dass an dieser Stelle Bildinhalt
+///   bloß verdeckt und nicht entfernt wurde;
+/// * **das Protokoll**, das ungefragt neben der Ausgabe entsteht. Enthält es
+///   Einträge der Negativliste, stehen darin Klartextnamen (Feld
+///   `blocked_by_negative_list[].pattern`) — wer die Ausgabe weitergibt, darf
+///   das Protokoll nicht versehentlich mitschicken.
+pub fn export_status(
+    rects: usize,
+    glyphs: usize,
+    out: &std::path::Path,
+    audit: &std::path::Path,
+    blocked: usize,
+    first_warning: Option<&str>,
+) -> String {
+    let mut text = format!(
+        "Export: {rects} Rechteck(e), {glyphs} Zeichen entfernt → {}",
+        out.display()
+    );
+    if let Some(warning) = first_warning {
+        text.push_str(&format!("  ⚠ {warning}"));
+    }
+    let audit_name = audit
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| audit.display().to_string());
+    text.push_str(&format!("  ·  Protokoll: {audit_name}"));
+    if blocked > 0 {
+        text.push_str(" (enthält Klartext aus Ihrer Schutzliste — nicht mitgeben)");
+    }
+    text
+}
+
 /// Zustand der Oberfläche.
 pub struct RedactApp {
     pub state: AppState,
@@ -181,6 +346,15 @@ pub struct RedactApp {
     /// Fläche des Hauptbereichs im letzten Frame — Grundlage für den
     /// Ablege-Hinweis, der über allem liegt.
     central_rect: Option<egui::Rect>,
+    /// Gerasterte Seitenbilder; rechnet auf einem eigenen Thread.
+    pages: PageCache,
+    /// Wurde das Schließen des Fensters bereits bestätigt?
+    close_confirmed: bool,
+    /// Rückfragen unterdrücken (nur für Tests ohne Bildschirm).
+    ///
+    /// Ein `rfd`-Dialog blockiert und braucht ein Fenster; im Test gibt es
+    /// beides nicht.
+    ask_before_discarding: bool,
 }
 
 impl Default for RedactApp {
@@ -197,6 +371,52 @@ impl RedactApp {
             pattern_ids,
             error: None,
             central_rect: None,
+            pages: PageCache::new(),
+            close_confirmed: false,
+            ask_before_discarding: true,
+        }
+    }
+
+    /// Ohne Rückfragen — für Tests ohne Bildschirm.
+    #[cfg(test)]
+    fn silent(pattern_ids: Vec<String>) -> Self {
+        Self {
+            ask_before_discarding: false,
+            ..Self::new(pattern_ids)
+        }
+    }
+
+    /// Darf Handarbeit weggeworfen werden?
+    ///
+    /// Ohne Handarbeit sofort `true` — die Rückfrage soll nur dann kommen,
+    /// wenn wirklich etwas verloren geht.
+    fn may_discard(&self, what: &str) -> bool {
+        if !self.state.has_manual_work() {
+            return true;
+        }
+        if !self.ask_before_discarding {
+            return true;
+        }
+        let count = self
+            .state
+            .regions
+            .iter()
+            .filter(|a| a.is_hand_made())
+            .count();
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Von Hand bearbeitete Schwärzungen verwerfen?")
+            .set_description(discard_question(count, what))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show()
+            == rfd::MessageDialogResult::Yes
+    }
+
+    /// Übergibt das geladene Dokument an den Rasterizer.
+    fn hand_document_to_the_renderer(&mut self) {
+        match self.state.document.as_ref() {
+            Some(doc) => self.pages.set_document(doc.clone()),
+            None => self.pages.reset(),
         }
     }
 
@@ -214,13 +434,8 @@ impl RedactApp {
 
     /// Lädt ein PDF und analysiert es sofort.
     pub fn open_and_analyze(&mut self, path: PathBuf) {
-        let booking = self.state.booking_path.clone();
-        let ids = self.pattern_ids.clone();
-        let result = self
-            .state
-            .load_document(&path)
-            .and_then(|()| self.state.analyze(&ids, booking.as_deref()).map(|_| ()));
-        self.report(result);
+        let loaded = self.state.load_document(&path);
+        self.after_loading(loaded);
     }
 
     /// Führt nur die Analyse aus (z.B. nach dem Laden einer Buchungsliste).
@@ -238,13 +453,27 @@ impl RedactApp {
     /// Öffnet ein aus dem Speicher abgelegtes PDF (Web-Build ohne Pfad).
     pub fn open_bytes_and_analyze(&mut self, bytes: &[u8], name: &str) {
         let path = (!name.is_empty()).then(|| PathBuf::from(name));
-        let ids = self.pattern_ids.clone();
+        let loaded = self.state.load_bytes(bytes, path);
+        self.after_loading(loaded);
+    }
+
+    /// Gemeinsamer Abschluss beider Ladewege: Rasterizer versorgen, dann
+    /// analysieren.
+    ///
+    /// Der Rasterizer bekommt das Dokument **nur bei geglücktem Laden** —
+    /// scheitert es, bleibt der alte Zustand samt Seitenbildern stehen, statt
+    /// den Zwischenspeicher grundlos zu leeren.
+    fn after_loading(&mut self, loaded: redact_core::Result<()>) {
+        if loaded.is_err() {
+            self.report(loaded);
+            return;
+        }
+        self.hand_document_to_the_renderer();
+        self.close_confirmed = false;
         let booking = self.state.booking_path.clone();
-        let result = self
-            .state
-            .load_bytes(bytes, path)
-            .and_then(|()| self.state.analyze(&ids, booking.as_deref()).map(|_| ()));
-        self.report(result);
+        let ids = self.pattern_ids.clone();
+        let analyzed = self.state.analyze(&ids, booking.as_deref()).map(|_| ());
+        self.report(analyzed);
     }
 
     /// Führt die Entscheidung aus, die [`classify_drop`] getroffen hat.
@@ -285,15 +514,18 @@ impl RedactApp {
 
     fn export_to(&mut self, out: PathBuf) {
         let audit = AppState::audit_path_for(&out);
+        let blocked = self.state.blocked_regions().len();
         match self.state.export(&out, Some(&audit)) {
             Ok(report) => {
                 self.error = None;
                 self.state.warnings = report.warnings.clone();
-                self.state.status = format!(
-                    "Export: {} Rechteck(e), {} Zeichen entfernt → {}",
+                self.state.status = export_status(
                     report.drawn_rects,
                     report.removed_glyphs,
-                    out.display()
+                    &out,
+                    &audit,
+                    blocked,
+                    report.warnings.first().map(String::as_str),
                 );
             }
             Err(e) => self.report(Err(e)),
@@ -304,7 +536,8 @@ impl RedactApp {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("PDF öffnen …").clicked() {
+            if ui.button("PDF öffnen …").clicked() && self.may_discard("Ein anderes PDF zu öffnen")
+            {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("PDF", &["pdf"])
                     .set_title("PDF öffnen")
@@ -378,7 +611,9 @@ impl RedactApp {
                 }
             }
 
-            if ui.button("Review laden …").clicked() {
+            if ui.button("Review laden …").clicked()
+                && self.may_discard("Ein Review zu laden ersetzt die Trefferliste und")
+            {
                 let mut dialog = rfd::FileDialog::new()
                     .add_filter("JSON", &["json"])
                     .set_title("Review-Datei laden");
@@ -405,9 +640,9 @@ impl RedactApp {
                 self.state.set_zoom(zoom);
             }
             if ui.button("Einpassen").clicked() {
-                let page_box = self.state.current_page_box();
+                let view = self.state.current_page_view();
                 let available = ui.ctx().screen_rect().size() - CHROME_SIZE;
-                self.state.set_zoom(viewer::fit_zoom(available, &page_box));
+                self.state.set_zoom(viewer::fit_zoom(available, &view));
             }
         });
     }
@@ -449,23 +684,50 @@ impl RedactApp {
                 }
             }
 
-            if !self.state.warnings.is_empty() {
+            // Warnungen kommen aus zwei Quellen: vom Schwärzen (bleiben nach
+            // einem Export stehen) und vom Rastern der aktuellen Seite. Beide
+            // gehören in die Zeile, nicht in einen Dialog — ein Dialog müsste
+            // weggeklickt werden und ist im nächsten Bild wieder da.
+            let warnings = self.visible_warnings();
+            if let Some(first) = warnings.first() {
                 ui.separator();
-                ui.label(
-                    RichText::new(format!("{} Warnung(en)", self.state.warnings.len()))
-                        .color(Color32::from_rgb(200, 140, 0)),
-                )
-                .on_hover_text(self.state.warnings.join("\n"));
+                let mut text = first.clone();
+                if warnings.len() > 1 {
+                    text.push_str(&format!(" (+{} weitere)", warnings.len() - 1));
+                }
+                ui.label(RichText::new(text).color(Color32::from_rgb(160, 100, 0)))
+                    .on_hover_text(warnings.join("\n"));
+            }
+
+            if self.pages.is_busy() {
+                ui.separator();
+                ui.label(RichText::new("Seitenbild wird erstellt …").weak());
             }
         });
     }
 
-    fn page_view(&mut self, ui: &mut egui::Ui) {
+    /// Warnungen des letzten Exports **und** des Rasterizers zur aktuellen
+    /// Seite, ohne Dopplungen.
+    fn visible_warnings(&self) -> Vec<String> {
+        let mut all = self.state.warnings.clone();
+        for warning in self.pages.warnings(self.state.current_page) {
+            if !all.contains(warning) {
+                all.push(warning.clone());
+            }
+        }
+        all
+    }
+
+    /// Der Hauptbereich: gerastertes Seitenbild, Schwärzungsrechtecke, Maus.
+    fn paint_page(&mut self, ui: &mut egui::Ui, summary: &HitSummary) {
         let page = self.state.current_page;
-        let page_box = self.state.current_page_box();
+        let view = self.state.current_page_view();
         let zoom = self.state.zoom;
-        let sheet_size = viewer::page_size_screen(&page_box, zoom);
-        let total = sheet_size + Vec2::splat(SHEET_MARGIN * 2.0);
+        let total = view.size_screen(zoom) + Vec2::splat(SHEET_MARGIN * 2.0);
+
+        // Fehlendes Bild anfordern — löst nur bei Wechsel von Seite oder
+        // Zoomstufe wirklich etwas aus.
+        self.pages.request(page, &view, zoom, ui.ctx());
 
         egui::ScrollArea::both()
             .auto_shrink([false, false])
@@ -473,22 +735,41 @@ impl RedactApp {
                 let (area, response) = ui.allocate_exact_size(total, egui::Sense::click_and_drag());
                 let origin = area.min + Vec2::splat(SHEET_MARGIN);
                 let painter = ui.painter_at(area);
+                let sheet = egui::Rect::from_min_size(origin, view.size_screen(zoom));
 
-                // --- Blatt und Text ---
-                {
-                    let preview = PagePreview::new(page, &page_box, &self.state.runs, zoom);
-                    preview.paint(&painter, origin);
+                let preview = PagePreview::new(page, view, &self.state.runs, zoom);
+                preview.paint_sheet(&painter, origin);
+
+                // --- Gerastertes Seitenbild ---
+                let cached = self.pages.page(page);
+                let mut show_schematic = true;
+                if let Some((texture, is_thumb)) = cached.and_then(|c| c.best()) {
+                    painter.image(
+                        texture.id(),
+                        sheet,
+                        egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    // Die schematische Vorschau bleibt der Notnagel: nur wenn das
+                    // Bild leer ist (`degraded`) oder erst das grobe Kleinbild
+                    // vorliegt, wird der Text zusätzlich gezeichnet.
+                    let degraded = cached.map(|c| c.meta.degraded).unwrap_or(false);
+                    show_schematic = degraded || is_thumb;
+                }
+                if show_schematic {
+                    preview.paint_text(&painter, origin);
                 }
 
                 // --- Regionen ---
                 for index in self.state.regions_on_page(page) {
                     let entry = &self.state.regions[index];
-                    let screen = viewer::pdf_to_screen(&entry.region.rect, &page_box, zoom, origin);
+                    let screen = viewer::pdf_to_screen(&entry.region.rect, &view, zoom, origin);
                     viewer::paint_region(
                         &painter,
                         screen,
                         entry.color.rgb(),
-                        entry.enabled,
+                        // Gefüllt wird nur, was auch wirklich geschwärzt wird.
+                        viewer::RegionStyle::from_outcome(summary.outcome(index)),
                         self.state.selected_region == Some(index),
                     );
                 }
@@ -498,18 +779,18 @@ impl RedactApp {
                     painter.rect_stroke(
                         preview,
                         viewer::NO_ROUNDING,
-                        Stroke::new(viewer::DRAG_STROKE, Color32::from_rgb(240, 150, 30)),
+                        Stroke::new(viewer::DRAG_STROKE, drop_accent()),
                     );
                 }
 
-                self.handle_pointer(&response, &page_box, origin, page, zoom);
+                self.handle_pointer(&response, &view, origin, page, zoom);
             });
     }
 
     fn handle_pointer(
         &mut self,
         response: &egui::Response,
-        page_box: &redact_core::Rect,
+        view: &viewer::PageView,
         origin: Pos2,
         page: usize,
         zoom: f32,
@@ -517,25 +798,53 @@ impl RedactApp {
         // Klick wählt aus (oder hebt die Auswahl auf).
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
-                let point = viewer::screen_to_pdf_point(pos, page_box, zoom, origin);
+                let point = viewer::screen_to_pdf_point(pos, view, zoom, origin);
                 self.state.selected_region = hit_test(&self.state.regions, page, point);
             }
         }
 
         // Ziehen legt eine manuelle Region an.
         if let Some((a, b)) = self.selector.interact(response) {
-            let rect = viewer::screen_to_pdf(a, b, page_box, zoom, origin);
+            let rect = viewer::screen_to_pdf(a, b, view, zoom, origin);
             self.state.add_manual_region(page, rect, "manuell markiert");
         }
     }
 
     /// Nimmt auf das Fenster gezogene Dateien entgegen.
+    ///
+    /// Ein Fehlgriff beim Ziehen genügte früher, um alle Handarbeit zu
+    /// verlieren — deshalb wird auch hier gefragt. Abgelehnte Dateien
+    /// (kein PDF) ändern nichts und brauchen keine Rückfrage.
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
             return;
         }
-        self.apply_drop(classify_drop(&dropped));
+        let action = classify_drop(&dropped);
+        let replaces_everything =
+            !matches!(action, DropAction::Nothing | DropAction::Rejected { .. });
+        if replaces_everything && !self.may_discard("Eine abgelegte Datei zu öffnen") {
+            self.state.status = "Abgelegte Datei nicht geöffnet — nichts verändert".to_string();
+            return;
+        }
+        self.apply_drop(action);
+    }
+
+    /// Fragt vor dem Schließen nach, wenn Handarbeit verloren ginge.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        if !needs_close_confirmation(self.state.has_manual_work(), self.close_confirmed) {
+            return;
+        }
+        // Erst das Schließen zurücknehmen, dann fragen — sonst ist das Fenster
+        // weg, bevor jemand antworten konnte.
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if self.may_discard("Das Fenster zu schließen") {
+            self.close_confirmed = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     /// Zeigt an, dass hier abgelegt werden darf, solange Dateien über dem
@@ -562,7 +871,7 @@ impl RedactApp {
 
         // Gestrichelter Rahmen aus vier Kanten.
         let frame = area.shrink(DROP_MARGIN);
-        let stroke = Stroke::new(DROP_STROKE, DROP_ACCENT);
+        let stroke = Stroke::new(DROP_STROKE, drop_accent());
         let corners = [
             frame.left_top(),
             frame.right_top(),
@@ -588,50 +897,47 @@ impl RedactApp {
         );
     }
 
+    /// Liest die Tasten aus dem Kontext.
+    ///
+    /// `focused()` beantwortet die entscheidende Frage: liegt der Eingabefokus
+    /// in einem Widget (typischerweise dem Textfeld „Ersetzen“ oder dem
+    /// Namenszusatz)? Dann gehören alle Tasten dorthin.
+    fn read_keys(ctx: &egui::Context) -> KeyState {
+        let text_focus = ctx.memory(|m| m.focused().is_some());
+        ctx.input(|i| KeyState {
+            delete: i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
+            escape: i.key_pressed(Key::Escape),
+            left: i.key_pressed(Key::ArrowLeft),
+            right: i.key_pressed(Key::ArrowRight),
+            up: i.key_pressed(Key::ArrowUp),
+            down: i.key_pressed(Key::ArrowDown),
+            page_up: i.key_pressed(Key::PageUp),
+            page_down: i.key_pressed(Key::PageDown),
+            shift: i.modifiers.shift,
+            text_focus,
+        })
+    }
+
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        let (delete, escape, left, right, up, down, page_up, page_down, shift) = ctx.input(|i| {
-            (
-                i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
-                i.key_pressed(Key::Escape),
-                i.key_pressed(Key::ArrowLeft),
-                i.key_pressed(Key::ArrowRight),
-                i.key_pressed(Key::ArrowUp),
-                i.key_pressed(Key::ArrowDown),
-                i.key_pressed(Key::PageUp),
-                i.key_pressed(Key::PageDown),
-                i.modifiers.shift,
-            )
-        });
+        let keys = Self::read_keys(ctx);
+        self.apply_key_commands(&key_commands(keys, self.state.selected_region.is_some()));
+    }
 
-        if escape {
-            self.selector.cancel();
-            self.state.selected_region = None;
-        }
-        if delete {
-            self.state.delete_selected();
-        }
-
-        let step = if shift { NUDGE_FAST } else { NUDGE };
-        if self.state.selected_region.is_some() {
-            // Y zeigt im PDF nach oben — „Pfeil hoch“ erhöht also y.
-            if left {
-                self.state.move_selected(-step, 0.0);
-            }
-            if right {
-                self.state.move_selected(step, 0.0);
-            }
-            if up {
-                self.state.move_selected(0.0, step);
-            }
-            if down {
-                self.state.move_selected(0.0, -step);
-            }
-        } else {
-            if left || page_up {
-                self.state.prev_page();
-            }
-            if right || page_down {
-                self.state.next_page();
+    fn apply_key_commands(&mut self, commands: &[KeyCommand]) {
+        for command in commands {
+            match *command {
+                KeyCommand::Deselect => {
+                    self.selector.cancel();
+                    self.state.selected_region = None;
+                }
+                KeyCommand::DeleteSelected => {
+                    self.state.delete_selected();
+                }
+                KeyCommand::Move { dx, dy } => {
+                    self.state.move_selected(dx, dy);
+                }
+                KeyCommand::PrevPage => self.state.prev_page(),
+                KeyCommand::NextPage => self.state.next_page(),
             }
         }
     }
@@ -639,8 +945,12 @@ impl RedactApp {
 
 impl eframe::App for RedactApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Fertige Seitenbilder abholen, bevor gezeichnet wird.
+        self.pages.poll(ctx);
         self.handle_dropped_files(ctx);
-        self.handle_keys(ctx);
+
+        // Einmal je Bild, nicht je Trefferzeile.
+        let summary = self.state.hit_summary();
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(BAR_PADDING);
@@ -656,13 +966,13 @@ impl eframe::App for RedactApp {
             .default_width(SIDEBAR_WIDTH)
             .width_range(SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH)
             .show(ctx, |ui| {
-                crate::sidebar::show(ui, &mut self.state);
+                crate::sidebar::show(ui, &mut self.state, &summary);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.central_rect = Some(ui.max_rect());
             if self.state.is_loaded() {
-                self.page_view(ui);
+                self.paint_page(ui, &summary);
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -676,6 +986,12 @@ impl eframe::App for RedactApp {
             }
         });
 
+        // Tasten erst **nach** den Panels: vorher weiß egui noch nicht, ob der
+        // Fokus in einem Textfeld liegt, und genau davon hängt ab, ob die
+        // Rücktaste eine Region löscht oder ein Zeichen.
+        self.handle_keys(ctx);
+        self.handle_close_request(ctx);
+
         // Zuletzt, damit der Hinweis über allem liegt.
         self.paint_drop_hint(ctx);
     }
@@ -684,6 +1000,223 @@ impl eframe::App for RedactApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use redact_core::Rect;
+
+    // ----------------------------------------------------------- Tastatur
+
+    /// A1: Steht der Fokus in einem Textfeld, darf **keine** Taste bis in den
+    /// Zustand durchschlagen. Vorher löschte die Rücktaste im Feld „Ersetzen“
+    /// die ausgewählte Region — ohne Rückfrage und ohne Rückgängig.
+    #[test]
+    fn a_focused_text_field_swallows_every_key() {
+        let every_key = KeyState {
+            delete: true,
+            escape: true,
+            left: true,
+            right: true,
+            up: true,
+            down: true,
+            page_up: true,
+            page_down: true,
+            shift: true,
+            text_focus: true,
+        };
+        assert!(key_commands(every_key, true).is_empty());
+        assert!(key_commands(every_key, false).is_empty());
+
+        // Ohne Fokus tut dieselbe Eingabe sehr wohl etwas.
+        let unfocused = KeyState {
+            text_focus: false,
+            ..every_key
+        };
+        assert!(!key_commands(unfocused, true).is_empty());
+    }
+
+    /// Und derselbe Fall einmal ganz konkret, mit echtem Zustand.
+    #[test]
+    fn backspace_in_a_text_field_does_not_delete_the_selected_region() {
+        let mut app = RedactApp::silent(Vec::new());
+        app.state
+            .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
+        let before = app.state.regions.clone();
+
+        let typing = KeyState {
+            delete: true,
+            text_focus: true,
+            ..KeyState::default()
+        };
+        app.apply_key_commands(&key_commands(typing, app.state.selected_region.is_some()));
+        assert_eq!(app.state.regions, before, "Region darf nicht verschwinden");
+        assert_eq!(app.state.selected_region, Some(0));
+
+        // Ohne Fokus im Textfeld löscht dieselbe Taste sehr wohl.
+        let on_canvas = KeyState {
+            text_focus: false,
+            ..typing
+        };
+        app.apply_key_commands(&key_commands(on_canvas, true));
+        assert!(app.state.regions.is_empty());
+    }
+
+    #[test]
+    fn arrow_keys_nudge_a_selection_and_otherwise_turn_the_page() {
+        let arrows = |left, right, up, down, shift| KeyState {
+            left,
+            right,
+            up,
+            down,
+            shift,
+            ..KeyState::default()
+        };
+
+        // Mit Auswahl: verschieben, Y zeigt im PDF nach oben.
+        assert_eq!(
+            key_commands(arrows(false, false, true, false, false), true),
+            vec![KeyCommand::Move { dx: 0.0, dy: 1.0 }]
+        );
+        assert_eq!(
+            key_commands(arrows(false, false, false, true, true), true),
+            vec![KeyCommand::Move { dx: 0.0, dy: -10.0 }]
+        );
+        assert_eq!(
+            key_commands(arrows(true, false, false, false, false), true),
+            vec![KeyCommand::Move { dx: -1.0, dy: 0.0 }]
+        );
+
+        // Ohne Auswahl: blättern.
+        assert_eq!(
+            key_commands(arrows(true, false, false, false, false), false),
+            vec![KeyCommand::PrevPage]
+        );
+        assert_eq!(
+            key_commands(arrows(false, true, false, false, false), false),
+            vec![KeyCommand::NextPage]
+        );
+
+        // Bild auf/ab blättert auch mit Auswahl.
+        let page_down = KeyState {
+            page_down: true,
+            ..KeyState::default()
+        };
+        assert_eq!(key_commands(page_down, true), vec![KeyCommand::NextPage]);
+
+        // Escape hebt die Auswahl auf und verschiebt nicht mehr.
+        let escape_and_left = KeyState {
+            escape: true,
+            left: true,
+            ..KeyState::default()
+        };
+        assert_eq!(
+            key_commands(escape_and_left, true),
+            vec![KeyCommand::Deselect, KeyCommand::PrevPage]
+        );
+
+        // Löschen ohne Auswahl ist ein Nichts.
+        let delete = KeyState {
+            delete: true,
+            ..KeyState::default()
+        };
+        assert!(key_commands(delete, false).is_empty());
+    }
+
+    // ------------------------------------------------- Rückfrage vor Verlust
+
+    /// A8: die Rückfrage kommt genau dann, wenn wirklich etwas verloren geht.
+    #[test]
+    fn closing_only_asks_when_there_is_hand_work_to_lose() {
+        assert!(!needs_close_confirmation(false, false));
+        assert!(!needs_close_confirmation(false, true));
+        assert!(needs_close_confirmation(true, false));
+        // Nach dem Bestätigen darf nicht noch einmal gefragt werden, sonst
+        // ließe sich das Fenster nie schließen.
+        assert!(!needs_close_confirmation(true, true));
+
+        let text = discard_question(3, "Das Fenster zu schließen");
+        assert!(text.contains('3'));
+        assert!(text.contains("Das Fenster zu schließen"));
+        assert!(text.contains("Rückgängig"));
+        assert!(text.contains("Review speichern"));
+    }
+
+    /// Ohne Handarbeit darf nichts nachfragen — die Rückfrage wäre dann nur im
+    /// Weg. `may_discard` fragt dafür `AppState::has_manual_work` ab.
+    #[test]
+    fn may_discard_passes_straight_through_without_hand_work() {
+        let mut app = RedactApp::new(vec!["iban_de".to_string()]);
+        // Frisch: nichts zu verlieren, also kein Dialog (sonst hinge der Test).
+        assert!(app.may_discard("Test"));
+
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        assert!(!app.state.regions.is_empty());
+        assert!(
+            app.may_discard("Test"),
+            "eine reine Analyse ist wiederholbar"
+        );
+
+        // Erst Handarbeit macht die Rückfrage nötig.
+        app.state
+            .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
+        assert!(app.state.has_manual_work());
+    }
+
+    /// Ein Fehlgriff beim Ziehen und Ablegen darf keine Arbeit kosten.
+    #[test]
+    fn a_declined_drop_leaves_everything_untouched() {
+        let ctx = egui::Context::default();
+        let app = std::cell::RefCell::new(RedactApp::new(vec!["iban_de".to_string()]));
+        app.borrow_mut()
+            .open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        app.borrow_mut()
+            .state
+            .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
+        let before = app.borrow().state.regions.clone();
+
+        // `ask_before_discarding` bleibt an, aber die Antwort wird nicht
+        // abgewartet: der Dialog käme nur, wenn `may_discard` ihn aufruft.
+        // Stattdessen wird hier die Entscheidung selbst geprüft.
+        assert!(app.borrow().state.has_manual_work());
+
+        // Eine abgelegte Nicht-PDF-Datei ändert ohnehin nichts und braucht
+        // deshalb auch keine Rückfrage.
+        let input = egui::RawInput {
+            dropped_files: vec![dropped_path("/daten/bild.png")],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.borrow_mut().handle_dropped_files(ctx));
+        assert_eq!(app.borrow().state.regions, before);
+        assert!(app.borrow().state.status.contains("Keine PDF-Datei"));
+    }
+
+    // ------------------------------------------------------------ Statuszeile
+
+    /// A5 und A7: Bildwarnung und Protokolldatei gehören in die Statuszeile.
+    #[test]
+    fn the_export_status_names_the_warning_and_the_audit_file() {
+        let out = PathBuf::from("/daten/auszug_geschwaerzt.pdf");
+        let audit = PathBuf::from("/daten/auszug_geschwaerzt_audit.json");
+
+        let plain = export_status(3, 42, &out, &audit, 0, None);
+        assert!(plain.contains("3 Rechteck(e)"));
+        assert!(plain.contains("42 Zeichen"));
+        assert!(plain.contains("auszug_geschwaerzt_audit.json"));
+        assert!(!plain.contains("Schutzliste"));
+
+        let warned = export_status(
+            1,
+            0,
+            &out,
+            &audit,
+            2,
+            Some("Bild auf Seite 1 nur überdeckt"),
+        );
+        assert!(
+            warned.contains("Bild auf Seite 1 nur überdeckt"),
+            "die erste Warnung muss im Text stehen: {warned}"
+        );
+        // Enthält das Protokoll Klartext aus der Negativliste, wird gewarnt.
+        assert!(warned.contains("Schutzliste"), "{warned}");
+    }
 
     #[test]
     fn analyze_without_document_sets_status_instead_of_failing() {

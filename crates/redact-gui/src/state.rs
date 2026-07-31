@@ -6,8 +6,14 @@
 //! Module [`crate::app`], [`crate::sidebar`] und [`crate::viewer`] rufen
 //! ausschließlich diese Methoden auf und halten selbst keinen Zustand, der
 //! über einen Frame hinaus Bedeutung hätte.
+//!
+//! Einzige Ausnahme von „ohne egui“ ist [`crate::viewer::PageView`] — reine
+//! Geometrie (MediaBox plus `/Rotate`), kein Fenster, keine Grafik. Sie liegt
+//! im Sichtmodul, weil sie dort gebraucht und geprüft wird.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redact_booking::{BookingMatcher, CsvBookingLoader};
@@ -21,6 +27,8 @@ use redact_pdf::{
     load_from_bytes, page_boxes, strip_metadata, PdfExtractor, PdfRedactor, PdfRenderer,
     RedactionReport,
 };
+
+use crate::viewer::{normalize_rotation, PageView};
 
 /// A4 als Rückfallwert, wenn noch kein Dokument geladen ist.
 pub const DEFAULT_PAGE_BOX: Rect = Rect {
@@ -36,12 +44,17 @@ pub const MIN_ZOOM: f32 = 0.25;
 /// Siehe [`MIN_ZOOM`].
 pub const MAX_ZOOM: f32 = 4.0;
 
-/// Farbkategorie einer Region in der Trefferliste und im Seitenbild.
+/// Kategorie einer Region in der Trefferliste und im Seitenbild.
+///
+/// Die Beschriftungen sagen, **was mit dem Treffer passiert**, nicht woher er
+/// technisch stammt. „Buchung negativ“ hieß früher die dritte Kategorie — auf
+/// einem Kontoauszug liest sich „negativ“ wie eine Soll-Buchung, gemeint war
+/// aber das genaue Gegenteil: dieser Text ist geschützt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionColor {
     /// Regex-Treffer (blau).
     AutoPattern,
-    /// Positivlisten-Treffer (grün).
+    /// Positivlisten-Treffer (grün) — soll geschwärzt werden.
     AutoBookingPos,
     /// Negativlisten-Treffer (rot) — wird nie geschwärzt.
     AutoBookingNeg,
@@ -49,8 +62,16 @@ pub enum RegionColor {
     Manual,
 }
 
+/// Alle Kategorien in fester Reihenfolge (Legende, Tests).
+pub const REGION_COLORS: [RegionColor; 4] = [
+    RegionColor::AutoPattern,
+    RegionColor::AutoBookingPos,
+    RegionColor::AutoBookingNeg,
+    RegionColor::Manual,
+];
+
 impl RegionColor {
-    /// Leitet die Farbkategorie aus der Herkunft der Region ab.
+    /// Leitet die Kategorie aus der Herkunft der Region ab.
     pub fn from_source(source: &Source) -> Self {
         match source {
             Source::Pattern { .. } => RegionColor::AutoPattern,
@@ -68,23 +89,160 @@ impl RegionColor {
 
     /// RGB-Wert für die Anzeige. Bewusst kein `egui::Color32`, damit dieses
     /// Modul frei von GUI-Abhängigkeiten bleibt.
+    ///
+    /// Das Orange der manuellen Regionen war früher `(240, 150, 30)` und kam im
+    /// hellen Thema auf 2,18:1 gegen den Bereichshintergrund und 2,31:1 gegen
+    /// das weiße Blatt — unter den 3:1, die für grafische Elemente das Minimum
+    /// sind. Das Grün lag mit 2,90:1 ebenfalls darunter. Beide sind jetzt
+    /// dunkler; alle vier Töne erreichen gegen weißes Blatt, hellen und dunklen
+    /// Bereichshintergrund mindestens 3:1 (siehe Test unten).
     pub fn rgb(self) -> (u8, u8, u8) {
         match self {
             RegionColor::AutoPattern => (60, 130, 246),
-            RegionColor::AutoBookingPos => (34, 168, 90),
+            RegionColor::AutoBookingPos => (21, 128, 61),
             RegionColor::AutoBookingNeg => (220, 60, 60),
-            RegionColor::Manual => (240, 150, 30),
+            RegionColor::Manual => (176, 88, 0),
         }
     }
 
-    /// Kurzbezeichnung für die Legende.
+    /// Zeichen vor dem Treffer.
+    ///
+    /// Vier **verschiedene** Zeichen, nicht nur vier Farben: Grün und Rot
+    /// unterscheiden sich bei einer Rot-Grün-Sehschwäche kaum, die Kategorie
+    /// muss aber auch dann ablesbar bleiben. Alle vier stammen aus demselben
+    /// Unicode-Block „Geometric Shapes“ wie das bisher schon benutzte `●`.
+    pub fn marker(self) -> &'static str {
+        match self {
+            RegionColor::AutoPattern => "●",
+            RegionColor::AutoBookingPos => "◆",
+            RegionColor::AutoBookingNeg => "■",
+            RegionColor::Manual => "▲",
+        }
+    }
+
+    /// Kurzbezeichnung für die Legende — ergebnisbezogen, ohne Fachjargon.
     pub fn label(self) -> &'static str {
         match self {
-            RegionColor::AutoPattern => "Pattern",
-            RegionColor::AutoBookingPos => "Buchung positiv",
-            RegionColor::AutoBookingNeg => "Buchung negativ",
-            RegionColor::Manual => "Manuell",
+            RegionColor::AutoPattern => "Muster gefunden",
+            RegionColor::AutoBookingPos => "Liste: schwärzen",
+            RegionColor::AutoBookingNeg => "Liste: schützen",
+            RegionColor::Manual => "selbst gezeichnet",
         }
+    }
+}
+
+// ------------------------------------------------------- Klartextbeschreibung
+
+/// Beschreibung eines Treffers in der Sprache der Zielgruppe.
+///
+/// Die alte Fassung zeigte `pattern: konto_nr (confidence 0.40)`: ein englisches
+/// Schlüsselwort, eine interne ID und eine Zahl, die niemand ohne Kenntnis der
+/// Erkennungsregeln deuten kann. Stattdessen wird jetzt die `description` des
+/// Musters gezeigt („Kontonummer (Heuristik, 6–10 Ziffern)“).
+pub fn plain_description(source: &Source) -> String {
+    match source {
+        Source::Pattern { pattern_id, .. } => pattern_description(pattern_id),
+        Source::Booking {
+            match_type: MatchType::Positive,
+            ..
+        } => "Aus Ihrer Liste: soll geschwärzt werden".to_string(),
+        Source::Booking {
+            match_type: MatchType::Negative,
+            ..
+        } => "Aus Ihrer Liste: darf nicht geschwärzt werden".to_string(),
+        Source::Manual { reason } => match reason.trim() {
+            "" => "Selbst gezeichnet".to_string(),
+            other => format!("Selbst gezeichnet: {other}"),
+        },
+    }
+}
+
+/// Beschreibung eines eingebauten Musters; sonst wenigstens dessen Namen.
+fn pattern_description(id: &str) -> String {
+    static TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        redact_patterns::builtin_patterns()
+            .into_iter()
+            .filter(|p| !p.description.trim().is_empty())
+            .map(|p| (p.id, p.description))
+            .collect()
+    });
+    match table.get(id) {
+        Some(description) => description.clone(),
+        // Aus einer Konfigurationsdatei nachgeladene Muster kennt die
+        // Oberfläche nicht — dann bleibt nur die ID.
+        None => format!("Muster „{id}“"),
+    }
+}
+
+// ------------------------------------------------------------ Trefferbilanz
+
+/// Was am Ende mit einem Treffer geschieht.
+///
+/// `resolve_conflicts` verwirft blockierte und doppelte Treffer. Ohne diese
+/// Unterscheidung zeigte die Seitenleiste sie weiter angehakt und gefüllt — der
+/// Eindruck, sie würden geschwärzt, war schlicht falsch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitOutcome {
+    /// Wird geschwärzt.
+    Redacted,
+    /// Schützt Text (Negativliste) und wird selbst nie geschwärzt.
+    Protecting,
+    /// Vom Nutzer abgewählt.
+    Disabled,
+    /// Durch einen Eintrag der Negativliste verhindert.
+    Blocked,
+    /// Doppelt bzw. vollständig in einem anderen Treffer enthalten.
+    Duplicate,
+}
+
+impl HitOutcome {
+    /// Wird dieser Treffer beim Export tatsächlich geschwärzt?
+    pub fn is_redacted(self) -> bool {
+        self == HitOutcome::Redacted
+    }
+
+    /// Kurzer Zusatz hinter der Trefferbeschriftung.
+    ///
+    /// Für geschützte Einträge steht hier ein **Wort** statt des früheren
+    /// Durchstreichens: durchgestrichen liest sich wie „gestrichen, entfernt“ —
+    /// gemeint ist das Gegenteil.
+    pub fn note(self) -> &'static str {
+        match self {
+            HitOutcome::Redacted => "",
+            HitOutcome::Protecting => "geschützt",
+            HitOutcome::Disabled => "abgewählt",
+            HitOutcome::Blocked => "geschützt durch Ihre Liste",
+            HitOutcome::Duplicate => "doppelt",
+        }
+    }
+}
+
+/// Ergebnis einer Konfliktauflösung, aufbereitet für die Anzeige.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HitSummary {
+    /// Je Eintrag in [`AppState::regions`] — gleiche Reihenfolge, gleiche Länge.
+    pub outcomes: Vec<HitOutcome>,
+    /// Anzahl der Treffer insgesamt.
+    pub total: usize,
+    /// Anzahl derer, die wirklich geschwärzt werden.
+    pub redacted: usize,
+}
+
+impl HitSummary {
+    pub fn outcome(&self, index: usize) -> HitOutcome {
+        self.outcomes
+            .get(index)
+            .copied()
+            .unwrap_or(HitOutcome::Duplicate)
+    }
+
+    /// Die eine Zahl, auf die es ankommt — als Satz.
+    pub fn headline(&self) -> String {
+        format!(
+            "{} Treffer · {} werden geschwärzt",
+            self.total, self.redacted
+        )
     }
 }
 
@@ -125,6 +283,17 @@ impl AnnotatedRegion {
         self.region.is_blocking()
     }
 
+    /// Hat die Nutzerin an diesem Eintrag etwas geändert?
+    ///
+    /// Grundlage für die Rückfrage, bevor Regionen weggeworfen werden.
+    pub fn is_hand_made(&self) -> bool {
+        // `enabled == is_blocking()` heißt: der Schalter steht **anders**, als
+        // ihn `AnnotatedRegion::new` gesetzt hätte.
+        matches!(self.region.source, Source::Manual { .. })
+            || self.enabled == self.region.is_blocking()
+            || self.action != Action::Blackout
+    }
+
     /// Beschriftung für die Trefferliste.
     pub fn label(&self) -> String {
         let text = self
@@ -135,6 +304,11 @@ impl AnnotatedRegion {
             .filter(|t| !t.is_empty())
             .unwrap_or("(ohne Text)");
         format!("S.{} {}", self.region.page + 1, shorten(text, 34))
+    }
+
+    /// Beschreibung in Klartext — siehe [`plain_description`].
+    pub fn description(&self) -> String {
+        plain_description(&self.region.source)
     }
 }
 
@@ -152,9 +326,16 @@ pub fn shorten(text: &str, max: usize) -> String {
 #[derive(Debug)]
 pub struct AppState {
     pub pdf_path: Option<PathBuf>,
-    pub document: Option<lopdf::Document>,
+    /// Das geladene Dokument.
+    ///
+    /// Hinter einem [`Arc`], weil der Rasterizer in [`crate::render`] auf einem
+    /// eigenen Thread darauf zugreift. Ohne den `Arc` müsste für jede Vorschau
+    /// eine vollständige Kopie des Dokuments angelegt werden.
+    pub document: Option<Arc<lopdf::Document>>,
     /// MediaBox je Seite.
     pub page_boxes: Vec<Rect>,
+    /// `/Rotate` je Seite (0/90/180/270), inklusive Vererbung vom Seitenbaum.
+    pub rotations: Vec<i64>,
     pub runs: Vec<TextRun>,
     pub current_page: usize,
     pub zoom: f32,
@@ -179,6 +360,7 @@ impl Default for AppState {
             pdf_path: None,
             document: None,
             page_boxes: Vec::new(),
+            rotations: Vec::new(),
             runs: Vec::new(),
             current_page: 0,
             zoom: 1.0,
@@ -216,8 +398,9 @@ impl AppState {
         let doc = load_from_bytes(bytes)?;
         let runs = PdfExtractor::new().extract(&doc)?;
         self.page_boxes = page_boxes(&doc);
+        self.rotations = page_rotations(&doc);
         self.runs = runs;
-        self.document = Some(doc);
+        self.document = Some(Arc::new(doc));
         self.pdf_path = path;
         self.current_page = 0;
         self.selected_region = None;
@@ -245,6 +428,30 @@ impl AppState {
             .get(self.current_page)
             .copied()
             .unwrap_or(DEFAULT_PAGE_BOX)
+    }
+
+    /// Drehung der angegebenen Seite (0, solange nichts geladen ist).
+    pub fn rotation(&self, page: usize) -> i64 {
+        self.rotations.get(page).copied().unwrap_or(0)
+    }
+
+    /// Geometrie einer Seite für die Koordinatenumrechnung.
+    ///
+    /// Enthält `/Rotate`; ohne das lägen die Schwärzungsrechtecke auf gedrehten
+    /// Seiten an der falschen Stelle.
+    pub fn page_view(&self, page: usize) -> PageView {
+        PageView::new(
+            self.page_boxes
+                .get(page)
+                .copied()
+                .unwrap_or(DEFAULT_PAGE_BOX),
+            self.rotation(page),
+        )
+    }
+
+    /// Geometrie der aktuellen Seite.
+    pub fn current_page_view(&self) -> PageView {
+        self.page_view(self.current_page)
     }
 
     /// Springt auf eine Seite; Werte außerhalb des Dokuments werden geklemmt.
@@ -318,9 +525,9 @@ impl AppState {
         self.regions.extend(manual);
         self.selected_region = None;
 
-        let total = self.regions.len();
-        let blocked = self.regions.iter().filter(|a| a.is_blocking()).count();
-        self.status = format!("Analyse: {total} Treffer ({blocked} aus der Negativliste)");
+        let summary = self.hit_summary();
+        let total = summary.total;
+        self.status = format!("Analyse: {}", summary.headline());
         Ok(total)
     }
 
@@ -434,6 +641,63 @@ impl AppState {
         resolve_conflicts(self.conflict_input())
     }
 
+    /// Bilanz für die Anzeige: was passiert mit welchem Treffer?
+    ///
+    /// Einmal je Bild berechnen und weiterreichen — [`resolve_conflicts`] ist
+    /// nicht teuer, aber quadratisch in der Trefferzahl.
+    ///
+    /// Die Zuordnung geschieht der Reihe nach: `resolve_conflicts` behält bei
+    /// Duplikaten das **erste** Vorkommen, also findet auch hier das erste
+    /// Vorkommen seinen Eintrag im Ergebnis, das zweite nicht mehr.
+    pub fn hit_summary(&self) -> HitSummary {
+        let resolution = self.resolution();
+        let mut redact: Vec<Option<&Region>> = resolution.redact.iter().map(Some).collect();
+        let mut blocked: Vec<Option<&BlockedRegion>> =
+            resolution.blocked.iter().map(Some).collect();
+
+        let outcomes: Vec<HitOutcome> = self
+            .regions
+            .iter()
+            .map(|entry| {
+                if entry.is_blocking() {
+                    return HitOutcome::Protecting;
+                }
+                if !entry.enabled {
+                    return HitOutcome::Disabled;
+                }
+                if let Some(slot) = redact
+                    .iter_mut()
+                    .find(|slot| slot.is_some_and(|r| *r == entry.region))
+                {
+                    *slot = None;
+                    return HitOutcome::Redacted;
+                }
+                if let Some(slot) = blocked.iter_mut().find(|slot| {
+                    slot.is_some_and(|b| b.page == entry.region.page && b.rect == entry.region.rect)
+                }) {
+                    *slot = None;
+                    return HitOutcome::Blocked;
+                }
+                HitOutcome::Duplicate
+            })
+            .collect();
+
+        HitSummary {
+            total: outcomes.len(),
+            redacted: resolution.redact.len(),
+            outcomes,
+        }
+    }
+
+    /// Steckt in den Regionen Handarbeit, die beim Verwerfen verloren ginge?
+    ///
+    /// Wahr, sobald ein Rechteck selbst gezogen, ein Treffer abgewählt oder
+    /// dessen Schwärzungsart geändert wurde. Eine frisch gelaufene Analyse
+    /// allein zählt **nicht** — die ist mit einem Klick wiederhergestellt.
+    pub fn has_manual_work(&self) -> bool {
+        self.regions.iter().any(AnnotatedRegion::is_hand_made)
+    }
+
     /// Durch die Negativliste verhinderte Treffer (fürs Audit-Log).
     pub fn blocked_regions(&self) -> Vec<BlockedRegion> {
         self.resolution().blocked
@@ -507,6 +771,25 @@ impl AppState {
 
     // ---------------------------------------------------------------- Export
 
+    /// Zeigt `out` auf die geladene Originaldatei?
+    ///
+    /// Erst der reine Pfadvergleich (greift auch, wenn die Zieldatei noch gar
+    /// nicht existiert), dann — falls beide Pfade auflösbar sind — der Vergleich
+    /// der aufgelösten Pfade. Damit fallen auch `./auszug.pdf`, Symlinks und
+    /// `../ordner/auszug.pdf` auf.
+    pub fn targets_the_input(&self, out: &Path) -> bool {
+        let Some(input) = self.pdf_path.as_deref() else {
+            return false;
+        };
+        if out == input {
+            return true;
+        }
+        match (std::fs::canonicalize(out), std::fs::canonicalize(input)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+
     /// Schwärzt eine Kopie des Dokuments, entfernt die Metadaten und schreibt
     /// das Ergebnis nach `out`.
     ///
@@ -515,14 +798,35 @@ impl AppState {
     /// dieselbe Datei.
     ///
     /// Ist `audit` gesetzt, wird zusätzlich ein JSON-Audit-Log geschrieben.
+    ///
+    /// Zwei Fälle werden **abgelehnt, bevor irgendetwas geschrieben wird**:
+    ///
+    /// * `out` zeigt auf die Originaldatei — der Dateidialog lässt das zu, und
+    ///   ein Klick auf „Überschreiben“ hätte das ungeschwärzte Original
+    ///   vernichtet;
+    /// * es ist nichts ausgewählt. Vorher entstand eine unveränderte Kopie
+    ///   namens `…_geschwaerzt.pdf` samt Erfolgsmeldung — eine Datei, die
+    ///   aussieht wie ein Ergebnis und keines ist.
     pub fn export(&self, out: &Path, audit: Option<&Path>) -> Result<RedactionReport> {
         let doc = self
             .document
             .as_ref()
             .ok_or_else(|| RedactError::Pdf("Kein Dokument geladen".into()))?;
 
+        if self.targets_the_input(out) {
+            return Err(RedactError::Config(
+                "Das ist die Originaldatei — bitte einen anderen Namen wählen.".into(),
+            ));
+        }
+
         let redactions = self.enabled_redactions();
-        let mut copy = doc.clone();
+        if redactions.is_empty() {
+            return Err(RedactError::Config(
+                "Nichts ausgewählt — es würde nichts geschwärzt.".into(),
+            ));
+        }
+
+        let mut copy = (**doc).clone();
         let report = PdfRedactor::new().apply_with_report(&mut copy, &redactions)?;
         strip_metadata(&mut copy);
         PdfRenderer::new().render(&copy, out)?;
@@ -585,6 +889,50 @@ impl AppState {
         self.selected_region = None;
         self.status = format!("Review übernommen: {} Einträge", self.regions.len());
     }
+}
+
+// --------------------------------------------------------------- Seitendrehung
+
+/// `/Rotate` jeder Seite, 0-basiert und inklusive Vererbung vom Seitenbaum.
+///
+/// `redact-pdf` liefert die MediaBoxen, aber keine Drehungen; der Rasterizer
+/// meldet die Drehung erst mit dem fertigen Bild. Die Oberfläche braucht sie
+/// aber **sofort**, sonst säßen die Schwärzungsrechtecke bis zum Eintreffen des
+/// ersten Bildes an der falschen Stelle. Deshalb hier noch einmal, mit derselben
+/// Vererbungslogik wie `redact_pdf::page_box`.
+pub fn page_rotations(doc: &lopdf::Document) -> Vec<i64> {
+    doc.get_pages()
+        .values()
+        .map(|id| page_rotation(doc, *id))
+        .collect()
+}
+
+fn page_rotation(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
+    let mut current = Some(page_id);
+    let mut depth = 0;
+    while let Some(id) = current {
+        // Gegen im Kreis zeigende /Parent-Ketten in kaputten Dateien.
+        if depth > 32 {
+            break;
+        }
+        depth += 1;
+        let Ok(dict) = doc.get_dictionary(id) else {
+            break;
+        };
+        if let Some(value) = dict
+            .get(b"Rotate")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_i64().ok())
+        {
+            return normalize_rotation(value);
+        }
+        current = match dict.get(b"Parent") {
+            Ok(lopdf::Object::Reference(parent)) => Some(*parent),
+            _ => None,
+        };
+    }
+    0
 }
 
 // ------------------------------------------------------------------- Audit
@@ -936,8 +1284,16 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Vergleicht den Export mit einer **hier von Hand nachgebauten** Kette aus
+    /// denselben Bausteinen (schwärzen → Metadaten strippen → schreiben).
+    ///
+    /// Ausdrücklich **kein** Vergleich mit `redact-cli`: dieses Crate hängt
+    /// nicht von der CLI ab und ruft deren Pipeline nicht auf. Der Test zeigt
+    /// also, dass `export` genau diese drei Schritte in dieser Reihenfolge und
+    /// mit der Vorgabe-Polsterung ausführt — nicht mehr. Weicht die CLI
+    /// irgendwann ab, merkt das nur ein Test, der beide wirklich ausführt.
     #[test]
-    fn export_is_byte_identical_to_the_cli_pipeline() {
+    fn export_matches_a_hand_built_pipeline_of_the_same_steps() {
         let mut state = loaded_state();
         state.analyze(&["iban_de".to_string()], None).unwrap();
         state.add_manual_region(1, Rect::new(70.0, 700.0, 250.0, 715.0), "Adresse");
@@ -946,20 +1302,18 @@ mod tests {
         let gui_out = dir.join("gui.pdf");
         state.export(&gui_out, None).unwrap();
 
-        // Derselbe Ablauf wie in `redact-cli`: schwärzen (Padding 1.0, die
-        // Vorgabe der CLI) → Metadaten strippen → schreiben.
-        let cli_out = dir.join("cli.pdf");
+        let reference = dir.join("reference.pdf");
         let mut doc = redact_pdf::load_from_bytes(&redact_pdf::testing::demo_statement()).unwrap();
         PdfRedactor::with_padding(1.0)
             .apply_with_report(&mut doc, &state.enabled_redactions())
             .unwrap();
         strip_metadata(&mut doc);
-        PdfRenderer::new().render(&doc, &cli_out).unwrap();
+        PdfRenderer::new().render(&doc, &reference).unwrap();
 
         assert_eq!(
             std::fs::read(&gui_out).unwrap(),
-            std::fs::read(&cli_out).unwrap(),
-            "GUI- und CLI-Ausgabe müssen Byte für Byte übereinstimmen"
+            std::fs::read(&reference).unwrap(),
+            "Export muss Byte für Byte dem nachgebauten Ablauf entsprechen"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -972,9 +1326,82 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A4: ohne ausgewählte Schwärzung entstand bisher eine unveränderte Kopie
+    /// mit Erfolgsmeldung. Jetzt wird abgelehnt — und **keine Datei angelegt**.
+    #[test]
+    fn export_refuses_when_nothing_would_be_redacted() {
+        let dir = temp_dir("nothing");
+        let out = dir.join("leer.pdf");
+
+        // Gar keine Treffer.
+        let state = loaded_state();
+        let error = state.export(&out, None).unwrap_err().to_string();
+        assert!(error.contains("Nichts ausgewählt"), "{error}");
+        assert!(!out.exists(), "es darf keine Datei entstanden sein");
+
+        // Treffer vorhanden, aber alle abgewählt.
+        let mut state = loaded_state();
+        state.analyze(&["iban_de".to_string()], None).unwrap();
+        assert!(!state.regions.is_empty());
+        for index in 0..state.regions.len() {
+            state.set_enabled(index, false);
+        }
+        assert!(state.export(&out, None).is_err());
+        assert!(!out.exists());
+
+        // Auch das Audit-Log wird dann nicht geschrieben.
+        let audit = dir.join("leer_audit.json");
+        assert!(state.export(&out, Some(&audit)).is_err());
+        assert!(!audit.exists());
+
+        // Mit einer aktiven Schwärzung geht es durch.
+        state.set_enabled(0, true);
+        assert!(state.export(&out, None).is_ok());
+        assert!(out.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A6: der Speichern-Dialog lässt das Original als Ziel zu. Der Export
+    /// nicht.
+    #[test]
+    fn export_refuses_to_overwrite_the_original() {
+        let dir = temp_dir("overwrite");
+        let input = dir.join("auszug.pdf");
+        std::fs::write(&input, redact_pdf::testing::demo_statement()).unwrap();
+
+        let mut state = AppState::new();
+        state.load_document(&input).unwrap();
+        state.analyze(&["iban_de".to_string()], None).unwrap();
+        assert!(!state.regions.is_empty());
+
+        let before = std::fs::read(&input).unwrap();
+        let error = state.export(&input, None).unwrap_err().to_string();
+        assert!(error.contains("Originaldatei"), "{error}");
+        assert_eq!(
+            std::fs::read(&input).unwrap(),
+            before,
+            "das Original muss unangetastet bleiben"
+        );
+
+        // Auch über einen Umweg im Pfad.
+        let detour = dir.join("unterordner").join("..").join("auszug.pdf");
+        std::fs::create_dir_all(dir.join("unterordner")).unwrap();
+        assert!(state.targets_the_input(&detour));
+        assert!(state.export(&detour, None).is_err());
+
+        // Ein anderer Name ist erlaubt.
+        assert!(state
+            .export(&dir.join("auszug_geschwaerzt.pdf"), None)
+            .is_ok());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn export_strips_metadata() {
-        let state = loaded_state();
+        let mut state = loaded_state();
+        state.analyze(&["iban_de".to_string()], None).unwrap();
         let dir = temp_dir("meta");
         let out = dir.join("out.pdf");
         state.export(&out, None).unwrap();
@@ -1234,44 +1661,280 @@ mod tests {
         assert_eq!(shorten("äöüäöüäöü", 4), "äöü…");
     }
 
+    /// Farbe allein reicht nicht: bei einer Rot-Grün-Sehschwäche sind
+    /// „Liste: schwärzen“ und „Liste: schützen“ sonst nicht zu trennen.
     #[test]
-    fn region_color_covers_every_source() {
+    fn every_category_is_distinguishable_without_colour() {
+        for (i, a) in REGION_COLORS.iter().enumerate() {
+            for b in REGION_COLORS.iter().skip(i + 1) {
+                assert_ne!(a.marker(), b.marker(), "{a:?} und {b:?} teilen ein Zeichen");
+                assert_ne!(
+                    a.label(),
+                    b.label(),
+                    "{a:?} und {b:?} teilen eine Beschriftung"
+                );
+                assert_ne!(a.rgb(), b.rgb(), "{a:?} und {b:?} teilen eine Farbe");
+            }
+        }
+        // Die Beschriftungen dürfen kein Entwicklervokabular mehr enthalten.
+        for color in REGION_COLORS {
+            let label = color.label().to_lowercase();
+            assert!(!label.contains("pattern"), "{label}");
+            assert!(!label.contains("negativ"), "{label}");
+            assert!(!label.contains("positiv"), "{label}");
+        }
+    }
+
+    /// Relative Leuchtdichte nach WCAG 2.1.
+    fn luminance((r, g, b): (u8, u8, u8)) -> f64 {
+        let channel = |v: u8| {
+            let c = v as f64 / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+        let (x, y) = (luminance(a), luminance(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Grafische Elemente brauchen nach WCAG 1.4.11 mindestens 3:1.
+    #[test]
+    fn region_colours_reach_the_graphic_contrast_minimum() {
+        // Weißes Blatt, heller und dunkler Bereichshintergrund von egui.
+        let backgrounds = [(255, 255, 255), (248, 248, 248), (27, 27, 27)];
+        for color in REGION_COLORS {
+            for background in backgrounds {
+                let ratio = contrast(color.rgb(), background);
+                assert!(
+                    ratio >= 3.0,
+                    "{color:?} erreicht gegen {background:?} nur {ratio:.2}:1"
+                );
+            }
+        }
+        // Das alte Orange scheiterte genau daran — Beleg, dass der Test greift.
+        assert!(contrast((240, 150, 30), (255, 255, 255)) < 3.0);
+    }
+
+    #[test]
+    fn descriptions_are_written_for_bank_customers() {
+        let konto = plain_description(&Source::Pattern {
+            pattern_id: "konto_nr".into(),
+            confidence: 0.4,
+        });
+        assert_eq!(konto, "Kontonummer (Heuristik, 6–10 Ziffern)");
+        // Weder interne ID noch die bedeutungslose Zahl.
+        assert!(!konto.contains("konto_nr"));
+        assert!(!konto.contains("0.4"));
+        assert!(!konto.contains("confidence"));
+
         assert_eq!(
-            RegionColor::from_source(&Source::Pattern {
-                pattern_id: "x".into(),
-                confidence: 1.0
-            }),
-            RegionColor::AutoPattern
-        );
-        assert_eq!(
-            RegionColor::from_source(&Source::Booking {
-                booking_id: "b".into(),
+            plain_description(&Source::Booking {
+                booking_id: "b1".into(),
                 match_type: MatchType::Positive
             }),
-            RegionColor::AutoBookingPos
+            "Aus Ihrer Liste: soll geschwärzt werden"
         );
         assert_eq!(
-            RegionColor::from_source(&Source::Booking {
-                booking_id: "b".into(),
+            plain_description(&Source::Booking {
+                booking_id: "b1".into(),
                 match_type: MatchType::Negative
             }),
-            RegionColor::AutoBookingNeg
+            "Aus Ihrer Liste: darf nicht geschwärzt werden"
         );
         assert_eq!(
-            RegionColor::from_source(&Source::Manual { reason: "r".into() }),
-            RegionColor::Manual
+            plain_description(&Source::Manual {
+                reason: "Gehalt".into()
+            }),
+            "Selbst gezeichnet: Gehalt"
         );
-        // Jede Farbe hat eine Beschriftung und einen RGB-Wert.
-        for color in [
-            RegionColor::AutoPattern,
-            RegionColor::AutoBookingPos,
-            RegionColor::AutoBookingNeg,
-            RegionColor::Manual,
-        ] {
-            assert!(!color.label().is_empty());
-            let (r, g, b) = color.rgb();
-            assert!(r as u32 + g as u32 + b as u32 > 0);
+        assert_eq!(
+            plain_description(&Source::Manual { reason: " ".into() }),
+            "Selbst gezeichnet"
+        );
+        // Unbekanntes Muster: wenigstens die ID, aber kein „confidence“.
+        let unknown = plain_description(&Source::Pattern {
+            pattern_id: "aus_config".into(),
+            confidence: 0.1,
+        });
+        assert!(unknown.contains("aus_config"));
+        assert!(!unknown.contains("confidence"));
+    }
+
+    /// A3: „Treffer (N)“ zählte auch das, was nie geschwärzt wird.
+    #[test]
+    fn hit_summary_separates_found_from_actually_redacted() {
+        let mut state = AppState::new();
+        // 1 — wird geschwärzt.
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(200.0, 200.0, 260.0, 210.0),
+        )));
+        // 2 — abgewählt.
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(300.0, 300.0, 360.0, 310.0),
+        )));
+        state.set_enabled(1, false);
+        // 3 — durch die Negativliste blockiert.
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(10.0, 10.0, 50.0, 20.0),
+        )));
+        // 4 — die blockierende Negativregion selbst.
+        state.regions.push(AnnotatedRegion::new(negative_region(
+            0,
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+        )));
+        // 5 — Duplikat von 1.
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(200.0, 200.0, 260.0, 210.0),
+        )));
+
+        let summary = state.hit_summary();
+        assert_eq!(summary.total, 5);
+        assert_eq!(summary.redacted, 1);
+        assert_eq!(summary.redacted, state.enabled_redactions().len());
+        assert_eq!(
+            summary.outcomes,
+            vec![
+                HitOutcome::Redacted,
+                HitOutcome::Disabled,
+                HitOutcome::Blocked,
+                HitOutcome::Protecting,
+                HitOutcome::Duplicate,
+            ]
+        );
+        assert_eq!(summary.headline(), "5 Treffer · 1 werden geschwärzt");
+        // Genau ein Eintrag wird gefüllt gezeichnet.
+        assert_eq!(
+            summary.outcomes.iter().filter(|o| o.is_redacted()).count(),
+            1
+        );
+        // „geschützt“ statt Durchstreichen.
+        assert_eq!(HitOutcome::Protecting.note(), "geschützt");
+    }
+
+    #[test]
+    fn hit_summary_is_empty_without_regions() {
+        let summary = AppState::new().hit_summary();
+        assert_eq!(summary.total, 0);
+        assert_eq!(summary.redacted, 0);
+        assert_eq!(summary.headline(), "0 Treffer · 0 werden geschwärzt");
+    }
+
+    /// A8: vor dem Wegwerfen von Handarbeit muss nachgefragt werden — aber nur
+    /// dann, sonst ist die Rückfrage bloß lästig.
+    #[test]
+    fn has_manual_work_only_reacts_to_real_hand_work() {
+        // Leerer Zustand: nichts zu verlieren.
+        assert!(!AppState::new().has_manual_work());
+
+        // Eine reine Analyse ist mit einem Klick wiederholbar.
+        let mut state = loaded_state();
+        state.analyze(&["iban_de".to_string()], None).unwrap();
+        assert!(!state.regions.is_empty());
+        assert!(!state.has_manual_work());
+
+        // Abwählen ist Handarbeit …
+        state.set_enabled(0, false);
+        assert!(state.has_manual_work());
+        state.set_enabled(0, true);
+        assert!(!state.has_manual_work());
+
+        // … eine geänderte Schwärzungsart auch …
+        state.set_action(0, Action::Whiteout);
+        assert!(state.has_manual_work());
+        state.set_action(0, Action::Blackout);
+        assert!(!state.has_manual_work());
+
+        // … und ein selbst gezogenes Rechteck sowieso.
+        state.add_manual_region(0, Rect::new(10.0, 10.0, 40.0, 20.0), "Gehalt");
+        assert!(state.has_manual_work());
+        state.selected_region = Some(state.regions.len() - 1);
+        assert!(state.delete_selected());
+        assert!(!state.has_manual_work());
+
+        // Ein Negativlisten-Treffer ist ausgeschaltet — das ist sein Normalfall
+        // und keine Handarbeit.
+        let mut state = AppState::new();
+        state.regions.push(AnnotatedRegion::new(negative_region(
+            0,
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+        )));
+        assert!(!state.has_manual_work());
+    }
+
+    #[test]
+    fn page_view_carries_the_rotation_of_each_page() {
+        let mut state = AppState::new();
+        // Ohne Dokument: A4 und ungedreht.
+        assert_eq!(state.current_page_view().rotate, 0);
+        assert_eq!(state.current_page_view().media_box, DEFAULT_PAGE_BOX);
+
+        state
+            .load_bytes(
+                &rotated_demo(&[90, 270]),
+                Some(PathBuf::from("gedreht.pdf")),
+            )
+            .unwrap();
+        assert_eq!(state.rotations, vec![90, 270]);
+        assert_eq!(state.page_view(0).rotate, 90);
+        assert_eq!(state.page_view(1).rotate, 270);
+        // Der Anzeigeraum ist bei 90° quer.
+        let display = state.page_view(0).display_box();
+        assert!((display.width() - 842.0).abs() < 0.01);
+        assert!((display.height() - 595.0).abs() < 0.01);
+
+        // Unbekannte Seite → 0, kein Absturz.
+        assert_eq!(state.page_view(99).rotate, 0);
+    }
+
+    #[test]
+    fn odd_and_inherited_rotations_are_normalized() {
+        // Krumme Werte gelten als „nicht gedreht“ …
+        let mut state = AppState::new();
+        state.load_bytes(&rotated_demo(&[45, -90]), None).unwrap();
+        assert_eq!(state.rotations, vec![0, 270]);
+
+        // … und ein am /Pages-Knoten gesetzter Wert wird vererbt.
+        let mut doc = redact_pdf::load_from_bytes(&redact_pdf::testing::demo_statement()).unwrap();
+        let pages_id = doc
+            .catalog()
+            .unwrap()
+            .get(b"Pages")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        doc.get_object_mut(pages_id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Rotate", 180_i64);
+        assert_eq!(page_rotations(&doc), vec![180, 180]);
+    }
+
+    /// Demo-PDF mit `/Rotate` je Seite.
+    fn rotated_demo(rotations: &[i64]) -> Vec<u8> {
+        let mut doc = redact_pdf::load_from_bytes(&redact_pdf::testing::demo_statement()).unwrap();
+        let ids: Vec<lopdf::ObjectId> = doc.get_pages().values().copied().collect();
+        for (id, rotate) in ids.iter().zip(rotations) {
+            doc.get_object_mut(*id)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Rotate", *rotate);
         }
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
     }
 
     fn temp_dir(tag: &str) -> PathBuf {

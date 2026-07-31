@@ -1,37 +1,38 @@
 //! Seitendarstellung und Koordinatenumrechnung.
 //!
-//! ## Warum kein echter Rasterizer?
+//! ## Zwei Bilder derselben Seite
 //!
-//! Die Vorschau kommt **ohne native PDF-Rasterisierung** aus. Statt die Seite
-//! zu rendern, zeichnet [`PagePreview`] ein weißes Blatt mit Schlagschatten und
-//! setzt darauf die von `redact-pdf` extrahierten [`TextRun`]s an ihren echten
-//! User-Space-Koordinaten neu — mit egui-eigenen Schriften, deren Größe aus der
-//! Höhe der Glyph-Box des Runs abgeleitet wird.
+//! Der Hauptbereich zeigt das **gerasterte** Seitenbild aus `redact-render`
+//! (siehe [`crate::render`]). Kann eine Seite nicht rasterisiert werden —
+//! `RenderedPage::degraded` —, springt die **schematische** Vorschau
+//! [`PagePreview`] ein: sie zeichnet ein weißes Blatt und setzt darauf die von
+//! `redact-pdf` extrahierten [`TextRun`]s an ihren echten User-Space-
+//! Koordinaten neu. Das ist kein hübsches, aber ein koordinatentreues Bild —
+//! man sieht wenigstens, wo Text steht, und kann Rechtecke platzieren.
 //!
-//! Das ist ein **schematisches, aber koordinatentreues** Bild: jede Textzeile
-//! steht an genau der Stelle, an der sie auch im PDF steht, und die Boxen der
-//! Schwärzungen liegen darum exakt richtig. Für das eigentliche Ziel der GUI —
-//! Rechtecke platzieren und Treffer kontrollieren — genügt das vollständig, und
-//! es kostet keine einzige native Abhängigkeit.
-//!
-//! **Grenzen** (bewusst in Kauf genommen):
-//!
-//! * Schriftart, Laufweite und Kerning entsprechen nicht dem Original; die
-//!   Zeile wird nur so weit gestaucht, dass sie in ihre Originalbreite passt.
-//! * Grafiken, Bilder, Linien, Tabellenrahmen und Hintergründe fehlen komplett.
-//! * Text in Vektorgrafiken oder gescannte Seiten ohne Textebene erscheinen als
-//!   leeres Blatt — dort hilft nur die manuelle Rechteckauswahl.
-//! * Gedrehte Seiten (`/Rotate`) werden nicht berücksichtigt.
-//!
-//! Wer eine pixelgenaue Vorschau braucht, baut mit `--features pdfium`; siehe
-//! [`pdfium_backend`].
+//! Dieselbe Notlösung wird auch gezeigt, solange das Seitenbild noch im
+//! Hintergrund gerendert wird.
 //!
 //! ## Koordinaten
 //!
-//! PDF: Ursprung links **unten** der MediaBox, Y wächst nach **oben**.
-//! egui: Ursprung links **oben** des Widgets, Y wächst nach **unten**.
-//! Die Umrechnung erledigen [`pdf_to_screen`] und [`screen_to_pdf`]; beide sind
-//! reine Funktionen und zueinander invers.
+//! Es gibt **drei** Räume, und der mittlere ist der Grund, warum diese Datei
+//! existiert:
+//!
+//! 1. **User-Space** — der Raum, in dem alle [`redact_core::Region`]s liegen.
+//!    Ursprung links unten der MediaBox, Y wächst nach oben, `/Rotate` ist
+//!    darin *nicht* enthalten.
+//! 2. **Anzeigeraum** — der User-Space nach Anwendung von `/Rotate`. Genau
+//!    diese Fläche zeigt das gerasterte Bild; `RenderedPage::page_box` ist ihr
+//!    Rechteck.
+//! 3. **Bildschirm** — egui, Ursprung links oben, Y wächst nach unten.
+//!
+//! [`PageView`] kennt MediaBox *und* Drehung und rechnet zwischen 1 und 2 um;
+//! [`pdf_to_screen`] und [`screen_to_pdf`] hängen 2 → 3 an. Ohne Schritt 1 → 2
+//! läge auf einer um 90° gedrehten Seite jedes Schwärzungsrechteck an der
+//! falschen Stelle — und würde beim Export die falsche Zeile schwärzen.
+//!
+//! Alle Funktionen hier sind rein und paarweise zueinander invers; genau das
+//! prüfen die Tests am Ende der Datei für alle vier Drehungen.
 
 use egui::{Align2, Color32, FontId, Pos2, Stroke, Vec2};
 use redact_core::{Point, Rect, TextRun};
@@ -67,43 +68,151 @@ pub const HANDLE_SIZE: f32 = 5.0;
 /// Versatz des Schlagschattens unter dem Blatt.
 pub const SHADOW_OFFSET: f32 = 4.0;
 
-/// Rechnet ein PDF-Rechteck in Bildschirmkoordinaten um.
+// ---------------------------------------------------------------------------
+// PageView — MediaBox und /Rotate
+// ---------------------------------------------------------------------------
+
+/// Geometrie einer Seite: MediaBox **und** Drehung.
+///
+/// Enthält bewusst keinen egui-Typ, damit die Umrechnung ohne Fenster prüfbar
+/// bleibt. Die Formeln sind exakt die Umkehrung dessen, was
+/// `redact_render::raster::Geometry` beim Rastern tut — [`PageView::display_box`]
+/// liefert deshalb dasselbe Rechteck wie `RenderedPage::page_box`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageView {
+    /// MediaBox im User-Space (normalisiert, ungedreht).
+    pub media_box: Rect,
+    /// Seitendrehung in Grad, bereits auf 0/90/180/270 normalisiert.
+    pub rotate: i64,
+}
+
+impl PageView {
+    /// `rotate` wird auf 0/90/180/270 normalisiert; alles andere wird zu 0.
+    pub fn new(media_box: Rect, rotate: i64) -> Self {
+        Self {
+            media_box: media_box.normalized(),
+            rotate: normalize_rotation(rotate),
+        }
+    }
+
+    /// Ungedrehte Seite.
+    pub fn upright(media_box: Rect) -> Self {
+        Self::new(media_box, 0)
+    }
+
+    /// Sind Breite und Höhe durch die Drehung vertauscht?
+    pub fn is_quarter_turned(self) -> bool {
+        self.rotate == 90 || self.rotate == 270
+    }
+
+    /// Das Rechteck, das das gerasterte Bild abdeckt (Anzeigeraum).
+    ///
+    /// Die linke untere Ecke ist die der MediaBox; bei 90° und 270° sind Breite
+    /// und Höhe getauscht. Deckungsgleich mit `RenderedPage::page_box`.
+    pub fn display_box(self) -> Rect {
+        let mb = self.media_box;
+        if self.is_quarter_turned() {
+            Rect::new(
+                mb.ll.x,
+                mb.ll.y,
+                mb.ll.x + mb.height(),
+                mb.ll.y + mb.width(),
+            )
+        } else {
+            mb
+        }
+    }
+
+    /// User-Space → Anzeigeraum.
+    pub fn user_to_display(self, p: Point) -> Point {
+        let mb = self.media_box;
+        let (x0, y0, x1, y1) = (mb.ll.x, mb.ll.y, mb.ur.x, mb.ur.y);
+        match self.rotate {
+            90 => Point::new(x0 + (p.y - y0), y0 + (x1 - p.x)),
+            180 => Point::new(x0 + x1 - p.x, y0 + y1 - p.y),
+            270 => Point::new(x0 + (y1 - p.y), y0 + (p.x - x0)),
+            _ => p,
+        }
+    }
+
+    /// Anzeigeraum → User-Space (Umkehrung von [`PageView::user_to_display`]).
+    pub fn display_to_user(self, p: Point) -> Point {
+        let mb = self.media_box;
+        let (x0, y0, x1, y1) = (mb.ll.x, mb.ll.y, mb.ur.x, mb.ur.y);
+        match self.rotate {
+            90 => Point::new(x1 - (p.y - y0), y0 + (p.x - x0)),
+            180 => Point::new(x0 + x1 - p.x, y0 + y1 - p.y),
+            270 => Point::new(x0 + (p.y - y0), y1 - (p.x - x0)),
+            _ => p,
+        }
+    }
+
+    /// Größe des Blatts auf dem Bildschirm.
+    pub fn size_screen(self, zoom: f32) -> Vec2 {
+        page_size_screen(&self.display_box(), zoom)
+    }
+}
+
+/// Drehung auf 0/90/180/270 bringen; krumme Werte bedeuten „keine Drehung“.
+///
+/// Gleiche Regel wie in `redact_render` — sonst zeigten Bild und Rechtecke
+/// unterschiedliche Vorstellungen von „oben“.
+pub fn normalize_rotation(rotate: i64) -> i64 {
+    let normalized = rotate.rem_euclid(360);
+    if normalized % 90 == 0 {
+        normalized
+    } else {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Umrechnung Anzeigeraum ↔ Bildschirm
+// ---------------------------------------------------------------------------
+
+/// Rechnet ein PDF-Rechteck (User-Space) in Bildschirmkoordinaten um.
 ///
 /// `origin` ist die linke **obere** Ecke des Seitenblatts auf dem Bildschirm.
-pub fn pdf_to_screen(rect: &Rect, page_box: &Rect, zoom: f32, origin: Pos2) -> egui::Rect {
-    let min = pdf_point_to_screen(rect.ll.x, rect.ur.y, page_box, zoom, origin);
-    let max = pdf_point_to_screen(rect.ur.x, rect.ll.y, page_box, zoom, origin);
-    egui::Rect::from_min_max(min, max)
+/// Eine Drehung um 90° bildet gegenüberliegende Ecken wieder auf
+/// gegenüberliegende Ecken ab, deshalb genügen die beiden Eckpunkte.
+pub fn pdf_to_screen(rect: &Rect, view: &PageView, zoom: f32, origin: Pos2) -> egui::Rect {
+    let a = pdf_point_to_screen(rect.ll.x, rect.ll.y, view, zoom, origin);
+    let b = pdf_point_to_screen(rect.ur.x, rect.ur.y, view, zoom, origin);
+    egui::Rect::from_two_pos(a, b)
 }
 
 /// Rechnet zwei Bildschirmpunkte in ein normalisiertes PDF-Rechteck um.
-pub fn screen_to_pdf(a: Pos2, b: Pos2, page_box: &Rect, zoom: f32, origin: Pos2) -> Rect {
+pub fn screen_to_pdf(a: Pos2, b: Pos2, view: &PageView, zoom: f32, origin: Pos2) -> Rect {
     Rect::from_corners(
-        screen_to_pdf_point(a, page_box, zoom, origin),
-        screen_to_pdf_point(b, page_box, zoom, origin),
+        screen_to_pdf_point(a, view, zoom, origin),
+        screen_to_pdf_point(b, view, zoom, origin),
     )
 }
 
-/// Ein einzelner PDF-Punkt → Bildschirm.
-pub fn pdf_point_to_screen(x: f64, y: f64, page_box: &Rect, zoom: f32, origin: Pos2) -> Pos2 {
+/// Ein einzelner PDF-Punkt (User-Space) → Bildschirm.
+pub fn pdf_point_to_screen(x: f64, y: f64, view: &PageView, zoom: f32, origin: Pos2) -> Pos2 {
+    let d = view.user_to_display(Point::new(x, y));
+    let page_box = view.display_box();
     let z = zoom as f64;
     Pos2::new(
-        origin.x + ((x - page_box.ll.x) * z) as f32,
-        // Y-Spiegelung: die Oberkante der MediaBox liegt auf `origin.y`.
-        origin.y + ((page_box.ur.y - y) * z) as f32,
+        origin.x + ((d.x - page_box.ll.x) * z) as f32,
+        // Y-Spiegelung: die Oberkante des Anzeigeraums liegt auf `origin.y`.
+        origin.y + ((page_box.ur.y - d.y) * z) as f32,
     )
 }
 
 /// Ein einzelner Bildschirmpunkt → PDF-User-Space.
-pub fn screen_to_pdf_point(p: Pos2, page_box: &Rect, zoom: f32, origin: Pos2) -> Point {
+pub fn screen_to_pdf_point(p: Pos2, view: &PageView, zoom: f32, origin: Pos2) -> Point {
+    let page_box = view.display_box();
     let z = (zoom as f64).max(f64::EPSILON);
-    Point::new(
+    let d = Point::new(
         page_box.ll.x + (p.x - origin.x) as f64 / z,
         page_box.ur.y - (p.y - origin.y) as f64 / z,
-    )
+    );
+    view.display_to_user(d)
 }
 
-/// Größe des Seitenblatts auf dem Bildschirm.
+/// Größe eines Anzeigerechtecks auf dem Bildschirm.
 pub fn page_size_screen(page_box: &Rect, zoom: f32) -> Vec2 {
     Vec2::new(
         (page_box.width() as f32 * zoom).max(1.0),
@@ -112,7 +221,8 @@ pub fn page_size_screen(page_box: &Rect, zoom: f32) -> Vec2 {
 }
 
 /// Zoomfaktor, bei dem die Seite vollständig in `available` passt.
-pub fn fit_zoom(available: Vec2, page_box: &Rect) -> f32 {
+pub fn fit_zoom(available: Vec2, view: &PageView) -> f32 {
+    let page_box = view.display_box();
     let w = page_box.width() as f32;
     let h = page_box.height() as f32;
     if w <= 0.0 || h <= 0.0 {
@@ -141,21 +251,30 @@ pub fn shrink_to_width(font_size: f32, measured_width: f32, target_width: f32) -
     (font_size * (target_width / measured_width)).max(MIN_FONT_SIZE)
 }
 
+// ---------------------------------------------------------------------------
+// Schematische Vorschau (Notnagel)
+// ---------------------------------------------------------------------------
+
 /// Schematische Vorschau einer einzelnen Seite.
 ///
 /// Hält nur Referenzen — der Zustand lebt in [`crate::state::AppState`].
+///
+/// **Grenzen**: Schriftart, Laufweite und Kerning entsprechen nicht dem
+/// Original, Grafiken und Bilder fehlen, und auf gedrehten Seiten steht der
+/// Text zwar an der richtigen Stelle, aber weiter waagerecht. Das ist bewusst
+/// so: die Vorschau soll die Textlage zeigen, nicht das Dokument ersetzen.
 pub struct PagePreview<'a> {
     pub page: usize,
-    pub page_box: &'a Rect,
+    pub view: PageView,
     pub runs: &'a [TextRun],
     pub zoom: f32,
 }
 
 impl<'a> PagePreview<'a> {
-    pub fn new(page: usize, page_box: &'a Rect, runs: &'a [TextRun], zoom: f32) -> Self {
+    pub fn new(page: usize, view: PageView, runs: &'a [TextRun], zoom: f32) -> Self {
         Self {
             page,
-            page_box,
+            view,
             runs,
             zoom,
         }
@@ -163,14 +282,21 @@ impl<'a> PagePreview<'a> {
 
     /// Größe des Blatts auf dem Bildschirm.
     pub fn size(&self) -> Vec2 {
-        page_size_screen(self.page_box, self.zoom)
+        self.view.size_screen(self.zoom)
     }
 
     /// Zeichnet Blatt, Schatten und Text. `origin` ist die linke obere Ecke.
     pub fn paint(&self, painter: &egui::Painter, origin: Pos2) {
-        let sheet = egui::Rect::from_min_size(origin, self.size());
+        self.paint_sheet(painter, origin);
+        self.paint_text(painter, origin);
+    }
 
-        // Schlagschatten, damit das Blatt vom Hintergrund abhebt.
+    /// Nur das leere Blatt mit Schatten und Kante.
+    ///
+    /// Getrennt vom Text, weil unter dem gerasterten Seitenbild derselbe
+    /// Schatten liegen soll, der Text darunter aber nicht.
+    pub fn paint_sheet(&self, painter: &egui::Painter, origin: Pos2) {
+        let sheet = egui::Rect::from_min_size(origin, self.size());
         painter.rect_filled(
             sheet.translate(Vec2::splat(SHADOW_OFFSET)),
             SHEET_ROUNDING,
@@ -182,7 +308,10 @@ impl<'a> PagePreview<'a> {
             Color32::WHITE,
             Stroke::new(SHEET_STROKE, Color32::from_gray(150)),
         );
+    }
 
+    /// Nur die Textzeilen.
+    pub fn paint_text(&self, painter: &egui::Painter, origin: Pos2) {
         for run in self.runs.iter().filter(|r| r.page == self.page) {
             self.paint_run(painter, origin, run);
         }
@@ -193,7 +322,7 @@ impl<'a> PagePreview<'a> {
         if text.is_empty() {
             return;
         }
-        let target = pdf_to_screen(&run.rect, self.page_box, self.zoom, origin);
+        let target = pdf_to_screen(&run.rect, &self.view, self.zoom, origin);
         let mut size = font_size_for(run.rect.height(), self.zoom);
         if size <= MIN_FONT_SIZE {
             // Zu klein für Text — als graue Linie andeuten, damit man sieht,
@@ -218,20 +347,45 @@ impl<'a> PagePreview<'a> {
     }
 }
 
+/// Wie ein Rechteck im Seitenbild aussieht.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionStyle {
+    /// Wird geschwärzt: halbtransparent gefüllt, durchgezogener Rand.
+    Redacted,
+    /// Aktiv und wirksam, aber keine Schwärzung (Schutzbereich): nur Rand.
+    Outlined,
+    /// Zählt nicht mit (abgewählt, blockiert, doppelt): gestrichelter Rand.
+    Discarded,
+}
+
+impl RegionStyle {
+    /// Ableitung aus dem Ergebnis der Konfliktauflösung.
+    pub fn from_outcome(outcome: crate::state::HitOutcome) -> Self {
+        use crate::state::HitOutcome::*;
+        match outcome {
+            Redacted => RegionStyle::Redacted,
+            Protecting => RegionStyle::Outlined,
+            Disabled | Blocked | Duplicate => RegionStyle::Discarded,
+        }
+    }
+}
+
 /// Zeichnet ein Schwärzungsrechteck.
 ///
-/// Aktivierte Regionen werden halbtransparent gefüllt, deaktivierte nur
-/// umrandet. Die ausgewählte Region bekommt einen dickeren Rand.
+/// Gefüllt wird **nur**, was am Ende wirklich geschwärzt wird. Ein bloß
+/// angehakter Treffer, den die Konfliktauflösung verwirft, bekommt einen
+/// gestrichelten Rand; sonst sähe im Seitenbild etwas nach Schwärzung aus, das
+/// keine ist.
 pub fn paint_region(
     painter: &egui::Painter,
     rect: egui::Rect,
     rgb: (u8, u8, u8),
-    enabled: bool,
+    style: RegionStyle,
     selected: bool,
 ) {
     let (r, g, b) = rgb;
     let color = Color32::from_rgb(r, g, b);
-    if enabled {
+    if style == RegionStyle::Redacted {
         painter.rect_filled(
             rect,
             NO_ROUNDING,
@@ -243,7 +397,20 @@ pub fn paint_region(
     } else {
         REGION_STROKE
     };
-    painter.rect_stroke(rect, NO_ROUNDING, Stroke::new(width, color));
+    let stroke = Stroke::new(width, color);
+    if style != RegionStyle::Discarded {
+        painter.rect_stroke(rect, NO_ROUNDING, stroke);
+    } else {
+        // Gestrichelt = „zählt nicht mit“.
+        for edge in [
+            [rect.left_top(), rect.right_top()],
+            [rect.right_top(), rect.right_bottom()],
+            [rect.right_bottom(), rect.left_bottom()],
+            [rect.left_bottom(), rect.left_top()],
+        ] {
+            painter.extend(egui::Shape::dashed_line(&edge, stroke, 4.0_f32, 4.0_f32));
+        }
+    }
     if selected {
         // Griffpunkte an den Ecken der Auswahl.
         for corner in [
@@ -261,29 +428,6 @@ pub fn paint_region(
     }
 }
 
-/// Pixelgenaue Vorschau über pdfium.
-///
-/// **Noch nicht implementiert.** Der Platzhalter existiert, damit das
-/// Feature-Gate und die Modulstruktur stehen; die Standardfassung des Programms
-/// benutzt ausschließlich [`PagePreview`]. Außerhalb dieses `cfg`-Blocks wird
-/// kein einziger pdfium-Typ referenziert, das Crate baut also ohne das Feature
-/// vollständig ohne native Bibliotheken.
-#[cfg(feature = "pdfium")]
-pub mod pdfium_backend {
-    use redact_core::{RedactError, Result};
-
-    /// Rendert eine Seite als RGBA-Puffer `(pixel, breite, höhe)`.
-    pub fn render_page_rgba(
-        _pdf_bytes: &[u8],
-        _page: usize,
-        _scale: f32,
-    ) -> Result<(Vec<u8>, usize, usize)> {
-        Err(RedactError::Pdf(
-            "pdfium-Backend ist in dieser Fassung noch nicht implementiert".into(),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +439,10 @@ mod tests {
 
     fn assert_close(a: f64, b: f64, what: &str) {
         assert!((a - b).abs() < 0.01, "{what}: {a} != {b}");
+    }
+
+    fn upright() -> PageView {
+        PageView::upright(offset_box())
     }
 
     #[test]
@@ -312,8 +460,9 @@ mod tests {
             for zoom in [0.5_f32, 1.0_f32, 2.5_f32] {
                 for origin in origins {
                     for rect in rects {
-                        let screen = pdf_to_screen(&rect, &page_box, zoom, origin);
-                        let back = screen_to_pdf(screen.min, screen.max, &page_box, zoom, origin);
+                        let view = PageView::upright(page_box);
+                        let screen = pdf_to_screen(&rect, &view, zoom, origin);
+                        let back = screen_to_pdf(screen.min, screen.max, &view, zoom, origin);
                         assert_close(back.ll.x, rect.ll.x, "ll.x");
                         assert_close(back.ll.y, rect.ll.y, "ll.y");
                         assert_close(back.ur.x, rect.ur.x, "ur.x");
@@ -324,17 +473,157 @@ mod tests {
         }
     }
 
+    /// Der gefährlichste Teil der ganzen Oberfläche: liegt ein Rechteck auf
+    /// einer gedrehten Seite falsch, wird beim Export die falsche Stelle
+    /// geschwärzt. Hin- und Rückweg müssen für **alle vier** Drehungen und für
+    /// eine versetzte MediaBox deckungsgleich sein.
+    #[test]
+    fn roundtrip_is_exact_for_every_rotation_and_an_offset_media_box() {
+        let boxes = [
+            Rect::new(0.0, 0.0, 595.0, 842.0),
+            offset_box(),
+            // Auch der Fall „breiter als hoch“ muss stimmen.
+            Rect::new(-30.0, -15.0, 842.0, 595.0),
+        ];
+        let rects = [
+            Rect::new(72.0, 700.0, 300.0, 715.0),
+            Rect::new(100.0, 100.0, 101.0, 101.0),
+            Rect::new(0.0, 0.0, 400.0, 500.0),
+        ];
+        let origins = [Pos2::new(0.0, 0.0), Pos2::new(37.0, 91.0)];
+
+        for page_box in boxes {
+            for rotate in [0_i64, 90, 180, 270] {
+                let view = PageView::new(page_box, rotate);
+                for zoom in [0.5_f32, 1.0_f32, 2.5_f32] {
+                    for origin in origins {
+                        for rect in rects {
+                            let screen = pdf_to_screen(&rect, &view, zoom, origin);
+                            let back = screen_to_pdf(screen.min, screen.max, &view, zoom, origin);
+                            let what = format!("rot={rotate} zoom={zoom} box={page_box:?}");
+                            assert_close(back.ll.x, rect.ll.x, &format!("ll.x {what}"));
+                            assert_close(back.ll.y, rect.ll.y, &format!("ll.y {what}"));
+                            assert_close(back.ur.x, rect.ur.x, &format!("ur.x {what}"));
+                            assert_close(back.ur.y, rect.ur.y, &format!("ur.y {what}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotation_swaps_width_and_height_of_the_display_box() {
+        let mb = offset_box(); // 595 × 842
+        for rotate in [0_i64, 180, 360, 720, -180] {
+            let view = PageView::new(mb, rotate);
+            assert_eq!(view.display_box(), mb, "rot={rotate}");
+            assert!(!view.is_quarter_turned());
+        }
+        for rotate in [90_i64, 270, 450, -90] {
+            let view = PageView::new(mb, rotate);
+            let db = view.display_box();
+            assert!(view.is_quarter_turned(), "rot={rotate}");
+            assert_close(db.width(), 842.0, "Breite");
+            assert_close(db.height(), 595.0, "Höhe");
+            // Die linke untere Ecke bleibt die der MediaBox.
+            assert_eq!(db.ll, mb.ll);
+        }
+        // Krumme Werte gelten als „nicht gedreht“ — genau wie im Rasterizer.
+        assert_eq!(PageView::new(mb, 45).rotate, 0);
+    }
+
+    /// Wo landen die vier Ecken der MediaBox auf dem Bildschirm? Für jede
+    /// Drehung eine andere — und immer genau eine je Bildecke.
+    #[test]
+    fn rotation_moves_the_media_box_corners_as_expected() {
+        let mb = Rect::new(0.0, 0.0, 600.0, 800.0);
+        let origin = Pos2::ZERO;
+        // Linke *obere* Ecke der ungedrehten Seite.
+        let top_left_user = (0.0_f64, 800.0_f64);
+
+        let landing = |rotate: i64| {
+            let view = PageView::new(mb, rotate);
+            pdf_point_to_screen(top_left_user.0, top_left_user.1, &view, 1.0, origin)
+        };
+
+        // 0°: bleibt links oben.
+        assert_eq!(landing(0), Pos2::new(0.0, 0.0));
+        // 90° im Uhrzeigersinn: die linke obere Ecke wandert nach rechts oben.
+        assert_eq!(landing(90), Pos2::new(800.0, 0.0));
+        // 180°: nach rechts unten.
+        assert_eq!(landing(180), Pos2::new(600.0, 800.0));
+        // 270°: nach links unten.
+        assert_eq!(landing(270), Pos2::new(0.0, 600.0));
+
+        // Und in jedem Fall füllt die ganze Seite genau das Blatt aus.
+        for rotate in [0_i64, 90, 180, 270] {
+            let view = PageView::new(mb, rotate);
+            let screen = pdf_to_screen(&mb, &view, 1.0, origin);
+            assert_eq!(screen.min, Pos2::ZERO, "rot={rotate}");
+            assert_eq!(
+                screen.size(),
+                view.size_screen(1.0),
+                "rot={rotate}: Blattgröße"
+            );
+        }
+    }
+
+    /// Ein schmaler Streifen am oberen Seitenrand muss auf einer um 90°
+    /// gedrehten Seite als schmaler Streifen am **rechten** Bildrand landen.
+    #[test]
+    fn a_banner_at_the_top_ends_up_at_the_right_edge_when_turned() {
+        let mb = Rect::new(0.0, 0.0, 600.0, 800.0);
+        let banner = Rect::new(0.0, 780.0, 600.0, 800.0);
+
+        let view = PageView::new(mb, 90);
+        let screen = pdf_to_screen(&banner, &view, 1.0, Pos2::ZERO);
+        // Anzeigeraum ist 800 × 600 groß.
+        assert_close(screen.left() as f64, 780.0, "links");
+        assert_close(screen.right() as f64, 800.0, "rechts");
+        assert_close(screen.top() as f64, 0.0, "oben");
+        assert_close(screen.bottom() as f64, 600.0, "unten");
+    }
+
+    /// Gefüllt darf nur werden, was auch geschwärzt wird — sonst sieht im
+    /// Seitenbild etwas nach Schwärzung aus, das keine ist.
+    #[test]
+    fn only_a_real_redaction_is_drawn_filled() {
+        use crate::state::HitOutcome;
+        assert_eq!(
+            RegionStyle::from_outcome(HitOutcome::Redacted),
+            RegionStyle::Redacted
+        );
+        for outcome in [
+            HitOutcome::Protecting,
+            HitOutcome::Disabled,
+            HitOutcome::Blocked,
+            HitOutcome::Duplicate,
+        ] {
+            assert_ne!(
+                RegionStyle::from_outcome(outcome),
+                RegionStyle::Redacted,
+                "{outcome:?} darf nicht gefüllt gezeichnet werden"
+            );
+        }
+        // Ein Schutzbereich ist wirksam und wird darum nicht gestrichelt.
+        assert_eq!(
+            RegionStyle::from_outcome(HitOutcome::Protecting),
+            RegionStyle::Outlined
+        );
+    }
+
     #[test]
     fn y_axis_is_flipped() {
-        let page_box = offset_box();
+        let view = upright();
         let origin = Pos2::new(0.0, 0.0);
         // Ganz oben auf der Seite (y nahe ur.y) …
         let top = Rect::new(20.0, 850.0, 100.0, 860.0);
         // … und ganz unten (y nahe ll.y).
         let bottom = Rect::new(20.0, 22.0, 100.0, 32.0);
 
-        let top_screen = pdf_to_screen(&top, &page_box, 1.0, origin);
-        let bottom_screen = pdf_to_screen(&bottom, &page_box, 1.0, origin);
+        let top_screen = pdf_to_screen(&top, &view, 1.0, origin);
+        let bottom_screen = pdf_to_screen(&bottom, &view, 1.0, origin);
 
         assert!(
             top_screen.min.y < bottom_screen.min.y,
@@ -355,48 +644,61 @@ mod tests {
 
     #[test]
     fn origin_offset_and_zoom_scale_correctly() {
-        let page_box = offset_box();
+        let view = upright();
         let origin = Pos2::new(100.0, 50.0);
         // Die linke untere Ecke der MediaBox landet auf (origin.x, origin.y + h*zoom).
-        let corner = pdf_point_to_screen(10.0, 20.0, &page_box, 2.0, origin);
+        let corner = pdf_point_to_screen(10.0, 20.0, &view, 2.0, origin);
         assert_close(corner.x as f64, 100.0, "x");
         assert_close(corner.y as f64, 50.0 + 842.0 * 2.0, "y");
 
         // Die linke obere Ecke landet exakt auf dem Ursprung.
-        let top_left = pdf_point_to_screen(10.0, 862.0, &page_box, 2.0, origin);
+        let top_left = pdf_point_to_screen(10.0, 862.0, &view, 2.0, origin);
         assert_close(top_left.x as f64, 100.0, "x");
         assert_close(top_left.y as f64, 50.0, "y");
     }
 
     #[test]
     fn screen_to_pdf_normalizes_dragged_corners() {
-        let page_box = offset_box();
+        let view = upright();
         let origin = Pos2::new(5.0, 5.0);
         // Von rechts unten nach links oben gezogen.
         let a = Pos2::new(300.0, 400.0);
         let b = Pos2::new(100.0, 200.0);
-        let rect = screen_to_pdf(a, b, &page_box, 1.5, origin);
+        let rect = screen_to_pdf(a, b, &view, 1.5, origin);
         assert!(rect.ll.x < rect.ur.x);
         assert!(rect.ll.y < rect.ur.y);
         assert!(rect.width() > 0.0 && rect.height() > 0.0);
 
         // Gleiches Ergebnis, egal in welcher Reihenfolge die Ecken kommen.
-        let swapped = screen_to_pdf(b, a, &page_box, 1.5, origin);
+        let swapped = screen_to_pdf(b, a, &view, 1.5, origin);
         assert_eq!(rect, swapped);
+
+        // Auch auf einer gedrehten Seite bleibt das Ergebnis normalisiert.
+        let turned = PageView::new(offset_box(), 270);
+        let rect = screen_to_pdf(a, b, &turned, 1.5, origin);
+        assert!(rect.ll.x < rect.ur.x && rect.ll.y < rect.ur.y);
     }
 
     #[test]
     fn page_size_and_fit_zoom() {
-        let page_box = offset_box();
-        assert_eq!(page_size_screen(&page_box, 1.0), Vec2::new(595.0, 842.0));
-        assert_eq!(page_size_screen(&page_box, 2.0), Vec2::new(1190.0, 1684.0));
+        let view = upright();
+        assert_eq!(view.size_screen(1.0), Vec2::new(595.0, 842.0));
+        assert_eq!(view.size_screen(2.0), Vec2::new(1190.0, 1684.0));
+        // Gedreht sind Breite und Höhe getauscht.
+        assert_eq!(
+            PageView::new(offset_box(), 90).size_screen(1.0),
+            Vec2::new(842.0, 595.0)
+        );
 
         // Passt auf halbe Höhe → Zoom ~0.5.
-        let z = fit_zoom(Vec2::new(1190.0, 421.0), &page_box);
+        let z = fit_zoom(Vec2::new(1190.0, 421.0), &view);
         assert!((z - 0.5).abs() < 1e-6, "{z}");
         // Entartete Seite → 1.0.
         assert_eq!(
-            fit_zoom(Vec2::new(100.0, 100.0), &Rect::new(0.0, 0.0, 0.0, 0.0)),
+            fit_zoom(
+                Vec2::new(100.0, 100.0),
+                &PageView::upright(Rect::new(0.0, 0.0, 0.0, 0.0))
+            ),
             1.0
         );
     }
@@ -427,7 +729,6 @@ mod tests {
     /// Zeichnen selbst lässt sich damit wenigstens *ausführen*.
     #[test]
     fn preview_and_regions_paint_without_panicking() {
-        let page_box = offset_box();
         let runs = vec![
             demo_run(0, "IBAN: DE89 3704 0044", 72.0, 700.0),
             demo_run(0, "   ", 72.0, 680.0),
@@ -436,13 +737,24 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             let origin = Pos2::new(12.0, 12.0);
-            for zoom in [0.05_f32, 1.0_f32, 2.5_f32] {
-                // 0.05 erzwingt den Zweig „zu klein für Text“.
-                PagePreview::new(0, &page_box, &runs, zoom).paint(ui.painter(), origin);
+            for rotate in [0_i64, 90, 180, 270] {
+                let view = PageView::new(offset_box(), rotate);
+                for zoom in [0.05_f32, 1.0_f32, 2.5_f32] {
+                    // 0.05 erzwingt den Zweig „zu klein für Text“.
+                    PagePreview::new(0, view, &runs, zoom).paint(ui.painter(), origin);
+                }
+                PagePreview::new(0, view, &runs, 1.0).paint_sheet(ui.painter(), origin);
             }
-            let rect = pdf_to_screen(&runs[0].rect, &page_box, 1.0, origin);
-            paint_region(ui.painter(), rect, (60, 130, 246), true, true);
-            paint_region(ui.painter(), rect, (220, 60, 60), false, false);
+            let view = upright();
+            let rect = pdf_to_screen(&runs[0].rect, &view, 1.0, origin);
+            for style in [
+                RegionStyle::Redacted,
+                RegionStyle::Outlined,
+                RegionStyle::Discarded,
+            ] {
+                paint_region(ui.painter(), rect, (60, 130, 246), style, true);
+                paint_region(ui.painter(), rect, (220, 60, 60), style, false);
+            }
         });
     }
 

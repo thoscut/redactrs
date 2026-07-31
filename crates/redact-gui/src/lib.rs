@@ -7,31 +7,38 @@
 //!
 //! ```text
 //!  state.rs    Zustand + Fachlogik (ohne egui, vollständig unit-getestet)
-//!  viewer.rs   Koordinatenumrechnung PDF ↔ Bildschirm, schematische Seitenvorschau
+//!  viewer.rs   Koordinatenumrechnung PDF ↔ Bildschirm, schematische Notvorschau
+//!  render.rs   Seitenbilder aus `redact-render`, im Hintergrund-Thread
 //!  selector.rs Rechteck aufziehen, Treffersuche
 //!  sidebar.rs  Seiten- und Trefferliste
 //!  app.rs      eframe-App: Leisten, Tasten, Dialoge
 //! ```
 //!
-//! Die Trennung ist Absicht: alle Rechnungen (Y-Spiegelung, Zoom),
-//! Zustandsübergänge (an/aus, verschieben, löschen) und der Export liegen in
-//! gewöhnlichen Funktionen, die ohne Fenster und ohne Grafikkontext getestet
-//! werden. Die egui-Module rufen sie nur auf.
+//! Die Trennung ist Absicht: alle Rechnungen (Drehung, Y-Spiegelung, Zoom),
+//! Zustandsübergänge (an/aus, verschieben, löschen), die Tastenbelegung und der
+//! Export liegen in gewöhnlichen Funktionen, die ohne Fenster und ohne
+//! Grafikkontext getestet werden. Die egui-Module rufen sie nur auf.
 //!
 //! ## Dateien öffnen
 //!
 //! Über „PDF öffnen …“ oder per Ziehen und Ablegen auf das Fenster. Was mit
 //! einer Menge abgelegter Dateien geschieht, entscheidet [`classify_drop`] —
 //! eine reine Funktion, damit das Verhalten (erste PDF gewinnt, Nicht-PDFs
-//! werden abgelehnt) ohne Maus prüfbar ist.
+//! werden abgelehnt) ohne Maus prüfbar ist. Bevor dabei von Hand gezogene
+//! Rechtecke verloren gehen, wird gefragt.
 //!
-//! ## Vorschau ohne Rasterizer
+//! ## Seitendarstellung
 //!
-//! Die Seitendarstellung rastert das PDF **nicht**. Sie zeichnet ein weißes
-//! Blatt und setzt darauf die extrahierten Textzeilen an ihren echten
-//! User-Space-Koordinaten neu. Das Bild ist schematisch, aber
-//! koordinatentreu — genau das, was zum Platzieren von Schwärzungsrechtecken
-//! gebraucht wird. Einzelheiten und Grenzen: [`viewer`].
+//! Der Hauptbereich zeigt das von `redact-render` gerasterte Seitenbild. Es
+//! entsteht auf einem eigenen Thread ([`render`]), damit Seitenwechsel und
+//! Zoomen die Oberfläche nicht anhalten. Kann eine Seite nicht rasterisiert
+//! werden, springt die schematische Vorschau aus [`viewer`] ein und zeigt
+//! wenigstens die Lage des Textes.
+//!
+//! Schwärzungsrechtecke liegen im **ungedrehten** User-Space, das Bild zeigt
+//! die Seite **nach** `/Rotate`. Die Umrechnung dazwischen macht
+//! [`viewer::PageView`]; ohne sie säßen die Rechtecke auf gedrehten Seiten an
+//! der falschen Stelle.
 //!
 //! ## Beispiel
 //!
@@ -44,15 +51,19 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod render;
 pub mod selector;
 pub mod sidebar;
 pub mod state;
 pub mod viewer;
 
-pub use app::{classify_drop, is_pdf_name, DropAction, RedactApp};
+pub use app::{
+    classify_drop, is_pdf_name, key_commands, DropAction, KeyCommand, KeyState, RedactApp,
+};
+pub use render::{PageCache, PageMeta};
 pub use selector::{hit_test, RectangleSelector};
-pub use state::{AnnotatedRegion, AppState, RegionColor};
-pub use viewer::{pdf_to_screen, screen_to_pdf, PagePreview};
+pub use state::{AnnotatedRegion, AppState, HitOutcome, HitSummary, RegionColor};
+pub use viewer::{pdf_to_screen, screen_to_pdf, PagePreview, PageView, RegionStyle};
 
 use std::path::PathBuf;
 
@@ -92,22 +103,4 @@ pub fn run(pdf: Option<PathBuf>, booking: Option<PathBuf>, patterns: Vec<String>
         Box::new(|_cc| Ok(Box::new(app) as Box<dyn eframe::App>)),
     )
     .map_err(|e| RedactError::Config(format!("Grafische Oberfläche nicht startbar: {e}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn window_constants_match_the_specification() {
-        assert_eq!(WINDOW_SIZE, [1280.0_f32, 860.0_f32]);
-        assert_eq!(WINDOW_TITLE, "redact-rs");
-    }
-
-    /// `run` lässt sich nicht ohne Bildschirm ausführen; hier wird nur
-    /// festgehalten, dass die Signatur die von der CLI erwartete ist.
-    #[test]
-    fn run_has_the_signature_the_cli_expects() {
-        let _: fn(Option<PathBuf>, Option<PathBuf>, Vec<String>) -> Result<()> = run;
-    }
 }

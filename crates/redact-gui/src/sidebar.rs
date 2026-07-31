@@ -1,22 +1,28 @@
 //! Linke Spalte: Seitenliste, Trefferliste und Details zur Auswahl.
 //!
 //! Das Modul enthält keinerlei Fachlogik — jeder Klick ruft eine Methode von
-//! [`AppState`] auf. Farbige Punkte markieren die Herkunft eines Treffers,
-//! Negativlisten-Einträge werden durchgestrichen und lassen sich nicht
-//! einschalten.
+//! [`AppState`] auf. Was ein Treffer bedeutet und ob er am Ende wirklich
+//! geschwärzt wird, entscheidet [`AppState::hit_summary`]; hier wird das nur
+//! angezeigt.
+//!
+//! ## Was hier bewusst anders ist als früher
+//!
+//! * Die Überschrift nennt **beide** Zahlen: gefundene Treffer und die, die
+//!   tatsächlich geschwärzt werden. Nur die zweite ist für das Ergebnis
+//!   relevant, und genau die fehlte.
+//! * Treffer, die `resolve_conflicts` verwirft (blockiert, doppelt), werden
+//!   ausgegraut und durchgestrichen. Vorher standen sie angehakt, farbig und
+//!   gefüllt in der Liste — als würden sie geschwärzt.
+//! * Geschützte Einträge (Negativliste) werden **nicht** durchgestrichen.
+//!   Durchgestrichen liest sich wie „entfernt“; gemeint ist das Gegenteil,
+//!   deshalb steht dort jetzt das Wort „geschützt“.
+//! * Der Detailbereich klebt unten am Panel statt am Ende der Liste. Bei 150
+//!   Treffern war er sonst nur nach langem Scrollen erreichbar.
 
 use egui::{Color32, RichText};
 use redact_core::Action;
 
-use crate::state::{AppState, RegionColor};
-
-/// Zeichen für den Farbpunkt vor einem Treffer.
-///
-/// Bewusst `●` (U+25CF) statt eines farbigen Emoji: die eingebauten
-/// egui-Schriften decken die Emoji-Blöcke nur lückenhaft ab, ein eingefärbter
-/// Kreis wird dagegen garantiert dargestellt — und die Farbe ist genau die
-/// Information, um die es geht.
-pub const COLOR_DOT: &str = "●";
+use crate::state::{AppState, HitOutcome, HitSummary, RegionColor, REGION_COLORS};
 
 /// Breite des Eingabefelds für den Namenszusatz.
 ///
@@ -34,7 +40,10 @@ pub fn dot_color(color: RegionColor) -> Color32 {
 }
 
 /// Zeichnet die gesamte Seitenleiste.
-pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
+///
+/// `summary` wird einmal je Bild von [`crate::app`] berechnet und
+/// hereingereicht — die Konfliktauflösung soll nicht je Trefferzeile laufen.
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     output_name(ui, state);
     ui.separator();
 
@@ -42,19 +51,30 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     pages(ui, state);
     ui.separator();
 
-    ui.horizontal(|ui| {
-        ui.heading("Treffer");
-        ui.label(RichText::new(format!("({})", state.regions.len())).weak());
-    });
+    ui.heading("Treffer");
+    ui.label(RichText::new(summary.headline()).strong());
     legend(ui);
     ui.separator();
+
+    // Erst der Detailbereich am unteren Rand, dann die Liste in den Rest —
+    // sonst schöbe die Liste die Details aus dem sichtbaren Bereich.
+    egui::TopBottomPanel::bottom("hit_details")
+        .resizable(false)
+        .show_inside(ui, |ui| {
+            ui.add_space(BAR_PADDING);
+            details(ui, state, summary);
+            ui.add_space(BAR_PADDING);
+        });
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            hits(ui, state);
+            hits(ui, state, summary);
         });
 }
+
+/// Vertikale Luft um den Detailbereich.
+const BAR_PADDING: f32 = 4.0;
 
 /// Namenszusatz der Ausgabedatei samt Vorschau des Ergebnisses.
 fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
@@ -107,19 +127,14 @@ fn pages(ui: &mut egui::Ui, state: &mut AppState) {
 
 fn legend(ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
-        for color in [
-            RegionColor::AutoPattern,
-            RegionColor::AutoBookingPos,
-            RegionColor::AutoBookingNeg,
-            RegionColor::Manual,
-        ] {
-            ui.label(RichText::new(COLOR_DOT).color(dot_color(color)));
+        for color in REGION_COLORS {
+            ui.label(RichText::new(color.marker()).color(dot_color(color)));
             ui.label(RichText::new(color.label()).small().weak());
         }
     });
 }
 
-fn hits(ui: &mut egui::Ui, state: &mut AppState) {
+fn hits(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     if state.regions.is_empty() {
         ui.label(RichText::new("Noch keine Treffer — „Analysieren“ oder Rechteck ziehen.").weak());
         return;
@@ -133,10 +148,10 @@ fn hits(ui: &mut egui::Ui, state: &mut AppState) {
         let blocking = entry.is_blocking();
         let selected = state.selected_region == Some(index);
         let mut enabled = entry.enabled;
-        let was_enabled = entry.enabled;
         let color = entry.color;
         let label = entry.label();
-        let tooltip = entry.region.reason();
+        let outcome = summary.outcome(index);
+        let tooltip = format!("{}\n{}", entry.description(), outcome_tooltip(outcome));
 
         ui.horizontal(|ui| {
             // Negativlisten-Treffer sind nicht schaltbar.
@@ -144,20 +159,30 @@ fn hits(ui: &mut egui::Ui, state: &mut AppState) {
             if checkbox.changed() {
                 toggle = Some(index);
             }
-            ui.label(RichText::new(COLOR_DOT).color(dot_color(color)));
+            ui.label(RichText::new(color.marker()).color(dot_color(color)));
 
             let mut text = RichText::new(label);
-            if blocking {
-                text = text.strikethrough().color(dot_color(color));
-            } else if !was_enabled {
-                text = text.weak();
+            match outcome {
+                // Wird geschwärzt: normal und in seiner Farbe.
+                HitOutcome::Redacted => {}
+                // Schützt Text — kein Durchstreichen, das hieße „gestrichen“.
+                HitOutcome::Protecting => text = text.color(dot_color(color)),
+                // Verworfen bzw. abgewählt: ausgegraut und durchgestrichen.
+                HitOutcome::Disabled | HitOutcome::Blocked | HitOutcome::Duplicate => {
+                    text = text.weak().strikethrough();
+                }
             }
             if ui
                 .selectable_label(selected, text)
-                .on_hover_text(tooltip)
+                .on_hover_text(&tooltip)
                 .clicked()
             {
                 select = Some(index);
+            }
+
+            let note = outcome.note();
+            if !note.is_empty() {
+                ui.label(RichText::new(note).small().weak());
             }
         });
     }
@@ -170,13 +195,28 @@ fn hits(ui: &mut egui::Ui, state: &mut AppState) {
         state.selected_region = Some(index);
         state.set_page(page);
     }
+}
 
-    ui.separator();
-    details(ui, state);
+/// Ein ganzer Satz zum Ergebnis — für die Sprechblase.
+pub fn outcome_tooltip(outcome: HitOutcome) -> &'static str {
+    match outcome {
+        HitOutcome::Redacted => "Diese Stelle wird beim Export geschwärzt.",
+        HitOutcome::Protecting => {
+            "Diese Stelle steht auf Ihrer Liste der zu schützenden Texte und \
+             wird nicht geschwärzt. Sie verhindert außerdem Schwärzungen darunter."
+        }
+        HitOutcome::Disabled => "Abgewählt — wird nicht geschwärzt.",
+        HitOutcome::Blocked => {
+            "Wird nicht geschwärzt: ein Eintrag Ihrer Liste schützt diese Stelle."
+        }
+        HitOutcome::Duplicate => {
+            "Wird nicht eigens geschwärzt — ein anderer Treffer deckt dieselbe Stelle bereits ab."
+        }
+    }
 }
 
 /// Detailbereich für die ausgewählte Region.
-fn details(ui: &mut egui::Ui, state: &mut AppState) {
+fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     let Some(index) = state.selected_region else {
         ui.label(RichText::new("Keine Region ausgewählt.").weak());
         return;
@@ -187,13 +227,14 @@ fn details(ui: &mut egui::Ui, state: &mut AppState) {
 
     let rect = entry.region.rect;
     let page = entry.region.page;
-    let reason = entry.region.reason();
+    let description = entry.description();
     let blocking = entry.is_blocking();
+    let outcome = summary.outcome(index);
     let mut action = entry.action.clone();
 
     ui.label(RichText::new("Auswahl").strong());
     ui.label(format!("Seite {}", page + 1));
-    ui.label(reason);
+    ui.label(description);
     ui.label(
         RichText::new(format!(
             "x {:.1} … {:.1}   y {:.1} … {:.1}",
@@ -205,11 +246,15 @@ fn details(ui: &mut egui::Ui, state: &mut AppState) {
 
     if blocking {
         ui.label(
-            RichText::new("Negativliste — wird nie geschwärzt und blockiert Treffer darunter.")
+            RichText::new(outcome_tooltip(HitOutcome::Protecting))
                 .small()
                 .color(dot_color(RegionColor::AutoBookingNeg)),
         );
         return;
+    }
+
+    if !outcome.is_redacted() {
+        ui.label(RichText::new(outcome_tooltip(outcome)).small().weak());
     }
 
     let mut changed = false;
@@ -258,21 +303,36 @@ pub fn action_label(action: &Action) -> &'static str {
 mod tests {
     use super::*;
 
+    /// Jedes Ergebnis braucht eine Erklärung, und die muss auf Deutsch
+    /// erkennbar machen, ob geschwärzt wird oder nicht.
     #[test]
-    fn every_action_has_a_label() {
-        assert_eq!(action_label(&Action::Blackout), "Schwarz");
-        assert_eq!(action_label(&Action::Whiteout), "Weiß");
-        assert_eq!(action_label(&Action::Replace("x".into())), "Ersetzen");
+    fn every_outcome_explains_itself() {
+        let outcomes = [
+            HitOutcome::Redacted,
+            HitOutcome::Protecting,
+            HitOutcome::Disabled,
+            HitOutcome::Blocked,
+            HitOutcome::Duplicate,
+        ];
+        for outcome in outcomes {
+            let text = outcome_tooltip(outcome);
+            assert!(text.len() > 20, "{outcome:?}: {text}");
+            assert_eq!(
+                outcome.is_redacted(),
+                !text.contains("nicht"),
+                "{outcome:?}: {text}"
+            );
+        }
+        // Nur „wird geschwärzt“ bekommt keinen Zusatz in der Zeile.
+        assert!(HitOutcome::Redacted.note().is_empty());
+        for outcome in outcomes.iter().filter(|o| !o.is_redacted()) {
+            assert!(!outcome.note().is_empty(), "{outcome:?}");
+        }
     }
 
     #[test]
     fn dot_colors_differ_per_category() {
-        let colors = [
-            dot_color(RegionColor::AutoPattern),
-            dot_color(RegionColor::AutoBookingPos),
-            dot_color(RegionColor::AutoBookingNeg),
-            dot_color(RegionColor::Manual),
-        ];
+        let colors: Vec<Color32> = REGION_COLORS.iter().copied().map(dot_color).collect();
         for (i, a) in colors.iter().enumerate() {
             for b in colors.iter().skip(i + 1) {
                 assert_ne!(a, b, "Farben müssen unterscheidbar sein");
@@ -291,7 +351,10 @@ mod tests {
         use crate::state::AnnotatedRegion;
 
         let empty = RefCell::new(AppState::new());
-        egui::__run_test_ui(|ui| show(ui, &mut empty.borrow_mut()));
+        egui::__run_test_ui(|ui| {
+            let summary = empty.borrow().hit_summary();
+            show(ui, &mut empty.borrow_mut(), &summary);
+        });
 
         let mut populated = AppState::new();
         populated
@@ -311,7 +374,10 @@ mod tests {
         populated.set_action(0, Action::Replace("[IBAN]".into()));
 
         let populated = RefCell::new(populated);
-        egui::__run_test_ui(|ui| show(ui, &mut populated.borrow_mut()));
+        egui::__run_test_ui(|ui| {
+            let summary = populated.borrow().hit_summary();
+            show(ui, &mut populated.borrow_mut(), &summary);
+        });
         // Der Negativ-Eintrag bleibt aus, egal wie oft gezeichnet wird.
         assert!(populated
             .borrow()
