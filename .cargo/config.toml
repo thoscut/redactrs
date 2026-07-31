@@ -1,0 +1,21 @@
+# Cargo-Konfiguration fuer redact-rs.
+#
+# Cross-Compiling nach Windows (x86_64-pc-windows-gnu) mit der mingw-w64
+# Toolchain. Unter Debian/Ubuntu:
+#
+#     sudo apt-get install -y mingw-w64
+#     rustup target add x86_64-pc-windows-gnu
+#
+# Hinweis: Der offizielle GitHub-Release wird mit dem MSVC-Target
+# (x86_64-pc-windows-msvc) auf einem echten Windows-Runner gebaut
+# (siehe .github/workflows/release.yml). Die Eintraege hier sind fuer
+# lokale Cross-Builds gedacht (scripts/build-windows.sh).
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+rustflags = [
+    # Die C-Runtime-Bibliotheken statisch dazulinken, damit die .exe ohne
+    # mitgelieferte libgcc_s_seh-1.dll / libwinpthread-1.dll laeuft.
+    "-C", "link-args=-static-libgcc -static-libstdc++ -Wl,-Bstatic -lpthread -Wl,-Bdynamic",
+]

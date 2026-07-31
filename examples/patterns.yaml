@@ -1,0 +1,37 @@
+# Eigene Pattern-Konfiguration für redact-rs.
+#
+#   redact-rs eingabe.pdf -o ausgabe.pdf --patterns-config examples/patterns.yaml
+#
+# extend_builtins: true  -> die eingebauten Patterns bleiben erhalten und werden
+#                           über die `id` gezielt überschrieben oder abgeschaltet.
+# extend_builtins: false -> ausschließlich die hier aufgeführten Patterns.
+#
+# `redact-rs --list-patterns` zeigt alle eingebauten IDs.
+
+extend_builtins: true
+
+patterns:
+  # Datumsangaben sind in Kontoauszügen selten schützenswert und erzeugen
+  # viele Treffer — hier abgeschaltet.
+  - id: date_de
+    enabled: false
+
+  # Beträge nur mit geringerer Konfidenz melden.
+  - id: amount_eur
+    confidence: 0.5
+
+  # Standardmäßig ausgeschaltete Muster gezielt einschalten.
+  - id: steuer_id
+    enabled: true
+
+  # Eigenes Muster: interne Kundennummern.
+  - id: kundennummer
+    regex: 'KdNr\.?\s*\d{5,}'
+    description: Interne Kundennummer
+    confidence: 0.85
+
+  # Eigenes Muster: Vertragsnummern mit Prüfziffer nach Luhn.
+  - id: vertragsnummer
+    regex: '(?<![0-9])\d{4}-\d{4}-\d{4}(?![0-9])'
+    description: Vertragsnummer
+    confidence: 0.7

@@ -28,3 +28,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+redact-pdf.workspace = true
+redact-core.workspace = true
+serde_json.workspace = true
