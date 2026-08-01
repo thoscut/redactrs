@@ -971,7 +971,7 @@ mod jpeg {
         out.extend_from_slice(&[0xFF, 0xDB]);
         out.extend_from_slice(&(67u16).to_be_bytes());
         out.push(0x00);
-        out.extend(std::iter::repeat(QUANT as u8).take(64));
+        out.extend(std::iter::repeat_n(QUANT as u8, 64));
 
         // SOF0: 8 Bit Präzision, ein Kanal, kein Subsampling.
         out.extend_from_slice(&[0xFF, 0xC0]);

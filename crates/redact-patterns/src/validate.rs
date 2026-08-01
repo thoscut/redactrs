@@ -112,7 +112,7 @@ pub fn validate_luhn(s: &str) -> bool {
         }
         sum += v;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 #[cfg(test)]

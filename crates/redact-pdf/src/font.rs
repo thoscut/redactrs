@@ -575,7 +575,7 @@ fn parse_cmap(table: &[u8]) -> BTreeMap<u32, u16> {
             (1, 0) => (0, false),
             _ => continue,
         };
-        if best.map_or(true, |(r, _, _)| rank > r) {
+        if best.is_none_or(|(r, _, _)| rank > r) {
             best = Some((rank, offset as usize, symbol));
         }
     }

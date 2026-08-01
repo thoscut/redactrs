@@ -136,27 +136,29 @@ jobs:
 
   # -------------------------------------------------------------------------
   # MSRV: prueft, ob die in Cargo.toml zugesagte aelteste Rust-Version
-  # tatsaechlich reicht. Genau dafuer ist skrifa in redact-render auf 0.33
-  # festgenagelt - bisher hat das nie jemand nachgemessen.
+  # tatsaechlich reicht.
   #
-  # ACHTUNG, BEFRISTET: dieser Job ist derzeit `continue-on-error`, weil die
-  # Zusage nicht stimmt. Mit rust-version = "1.75" scheitert
-  # `cargo check --workspace --locked` bereits am Aufloesen von Cargo.lock:
+  # Sie reichte lange nicht. Der Job war als `continue-on-error` angelegt,
+  # weil `rust-version = "1.75"` schlicht nicht stimmte - eine Zusage, die
+  # nie jemand nachgemessen hatte:
   #
-  #   * clap_lex 1.1.0 verwendet edition2024 und braucht cargo >= 1.85
-  #   * time 0.3.54 (ueber lopdf) deklariert rust-version 1.88
+  #   * clap_lex verwendet edition2024 und braucht cargo >= 1.85
+  #   * time 0.3.54 (ueber lopdf) und image (ueber eframe) deklarieren 1.88
   #
-  # Mit 1.88.0 laeuft der Workspace durch. Zu tun (ausserhalb dieser
-  # Build-Haertung, weil es Cargo.toml/Cargo.lock beruehrt): entweder
-  # rust-version auf den real erreichbaren Wert anheben oder die
-  # betreffenden Abhaengigkeiten zurueckpinnen. Danach `continue-on-error`
-  # hier entfernen - der Job ist erst dann eine Zusicherung.
+  # Nachgemessen mit einer echten 1.88.0-Toolchain auf frischem Baum:
+  # `cargo check --workspace --locked` laeuft durch. 1.88.0 ist auch die
+  # exakte Untergrenze - cargo bricht ab, sobald eine Abhaengigkeit eine
+  # hoehere `rust-version` deklariert als die verwendete Toolchain.
+  #
+  # `continue-on-error` ist deshalb entfernt: der Job ist jetzt eine
+  # Zusicherung und kein Hinweis mehr. Steigt eine Abhaengigkeit weiter,
+  # wird er rot - dann gehoert der Wert in Cargo.toml angehoben, nicht
+  # dieser Job abgeschaltet.
   # -------------------------------------------------------------------------
   msrv:
     name: MSRV (rust-version aus Cargo.toml)
     needs: toolchain
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

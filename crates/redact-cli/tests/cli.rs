@@ -1027,8 +1027,8 @@ fn deep_nesting_cannot_hide_behind_a_binary_looking_stream() {
     // Geparst wird er trotzdem — also muss er auch geprüft werden.
     let dir = workdir("binary-disguise");
     let mut payload: Vec<u8> = (0..20_000u32).map(|i| (i * 61 % 256) as u8).collect();
-    payload.extend(std::iter::repeat(b'[').take(2_000));
-    payload.extend(std::iter::repeat(b']').take(2_000));
+    payload.extend(std::iter::repeat_n(b'[', 2_000));
+    payload.extend(std::iter::repeat_n(b']', 2_000));
 
     let mut stream =
         format!("<< /Length1 4711 /Length {} >>\nstream\n", payload.len()).into_bytes();

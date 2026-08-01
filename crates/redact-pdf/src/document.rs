@@ -1135,7 +1135,7 @@ mod tests {
         // Zwischen `ID` und `EI` stehen rohe Bilddaten. Sie dürfen weder als
         // Struktur gezählt noch den Rest des Streams verschlucken.
         let mut payload = b"BT ET q 1 0 0 1 0 0 cm BI /W 8 /H 8 /BPC 8 ID ".to_vec();
-        payload.extend(std::iter::repeat(b'[').take(1000));
+        payload.extend(std::iter::repeat_n(b'[', 1000));
         payload.extend_from_slice(b" EI Q\n[(a) 1 (b)] TJ\n");
         assert!(scan(&with_stream("", &payload)).is_ok());
     }

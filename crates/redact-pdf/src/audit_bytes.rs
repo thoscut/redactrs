@@ -428,7 +428,7 @@ fn run_length_decode(data: &[u8]) -> Vec<u8> {
             }
             _ => {
                 if let Some(&b) = data.get(i) {
-                    out.extend(std::iter::repeat(b).take(257 - length as usize));
+                    out.extend(std::iter::repeat_n(b, 257 - length as usize));
                 }
                 i += 1;
             }

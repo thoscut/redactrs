@@ -525,7 +525,7 @@ fn an_out_of_range_page_index_is_survivable() {
             "Index {index}: leeres Bild"
         );
         assert!(
-            !page.rgba.is_empty() && page.rgba.len() % 4 == 0,
+            !page.rgba.is_empty() && page.rgba.len().is_multiple_of(4),
             "Index {index}: Puffer"
         );
         assert!(page.degraded, "Index {index}: müsste degraded sein");

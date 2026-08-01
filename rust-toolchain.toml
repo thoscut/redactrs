@@ -30,7 +30,7 @@
 # gezielt und nur dort.
 #
 # Nicht verwechseln: `channel` ist die Toolchain, mit der gebaut wird.
-# `rust-version` in Cargo.toml (derzeit 1.75) ist die aelteste Toolchain, die
+# `rust-version` in Cargo.toml (derzeit 1.88) ist die aelteste Toolchain, die
 # wir zu unterstuetzen versprechen; die prueft der MSRV-Job.
 #
 # Beim Anheben: Wert hier aendern, sonst nichts - CI und Release ziehen nach.
