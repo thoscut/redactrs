@@ -231,6 +231,18 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
   sie gar nicht auspackt. Ihre entpackte Größe zählt aber gegen das große
   Budget.
 
+  Nachtrag zur Bildschwärzung: Seit Schwärzungen die **Pixel** eines Bildes
+  überschreiben, wird ein betroffenes Bild sehr wohl dekodiert — nach RGBA8,
+  also 4 Byte je Pixel. Dagegen steht eine eigene Grenze von
+  **40 000 000 Pixeln** (`MAX_IMAGE_PIXELS` in
+  `crates/redact-pdf/src/ops.rs`), das sind rund 160 MB je Bild. Ein Bild
+  darüber wird nicht dekodiert, sondern als Platzhalter geführt — und ein
+  Platzhalter unter einer Schwärzung **bricht den Lauf ab** (dieselbe
+  Behandlung wie `/JPXDecode` und `/CCITTFaxDecode`, siehe
+  `crates/redact-pdf/src/image.rs`). Lieber ein Fehler als eine Datei, in der
+  die Schwärzung nur obenauf liegt; `--allow-undecodable-images` hebt das
+  bewusst auf.
+
 ### Die Zusicherungen oben gelten für die Kommandozeile, nicht für die Oberfläche
 
 Nachtrag zur Dokumentationsprüfung (Stand: dieser Commit). Zwei der Punkte unter

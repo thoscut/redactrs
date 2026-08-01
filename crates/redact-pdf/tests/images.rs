@@ -207,6 +207,44 @@ fn an_upright_image_loses_exactly_the_covered_pixels() {
     assert_blacked(&before, &after, (5, 9, 5, 9), "aufrechtes Bild");
 }
 
+/// `/Width`, `/Height` und `/BitsPerComponent` als **indirekte** Verweise.
+///
+/// In freier Wildbahn üblich, für uns lange folgenlos: das Bild dekodierte zum
+/// Platzhalter und wurde nur übermalt. Seit der Bildschwärzung ist derselbe
+/// Platzhalter ein Abbruch — aus einem stillen Fehler ist ein lauter geworden.
+/// Ursache war das Auslesen ohne `Document::dereference`.
+#[test]
+fn an_image_with_indirect_size_entries_is_decoded_and_redacted() {
+    let mut doc = build(Vec::new(), &["q 100 0 0 100 50 600 cm /Im0 Do Q\n"]);
+    let width_id = doc.add_object(Object::Integer(20));
+    let height_id = doc.add_object(Object::Integer(20));
+    let bpc_id = doc.add_object(Object::Integer(8));
+    let mut stream = rgb_image(20, 20);
+    stream.dict.set("Width", Object::Reference(width_id));
+    stream.dict.set("Height", Object::Reference(height_id));
+    stream
+        .dict
+        .set("BitsPerComponent", Object::Reference(bpc_id));
+    let image_id = doc.add_object(Object::Stream(stream));
+    add_xobject(&mut doc, "Im0", image_id);
+
+    let before = images_of(&doc, 0).remove(0);
+    assert!(
+        !before.placeholder,
+        "indirektes /Width ließ das Bild zum Platzhalter werden"
+    );
+    assert_eq!((before.width, before.height), (20, 20));
+
+    // Und die Schwärzung läuft durch, statt am Platzhalter abzubrechen.
+    let (report, out, _) = roundtrip(
+        &mut doc,
+        &[blackout(0, Rect::new(75.0, 650.0, 100.0, 675.0))],
+    );
+    assert_eq!(report.redacted_images, 1);
+    let after = images_of(&out, 0).remove(0);
+    assert_blacked(&before, &after, (5, 9, 5, 9), "indirekte Größenangaben");
+}
+
 /// Dieselbe Schwärzung, aber das Bild ist um 90° gedreht platziert:
 /// `0 100 -100 0 150 600 cm` bildet u auf y und v auf x ab. Damit liegt der
 /// geschwärzte Bereich bei Spalten 10..14 statt 5..9 — wer die inverse CTM

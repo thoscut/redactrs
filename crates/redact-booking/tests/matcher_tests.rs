@@ -89,8 +89,10 @@ fn splits_positive_and_negative_in_file_order() {
 
 #[test]
 fn matches_iban_whitespace_insensitively() {
-    // Im PDF steht die IBAN mit doppeltem Leerzeichen und Zeilenumbruch.
-    let text = "Konto: DE89  3704\n0044 0532 0130 00";
+    // Im PDF steht die IBAN mit abweichender *Menge* an Leerraum — hier ein
+    // doppeltes und ein dreifaches Leerzeichen. Genau dagegen ist die
+    // Normalisierung gebaut.
+    let text = "Konto: DE89  3704 0044   0532 0130 00";
     let m = matcher(vec![entry(
         "b002",
         ListType::Positive,
@@ -100,10 +102,78 @@ fn matches_iban_whitespace_insensitively() {
     assert_eq!(regions.len(), 1);
     assert_eq!(
         regions[0].text.as_deref(),
-        Some("DE89  3704\n0044 0532 0130 00")
+        Some("DE89  3704 0044   0532 0130 00")
     );
-    // Treffer beginnt bei Zeichen 7 und reicht bis zum Textende (35 Zeichen).
-    assert_eq!(regions[0].rect, rect_for_chars(7, 35));
+    // Treffer beginnt bei Zeichen 7 und reicht bis zum Textende (37 Zeichen).
+    assert_eq!(regions[0].rect, rect_for_chars(7, 37));
+}
+
+/// Leerraum wird **zusammengefasst, nicht entfernt**.
+///
+/// Nachgemessen am fertigen Programm: eine Seite mit
+/// `IBAN: DE89370400440532013000` und dem Buchungslisten-Eintrag
+/// `DE89 3704 0044 0532 0130 00` ergibt `Textzeilen: 1, Treffer gesamt: 0`.
+/// Wer beide Schreibweisen abdecken will, braucht zwei Einträge — oder das
+/// Muster `iban_de`, das die ungruppierte Form selbst erkennt.
+#[test]
+fn collapsing_whitespace_is_not_the_same_as_ignoring_it() {
+    let m = matcher(vec![entry(
+        "b002",
+        ListType::Positive,
+        "DE89 3704 0044 0532 0130 00",
+    )]);
+    let regions = m
+        .find_matches(&[run(0, "IBAN: DE89370400440532013000")])
+        .unwrap();
+    assert!(
+        regions.is_empty(),
+        "ohne Leerzeichen trifft ein Muster mit Leerzeichen nicht"
+    );
+}
+
+/// Hält die **tatsächliche** Lage fest: über einen Zeilenumbruch hinweg wird
+/// nicht gefunden.
+///
+/// Der Extraktor (`redact_pdf::extract::PdfExtractor::build_lines`) gruppiert
+/// Glyphen entlang der Grundlinie und liefert je Zeile einen eigenen
+/// `TextRun`; `assemble_line` setzt als Trennzeichen ausschließlich `' '`.
+/// Ein `TextRun` enthält deshalb **nie** ein `\n`, und eine über zwei Zeilen
+/// verteilte IBAN erreicht den Matcher als zwei getrennte Runs.
+///
+/// Nachgemessen am fertigen Programm mit einer Seite, auf der
+/// `IBAN: DE89 3704` und `0044 0532 0130 00` in zwei Zeilen stehen:
+/// `Textzeilen: 2, Treffer gesamt: 0` — sowohl mit `--booking-list` als auch
+/// mit `--patterns iban_de`.
+///
+/// Dieser Test darf nicht „repariert“ werden, indem man die beiden Runs im
+/// Test zu einem zusammenzieht: dann prüft er den Extraktor nicht mehr nach,
+/// sondern nur noch sich selbst. Soll der Zeilenumbruch wirklich überbrückt
+/// werden, muss der Abgleich über Run-Grenzen hinweg suchen — das ist ein
+/// Eingriff in `redact-pdf` (Leserichtung/Nachbarschaft der Zeilen) und in die
+/// Rechteckbildung (ein Treffer bekäme dann mehrere Rechtecke).
+#[test]
+fn iban_split_across_two_extracted_lines_is_not_found() {
+    let m = matcher(vec![entry(
+        "b002",
+        ListType::Positive,
+        "DE89 3704 0044 0532 0130 00",
+    )]);
+
+    // Genau das, was der Extraktor für zwei Zeilen liefert: zwei Runs.
+    let runs = vec![run(0, "IBAN: DE89 3704"), run(0, "0044 0532 0130 00")];
+
+    // Vorbedingung: kein Run trägt einen Zeilenumbruch.
+    assert!(runs.iter().all(|r| !r.text.contains('\n')));
+
+    assert!(
+        m.find_matches(&runs).unwrap().is_empty(),
+        "Buchungslisten-Abgleich läuft je Run — über Zeilengrenzen hinweg darf \
+         (und kann) er nicht treffen"
+    );
+
+    // Gegenprobe: derselbe Eintrag trifft, sobald beides in *einer* Zeile steht.
+    let one_line = vec![run(0, "IBAN: DE89 3704 0044 0532 0130 00")];
+    assert_eq!(m.find_matches(&one_line).unwrap().len(), 1);
 }
 
 #[test]

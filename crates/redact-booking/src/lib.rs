@@ -11,10 +11,18 @@
 //!   zuerst geprüft und gewinnt jeden Konflikt (die Auflösung selbst passiert in
 //!   [`redact_core::resolve_conflicts`]).
 //! * Der Vergleich ist **ohne Beachtung von Groß-/Kleinschreibung** und
-//!   **leerraum-unempfindlich**: eine IBAN `DE89 3704 0044 0532 0130 00` aus der
-//!   CSV trifft auch auf `DE89  3704\n0044 …` im PDF. Details zur Rückabbildung
-//!   auf exakte Byte-Offsets (und damit auf exakte Rechtecke) siehe das interne
+//!   unempfindlich gegen die *Menge* an Leerraum: eine IBAN
+//!   `DE89 3704 0044 0532 0130 00` aus der CSV trifft auch auf
+//!   `DE89  3704 0044   0532 0130 00` im PDF. Leerraum wird dabei
+//!   **zusammengefasst, nicht entfernt** — auf `DE89370400440532013000`
+//!   trifft dasselbe Muster deshalb *nicht*. Details zur Rückabbildung auf
+//!   exakte Byte-Offsets (und damit auf exakte Rechtecke) siehe das interne
 //!   Modul `normalize`.
+//! * **Nicht über einen Zeilenumbruch hinweg.** Abgeglichen wird gegen je einen
+//!   [`redact_core::TextRun`], und ein Run ist genau eine extrahierte Zeile.
+//!   Steht ein Wert im PDF über zwei Zeilen verteilt, sind das zwei Runs, und
+//!   der Eintrag trifft nicht — siehe das Modul `normalize`. Für solche Fälle
+//!   bleibt nur eine manuelle Region bzw. die GUI.
 //! * **Kontextprüfung**: `context_before` bzw. `context_after` müssen — falls
 //!   gesetzt — im Text vor bzw. nach der Fundstelle desselben Runs vorkommen.
 //!   Scheitert die Prüfung, wird nur diese Fundstelle verworfen und im selben

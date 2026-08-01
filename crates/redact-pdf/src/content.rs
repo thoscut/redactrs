@@ -39,13 +39,35 @@ use crate::ops::{PathSeg, Rgb, Stroke};
 /// Maximale Rekursionstiefe für verschachtelte Form-XObjects.
 const MAX_FORM_DEPTH: usize = 8;
 
-/// Ab welchem Anteil unlesbarer Zeichen ein Font ohne `/ToUnicode` gemeldet
-/// wird.
-const UNREADABLE_RATIO: f64 = 0.3;
+/// Ab wie vielen **unlesbaren** Zeichen ein Font ohne `/ToUnicode` gemeldet
+/// wird — unabhängig davon, wie klein ihr Anteil ist.
+///
+/// Vorher zählte diese Schwelle die *insgesamt* gesetzten Zeichen: unter vier
+/// blieb es still. Eine Seite mit genau drei unlesbaren Glyphen warnte deshalb
+/// nicht — ausgerechnet der Fall, der wehtut. Drei unlesbare Zeichen können
+/// genau die Ziffern sein, auf die es ankommt; der Rest einer Kontonummer ist
+/// nicht weniger schutzbedürftig, weil er kurz ist. Gezählt wird jetzt das
+/// Unlesbare selbst.
+///
+/// Bei **einem** einzelnen Zeichen bleibt es still, sofern der Font sonst
+/// lesbar ist (siehe [`UNREADABLE_RATIO`]): ein Aufzählungspunkt oder ein
+/// Logo-Dingbat ist Gestaltung, kein Text. Dieser Fall ist häufig genug, dass
+/// eine Warnung darüber die echten Befunde zudecken würde.
+const UNREADABLE_MIN_GLYPHS: usize = 2;
 
-/// So viele Zeichen müssen mindestens vorliegen, bevor der Anteil zählt —
-/// sonst schlägt eine einzelne Sonderglyphe schon Alarm.
-const UNREADABLE_MIN_GLYPHS: usize = 4;
+/// Ab welchem Anteil schon ein **einzelnes** unlesbares Zeichen gemeldet wird.
+///
+/// Vorher war der Anteil das alleinige Maß, mit 0,3. Das ist die falsche
+/// Größe: Der Anteil misst, wie typisch das Problem im Font ist, nicht wie
+/// viel Text dadurch ungeprüft bleibt — 29 % eines Fonts mit 1000 Zeichen sind
+/// 290 unlesbare Zeichen, und die blieben unerwähnt. Über die Menge
+/// entscheidet jetzt [`UNREADABLE_MIN_GLYPHS`].
+///
+/// Der Anteil hat nur noch eine Aufgabe: Ein Font, der überhaupt kaum Text
+/// setzt (bis zu 20 Zeichen), fällt schon mit einem einzigen unlesbaren
+/// Zeichen auf — dort trägt dieses eine Zeichen Gewicht, während dieselbe
+/// Glyphe in einem seitenfüllenden Font Beiwerk ist.
+const UNREADABLE_RATIO: f64 = 0.05;
 
 /// Aus welchem Stream ein Datensatz stammt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -605,10 +627,12 @@ impl FontDecodeStats {
     fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         for ((resource, base_font), (total, unreadable)) in &self.per_font {
-            if *total < UNREADABLE_MIN_GLYPHS {
+            if *unreadable == 0 {
                 continue;
             }
-            if (*unreadable as f64) < *total as f64 * UNREADABLE_RATIO {
+            let enough = *unreadable >= UNREADABLE_MIN_GLYPHS
+                || (*unreadable as f64) >= *total as f64 * UNREADABLE_RATIO;
+            if !enough {
                 continue;
             }
             let name = if base_font.is_empty() {

@@ -39,6 +39,22 @@ const PLACEHOLDER_FONT: &[u8] = b"RedactRsHelv";
 pub struct RedactionReport {
     /// Anzahl tatsächlich aus dem Content-Stream entfernter Zeichen.
     pub removed_glyphs: usize,
+    /// Entfernte Zeichen **je übergebener Schwärzung**, in derselben
+    /// Reihenfolge und Länge wie die an [`PdfRedactor::apply_with_report`]
+    /// übergebene Liste.
+    ///
+    /// Ohne diese Aufschlüsselung kann ein Audit-Log nur die Gesamtsumme
+    /// nennen. Eine Region, die zwar gültig ist, im Strom aber nichts trifft —
+    /// falsche Koordinaten, Glyphen außerhalb, nur ein Bild darunter —, sähe
+    /// darin aus wie jede andere: „angewendet“. Mit `per_redaction` lässt sich
+    /// je Region die Wahrheit protokollieren, und eine `0` ist ein Befund.
+    ///
+    /// Überlappende Bereiche werden **jeder für sich** gezählt: verdecken zwei
+    /// Regionen dasselbe Zeichen, erscheint es in beiden Zahlen. Die Summe
+    /// kann deshalb größer sein als [`RedactionReport::removed_glyphs`] — die
+    /// Frage „hat *diese* Region etwas bewirkt?“ ist nur so ehrlich zu
+    /// beantworten.
+    pub per_redaction: Vec<usize>,
     /// Anzahl gezeichneter Deck-Rechtecke.
     pub drawn_rects: usize,
     /// Anzahl entfernter Annotationen.
@@ -59,6 +75,25 @@ enum PlanItem {
     Adjust(f64),
 }
 
+/// Welche Zeichen einer Text-Operation verdeckt sind — insgesamt und je
+/// Schwärzung.
+#[derive(Debug, Clone, Default)]
+struct Selection {
+    /// Vereinigung über alle Bereiche: das entscheidet über den Strom.
+    hidden: Vec<bool>,
+    /// Index der Schwärzung → die Zeichen, die **sie** verdeckt.
+    ///
+    /// Nur Bereiche, die überhaupt etwas treffen, stehen hier. Getrennt
+    /// geführt, weil sich nur so je Region sagen lässt, ob sie gewirkt hat.
+    per_redaction: BTreeMap<usize, Vec<bool>>,
+}
+
+impl Selection {
+    fn any(&self) -> bool {
+        self.hidden.iter().any(|h| *h)
+    }
+}
+
 /// Bauplan für eine einzelne Text-Operation.
 #[derive(Debug, Clone)]
 struct Plan {
@@ -68,11 +103,11 @@ struct Plan {
     font_size: f64,
     h_scale: f64,
     items: Vec<PlanItem>,
-    hidden: Vec<bool>,
+    selection: Selection,
 }
 
 impl Plan {
-    fn from_record(record: &ShowRecord, hidden: Vec<bool>) -> Self {
+    fn from_record(record: &ShowRecord, selection: Selection) -> Self {
         let items = record
             .items
             .iter()
@@ -90,12 +125,25 @@ impl Plan {
             font_size: record.font_size,
             h_scale: record.h_scale,
             items,
-            hidden,
+            selection,
         }
     }
 
+    fn hidden(&self) -> &[bool] {
+        &self.selection.hidden
+    }
+
     fn hidden_count(&self) -> usize {
-        self.hidden.iter().filter(|h| **h).count()
+        self.selection.hidden.iter().filter(|h| **h).count()
+    }
+
+    /// Wie viele Zeichen dieser Operation die Schwärzung `index` verdeckt.
+    fn count_for(&self, index: usize) -> usize {
+        self.selection
+            .per_redaction
+            .get(&index)
+            .map(|flags| flags.iter().filter(|h| **h).count())
+            .unwrap_or(0)
     }
 }
 
@@ -146,7 +194,10 @@ impl PdfRedactor {
         doc: &mut Document,
         redactions: &[Redaction],
     ) -> Result<RedactionReport> {
-        let mut report = RedactionReport::default();
+        let mut report = RedactionReport {
+            per_redaction: vec![0; redactions.len()],
+            ..RedactionReport::default()
+        };
         // Auch bei „0 Schwärzungen“ muss der Nutzer erfahren, dass die Datei
         // eine Vorgeschichte hat: was in einer früheren Revision stand, ist
         // beim Laden mitgekommen.
@@ -186,10 +237,14 @@ impl PdfRedactor {
         let no_plans: BTreeMap<usize, Plan> = BTreeMap::new();
 
         for (page_index, page_id) in pages.iter().enumerate() {
-            let page_redactions: Vec<&Redaction> = redactions
+            // Der Index in der **übergebenen** Liste wird mitgeführt: nur so
+            // lässt sich am Ende je Schwärzung sagen, was sie bewirkt hat.
+            let on_this_page: Vec<(usize, &Redaction)> = redactions
                 .iter()
-                .filter(|r| r.region.page == page_index)
+                .enumerate()
+                .filter(|(_, r)| r.region.page == page_index)
                 .collect();
+            let page_redactions: Vec<&Redaction> = on_this_page.iter().map(|(_, r)| *r).collect();
 
             // Gescannt wird *jede* Seite, auch die ohne Schwärzung. Die
             // Befunde des Scanners — ein Font, dessen Text sich nicht
@@ -221,27 +276,31 @@ impl PdfRedactor {
             if page_redactions.is_empty() {
                 continue;
             }
-            let rects: Vec<Rect> = page_redactions
+            // Entartete Bereiche fliegen raus, ihr Index bleibt aber erhalten:
+            // im Bericht steht für sie eine ehrliche 0.
+            let indexed_rects: Vec<(usize, Rect)> = on_this_page
                 .iter()
-                .map(|r| r.region.rect.expanded(self.padding))
-                .filter(|r| !r.is_empty())
+                .map(|(index, r)| (*index, r.region.rect.expanded(self.padding)))
+                .filter(|(_, r)| !r.is_empty())
                 .collect();
+            let rects: Vec<Rect> = indexed_rects.iter().map(|(_, r)| *r).collect();
 
             let mut page_plans: BTreeMap<usize, Plan> = BTreeMap::new();
 
             for record in &scan.shows {
-                let hidden = hidden_flags(record, &rects);
-                if !hidden.iter().any(|h| *h) {
+                let selection = hidden_flags(record, &indexed_rects);
+                if !selection.any() {
                     continue;
                 }
                 let target = match record.stream {
                     StreamKey::Page => &mut page_plans,
                     StreamKey::Form(id) => form_plans.entry(id).or_default(),
                 };
-                merge_plan(target, record, hidden);
+                merge_plan(target, record, selection);
             }
 
             report.removed_glyphs += page_plans.values().map(Plan::hidden_count).sum::<usize>();
+            add_per_redaction(&mut report, page_plans.values());
 
             let inline = inline_images
                 .get(&InlineTarget::Page(*page_id))
@@ -273,6 +332,7 @@ impl PdfRedactor {
                 .get(&InlineTarget::Form(form_id))
                 .unwrap_or(&no_inline);
             report.removed_glyphs += plans.values().map(Plan::hidden_count).sum::<usize>();
+            add_per_redaction(&mut report, plans.values());
             rewrite_form(doc, form_id, plans, inline)?;
         }
 
@@ -439,36 +499,123 @@ fn encode_inline_image(dict: &Dictionary, data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Welche Glyphen einer Text-Operation liegen im Schwärzungsbereich?
-fn hidden_flags(record: &ShowRecord, rects: &[Rect]) -> Vec<bool> {
-    record
-        .items
-        .iter()
-        .map(|item| match item {
-            ShowItem::Glyph(g) => rects.iter().any(|r| {
-                g.rect.covered_fraction(r) >= GLYPH_COVERAGE_THRESHOLD
-                    || r.contains(g.rect.center())
-            }),
-            ShowItem::Adjust(_) => false,
-        })
-        .collect()
+///
+/// `rects` sind die (bereits um `padding` erweiterten) Bereiche zusammen mit
+/// ihrem Index in der übergebenen Schwärzungsliste. Der Index wird
+/// mitgeschleppt, damit der Bericht je Region Rechenschaft ablegen kann.
+fn hidden_flags(record: &ShowRecord, rects: &[(usize, Rect)]) -> Selection {
+    let mut selection = Selection {
+        hidden: vec![false; record.items.len()],
+        per_redaction: BTreeMap::new(),
+    };
+    for (index, rect) in rects {
+        let mut flags: Vec<bool> = record
+            .items
+            .iter()
+            .map(|item| match item {
+                ShowItem::Glyph(g) => {
+                    g.rect.covered_fraction(rect) >= GLYPH_COVERAGE_THRESHOLD
+                        || rect.contains(g.rect.center())
+                }
+                ShowItem::Adjust(_) => false,
+            })
+            .collect();
+        // Erst je Bereich verbreitern, dann vereinigen: eine Region, die nur
+        // eine Hälfte einer Ligatur trifft, hat auch die andere zu verantworten.
+        widen_over_ligatures(&record.items, &mut flags);
+        if !flags.iter().any(|h| *h) {
+            continue;
+        }
+        for (all, one) in selection.hidden.iter_mut().zip(&flags) {
+            *all = *all || *one;
+        }
+        selection.per_redaction.insert(*index, flags);
+    }
+    selection
+}
+
+/// Schreibt die Zeichenzahlen je Schwärzung fort.
+fn add_per_redaction<'a>(report: &mut RedactionReport, plans: impl Iterator<Item = &'a Plan>) {
+    for plan in plans {
+        for index in plan.selection.per_redaction.keys() {
+            if let Some(slot) = report.per_redaction.get_mut(*index) {
+                *slot += plan.count_for(*index);
+            }
+        }
+    }
+}
+
+/// Zieht die Auswahl über ganze Zeichencodes zusammen.
+///
+/// Eine Ligatur ist im Strom **ein** Code, steht aber für mehrere Zeichen.
+/// [`crate::content`] teilt sie in Teilzeichen auf, damit Text und Geometrie
+/// zeichenweise zusammenpassen; die Originalbytes trägt dabei nur das erste
+/// Teilzeichen, alle weiteren haben `bytes` leer.
+///
+/// Beim Neuschreiben entscheidet deshalb allein das erste Teilzeichen, ob der
+/// Code wieder in den Strom geschrieben wird — und mit ihm **alle** seine
+/// Zeichen. Beginnt der Treffer erst beim zweiten Teilzeichen, überlebt die
+/// Ligatur also vollständig und bleibt mit `pdftotext` lesbar, obwohl das
+/// Deck-Rechteck sie halb verdeckt.
+///
+/// Eine nur teilweise getroffene Ligatur muss deshalb **ganz** verschwinden.
+/// Das ist auch die sichere Richtung: lieber ein Zeichen zu viel entfernt als
+/// ein Geheimnis halb stehen gelassen.
+fn widen_over_ligatures(items: &[ShowItem], flags: &mut [bool]) {
+    let mut index = 0;
+    while index < items.len() {
+        // Ein Code beginnt bei der Glyphe, die die Originalbytes trägt.
+        let starts_code = matches!(&items[index], ShowItem::Glyph(g) if !g.bytes.is_empty());
+        if !starts_code {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while matches!(items.get(index), Some(ShowItem::Glyph(g)) if g.bytes.is_empty()) {
+            index += 1;
+        }
+        if index - start > 1 && flags[start..index].iter().any(|h| *h) {
+            for flag in &mut flags[start..index] {
+                *flag = true;
+            }
+        }
+    }
 }
 
 /// Führt mehrere Platzierungen desselben XObjects zusammen: ein Zeichen wird
 /// entfernt, sobald es in *irgendeiner* Platzierung verdeckt ist.
-fn merge_plan(target: &mut BTreeMap<usize, Plan>, record: &ShowRecord, hidden: Vec<bool>) {
+///
+/// Die Zählung je Schwärzung wird mit vereinigt — dadurch zählt ein Zeichen,
+/// das in zwei Platzierungen desselben Formulars verdeckt ist, für dieselbe
+/// Region trotzdem nur einmal.
+fn merge_plan(target: &mut BTreeMap<usize, Plan>, record: &ShowRecord, selection: Selection) {
     match target.get_mut(&record.op_index) {
-        Some(existing) if existing.hidden.len() == hidden.len() => {
-            for (a, b) in existing.hidden.iter_mut().zip(hidden) {
-                *a = *a || b;
+        Some(existing) if existing.selection.hidden.len() == selection.hidden.len() => {
+            for (a, b) in existing.selection.hidden.iter_mut().zip(&selection.hidden) {
+                *a = *a || *b;
+            }
+            for (index, flags) in selection.per_redaction {
+                match existing.selection.per_redaction.get_mut(&index) {
+                    Some(known) if known.len() == flags.len() => {
+                        for (a, b) in known.iter_mut().zip(&flags) {
+                            *a = *a || *b;
+                        }
+                    }
+                    _ => {
+                        existing.selection.per_redaction.insert(index, flags);
+                    }
+                }
             }
         }
         Some(existing) => {
-            if hidden.iter().filter(|h| **h).count() > existing.hidden_count() {
-                *existing = Plan::from_record(record, hidden);
+            let count = selection.hidden.iter().filter(|h| **h).count();
+            if count > existing.hidden_count() {
+                *existing = Plan::from_record(record, selection);
             }
         }
         None => {
-            target.insert(record.op_index, Plan::from_record(record, hidden));
+            target.insert(record.op_index, Plan::from_record(record, selection));
         }
     }
 }
@@ -504,7 +651,7 @@ fn rebuild_show(plan: &Plan) -> Vec<Operation> {
     let mut pending_shift = 0.0f64;
 
     for (index, item) in plan.items.iter().enumerate() {
-        let is_hidden = plan.hidden.get(index).copied().unwrap_or(false);
+        let is_hidden = plan.hidden().get(index).copied().unwrap_or(false);
         match item {
             PlanItem::Glyph {
                 bytes,
@@ -1233,7 +1380,10 @@ mod tests {
                     displacement: 5.0,
                 },
             ],
-            hidden,
+            selection: Selection {
+                hidden,
+                per_redaction: BTreeMap::new(),
+            },
         }
     }
 
@@ -1302,10 +1452,15 @@ mod tests {
         target.insert(7usize, plan(vec![true, false, false]));
         // Zweite Platzierung verdeckt ein anderes Zeichen.
         if let Some(existing) = target.get_mut(&7) {
-            for (a, b) in existing.hidden.iter_mut().zip([false, false, true]) {
+            for (a, b) in existing
+                .selection
+                .hidden
+                .iter_mut()
+                .zip([false, false, true])
+            {
                 *a = *a || b;
             }
         }
-        assert_eq!(target[&7].hidden, vec![true, false, true]);
+        assert_eq!(target[&7].hidden(), [true, false, true]);
     }
 }

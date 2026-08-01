@@ -2,17 +2,15 @@
 
 #![forbid(unsafe_code)]
 
-mod audit;
 mod cli;
-mod pipeline;
 
 use std::process::ExitCode;
 
 use clap::Parser;
 use redact_core::{RedactError, Result};
+use redact_pipeline::Outcome;
 
 use crate::cli::Cli;
-use crate::pipeline::Config;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -51,34 +49,13 @@ fn dispatch(cli: Cli) -> Result<()> {
         return start_gui(&cli);
     }
 
-    let Some(input) = cli.input.clone() else {
+    if cli.input.is_none() {
         return Err(RedactError::Config(
             "keine Eingabedatei angegeben (`redact-rs --help` zeigt Beispiele)".into(),
         ));
-    };
+    }
 
-    let config = Config {
-        input,
-        output: cli.output.clone(),
-        output_suffix: cli.output_suffix.clone(),
-        force: cli.force,
-        patterns: cli.patterns.clone(),
-        no_patterns: cli.no_patterns,
-        patterns_config: cli.patterns_config.clone(),
-        min_confidence: cli.min_confidence,
-        booking_list: cli.booking_list.clone(),
-        manual_regions: cli.manual_regions.clone(),
-        review: cli.review,
-        review_out: cli.review_out.clone(),
-        apply_review: cli.apply_review.clone(),
-        audit_log: cli.audit_log.clone(),
-        action: cli.action.to_action(&cli.replace_with),
-        padding: cli.padding,
-        limits: cli.limits(),
-        max_candidates: cli.max_candidates,
-    };
-
-    let outcome = pipeline::run(&config)?;
+    let outcome = redact_pipeline::run(&cli.config())?;
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&outcome)?);
@@ -88,7 +65,7 @@ fn dispatch(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-fn report(outcome: &pipeline::Outcome) {
+fn report(outcome: &Outcome) {
     println!("Eingabe:            {}", outcome.input);
     println!("Seiten:             {}", outcome.pages);
     if outcome.text_runs > 0 {
@@ -123,6 +100,18 @@ fn report(outcome: &pipeline::Outcome) {
             println!("Deck-Rechtecke:     {}", outcome.drawn_rects);
             if outcome.removed_annotations > 0 {
                 println!("Entfernte Annotationen: {}", outcome.removed_annotations);
+            }
+            // Ein überschriebenes Bild gehört gemeldet: die Bildpunkte
+            // außerhalb der Schwärzung bleiben zwar unverändert (neu kodiert
+            // wird verlustfrei mit Flate), die *Datei* ist danach aber eine
+            // andere — aus einem JPEG-Stream wird ein Flate-Stream, und die
+            // Ausgabe wächst dadurch spürbar.
+            if outcome.redacted_images > 0 {
+                println!(
+                    "Überschriebene Bilder: {} (neu kodiert: außerhalb der \
+                     Schwärzung verlustfrei, Datei dadurch größer)",
+                    outcome.redacted_images
+                );
             }
             if outcome.metadata_removed.is_empty() {
                 println!("Metadaten:          nichts zu entfernen");
@@ -183,11 +172,9 @@ fn list_patterns() -> Result<()> {
 
 #[cfg(feature = "gui")]
 fn start_gui(cli: &Cli) -> Result<()> {
-    redact_gui::run(
-        cli.input.clone(),
-        cli.booking_list.clone(),
-        cli.patterns.clone(),
-    )
+    // Dieselbe Konfiguration wie ein Lauf auf der Kommandozeile — die
+    // Oberfläche analysiert und exportiert damit über dieselbe Kette.
+    redact_gui::run(cli.config())
 }
 
 #[cfg(not(feature = "gui"))]

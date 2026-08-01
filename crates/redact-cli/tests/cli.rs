@@ -1054,3 +1054,193 @@ fn deep_nesting_cannot_hide_behind_a_binary_looking_stream() {
     ]);
     assert_clean_refusal(&out, "Verschachtelungstiefe");
 }
+
+// ---------------------------------------------------------------------------
+// Ausweichmöglichkeiten, die es bisher nicht gab (Aufgaben 53a und 54)
+// ---------------------------------------------------------------------------
+
+/// Ein Dokument mit einem Bild, das sich nicht dekodieren lässt (JPX), und
+/// einem Textstück daneben.
+fn pdf_with_an_undecodable_image(dir: &Path) -> PathBuf {
+    use lopdf::{dictionary, Document, Object, Stream};
+
+    let mut doc = Document::with_version("1.5");
+    let image_id = doc.add_object(Object::Stream(Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Image",
+            "Width" => 20_i64, "Height" => 20_i64,
+            "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8_i64,
+            "Filter" => "JPXDecode",
+        },
+        vec![0x99; 64],
+    )));
+    let resources_id = doc.add_object(dictionary! {
+        "XObject" => dictionary! { "Im0" => image_id },
+    });
+    // Das Bild liegt bei (50,600)–(150,700).
+    let content_id = doc.add_object(Stream::new(
+        dictionary! {},
+        b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec(),
+    ));
+    let pages_id = doc.new_object_id();
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id,
+        "Contents" => content_id, "Resources" => resources_id,
+        "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1_i64,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog_id);
+
+    let path = dir.join("mit_bild.pdf");
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// Eine Regionsdatei, die genau auf dem Bild liegt.
+fn region_on_the_image(dir: &Path) -> PathBuf {
+    let path = dir.join("regionen.json");
+    std::fs::write(
+        &path,
+        r#"[{"page":0,
+             "rect":{"ll":{"x":75.0,"y":650.0},"ur":{"x":100.0,"y":675.0}},
+             "text":null,
+             "source":{"manual":{"reason":"Bild"}}}]"#,
+    )
+    .unwrap();
+    path
+}
+
+/// **Aufgabe 53a.** Ohne Schalter bricht der Lauf bei einem nicht
+/// dekodierbaren Bild ab — richtig so, denn die Schwärzung läge nur obenauf.
+/// Bis hierher gab es aber gar keinen Ausweg: die Bibliothek konnte es,
+/// die Kommandozeile nicht.
+#[test]
+fn an_undecodable_image_can_be_waved_through_on_request() {
+    let dir = workdir("undecodable");
+    let input = pdf_with_an_undecodable_image(&dir);
+    let regions = region_on_the_image(&dir);
+    let out = dir.join("out.pdf");
+
+    let refused = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--manual-regions",
+        regions.to_str().unwrap(),
+        "--no-patterns",
+    ]);
+    assert!(!refused.status.success(), "hätte abbrechen müssen");
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(message.contains("JPXDecode"), "{message}");
+    assert!(!out.exists(), "es darf keine Ausgabe entstanden sein");
+
+    // Mit dem Schalter entsteht eine Ausgabe — und der Lauf sagt, was das
+    // bedeutet.
+    let allowed = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--manual-regions",
+        regions.to_str().unwrap(),
+        "--no-patterns",
+        "--allow-undecodable-images",
+    ]);
+    assert!(allowed.status.success(), "{}", stderr(&allowed));
+    assert!(out.exists());
+    let warned = stderr(&allowed);
+    assert!(
+        warned.to_lowercase().contains("bild"),
+        "der Lauf muss auf das ungeschwärzte Bild hinweisen: {warned}"
+    );
+}
+
+/// **Aufgabe 54.** `"sha256": ""` von Hand in eine Review-Datei geschrieben
+/// hebelte die Identitätsprüfung aus: die Kette gab stillschweigend `Ok`
+/// zurück, und die Rechtecke landeten auf einem beliebigen Dokument.
+#[test]
+fn a_review_file_without_a_checksum_is_refused_unless_allowed() {
+    let dir = workdir("unverified");
+    let input = demo(&dir);
+    let review = dir.join("review.json");
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        review.to_str().unwrap(),
+        "--patterns",
+        "iban_de",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // Von Hand entwertet — genau der Fall, um den es geht.
+    let data = std::fs::read_to_string(&review).unwrap();
+    let mut file: redact_core::ReviewFile = serde_json::from_str(&data).unwrap();
+    file.input.sha256 = String::new();
+    std::fs::write(&review, file.to_json().unwrap()).unwrap();
+
+    let output = dir.join("out.pdf");
+    let refused = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--apply-review",
+        review.to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success(), "leere Prüfsumme kam durch");
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(message.contains("keine Prüfsumme"), "{message}");
+    assert!(message.contains("--allow-unverified-review"), "{message}");
+    assert!(!output.exists());
+
+    // Ausdrücklich überstimmt geht es durch.
+    let allowed = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--apply-review",
+        review.to_str().unwrap(),
+        "--allow-unverified-review",
+    ]);
+    assert!(allowed.status.success(), "{}", stderr(&allowed));
+    assert_no_leak(&output, "DE02", "die Review-Datei wurde angewendet");
+}
+
+/// Eine Review-Datei mit **falscher** Prüfsumme bleibt auch mit dem Schalter
+/// abgelehnt: „ungeprüft“ ist etwas anderes als „nachweislich fremd“.
+#[test]
+fn the_switch_does_not_help_a_review_file_of_another_document() {
+    let dir = workdir("still-refused");
+    let input = demo(&dir);
+    let other = dir.join("andere.pdf");
+    std::fs::write(&other, redact_pdf::testing::minimal_pdf("nichts geheimes")).unwrap();
+    let review = dir.join("review.json");
+
+    run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        review.to_str().unwrap(),
+    ]);
+
+    let out = run(&[
+        other.to_str().unwrap(),
+        "-o",
+        dir.join("out.pdf").to_str().unwrap(),
+        "--apply-review",
+        review.to_str().unwrap(),
+        "--allow-unverified-review",
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("andere Eingabe"));
+}

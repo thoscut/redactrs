@@ -14,20 +14,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use redact_booking::{BookingMatcher, CsvBookingLoader};
 use redact_core::{
-    output_path_with_suffix, resolve_conflicts, sibling_path, Action, BlockedRegion, BookingLoader,
-    Extractor, MatchType, Rect, RedactError, Redaction, Region, Renderer, Result, ReviewFile,
-    ReviewInput, Source, TextRun, AUDIT_SUFFIX, DEFAULT_OUTPUT_SUFFIX, REVIEW_SUFFIX,
+    output_path_with_suffix, resolve_conflicts, sibling_path, Action, BlockedRegion, MatchType,
+    Rect, RedactError, Redaction, Region, Result, ReviewFile, ReviewInput, Source, TextRun,
+    AUDIT_SUFFIX, REVIEW_SUFFIX,
 };
-use redact_patterns::PatternMatcher;
-use redact_pdf::{
-    load_from_bytes, page_boxes, strip_metadata, PdfExtractor, PdfRedactor, PdfRenderer,
-    RedactionReport,
-};
-use sha2::{Digest, Sha256};
+use redact_pdf::document::load_from_bytes_with_limits;
+use redact_pdf::{page_boxes, PdfExtractor};
+use redact_pipeline::{sha256_bytes, Config, Outcome, ReviewIdentity};
 
 use crate::history::History;
 use crate::viewer::{normalize_rotation, PageView};
@@ -337,53 +332,12 @@ pub fn shorten(text: &str, max: usize) -> String {
 
 /// SHA-256 als Hex-Zeichenkette.
 ///
-/// Gleiche Rechnung wie `redact_cli::audit::sha256_bytes`; der Test unten
-/// prüft denselben bekannten Wert, damit die Prüfsummen beider Programme
-/// austauschbar bleiben.
+/// Nur noch ein Name für [`redact_pipeline::sha256_bytes`] — dieselbe
+/// Rechnung, dieselbe Fassung, ein Aufruf. Vorher stand hier eine zweite
+/// Implementierung, deren Übereinstimmung mit der der CLI ein Test *behaupten*
+/// musste.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// Gehört eine Review-Datei zum geladenen Dokument?
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReviewIdentity {
-    /// Prüfsummen vorhanden und gleich.
-    Matches,
-    /// Nicht prüfbar: die Datei nennt keine Prüfsumme (so schrieb die GUI
-    /// früher **jede** Review-Datei) oder es ist kein Dokument geladen.
-    Unchecked,
-    /// Prüfsummen vorhanden und verschieden — die Datei gehört woandershin.
-    Mismatch,
-}
-
-/// Vergleicht die Prüfsumme aus der Review-Datei mit der des geladenen
-/// Dokuments.
-///
-/// Reine Funktion, damit die Entscheidung ohne Dateien und ohne Fenster
-/// prüfbar ist. Die Regel ist dieselbe wie in der CLI
-/// (`verify_review_matches_input`): eine leere Prüfsumme in der Datei kann
-/// nicht widerlegt werden und blockiert deshalb nicht — die GUI schreibt
-/// jetzt aber immer eine.
-pub fn review_identity(review_sha: &str, document_sha: &str) -> ReviewIdentity {
-    if review_sha.is_empty() || document_sha.is_empty() {
-        return ReviewIdentity::Unchecked;
-    }
-    if review_sha.eq_ignore_ascii_case(document_sha) {
-        ReviewIdentity::Matches
-    } else {
-        ReviewIdentity::Mismatch
-    }
-}
-
-/// Die ersten Stellen einer Prüfsumme — mehr braucht eine Meldung nicht.
-fn short_sha(sha: &str) -> &str {
-    &sha[..sha.len().min(12)]
+    sha256_bytes(bytes)
 }
 
 /// Der gesamte Zustand der Anwendung.
@@ -410,16 +364,27 @@ pub struct AppState {
     pub zoom: f32,
     pub regions: Vec<AnnotatedRegion>,
     pub selected_region: Option<usize>,
-    pub booking_path: Option<PathBuf>,
-    /// Namenszusatz für die vorgeschlagene Ausgabedatei.
+    /// Die Einstellungen des Laufs — **dieselbe** Struktur, mit der die
+    /// Kommandozeile arbeitet.
     ///
-    /// Aus `kontoauszug.pdf` wird mit dem Standardwert
-    /// `kontoauszug_geschwaerzt.pdf`. Bewusst Zustand und keine Konstante — der
-    /// Zusatz ist in der Oberfläche änderbar und soll später auch aus einer
-    /// Einstellungsdatei bzw. von `--output-suffix` kommen können.
-    pub output_suffix: String,
+    /// Sie kommt von dort (`redact-rs --gui …`) und wird hier weiterbenutzt:
+    /// Muster, Buchungsliste, `--min-confidence`, `--manual-regions`,
+    /// `--padding`, die Ladegrenzen. Vorher hatte die Oberfläche eine Handvoll
+    /// eigener Felder und kannte den Rest schlicht nicht.
+    ///
+    /// [`Config::input`] wird beim Öffnen eines Dokuments gesetzt; der
+    /// Namenszusatz [`Config::output_suffix`] ist in der Seitenleiste änderbar.
+    pub config: Config,
     /// Statuszeile.
     pub status: String,
+    /// Warnungen des Extraktors zum geladenen Dokument.
+    ///
+    /// Getrennt von [`AppState::warnings`], weil sie zum **Dokument** gehören
+    /// und in jeden Export mitgehen müssen: „auf dieser Seite konnten wir
+    /// nichts lesen“ ist die einzige Stelle, an der übersehener Text sichtbar
+    /// wird. Die Kommandozeile stellt sie genauso an den Anfang ihrer
+    /// Warnungsliste.
+    pub extract_warnings: Vec<String>,
     pub warnings: Vec<String>,
     /// Schnappschüsse für Rückgängig/Wiederholen.
     pub history: History,
@@ -438,9 +403,9 @@ impl Default for AppState {
             zoom: 1.0,
             regions: Vec::new(),
             selected_region: None,
-            booking_path: None,
-            output_suffix: DEFAULT_OUTPUT_SUFFIX.to_string(),
+            config: Config::default(),
             status: "Kein Dokument geladen".to_string(),
+            extract_warnings: Vec::new(),
             warnings: Vec::new(),
             history: History::new(),
         }
@@ -450,6 +415,14 @@ impl Default for AppState {
 impl AppState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Zustand mit den Einstellungen eines Kommandozeilenaufrufs.
+    pub fn with_config(config: Config) -> Self {
+        Self {
+            config,
+            ..Self::default()
+        }
     }
 
     // ---------------------------------------------------------------- Laden
@@ -467,9 +440,16 @@ impl AppState {
 
     /// Wie [`AppState::load_document`], aber aus dem Speicher. Es werden keine
     /// temporären Dateien angelegt.
+    ///
+    /// Geladen wird mit denselben Grenzen (`--max-decompressed-mb`,
+    /// `--max-parsed-mb`) und mit demselben Extraktoraufruf wie in der
+    /// Kommandozeile: `extract_with_warnings` statt `extract`. Der Interpreter
+    /// bricht an mehreren Stellen still ab; dort steht Text, den die Analyse
+    /// nicht sieht. Wer das nicht erfährt, hält eine Datei mit „0 Treffer“ für
+    /// sauber — die Oberfläche hat diese Warnungen bisher weggeworfen.
     pub fn load_bytes(&mut self, bytes: &[u8], path: Option<PathBuf>) -> Result<()> {
-        let doc = load_from_bytes(bytes)?;
-        let runs = PdfExtractor::new().extract(&doc)?;
+        let doc = load_from_bytes_with_limits(bytes, &self.config.limits)?;
+        let (runs, warnings) = PdfExtractor::new().extract_with_warnings(&doc)?;
         self.page_boxes = page_boxes(&doc);
         self.rotations = page_rotations(&doc);
         self.runs = runs;
@@ -477,11 +457,13 @@ impl AppState {
         // Über die Bytes, nicht über das geparste Dokument: die Review-Datei
         // soll die Datei benennen, die die Nutzerin geöffnet hat.
         self.input_sha256 = sha256_hex(bytes);
+        self.config.input = path.clone().unwrap_or_default();
         self.pdf_path = path;
         self.current_page = 0;
         self.selected_region = None;
         self.regions.clear();
-        self.warnings.clear();
+        self.extract_warnings = warnings.clone();
+        self.warnings = warnings;
         // Der Verlauf gehörte zum vorigen Dokument.
         self.history.clear();
         self.status = format!(
@@ -616,31 +598,33 @@ impl AppState {
 
     // -------------------------------------------------------------- Analyse
 
-    /// Führt Pattern- und (optional) Buchungslisten-Analyse über die
-    /// extrahierten Text-Runs aus.
+    /// Führt die Analyse über die extrahierten Text-Runs aus — **die** Analyse,
+    /// [`redact_pipeline::collect_regions`].
+    ///
+    /// Damit gelten hier dieselben Regeln wie auf der Kommandozeile:
+    /// `--manual-regions`, die Buchungsliste, `--patterns-config`,
+    /// `--no-patterns`, `--min-confidence` und die Obergrenze
+    /// `--max-candidates`. Vorher stand hier ein eigener Aufruf von
+    /// `PatternMatcher::new`, der von alldem nur die Muster-IDs kannte.
     ///
     /// Bereits von Hand gezogene Regionen bleiben erhalten — eine erneute
     /// Analyse darf Nutzerarbeit nicht wegwerfen. Alle automatisch gefundenen
     /// Regionen werden dagegen ersetzt.
     ///
     /// Gibt die Gesamtzahl der Regionen zurück.
-    pub fn analyze(&mut self, pattern_ids: &[String], booking: Option<&Path>) -> Result<usize> {
+    pub fn analyze(&mut self) -> Result<usize> {
         // Erst rechnen, dann den Verlauf anfassen: scheitert die Analyse,
         // bleibt der Stapel unberührt.
-        let matcher = PatternMatcher::new(pattern_ids)?;
-        let mut found = matcher.find_matches(&self.runs)?;
+        let found = redact_pipeline::collect_regions(&self.config, &self.runs)?;
 
-        if let Some(path) = booking {
-            let entries = CsvBookingLoader.load(path)?;
-            let booking_matcher = BookingMatcher::new(entries)?;
-            found.extend(booking_matcher.find_matches(&self.runs)?);
-            self.booking_path = Some(path.to_path_buf());
-        }
-
+        // Was aus `--manual-regions` kommt, steht schon in `found`; ohne den
+        // zweiten Test stünde es nach jeder Analyse ein weiteres Mal in der
+        // Liste.
         let manual: Vec<AnnotatedRegion> = self
             .regions
             .iter()
             .filter(|a| matches!(a.region.source, Source::Manual { .. }))
+            .filter(|a| !found.contains(&a.region))
             .cloned()
             .collect();
 
@@ -914,7 +898,7 @@ impl AppState {
     pub fn suggested_output_path(&self) -> Option<PathBuf> {
         self.pdf_path
             .as_ref()
-            .map(|input| output_path_with_suffix(input, &self.output_suffix))
+            .map(|input| output_path_with_suffix(input, &self.config.output_suffix))
     }
 
     /// Vorschlag für die Review-Datei: neben dem Original, `…_review.json`.
@@ -969,14 +953,41 @@ impl AppState {
         }
     }
 
+    /// Einstellungen für einen Export nach `out`.
+    ///
+    /// `force` steht auf `true`: der Speichern-Dialog des Systems hat das
+    /// Überschreiben bereits abgefragt, eine zweite Rückfrage im Schreibpfad
+    /// wäre eine Sackgasse. Das ist der einzige bewusste Unterschied im
+    /// Schreibverhalten gegenüber der Kommandozeile, wo `--force` die Antwort
+    /// ist. Alles andere — die Eingabedatei bleibt geschützt, kein Symlink,
+    /// kein halb geschriebenes Ziel, Modus 0600 für Log und Review — gilt
+    /// hier wie dort.
+    pub fn export_config(&self, out: &Path, audit: Option<&Path>) -> Config {
+        Config {
+            output: Some(out.to_path_buf()),
+            audit_log: audit.map(Path::to_path_buf),
+            force: true,
+            // `redact-rs --gui --review` hat die Oberfläche geöffnet, um die
+            // Treffer anzusehen. Wer hier auf „Exportieren“ drückt, will eine
+            // geschwärzte Datei — der Review-Modus der Kommandozeile ist
+            // damit erledigt.
+            review: false,
+            ..self.config.clone()
+        }
+    }
+
     /// Schwärzt eine Kopie des Dokuments, entfernt die Metadaten und schreibt
     /// das Ergebnis nach `out`.
     ///
-    /// Die Reihenfolge (schwärzen → Metadaten strippen → schreiben) ist exakt
-    /// dieselbe wie in der CLI-Pipeline; bei gleicher Regionenmenge entsteht
-    /// dieselbe Datei.
+    /// Die Arbeit macht [`redact_pipeline::apply`] — **derselbe** Aufruf, den
+    /// auch [`redact_pipeline::run`] für die Kommandozeile ausführt. Bei
+    /// gleicher Regionenmenge und gleicher [`Config`] entsteht dieselbe Datei,
+    /// Byte für Byte, und dasselbe Audit-Log. Vorher standen hier drei von Hand
+    /// nachgebaute Zeilen mit fest verdrahteter Polsterung 1,0, stillem
+    /// Überschreiben und einem selbst zusammengesetzten Log.
     ///
-    /// Ist `audit` gesetzt, wird zusätzlich ein JSON-Audit-Log geschrieben.
+    /// Ist `audit` gesetzt, wird zusätzlich ein Audit-Log geschrieben — mit
+    /// beiden Prüfsummen, gemessener Wirkung und Modus 0600.
     ///
     /// Zwei Fälle werden **abgelehnt, bevor irgendetwas geschrieben wird**:
     ///
@@ -986,7 +997,7 @@ impl AppState {
     /// * es ist nichts ausgewählt. Vorher entstand eine unveränderte Kopie
     ///   namens `…_geschwaerzt.pdf` samt Erfolgsmeldung — eine Datei, die
     ///   aussieht wie ein Ergebnis und keines ist.
-    pub fn export(&self, out: &Path, audit: Option<&Path>) -> Result<RedactionReport> {
+    pub fn export(&self, out: &Path, audit: Option<&Path>) -> Result<Outcome> {
         let doc = self
             .document
             .as_ref()
@@ -1005,25 +1016,25 @@ impl AppState {
             ));
         }
 
+        let config = self.export_config(out, audit);
+        let mut outcome = Outcome {
+            input: config.input.display().to_string(),
+            input_sha256: self.input_sha256.clone(),
+            pages: self.page_count(),
+            text_runs: self.runs.len(),
+            candidates: self.regions.len(),
+            // Die Warnungen des Extraktors gehören mit ins Log — genau wie in
+            // `redact_pipeline::run`, wo sie ebenfalls vor der Schwärzung
+            // eingetragen werden.
+            warnings: self.extract_warnings.clone(),
+            ..Default::default()
+        };
+
         let mut copy = (**doc).clone();
-        let report = PdfRedactor::new().apply_with_report(&mut copy, &redactions)?;
-        strip_metadata(&mut copy);
-        PdfRenderer::new().render(&copy, out)?;
-
-        if let Some(audit_path) = audit {
-            let log = build_audit_log(
-                self.pdf_path.as_deref(),
-                out,
-                &redactions,
-                &self.blocked_regions(),
-                &report.warnings,
-                unix_seconds_now(),
-            );
-            let json = serde_json::to_string_pretty(&log)?;
-            std::fs::write(audit_path, json)?;
-        }
-
-        Ok(report)
+        let blocked = self.blocked_regions();
+        redact_pipeline::apply(&mut copy, &redactions, &blocked, &config, &mut outcome)?;
+        outcome.blocked_details = redact_pipeline::describe_blocked(&blocked);
+        Ok(outcome)
     }
 
     // ---------------------------------------------------------------- Review
@@ -1055,6 +1066,21 @@ impl AppState {
         file
     }
 
+    /// Schreibt die Review-Datei — über den **einen** Schreibpfad.
+    ///
+    /// In der Datei stehen die gefundenen Geheimnisse im Klartext. Sie
+    /// entstand hier lange mit `std::fs::write`: Modus 0644, durch einen
+    /// Symlink hindurch, ohne atomares Umbenennen. Jetzt gilt dasselbe wie für
+    /// `--review-out`: 0600, kein Symlink, ein Zug, und die Eingabedatei kann
+    /// nicht getroffen werden.
+    pub fn save_review_file(&self, path: &Path) -> Result<()> {
+        let config = Config {
+            force: true,
+            ..self.config.clone()
+        };
+        redact_pipeline::write_review_file(path, &self.to_review_file(), &config)
+    }
+
     /// Übernimmt eine Review-Datei (z.B. aus `redact-rs --review-out`).
     ///
     /// **Prüft zuerst die Identität.** Eine Review-Datei sagt nur „schwärze
@@ -1063,21 +1089,11 @@ impl AppState {
     /// und ist es nicht. Stimmen die Prüfsummen nicht überein, wird die Datei
     /// deshalb **abgelehnt** und nichts verändert.
     pub fn apply_review_file(&mut self, review: ReviewFile) -> Result<()> {
-        let identity = review_identity(&review.input.sha256, &self.input_sha256);
-        if identity == ReviewIdentity::Mismatch {
-            return Err(RedactError::Config(format!(
-                "Diese Review-Datei gehört zu einem anderen Dokument \
-                 (Datei: {}…, geladen: {}…). Sie wurde nicht angewendet — \
-                 die Schwärzungen lägen an falschen Stellen. \
-                 Bitte „{}“ öffnen oder eine passende Review-Datei wählen.",
-                short_sha(&review.input.sha256),
-                short_sha(&self.input_sha256),
-                match review.input.path.trim() {
-                    "" => "das zugehörige PDF",
-                    path => path,
-                }
-            )));
-        }
+        let identity = redact_pipeline::check_review_identity(
+            &review,
+            &self.input_sha256,
+            self.config.allow_unverified_review,
+        )?;
 
         self.history.record(&self.regions);
         self.regions = review
@@ -1097,8 +1113,9 @@ impl AppState {
                 "Review übernommen: {} Einträge (Prüfsumme stimmt)",
                 self.regions.len()
             ),
-            // Ohne Prüfsumme lässt sich die Zugehörigkeit nicht widerlegen —
-            // aber auch nicht bestätigen. Das gehört gesagt.
+            // Hierher kommt nur, wer die Prüfung ausdrücklich abgeschaltet hat
+            // (`--allow-unverified-review`). Dann gehört wenigstens gesagt,
+            // dass die Zugehörigkeit zum Dokument niemand geprüft hat.
             _ => format!(
                 "Review übernommen: {} Einträge — ohne Prüfsumme, \
                  Zugehörigkeit zum Dokument ungeprüft",
@@ -1153,120 +1170,19 @@ fn page_rotation(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
     0
 }
 
-// ------------------------------------------------------------------- Audit
-
-/// Baut das Audit-Log als JSON-Wert.
-///
-/// Die Struktur ist deckungsgleich mit dem, was `redact-cli` schreibt — mit
-/// zwei bewussten Unterschieden:
-///
-/// * `input.sha256` und `output.sha256` bleiben **leer**, weil dieses Crate
-///   keine `sha2`-Abhängigkeit hat.
-/// * Zusätzlich zum RFC-3339-Zeitstempel (UTC, Sekundengenauigkeit) wird
-///   `timestamp_unix` mit den Sekunden seit der Epoche ausgegeben. Dieses Crate
-///   hat kein `chrono`; der Zeitstempel wird aus [`SystemTime`] selbst
-///   formatiert (siehe [`format_rfc3339_utc`]), und der reine Zahlenwert macht
-///   das Log unabhängig von der Formatierung nachprüfbar.
-pub fn build_audit_log(
-    input: Option<&Path>,
-    output: &Path,
-    redactions: &[Redaction],
-    blocked: &[BlockedRegion],
-    warnings: &[String],
-    unix_secs: i64,
-) -> serde_json::Value {
-    let entries: Vec<serde_json::Value> = redactions
-        .iter()
-        .map(|r| {
-            serde_json::json!({
-                // 1-basiert, damit das Log ohne Umrechnung lesbar ist.
-                "page": r.region.page + 1,
-                "rect": r.region.rect,
-                "action": r.action,
-                "reason": r.reason,
-                "source": r.region.source_kind(),
-            })
-        })
-        .collect();
-
-    let blocked_entries: Vec<serde_json::Value> = blocked
-        .iter()
-        .map(|b| {
-            serde_json::json!({
-                "page": b.page + 1,
-                "pattern": b.pattern,
-                "booking_id": b.booking_id,
-                "blocked_reason": b.blocked_reason,
-            })
-        })
-        .collect();
-
-    serde_json::json!({
-        "timestamp": format_rfc3339_utc(unix_secs),
-        "timestamp_unix": unix_secs,
-        "tool": {
-            "name": "redact-rs",
-            "version": env!("CARGO_PKG_VERSION"),
-        },
-        "input": {
-            "path": input.map(|p| p.display().to_string()).unwrap_or_default(),
-            "sha256": "",
-        },
-        "output": {
-            "path": output.display().to_string(),
-            "sha256": "",
-        },
-        "redactions": entries,
-        "blocked_by_negative_list": blocked_entries,
-        "metadata_stripped": true,
-        "warnings": warnings,
-    })
-}
-
-/// Sekunden seit der Unix-Epoche (negativ für Zeiten davor).
-pub fn unix_seconds_now() -> i64 {
-    let now = SystemTime::now();
-    match now.duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_secs() as i64,
-        Err(e) => -(e.duration().as_secs() as i64),
-    }
-}
-
-/// Formatiert Sekunden seit der Epoche als UTC-Zeitstempel nach RFC 3339
-/// (`YYYY-MM-DDTHH:MM:SSZ`).
-///
-/// Eigenimplementierung, weil dieses Crate kein `chrono` hat. Schaltjahre
-/// werden nach dem gregorianischen Kalender behandelt; Schaltsekunden gibt es
-/// in der Unix-Zeit nicht.
-pub fn format_rfc3339_utc(unix_secs: i64) -> String {
-    let days = unix_secs.div_euclid(86_400);
-    let secs = unix_secs.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let (hour, minute, second) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-/// Tage seit 1970-01-01 → (Jahr, Monat, Tag) im gregorianischen Kalender.
-///
-/// Algorithmus nach Howard Hinnant, „chrono-Compatible Low-Level Date
-/// Algorithms“ — abhängigkeitsfrei und über den ganzen i64-Bereich korrekt.
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use redact_core::{MatchType, Point};
+    use redact_pipeline::review_identity;
+
+    /// Einstellungen, wie sie `redact-rs --gui --patterns iban_de` erzeugt.
+    fn iban_only() -> Config {
+        Config {
+            patterns: vec!["iban_de".to_string()],
+            ..Config::default()
+        }
+    }
 
     fn pattern_region(page: usize, rect: Rect) -> Region {
         Region::new(
@@ -1293,7 +1209,8 @@ mod tests {
     }
 
     fn loaded_state() -> AppState {
-        let mut state = AppState::new();
+        // Nur die IBAN-Muster, damit die Tests nicht an anderen Treffern hängen.
+        let mut state = AppState::with_config(iban_only());
         state
             .load_bytes(
                 &redact_pdf::testing::demo_statement(),
@@ -1325,9 +1242,7 @@ mod tests {
     fn analyze_assigns_colors_and_disables_negative_hits() {
         let mut state = loaded_state();
         // Nur die IBAN-Patterns, damit der Test nicht an anderen Treffern hängt.
-        state
-            .analyze(&["iban_de".to_string()], None)
-            .expect("Analyse läuft");
+        state.analyze().expect("Analyse läuft");
         assert!(!state.regions.is_empty());
         assert!(state
             .regions
@@ -1348,7 +1263,7 @@ mod tests {
     fn analyze_keeps_manual_regions() {
         let mut state = loaded_state();
         state.add_manual_region(0, Rect::new(10.0, 10.0, 40.0, 20.0), "Gehalt");
-        state.analyze(&["iban_de".to_string()], None).unwrap();
+        state.analyze().unwrap();
         assert_eq!(
             state
                 .regions
@@ -1463,20 +1378,20 @@ mod tests {
     #[test]
     fn export_removes_the_text_from_the_pdf() {
         let mut state = loaded_state();
-        state.analyze(&["iban_de".to_string()], None).unwrap();
+        state.analyze().unwrap();
         assert!(!state.regions.is_empty());
 
         let dir = temp_dir("export");
         let out = dir.join("out.pdf");
         let audit = dir.join("audit.json");
-        let report = state.export(&out, Some(&audit)).expect("Export läuft");
-        assert!(report.removed_glyphs > 0);
-        assert!(report.drawn_rects > 0);
+        let outcome = state.export(&out, Some(&audit)).expect("Export läuft");
+        assert!(outcome.removed_glyphs > 0);
+        assert!(outcome.drawn_rects > 0);
 
         // Ergebnis erneut extrahieren: die IBAN darf nicht mehr auftauchen.
         let bytes = std::fs::read(&out).unwrap();
         let doc = redact_pdf::load_from_bytes(&bytes).unwrap();
-        let runs = PdfExtractor::new().extract(&doc).unwrap();
+        let (runs, _) = PdfExtractor::new().extract_with_warnings(&doc).unwrap();
         let text: String = runs
             .iter()
             .map(|r| r.text.as_str())
@@ -1490,49 +1405,89 @@ mod tests {
         // Nicht getroffener Text bleibt erhalten.
         assert!(text.contains("Musterbank"));
 
-        // Audit-Log ist gültiges JSON in der vereinbarten Form.
+        // Audit-Log: dasselbe, was die Kommandozeile schreibt.
+        //
+        // Vorher stand hier ein von Hand zusammengesetztes JSON mit **leeren**
+        // Prüfsummen und hart verdrahtetem `metadata_stripped: true`. Ein
+        // Nachweis ohne Prüfsummen bezeugt nichts, und die Metadatenzeile war
+        // schlicht gelogen.
         let log: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&audit).unwrap()).unwrap();
-        assert_eq!(log["metadata_stripped"], serde_json::json!(true));
         assert!(!log["redactions"].as_array().unwrap().is_empty());
         assert_eq!(log["redactions"][0]["page"], serde_json::json!(1));
-        assert_eq!(log["input"]["sha256"], serde_json::json!(""));
-        assert!(log["timestamp"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(
+            log["input"]["sha256"].as_str().unwrap(),
+            state.input_sha256,
+            "das Log muss die Eingabe benennen können"
+        );
+        assert_eq!(log["output"]["sha256"].as_str().unwrap().len(), 64);
+        // Gemessen, nicht behauptet: das Demo-PDF bringt ein /Info-Dictionary
+        // mit, also *wurde* etwas entfernt — und das Log zählt es auf.
+        assert_eq!(log["metadata_stripped"], serde_json::json!(true));
+        assert!(!log["metadata"]["summary"].as_array().unwrap().is_empty());
+        assert_eq!(log["effect"]["padding"], serde_json::json!(1.0));
+        assert_eq!(
+            log["effect"]["removed_glyphs"],
+            serde_json::json!(outcome.removed_glyphs)
+        );
+
+        // Klartext, deshalb nur für die Eigentümerin lesbar (0600).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&audit).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "Audit-Log stand auf {mode:o}");
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Vergleicht den Export mit einer **hier von Hand nachgebauten** Kette aus
-    /// denselben Bausteinen (schwärzen → Metadaten strippen → schreiben).
+    /// Der Export benutzt **die** Polsterung aus der Konfiguration.
     ///
-    /// Ausdrücklich **kein** Vergleich mit `redact-cli`: dieses Crate hängt
-    /// nicht von der CLI ab und ruft deren Pipeline nicht auf. Der Test zeigt
-    /// also, dass `export` genau diese drei Schritte in dieser Reihenfolge und
-    /// mit der Vorgabe-Polsterung ausführt — nicht mehr. Weicht die CLI
-    /// irgendwann ab, merkt das nur ein Test, der beide wirklich ausführt.
+    /// Hier stand bis Aufgabe 5 ein Test, der die Kette daneben noch einmal von
+    /// Hand aufschrieb und deshalb nie fehlschlagen konnte. Der echte Vergleich
+    /// — dieselbe Datei aus dem `redact-rs`-Binary und aus dieser Oberfläche,
+    /// Byte für Byte — steht in `redact-cli/tests/cli_and_gui_agree.rs`.
+    ///
+    /// Was hier bleibt, ist der Befund, der die beiden früher trennte: die
+    /// Oberfläche polsterte mit fest verdrahteten 1,0 und war für `--padding`
+    /// unerreichbar.
     #[test]
-    fn export_matches_a_hand_built_pipeline_of_the_same_steps() {
-        let mut state = loaded_state();
-        state.analyze(&["iban_de".to_string()], None).unwrap();
-        state.add_manual_region(1, Rect::new(70.0, 700.0, 250.0, 715.0), "Adresse");
+    fn export_uses_the_padding_from_the_configuration() {
+        let dir = temp_dir("padding");
 
-        let dir = temp_dir("identical");
-        let gui_out = dir.join("gui.pdf");
-        state.export(&gui_out, None).unwrap();
+        let export_with = |padding: f64, name: &str| {
+            let mut state = AppState::with_config(Config {
+                padding,
+                ..iban_only()
+            });
+            state
+                .load_bytes(
+                    &redact_pdf::testing::demo_statement(),
+                    Some(PathBuf::from("demo.pdf")),
+                )
+                .unwrap();
+            state.analyze().unwrap();
+            let out = dir.join(name);
+            let outcome = state.export(&out, None).unwrap();
+            (std::fs::read(&out).unwrap(), outcome)
+        };
 
-        let reference = dir.join("reference.pdf");
-        let mut doc = redact_pdf::load_from_bytes(&redact_pdf::testing::demo_statement()).unwrap();
-        PdfRedactor::with_padding(1.0)
-            .apply_with_report(&mut doc, &state.enabled_redactions())
-            .unwrap();
-        strip_metadata(&mut doc);
-        PdfRenderer::new().render(&doc, &reference).unwrap();
+        let (thin, _) = export_with(1.0, "thin.pdf");
+        let (fat, _) = export_with(6.0, "fat.pdf");
+        assert_ne!(thin, fat, "--padding muss in der Oberfläche ankommen");
 
-        assert_eq!(
-            std::fs::read(&gui_out).unwrap(),
-            std::fs::read(&reference).unwrap(),
-            "Export muss Byte für Byte dem nachgebauten Ablauf entsprechen"
+        // Und der entartete Fall wird auch hier gemeldet statt als Erfolg
+        // durchgereicht.
+        let (_, degenerate) = export_with(-100.0, "leer.pdf");
+        assert_eq!(degenerate.effective_redactions, 0);
+        assert!(degenerate.degenerate_redactions > 0);
+        assert!(
+            degenerate.warnings.iter().any(|w| w.contains("leeres")),
+            "{:?}",
+            degenerate.warnings
         );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1559,7 +1514,7 @@ mod tests {
 
         // Treffer vorhanden, aber alle abgewählt.
         let mut state = loaded_state();
-        state.analyze(&["iban_de".to_string()], None).unwrap();
+        state.analyze().unwrap();
         assert!(!state.regions.is_empty());
         for index in 0..state.regions.len() {
             state.set_enabled(index, false);
@@ -1590,7 +1545,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.load_document(&input).unwrap();
-        state.analyze(&["iban_de".to_string()], None).unwrap();
+        state.analyze().unwrap();
         assert!(!state.regions.is_empty());
 
         let before = std::fs::read(&input).unwrap();
@@ -1619,7 +1574,7 @@ mod tests {
     #[test]
     fn export_strips_metadata() {
         let mut state = loaded_state();
-        state.analyze(&["iban_de".to_string()], None).unwrap();
+        state.analyze().unwrap();
         let dir = temp_dir("meta");
         let out = dir.join("out.pdf");
         state.export(&out, None).unwrap();
@@ -1631,7 +1586,7 @@ mod tests {
     #[test]
     fn review_file_roundtrip_preserves_state() {
         let mut state = loaded_state();
-        state.analyze(&["iban_de".to_string()], None).unwrap();
+        state.analyze().unwrap();
         state.add_manual_region(1, Rect::new(70.0, 700.0, 200.0, 715.0), "Adresse");
         state.set_enabled(0, false);
         state.set_action(1, Action::Whiteout);
@@ -1663,7 +1618,12 @@ mod tests {
 
     #[test]
     fn review_file_never_enables_a_negative_hit() {
-        let mut state = AppState::new();
+        // Ohne geladenes Dokument gibt es keine Prüfsumme zu vergleichen; hier
+        // geht es um den Negativtreffer, deshalb die Prüfung ausdrücklich aus.
+        let mut state = AppState::with_config(Config {
+            allow_unverified_review: true,
+            ..Config::default()
+        });
         state.regions.push(AnnotatedRegion::new(negative_region(
             0,
             Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -1678,8 +1638,10 @@ mod tests {
 
     // ------------------------------------------------- Identität (Aufgabe 36)
 
-    /// Dieselbe Rechnung wie in `redact-cli` — sonst lehnte das eine Programm
-    /// ab, was das andere schreibt.
+    /// Der bekannte Wert aus dem SHA-256-Standard.
+    ///
+    /// Dass beide Programme dieselbe Rechnung benutzen, muss dieser Test nicht
+    /// mehr behaupten: [`sha256_hex`] *ist* [`redact_pipeline::sha256_bytes`].
     #[test]
     fn sha256_matches_the_known_value_of_the_cli() {
         assert_eq!(
@@ -1744,7 +1706,7 @@ mod tests {
 
         // Dokument B ist ein anderes.
         let mut target = loaded_state();
-        target.analyze(&["iban_de".to_string()], None).unwrap();
+        target.analyze().unwrap();
         let before = target.regions.clone();
         let history_before = target.history.undo_depth();
         assert_ne!(target.input_sha256, origin.input_sha256);
@@ -1771,14 +1733,33 @@ mod tests {
         assert_eq!(right.regions.len(), 1);
     }
 
-    /// Eine Datei ohne Prüfsumme (alte GUI-Dateien, von Hand geschriebene)
-    /// wird angewendet — aber die Statuszeile sagt, dass nichts geprüft wurde.
+    /// **Aufgabe 54.** Eine Review-Datei ohne Prüfsumme wurde stillschweigend
+    /// angewendet — in beiden Programmen. Damit genügte ein von Hand
+    /// eingetragenes `"sha256": ""`, um die Identitätsprüfung vollständig
+    /// auszuhebeln. Jetzt wird sie abgelehnt, und der Weg daran vorbei ist ein
+    /// ausdrücklicher Schalter.
     #[test]
-    fn a_review_file_without_a_checksum_is_applied_but_flagged() {
+    fn a_review_file_without_a_checksum_is_refused_unless_allowed() {
         let mut state = loaded_state();
         let mut review = state.to_review_file();
         review.input.sha256 = String::new();
         review.items.clear();
+
+        let before = state.regions.clone();
+        let error = state
+            .apply_review_file(review.clone())
+            .expect_err("ohne Prüfsumme muss abgelehnt werden")
+            .to_string();
+        assert!(error.contains("keine Prüfsumme"), "{error}");
+        assert!(error.contains("--allow-unverified-review"), "{error}");
+        assert_eq!(
+            state.regions, before,
+            "es darf nichts verändert worden sein"
+        );
+
+        // Mit dem Schalter geht sie durch — die Statuszeile sagt trotzdem,
+        // dass niemand die Zugehörigkeit geprüft hat.
+        state.config.allow_unverified_review = true;
         state.apply_review_file(review).expect("wird angewendet");
         assert!(state.status.contains("ungeprüft"), "{}", state.status);
     }
@@ -1786,7 +1767,10 @@ mod tests {
     #[test]
     fn suggested_output_path_sits_next_to_the_input() {
         let mut state = AppState::new();
-        assert_eq!(state.output_suffix, DEFAULT_OUTPUT_SUFFIX);
+        assert_eq!(
+            state.config.output_suffix,
+            redact_core::DEFAULT_OUTPUT_SUFFIX
+        );
         // Ohne Dokument gibt es keinen Vorschlag.
         assert_eq!(state.suggested_output_path(), None);
         assert_eq!(state.suggested_review_path(), None);
@@ -1825,7 +1809,7 @@ mod tests {
             )
             .unwrap();
 
-        state.output_suffix = "_anonym".to_string();
+        state.config.output_suffix = "_anonym".to_string();
         assert_eq!(
             state.suggested_output_path().unwrap(),
             PathBuf::from("/daten/kontoauszug_anonym.pdf")
@@ -1833,7 +1817,7 @@ mod tests {
 
         // Leerer Zusatz fällt auf den Standard zurück, damit das Original
         // niemals überschrieben wird.
-        state.output_suffix = String::new();
+        state.config.output_suffix = String::new();
         assert_eq!(
             state.suggested_output_path().unwrap(),
             PathBuf::from("/daten/kontoauszug_geschwaerzt.pdf")
@@ -1873,7 +1857,7 @@ mod tests {
                 )
                 .unwrap();
             for suffix in suffixes {
-                state.output_suffix = suffix.to_string();
+                state.config.output_suffix = suffix.to_string();
                 let out = state.suggested_output_path().unwrap();
                 assert_ne!(
                     out,
@@ -1984,7 +1968,7 @@ mod tests {
         assert!(!state.undo(), "ohne Verlauf passiert nichts");
 
         // 1) Analyse.
-        state.analyze(&["iban_de".to_string()], None).unwrap();
+        state.analyze().unwrap();
         let after_analysis = state.regions.clone();
         assert!(!after_analysis.is_empty());
         assert!(state.can_undo());
@@ -2077,66 +2061,6 @@ mod tests {
         // Eine echte Änderung dagegen schon.
         assert!(state.set_enabled(0, false));
         assert!(state.can_undo());
-    }
-
-    #[test]
-    fn timestamp_formatting_matches_known_values() {
-        assert_eq!(format_rfc3339_utc(0), "1970-01-01T00:00:00Z");
-        assert_eq!(format_rfc3339_utc(1_700_000_000), "2023-11-14T22:13:20Z");
-        // Schaltjahr: 2024-02-29.
-        assert_eq!(format_rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z");
-        // Vor der Epoche.
-        assert_eq!(format_rfc3339_utc(-1), "1969-12-31T23:59:59Z");
-    }
-
-    #[test]
-    fn audit_log_shape_matches_cli_format() {
-        let redaction = Redaction::new(
-            pattern_region(0, Rect::new(1.0, 2.0, 3.0, 4.0)),
-            Action::Blackout,
-        );
-        let blocked = vec![BlockedRegion {
-            page: 1,
-            rect: Rect::new(0.0, 0.0, 5.0, 5.0),
-            pattern: "Max Mustermann".into(),
-            booking_id: "b003".into(),
-            blocked_reason: Some("pattern: iban_de".into()),
-        }];
-        let log = build_audit_log(
-            Some(Path::new("in.pdf")),
-            Path::new("out.pdf"),
-            &[redaction],
-            &blocked,
-            &["Bild nur überdeckt".to_string()],
-            1_700_000_000,
-        );
-
-        assert_eq!(log["timestamp"], serde_json::json!("2023-11-14T22:13:20Z"));
-        assert_eq!(log["timestamp_unix"], serde_json::json!(1_700_000_000i64));
-        assert_eq!(log["tool"]["name"], serde_json::json!("redact-rs"));
-        assert_eq!(log["input"]["path"], serde_json::json!("in.pdf"));
-        assert_eq!(log["input"]["sha256"], serde_json::json!(""));
-        assert_eq!(log["output"]["path"], serde_json::json!("out.pdf"));
-        assert_eq!(log["redactions"][0]["page"], serde_json::json!(1));
-        assert_eq!(
-            log["redactions"][0]["action"],
-            serde_json::json!("blackout")
-        );
-        assert_eq!(log["redactions"][0]["source"], serde_json::json!("auto"));
-        assert_eq!(
-            log["redactions"][0]["rect"],
-            serde_json::json!({"ll": {"x": 1.0, "y": 2.0}, "ur": {"x": 3.0, "y": 4.0}})
-        );
-        assert_eq!(
-            log["blocked_by_negative_list"][0]["booking_id"],
-            serde_json::json!("b003")
-        );
-        assert_eq!(
-            log["blocked_by_negative_list"][0]["page"],
-            serde_json::json!(2)
-        );
-        assert_eq!(log["metadata_stripped"], serde_json::json!(true));
-        assert_eq!(log["warnings"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -2349,7 +2273,7 @@ mod tests {
 
         // Eine reine Analyse ist mit einem Klick wiederholbar.
         let mut state = loaded_state();
-        state.analyze(&["iban_de".to_string()], None).unwrap();
+        state.analyze().unwrap();
         assert!(!state.regions.is_empty());
         assert!(!state.has_manual_work());
 

@@ -1,6 +1,6 @@
 id,list_type,pattern,context_before,context_after,is_regex,hinweis
 b001,positive,Musterfirma GmbH,Überweisung an,,false,Empfängername wird nur geschwärzt wenn davor "Überweisung an" steht
-b002,positive,DE89 3704 0044 0532 0130 00,,,false,IBAN mit Leerzeichen - Leerraum im PDF ist egal (auch Zeilenumbrüche)
+b002,positive,DE89 3704 0044 0532 0130 00,,,false,IBAN mit Leerzeichen - die Menge an Leerraum im PDF ist egal; ueber einen Zeilenumbruch hinweg trifft der Eintrag NICHT
 b003,positive,Lieferant Nord OHG,,Rechnungsnummer,false,Nur schwärzen wenn danach "Rechnungsnummer" im selben Textabschnitt folgt
 b004,positive,Gehaltszahlung Personalabteilung,,,false,Groß-/Kleinschreibung wird ignoriert
 b005,negative,Max Mustermann,,,false,Kontoinhaber - darf NICHT geschwärzt werden und blockiert überlappende Treffer

@@ -68,15 +68,28 @@
 //! ein anderes PDF angewendet läge jedes Rechteck an einer beliebigen Stelle:
 //! das Ergebnis sähe geschwärzt aus, und die Geheimnisse stünden noch da.
 //! Deshalb schreibt [`AppState::to_review_file`] die SHA-256-Prüfsumme des
-//! Eingabedokuments mit, und [`AppState::apply_review_file`] lehnt eine Datei
-//! mit abweichender Prüfsumme ab ([`review_identity`]) — dieselbe Regel, die
-//! die CLI mit `--apply-review` anwendet.
+//! Eingabedokuments mit, und [`AppState::apply_review_file`] gibt die
+//! Entscheidung an [`redact_pipeline::check_review_identity`] —
+//! **buchstäblich dieselbe Funktion**, die `--apply-review` benutzt, nicht
+//! bloß dieselbe Regel. Eine abweichende Prüfsumme wird abgelehnt, eine
+//! fehlende ebenfalls (nur `--allow-unverified-review` kommt daran vorbei).
+//!
+//! ## Die Verarbeitungskette liegt woanders
+//!
+//! Analyse und Export dieser Oberfläche sind Aufrufe von
+//! [`redact_pipeline::collect_regions`] und [`redact_pipeline::apply`]. Hier
+//! stehen nur Fenster, Auswahl und Zustand. Bis Aufgabe 5 waren es rund 130
+//! abgetippte Zeilen neben der CLI — und sie waren auseinandergelaufen.
 //!
 //! ## Beispiel
 //!
 //! ```no_run
 //! # use std::path::PathBuf;
-//! redact_gui::run(Some(PathBuf::from("auszug.pdf")), None, vec![])?;
+//! let config = redact_pipeline::Config {
+//!     input: PathBuf::from("auszug.pdf"),
+//!     ..redact_pipeline::Config::default()
+//! };
+//! redact_gui::run(config)?;
 //! # Ok::<(), redact_core::RedactError>(())
 //! ```
 
@@ -100,15 +113,13 @@ pub use app::{
 pub use history::{History, HISTORY_LIMIT};
 pub use render::{PageCache, PageMeta};
 pub use selector::{hit_test, RectangleSelector};
-pub use state::{
-    review_identity, sha256_hex, AnnotatedRegion, AppState, HitOutcome, HitSummary, RegionColor,
-    ReviewIdentity,
-};
+pub use state::{sha256_hex, AnnotatedRegion, AppState, HitOutcome, HitSummary, RegionColor};
+// Die Identitätsprüfung liegt jetzt in der gemeinsamen Kette; hier bleibt nur
+// der gewohnte Name.
+pub use redact_pipeline::{review_identity, Config, ReviewIdentity};
 pub use theme::Theme;
 pub use toolbar::{ToolAction, ToolButton, ToolContext, ToolItem};
 pub use viewer::{pdf_to_screen, screen_to_pdf, PagePreview, PageView, RegionStyle};
-
-use std::path::PathBuf;
 
 use redact_core::{RedactError, Result};
 
@@ -119,16 +130,20 @@ pub const WINDOW_TITLE: &str = "redact-rs";
 
 /// Startet die grafische Oberfläche.
 ///
-/// Ist `pdf` gesetzt, wird die Datei geladen und sofort analysiert; ein Fehler
-/// dabei beendet das Programm **nicht**, sondern erscheint in der Statuszeile.
-/// `booking` ist eine optionale Buchungsliste (CSV), `patterns` die Auswahl der
-/// Pattern-IDs (leer = alle eingebauten).
+/// Die Nahtstelle zur CLI (`redact-rs --gui`) ist **die Konfiguration der
+/// Verarbeitungskette selbst**: [`redact_pipeline::Config`], dieselbe Struktur,
+/// die `redact_pipeline::run` bekommt. Damit gelten in der Oberfläche
+/// dieselben Schalter wie auf der Kommandozeile — vorher reichte sie nur PDF,
+/// Buchungsliste und Muster-IDs durch, und `--patterns-config`,
+/// `--no-patterns`, `--min-confidence`, `--manual-regions` und `--padding`
+/// blieben draußen.
 ///
-/// Diese Signatur ist die Nahtstelle zur CLI (`redact-rs --gui`) und darf sich
-/// nicht ändern.
-pub fn run(pdf: Option<PathBuf>, booking: Option<PathBuf>, patterns: Vec<String>) -> Result<()> {
-    let mut app = RedactApp::new(patterns);
-    app.state.booking_path = booking;
+/// Ist [`Config::input`] gesetzt, wird die Datei geladen und sofort
+/// analysiert; ein Fehler dabei beendet das Programm **nicht**, sondern
+/// erscheint in der Statuszeile.
+pub fn run(config: Config) -> Result<()> {
+    let pdf = (!config.input.as_os_str().is_empty()).then(|| config.input.clone());
+    let mut app = RedactApp::new(config);
     if let Some(path) = pdf {
         app.open_and_analyze(path);
     }

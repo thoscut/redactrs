@@ -4,10 +4,14 @@ Ein schlankes, **lokales** CLI- und GUI-Werkzeug in Rust zum Schwärzen sensible
 Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
 
 * **Manuelle Schwärzung** über Regionen (JSON oder per Maus in der GUI)
-* **Automatische Schwärzung** über Regex-Muster (IBAN, BIC, Beträge, …)
+* **Automatische Schwärzung** über Regex-Muster (IBAN, BIC, Steuer-ID, …)
 * **Buchungsliste** mit Positiv- und Negativliste (CSV)
 * **Echte Schwärzung**: der gefundene Text wird aus dem Content-Stream
   *entfernt*, nicht nur übermalt
+* **Auch in Bildern**: liegt eine Schwärzung über einem Rasterbild, werden die
+  betroffenen **Pixel überschrieben**, nicht überdeckt. Gescannte Seiten lassen
+  sich damit ohne OCR sicher schwärzen — die Rechtecke zieht man von Hand
+  ([Details](#bilder))
 * **Keine Cloud**, keine Netzverbindung, deterministische Ausgabe
 
 > **Vor dem ersten Einsatz bitte zwei Abschnitte lesen:**
@@ -27,15 +31,16 @@ Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
 4. [Buchungsliste](#buchungsliste)
 5. [Manuelle Regionen](#manuelle-regionen)
 6. [Eigene Patterns](#eigene-patterns)
-7. [Review-Workflow](#review-workflow)
-8. [Audit-Log](#audit-log)
-9. [Prüfen, ob die Schwärzung gewirkt hat](#pruefen)
-10. [Was dieses Werkzeug nicht leistet](#grenzen)
-11. [Grafische Oberfläche](#grafische-oberfläche)
-12. [Architektur](#architektur)
-13. [Sicherheit — was zugesichert wird](#sicherheit)
-14. [Abweichungen vom Ursprungskonzept](#abweichungen-vom-ursprungskonzept)
-15. [Entwicklung](#entwicklung)
+7. [Bilder werden wirklich geschwärzt](#bilder)
+8. [Review-Workflow](#review-workflow)
+9. [Audit-Log](#audit-log)
+10. [Prüfen, ob die Schwärzung gewirkt hat](#pruefen)
+11. [Was dieses Werkzeug nicht leistet](#grenzen)
+12. [Grafische Oberfläche](#grafische-oberfläche)
+13. [Architektur](#architektur)
+14. [Sicherheit — was zugesichert wird](#sicherheit)
+15. [Abweichungen vom Ursprungskonzept](#abweichungen-vom-ursprungskonzept)
+16. [Entwicklung](#entwicklung)
 
 ---
 
@@ -50,19 +55,48 @@ redact-rs --write-demo kontoauszug.pdf
 redact-rs kontoauszug.pdf --patterns iban_de,bic,email
 ```
 
-Und dann **nicht** aufhören. Der Lauf oben entfernt IBAN, BIC und E-Mail-Adresse
-— den Kontoinhaber, die Kontonummer, die Telefonnummer und die Steuer-ID lässt
-er stehen, weil kein aktives Muster darauf passt. Wie man das feststellt, steht
-unter [Prüfen, ob die Schwärzung gewirkt hat](#pruefen).
+Und dann **nicht** aufhören. Der Lauf oben schränkt mit `--patterns` bewusst auf
+drei Muster ein und entfernt darum nur IBAN, BIC und E-Mail-Adresse — Kontoinhaber,
+Kontonummer, Telefonnummer und Steuer-ID lässt er stehen (nachgemessen:
+4 Schwärzungen). Ohne `--patterns` greifen die Vorgabemuster und es werden
+7 Schwärzungen; übrig bleibt dann von den schützenswerten Angaben nur der
+**Name**, denn dafür gibt es kein Muster:
+
+```console
+$ redact-rs kontoauszug.pdf -o std.pdf --force
+Treffer gesamt:     7
+Schwärzungen:       7
+$ pdftotext std.pdf -
+Kontoinhaber: Max Mustermann      ← steht noch da
+IBAN:
+Kontonummer:
+Telefon:
+Steuer-ID:
+```
+
+Wie man das feststellt, steht unter
+[Prüfen, ob die Schwärzung gewirkt hat](#pruefen).
 
 ## Installation
 
 Fertige Binaries für Windows und Linux liegen unter
 [Releases](https://github.com/thoscut/redactrs/releases).
-Das Windows-Archiv enthält `redact-rs.exe`, die Beispieldateien und die
-SHA-256-Prüfsummen.
 
-Selbst bauen:
+Das Windows-Archiv enthält **zwei Programme**, dazu die Beispieldateien und die
+SHA-256-Prüfsummen:
+
+| Datei | wofür |
+|---|---|
+| `redact-rs-gui.exe` | Die zum **Doppelklicken**. Öffnet nur das Fenster, ohne die schwarze Konsole dahinter, und nimmt ein PDF entgegen, das man auf ihr Symbol zieht. |
+| `redact-rs.exe` | Die **Konsolenfassung** mit allen Optionen — und der einzige Weg zu Ausgaben auf stdout (`--json`, `--list-patterns`). |
+
+Zwei Dateien statt eines Schalters, weil `#![windows_subsystem = "windows"]`
+das Konsolenfenster nur um den Preis *jeder* Ausgabe auf stdout/stderr abschaltet
+(siehe `crates/redact-cli/src/bin/redact-rs-gui.rs`). Unter Linux gibt es diese
+Trennung nicht; dort startet `redact-rs` ohne Argumente die Oberfläche.
+
+Selbst bauen (benötigt **Rust 1.88** oder neuer — `rust-version` in
+`Cargo.toml`):
 
 ```bash
 git clone https://github.com/thoscut/redactrs
@@ -102,6 +136,7 @@ redact-rs [EINGABE.pdf] [OPTIONEN]
       --patterns <IDs>        Muster, kommagetrennt (z.B. iban_de,bic)
       --no-patterns           gar keine Muster anwenden
       --patterns-config <F>   eigene Musterkonfiguration (YAML oder JSON)
+      --min-confidence <WERT> Mindestvertrauen eines Treffers (Standard: 0.5)
       --booking-list <CSV>    Buchungsliste (Positiv-/Negativliste)
       --manual-regions <JSON> manuell festgelegte Regionen
       --review                nur analysieren, nichts schwärzen
@@ -111,6 +146,8 @@ redact-rs [EINGABE.pdf] [OPTIONEN]
       --action <ART>          blackout (Standard) | whiteout | replace
       --replace-with <TEXT>   Ersatztext für --action replace
       --padding <PUNKT>       Rand um jede Schwärzung (Standard: 1.0)
+      --allow-undecodable-images  nicht dekodierbare Bilder durchgehen lassen
+                                  (UNSICHER — siehe unten)
       --max-decompressed-mb <MB>  Budget für alle entpackten Streams (1024)
       --max-parsed-mb <MB>        davon für geparste Streams (16)
       --max-candidates <N>        Obergrenze für Trefferkandidaten (100000)
@@ -126,27 +163,50 @@ was sie abwehren und warum sie so hoch bzw. so niedrig liegen, steht in
 [`SECURITY.md`](SECURITY.md). Sie wirken **nur in der Kommandozeile** — die
 grafische Oberfläche lädt mit den fest eingebauten Vorgaben.
 
+`--allow-undecodable-images` ist der einzige Schalter, der die Sicherheit
+*senkt*: siehe [Bilder werden wirklich geschwärzt](#bilder).
+
 Rückgabewerte: `0` Erfolg, `1` Verarbeitungsfehler, `2` Bedienfehler.
 
 ### Eingebaute Muster
 
-| ID | Beschreibung | Standard |
-|----|--------------|----------|
-| `iban_de` | Deutsche IBAN, mit Prüfsummenkontrolle (mod 97) | an |
-| `iban_intl` | Internationale IBAN | aus |
-| `konto_nr` | Kontonummer (6–10 Ziffern, Heuristik) | an |
-| `blz` | Bankleitzahl (8 Ziffern) | an |
-| `bic` | BIC/SWIFT mit Länderkennung-Prüfung | an |
-| `amount_eur` | Geldbetrag in deutscher Schreibweise | an |
-| `date_de` | Datum TT.MM.JJJJ | an |
-| `credit_card` | Kreditkartennummer, Luhn-geprüft | an |
-| `steuer_id` | Steuerliche Identifikationsnummer | aus |
-| `email` | E-Mail-Adresse | an |
-| `phone_de` | Deutsche Telefonnummer | an |
+Die Spalten „mit Kt.“ und „ohne“ sind die Konfidenz **mit** bzw. **ohne**
+passendes Schlüsselwort daneben. Alles unterhalb von `--min-confidence`
+(Vorgabe **0.50**) wird verworfen — ein Muster, dessen Wert in der Spalte
+„ohne“ darunter liegt, findet also nichts, solange kein Schlüsselwort
+danebensteht. Genau dieselbe Tabelle liefert `redact-rs --list-patterns`.
+
+| ID | Beschreibung | mit Kt. | ohne | Standard |
+|----|--------------|---------|------|----------|
+| `iban_de` | Deutsche IBAN (DE + 2 Prüfziffern + 18 Ziffern), mod-97-geprüft | 0.95 | – | **an** |
+| `iban_intl` | Internationale IBAN (zu unspezifisch) | 0.90 | – | aus |
+| `konto_nr` | Kontonummer (6–10 Ziffern nach „Kto.“ o. ä.) | 0.85 | 0.30 | **an** |
+| `blz` | Bankleitzahl (8 Ziffern nach „BLZ“/„Bankleitzahl“) | 0.80 | 0.25 | **an** |
+| `bic` | BIC/SWIFT mit Länderkennung-Prüfung | 0.80 | – | **an** |
+| `amount_eur` | Geldbetrag in Euro | 0.70 | – | aus |
+| `date_de` | Datum TT.MM.JJJJ | 0.60 | – | aus |
+| `credit_card` | Kreditkartennummer (13–19 Ziffern), Luhn-geprüft | 0.90 | – | **an** |
+| `steuer_id` | Steuerliche Identifikationsnummer (11 Ziffern nach „Steuer-ID“) | 0.90 | 0.25 | **an** |
+| `email` | E-Mail-Adresse | 0.90 | – | **an** |
+| `phone_de` | Deutsche Telefonnummer | 0.85 | 0.35 | **an** |
 
 Muster mit Prüfsumme (IBAN, BIC, Kreditkarte) verwerfen Treffer, die die
 Prüfung nicht bestehen — das drückt die Fehlalarmquote deutlich.
-Ausgeschaltete Muster lassen sich mit `--patterns steuer_id` gezielt aktivieren.
+Ausgeschaltete Muster lassen sich mit `--patterns amount_eur` gezielt aktivieren.
+
+**Was sich an den Vorgaben geändert hat** — und warum:
+
+* `date_de` und `amount_eur` sind **aus**. Datum und Betrag sind der *Inhalt*
+  eines Kontoauszugs, nicht sein Schutzgut; auf einem Kontoauszug war praktisch
+  jeder Treffer ein Fehltreffer. Wer sie braucht (etwa ein Gehaltsdatum),
+  schaltet sie mit `--patterns date_de` gezielt ein.
+* `steuer_id` ist **an**. Die Steuer-ID *ist* Schutzgut, und sie ist eindeutiger
+  als vieles andere auf dem Papier.
+* `konto_nr` und `blz` entscheiden nicht mehr über die **Ziffernlänge**, sondern
+  über den **Kontext**. Eine nackte achtstellige Zahl ist kein Schutzgut — sie
+  bekommt 0.30 bzw. 0.25 und fällt damit unter die Schwelle. Steht „Kto.“ oder
+  „BLZ“ daneben, steigt sie auf 0.85 bzw. 0.80. Wer auch die Verdachtsfälle
+  sehen will, senkt die Schwelle: `--min-confidence 0.25`.
 
 **Kein Muster erkennt Namen.** Für Kontoinhaber, Empfänger, Arbeitgeber und
 Ähnliches gibt es nur die [Buchungsliste](#buchungsliste), die
@@ -176,7 +236,12 @@ Regeln:
   Nutzerentscheidung wird nicht automatisch verworfen.
 * Der Vergleich ignoriert Groß-/Kleinschreibung und die *Menge* an Leerraum —
   eine IBAN wird also auch gefunden, wenn im PDF mehrere Leerzeichen zwischen
-  den Blöcken stehen oder gar keine.
+  den Blöcken stehen.
+* **Leerraum wird zusammengefasst, nicht entfernt.** Der Eintrag
+  `DE89 3704 0044 0532 0130 00` trifft *nicht* auf `DE89370400440532013000` im
+  PDF (nachgemessen: `Textzeilen: 1, Treffer gesamt: 0`). Wer beide
+  Schreibweisen abdecken will, nimmt zwei Einträge — oder das Muster `iban_de`,
+  das die ungruppierte Form von sich aus erkennt.
 * **Nicht über einen Zeilenumbruch hinweg.** Abgeglichen wird immer gegen eine
   einzelne extrahierte Textzeile. Steht eine IBAN im PDF über zwei Zeilen
   verteilt, sind das zwei getrennte Textzeilen, und der Eintrag trifft nicht.
@@ -225,6 +290,94 @@ redact-rs eingabe.pdf -o ausgabe.pdf --patterns-config examples/patterns.yaml
 Es kommt [`fancy-regex`](https://docs.rs/fancy-regex) zum Einsatz, Look-around
 (`(?<!…)`, `(?!…)`) ist also erlaubt. Auch hier gilt: gesucht wird je
 extrahierter Textzeile, ein Muster kann keinen Zeilenumbruch überspannen.
+
+<a id="bilder"></a>
+
+## Bilder werden wirklich geschwärzt
+
+Liegt eine Schwärzung über einem Rasterbild, wird nicht nur ein Rechteck
+darüber gezeichnet — die **Pixel im Bild-XObject selbst werden überschrieben**.
+Damit lässt sich ein gescanntes Dokument sicher schwärzen, ganz ohne OCR: man
+zieht die Rechtecke von Hand (GUI oder `--manual-regions`), und die Bildpunkte
+darunter sind hinterher weg.
+
+Nachgemessen an einem 200×100-Bild, das eine Seite als Scan trägt, mit einer
+manuellen Region darüber:
+
+```console
+$ redact-rs scan.pdf -o scan_geschwaerzt.pdf --manual-regions regionen.json
+Seiten:             1
+Schwärzungen:       1
+Entfernte Zeichen:  0
+Deck-Rechtecke:     1
+Überschriebene Bilder: 1 (neu kodiert, verlustbehaftet)
+```
+
+Das Bild aus der Ausgabedatei erneut dekodiert und Pixel für Pixel mit dem
+Original verglichen: **4784 von 20 000 Pixeln geändert, alle 4784 auf Schwarz;
+kein einziges Pixel außerhalb des Rechtecks verändert.**
+
+> Das Wort **„verlustbehaftet“ in dieser Ausgabezeile ist falsch** und wird
+> noch korrigiert. Neu kodiert wird immer verlustfrei mit `/FlateDecode`
+> (`crates/redact-pdf/src/image.rs`); die Messung oben zeigt außerhalb der
+> Schwärzung null veränderte Pixel — auch dann, wenn das Original ein JPEG war.
+> Nicht bitgleich ist die *Datei*, nicht das *Bild*.
+
+### Der Preis: die Datei ist nicht mehr bitgleich
+
+Ein überschriebenes Bild wird **verlustfrei neu kodiert — immer als
+`/FlateDecode`**. Ein `/DCTDecode`-Bild (JPEG) verliert dabei seinen Filter:
+
+```console
+$ # vorher                        nachher
+$ #   /Filter /DCTDecode            /Filter /FlateDecode
+$ #   10 307 Stream-Bytes           39 296 Stream-Bytes
+$ #   Datei 10 961 Byte             Datei 39 990 Byte
+```
+
+Das ist Absicht. JPEG neu zu kodieren wäre verlustbehaftet, und die DCT-Blöcke
+am Rand der Schwärzung könnten Reste der ursprünglichen Pixel zurücktragen.
+Die Datei wird dafür deutlich größer.
+
+Ehrlich dazugesagt: **verlustfrei heißt pixelgleich, nicht bytegleich.** Die
+Bildpunkte außerhalb der Schwärzung sind nachweislich unverändert (siehe die
+Messung oben, auch beim JPEG-Fall), aber das Bild-Objekt in der Datei ist ein
+anderes als im Original. Wer Bitgleichheit gegenüber dem Original braucht, darf
+keine Schwärzung über ein Bild legen.
+
+### Nicht dekodierbare Bilder brechen den Lauf ab
+
+JPEG-2000 (`/JPXDecode`) und Fax-Kodierung (`/CCITTFaxDecode`) kann redact-rs
+nicht öffnen. Eine Schwärzung darauf ließe sich nur *überdecken* — die Pixel
+blieben in der Datei. Deshalb bricht der Lauf in diesem Fall mit einem Fehler
+ab, statt eine Datei zu erzeugen, deren Schwärzung nur obenauf liegt:
+
+```console
+$ redact-rs scan_jpx.pdf -o out.pdf --manual-regions regionen.json
+Fehler: PDF-Fehler: Bild /Im0 auf Seite 1 lässt sich nicht dekodieren
+(Filter: JPXDecode). Die Schwärzung läge nur darüber; die Pixel blieben
+in der Datei.
+$ echo $?
+1
+```
+
+`--allow-undecodable-images` hebt das auf. Dann entsteht eine Ausgabe (Exit
+`0`), in der das Bild **ungeschwärzt** ist und die Schwärzung nur darüberliegt;
+es bleibt bei einer Warnung in der Zusammenfassung und im Audit-Log:
+
+```console
+$ redact-rs scan_jpx.pdf -o out.pdf --manual-regions regionen.json \
+      --allow-undecodable-images
+…
+Warnung: Bild /Im0 auf Seite 1 lässt sich nicht dekodieren (Filter: JPXDecode).
+Die Schwärzung läge nur darüber; die Pixel blieben in der Datei.
+```
+
+Der Schalter ist für Fälle gedacht, in denen man das bewusst in Kauf nimmt —
+er macht die Ausgabe unsicher.
+
+Liegt ein nicht dekodierbares Bild **außerhalb** jeder Schwärzung, ist es kein
+Problem und der Lauf geht ohne Schalter durch.
 
 ## Review-Workflow
 
@@ -278,25 +431,44 @@ Warnung, sondern nur schwarze Balken an den falschen Stellen.
 
 ```json
 {
-  "timestamp": "2026-07-31T18:12:08Z",
+  "timestamp": "2026-08-01T09:04:22Z",
   "tool": { "name": "redact-rs", "version": "0.1.0" },
   "input":  { "path": "kontoauszug.pdf", "sha256": "466c0af4…" },
-  "output": { "path": "geschwaerzt.pdf", "sha256": "4768dae5…" },
+  "output": { "path": "geschwaerzt.pdf", "sha256": "c2c54724…" },
   "redactions": [
     {
       "page": 1,
-      "rect": { "ll": { "x": 100.9, "y": 732.8 }, "ur": { "x": 239.9, "y": 742.5 } },
+      "rect":           { "ll": { "x": 100.9, "y": 732.8 }, "ur": { "x": 239.9, "y": 742.5 } },
+      "effective_rect": { "ll": { "x":  99.9, "y": 731.8 }, "ur": { "x": 240.9, "y": 743.5 } },
+      "effect": "applied",
       "action": "blackout",
-      "reason": "pattern: iban_de (confidence 0.99)",
-      "source": "auto"
+      "reason": "booking: b002 (positive)",
+      "source": "booking_list"
     }
   ],
   "blocked_by_negative_list": [
     { "page": 2, "pattern": "Max Mustermann", "booking_id": "b003" }
   ],
-  "metadata_stripped": true
+  "metadata_stripped": true,
+  "metadata": {
+    "info": true, "xmp": false, "acroform": true, "xfa": true,
+    "field_values": 2, "file_attachments": 1, "open_action": true,
+    "additional_actions": 2, "optional_content": true,
+    "summary": ["/Info-Dictionary", "Formulardefinition (/AcroForm)", "…"]
+  },
+  "effect": {
+    "padding": 1.0, "requested": 4, "applied": 4, "degenerate": 0,
+    "removed_glyphs": 66, "drawn_rects": 4, "removed_annotations": 0,
+    "redacted_images": 0, "copied_images": 0
+  }
 }
 ```
+
+`rect` ist das gefundene Rechteck, `effective_rect` dasselbe zuzüglich
+`--padding`. `metadata` ist der **gemessene** Bericht darüber, was tatsächlich
+entfernt wurde (nicht, was vorgesehen war); `effect` fasst den Lauf in Zahlen
+zusammen — `redacted_images` und `copied_images` beziffern die
+[Bildschwärzung](#bilder).
 
 ### Achtung: `page` bedeutet in den beiden Dateien nicht dasselbe
 
@@ -365,10 +537,11 @@ Steuer-ID: 12345678901
 Zwei getrennte Fehler stecken darin:
 
 1. **`grep` prüft genau eine Zeichenkette.** Was kein Muster erkannt hat —
-   Namen grundsätzlich, die Steuer-ID (Muster standardmäßig aus), hier zusätzlich
-   Kontonummer und Telefonnummer, weil `--patterns iban_de,bic,email` sie
-   ausgeschlossen hat — steht unangetastet in der Datei und wird von einem
-   `grep DE89` nie berührt.
+   Namen grundsätzlich, hier zusätzlich Kontonummer, Telefonnummer und
+   Steuer-ID, weil `--patterns iban_de,bic,email` sie ausgeschlossen hat —
+   steht unangetastet in der Datei und wird von einem `grep DE89` nie berührt.
+   (Ohne `--patterns` greifen Kontonummer, Telefon und Steuer-ID sehr wohl;
+   der Name bleibt trotzdem stehen.)
 2. **`pdftotext` sieht nicht alles.** Es rendert Seitentext. Ein PDF kann
    dieselbe Zeichenkette an mehreren Stellen tragen, die dabei nicht vorkommen.
    Nachgemessen mit `poppler 24.02.0` an je einer winzigen Datei pro Versteck:
@@ -494,32 +667,38 @@ nicht steht, ist deshalb nicht automatisch abgedeckt.
   Treffer gesamt:     0
   ```
 
-* **Muster sind Heuristiken.** `konto_nr` (Konfidenz 0.40) und `blz` (0.50)
-  treffen auf beliebige Ziffernfolgen passender Länge; `steuer_id` und
-  `iban_intl` sind standardmäßig **aus** und werden ohne `--patterns` gar nicht
-  angewandt.
+* **Muster sind Heuristiken.** `konto_nr` und `blz` entscheiden über den
+  Kontext: ohne Schlüsselwort daneben liegen sie mit 0.30 bzw. 0.25 unter der
+  Schwelle von 0.50 und finden nichts — eine nackte Ziffernfolge wird also
+  *nicht* geschwärzt, solange man nicht `--min-confidence` senkt. `iban_intl`,
+  `amount_eur` und `date_de` sind standardmäßig **aus** und werden ohne
+  `--patterns` gar nicht angewandt.
 * **Fonts ohne `/ToUnicode`.** Steht der Text in einer Schrift, deren Kodierung
   sich nicht auflösen lässt, ist er für die Analyse unsichtbar — und wird
-  deshalb nicht geschwärzt. Der Interpreter erzeugt dafür zwar eine Warnung,
-  aber **sie erreicht den Nutzer nicht**: `Extractor::extract` wirft die
-  Warnungen weg (`crates/redact-pdf/src/extract.rs:246` gibt nur `.0` des
-  Tupels zurück), und weder Kommandozeile noch Oberfläche rufen
-  `extract_with_warnings` auf. Was der Lauf meldet, sind ausschließlich die
-  Warnungen der Schwärzung selbst.
+  deshalb nicht geschwärzt. Immerhin **sagt der Lauf es inzwischen**: die
+  Warnungen des Interpreters erreichen die Zusammenfassung. Nachgemessen an
+  einem PDF mit einem Form-XObject ohne `/Subtype`:
+
+  ```console
+  $ redact-rs nosubtype.pdf -o out.pdf --patterns iban_de
+  Treffer gesamt:     0
+  Warnung: XObject „Fx“ hat kein bekanntes /Subtype (weder /Form noch /Image);
+  sein Inhalt wurde nicht durchsucht. Steht dort Text, blieb er ungeschwärzt.
+  ```
+
+  Eine solche Warnung ist der Hinweis, dass „0 Schwärzungen“ nichts bedeutet.
+  Sie ersetzt die Sichtprüfung nicht.
 
 ### Gescannte Dokumente
 
 * **Keine OCR.** Steht die sensible Information als Pixel in einem Rasterbild,
-  findet die Analyse sie nicht.
-* **Bilder werden nicht neu kodiert.** Eine Schwärzung über einem Bild zeichnet
-  ein deckendes Rechteck *darüber*; die Bilddaten bleiben vollständig in der
-  Datei und lassen sich mit jedem Extraktionswerkzeug wieder herausholen. Für
-  gescannte Seiten ist die Ausgabe dieses Werkzeugs damit **nicht** sicher.
-* **Die Warnung erscheint ausgerechnet dann nicht, wenn sie am wichtigsten
-  wäre.** Der Hinweis „Seite enthält Rasterbilder …“ wird nur für Seiten
-  erzeugt, auf denen mindestens eine Schwärzung stattfindet. Ein reiner Scan
-  hat keinen extrahierbaren Text, also keine Treffer, also keine Schwärzung —
-  und damit auch keine Warnung. Der Lauf sieht so aus:
+  **findet** die Analyse sie nicht. Sie muss von Hand gezogen werden — in der
+  GUI mit der Maus oder über `--manual-regions`. Was gezogen wurde, wird dann
+  aber auch wirklich entfernt (siehe [Bilder](#bilder)); das ist der
+  Unterschied zwischen „nicht gefunden“ und „nicht geschwärzt“.
+* **Ein reiner Scan meldet 0 Schwärzungen.** Ohne extrahierbaren Text gibt es
+  keine Treffer. Die Warnung dazu erscheint aber inzwischen **auch dann**, wenn
+  gar nichts geschwärzt wurde — nachgemessen:
 
   ```console
   $ redact-rs scan.pdf -o scan_geschwaerzt.pdf
@@ -528,45 +707,74 @@ nicht steht, ist deshalb nicht automatisch abgedeckt.
   Schwärzungen:       0
   Entfernte Zeichen:  0
   Ausgabe:            scan_geschwaerzt.pdf
+  Warnung: 1 von 1 Seite(n) enthalten Rasterbilder. Geschwärzte Bereiche
+  werden im Bild selbst überschrieben; gelesen wird der Bildinhalt aber
+  nicht — Text *in* einem Bild (Scan, Foto) findet die Analyse ohne OCR nicht.
   ```
 
-  Kein Fehler, keine Warnung, eine Ausgabedatei, die alles enthält. Wer ein
-  gescanntes Dokument bearbeitet, muss die Seiten selbst ansehen und die
-  Bereiche von Hand ziehen — und danach in Kauf nehmen, dass die Pixel
-  darunter erhalten bleiben.
+  Festgehalten von `a_pure_scan_is_reported_even_without_any_redaction`
+  (`crates/redact-pdf/tests/images.rs`). Die Ausgabedatei enthält trotzdem
+  alles: wer ein gescanntes Dokument bearbeitet, muss die Seiten selbst
+  ansehen und die Bereiche von Hand ziehen.
+* **JPEG-2000 und CCITT-Fax lassen sich nicht öffnen.** Eine Schwärzung darauf
+  bricht den Lauf ab, statt nur zu überdecken — es sei denn, man erlaubt es mit
+  `--allow-undecodable-images`, und dann ist die Ausgabe unsicher
+  ([Details](#bilder)).
 
 ### Bekannte Lecks in der Schwärzung
 
-* **Inline-Bilder zerreißen den Seiteninhalt.** Steht im Content-Stream ein
-  Inline-Bild (`BI … ID … EI`), verliert der Parser alles dahinter. Der Text
-  danach wird weder gefunden noch geschwärzt — **und er geht beim Neuschreiben
-  der Seite verloren**. Aus einer Schwärzung wird also zusätzlich ein
-  Datenverlust. **[Testfall]**
-  (`text_after_an_inline_image_is_still_found_by_the_extractor`,
-  `unrelated_text_after_an_inline_image_survives_the_rewrite`)
-* **Formularfeld-Werte werden nicht geschwärzt.** Der Wert eines AcroForm-Feldes
-  (`/V`) bleibt unangetastet, auch wenn das Feld mitten im Schwärzungsbereich
-  liegt. **[Testfall]** (`form_field_value_is_redacted_too`)
+Von den vier Lecks, die hier früher standen, sind **drei behoben**. Übrig ist
+eines:
+
 * **Erscheinungsströme außerhalb des Schwärzungsbereichs.** Annotationen, die
   in einen Schwärzungsbereich ragen, werden entfernt. Der Erscheinungsstrom
-  einer Annotation, die *nicht* hineinragt, wird nicht geprüft — ihr Text bleibt
-  in der Datei. **[Testfall]**
-  (`appearance_stream_outside_the_redaction_is_also_cleaned`)
-* **Vektorgrafiken und eingebettete Dateien** werden nicht durchsucht.
+  (`/AP`) einer Annotation, die *nicht* hineinragt, wird nicht geprüft — ihr
+  Text bleibt in der Datei. **[Testfall]**
+  (`appearance_stream_outside_the_redaction_is_also_cleaned`, Aufgabe #26)
+
+Dazu diese Grenzen, für die es keinen Testfall gibt:
+
+* **Ebenennamen (`/OCG /Name`) überleben.** `/OCProperties` wird aus dem Katalog
+  entfernt, aber ein `/OCG`-Dictionary, das eine Seite über
+  `/Resources /Properties` weiterhin referenziert, bleibt erreichbar — samt
+  seinem `/Name`. Heißt eine Ebene „Ebene Mustermann“, steht dieser Name
+  hinterher noch in der Datei. Nachgemessen mit
+  [`redact_pdf::leaks`](#pruefen) an einer Ausgabedatei: 3 Fundstellen, während
+  Feldwerte, XFA, `/Info`, OpenAction-JavaScript und Dateianhang derselben
+  Datei sauber waren. Das ist die eine bekannte Restdatenstelle, die
+  `crates/redact-pdf/src/meta.rs` bewusst offen lässt.
+* **Vektorgrafiken** werden nicht durchsucht — Text, der als Pfad gezeichnet
+  ist, ist für die Analyse unsichtbar.
+* **Eingebettete Dateien** werden nicht durchsucht. Sie werden allerdings
+  **entfernt** (`/Names /EmbeddedFiles` und `/FileAttachment`-Annotationen),
+  also nicht auf Inhalte geprüft, sondern samt Inhalt gelöscht.
 * **Type3-Fonts** liefern kein Fontprogramm und werden nur genähert behandelt.
 
-Die genannten vier Tests stehen in
+Der eine offene Testfall steht in
 [`crates/redact-pdf/tests/known_leaks.rs`](crates/redact-pdf/tests/known_leaks.rs)
-und tragen ein `#[ignore]` mit Aufgabennummer, damit die Suite grün bleibt und
+und trägt ein `#[ignore]` mit Aufgabennummer, damit die Suite grün bleibt und
 der Defekt trotzdem dokumentiert ist. Nachstellen:
 
 ```bash
 cargo test -p redact-pdf --no-default-features -- --ignored
-# 0 passed; 4 failed  →  alle vier Lecks bestehen weiterhin
+# 0 passed; 1 failed  →  das Leck besteht weiterhin
 ```
 
-Solange diese vier fehlschlagen, bestehen die Lecks. Schlägt einer davon
-plötzlich *nicht* mehr fehl, ist das Leck behoben und das `#[ignore]` kann weg.
+Solange dieser Test fehlschlägt, besteht das Leck. Schlägt er plötzlich *nicht*
+mehr fehl, ist es behoben und das `#[ignore]` kann weg. Dafür sorgt zusätzlich
+ein **Kanarienvogel** (`canary_appearance_stream_outside_the_redaction_still_leaks`),
+der ohne `#[ignore]` läuft und rot wird, sobald das Leck verschwindet.
+
+**Behoben** (die Tests laufen jetzt ohne `#[ignore]` und sind grün — insgesamt
+12 bestandene Tests in `known_leaks.rs`):
+
+| früheres Leck | Test |
+|---|---|
+| Inline-Bilder zerreißen den Seiteninhalt | `text_after_an_inline_image_is_still_found_by_the_extractor`, `unrelated_text_after_an_inline_image_survives_the_rewrite`, `redacting_a_page_with_an_inline_image_removes_the_secret` |
+| Formularfeld-Werte (`/V`) bleiben stehen | `form_field_value_is_redacted_too` |
+| verwaiste Objekte werden mitgeschrieben | `objects_unpacked_from_an_object_stream_are_not_carried_over` |
+| inkrementelle Vorversionen bleiben erhalten | `incremental_history_is_dropped_when_the_file_is_rewritten` |
+| `/ActualText` spiegelt den geschwärzten Text | `struct_elem_actual_text_does_not_mirror_the_redacted_text` |
 
 ### Verarbeitung
 
@@ -587,9 +795,11 @@ plötzlich *nicht* mehr fehl, ist das Leck behoben und das `#[ignore]` kann weg.
    [Prüfen, ob die Schwärzung gewirkt hat](#pruefen).
 3. **`review.json` und `audit.json` aufräumen.** Beide liegen standardmäßig
    neben dem Original und tragen Klartext (Details oben).
-4. **Bei gescannten Seiten nicht auf dieses Werkzeug bauen.** Dort ist eine
-   Neuausgabe der Seite als Bild ohne die betroffenen Pixel der einzige sichere
-   Weg — und den kann redact-rs nicht.
+4. **Bei gescannten Seiten die Rechtecke selbst ziehen.** Ohne OCR *findet* das
+   Werkzeug dort nichts; gezogene Bereiche werden aber wirklich aus den Pixeln
+   entfernt ([Details](#bilder)). Die Verantwortung dafür, dass jede
+   schützenswerte Stelle ein Rechteck bekommen hat, liegt beim Auge des
+   Nutzers.
 5. **Das Original getrennt aufbewahren.** Die Ausgabe entsteht neben der
    Eingabe; eine Verwechslung beim Verschicken ist der wahrscheinlichste Fehler
    überhaupt.
@@ -610,22 +820,22 @@ Seiten mit allen gefundenen Treffern als farbige Rahmen:
 🔵 Muster · 🟢 Positivliste · 🔴 Negativliste (blockiert) · 🟠 manuell.
 Neue Bereiche zieht man mit der Maus, Treffer schaltet man per Checkbox ab.
 
-### Die GUI ist **nicht** dieselbe Pipeline wie die CLI
+### GUI und CLI teilen sich inzwischen die Verarbeitungskette
 
-`redact-gui` hat keine Abhängigkeit auf `redact-cli`; der Ablauf ist dort
-eigenständig implementiert. Er führt dieselben drei Schritte in derselben
-Reihenfolge aus (schwärzen → Metadaten strippen → schreiben), aber es gibt
-keinen Test, der beide Programme ausführt und die Ergebnisse vergleicht.
-Bekannte Unterschiede:
+Hier stand früher eine Liste von Unterschieden zwischen beiden Programmen —
+die GUI hatte den Ablauf abgetippt statt geteilt und war davon abgewichen
+(feste Polsterung, stilles Überschreiben, Audit-Log ohne Modus `0600`).
+Beide gehen jetzt durch dasselbe Crate **`redact-pipeline`**: `redact-cli` und
+`redact-gui` hängen beide daran, und die genannten Abweichungen sind geschlossen
+(u. a. `export_uses_the_padding_from_the_configuration` und
+`audit_path_follows_the_chosen_output` in `crates/redact-gui/src/state.rs`;
+Review-Datei und Audit-Log gehen über `redact_pipeline::write_review_file`,
+also über den einen Schreibpfad mit Modus `0600`).
 
-| | CLI | GUI |
-|---|---|---|
-| Polsterung um jede Schwärzung | `--padding` (Vorgabe 1.0) | fest 1.0 |
-| Eingabegrenzen | über `--max-…` einstellbar | fest auf den Vorgaben |
-| vorhandene Ausgabedatei | nur mit `--force` | wird überschrieben (der Dateidialog fragt vorher) |
-| Audit-Log und Review-Datei | über den zentralen Schreibpfad, Modus 0600 | mit `std::fs::write`, also mit den Vorgaberechten des Kontos |
-
-Wer ein nachvollziehbares, prüfbares Ergebnis braucht, nimmt die
+Was **weiterhin gilt**: Es gibt keinen Test, der beide *Programme* startet und
+ihre Ausgabedateien byteweise vergleicht. Dass die Kette dieselbe ist, ist am
+gemeinsamen Crate ablesbar, nicht an einem End-to-End-Vergleich. Wer ein
+nachvollziehbares, prüfbares Ergebnis braucht, nimmt weiterhin die
 Kommandozeile — oder exportiert aus der GUI eine Review-Datei und wendet sie
 mit `redact-rs --apply-review` an.
 
@@ -638,7 +848,9 @@ redact-pdf        Content-Stream-Interpreter, Textextraktion, echte Schwärzung,
 redact-patterns   Regex-Muster inkl. IBAN-/BIC-/Luhn-Prüfung
 redact-booking    CSV-Buchungsliste, Positiv-/Negativ-Matching
 redact-render     Rasterisierung der Seiten für die Vorschau (reines Rust)
-redact-cli        Kommandozeile und Pipeline-Orchestrierung
+redact-pipeline   die Verarbeitungskette — von CLI *und* GUI benutzt,
+                  samt Audit-Log und Schreibpfad
+redact-cli        Kommandozeile (Argumente, Ausgabe)
 redact-gui        egui-Oberfläche (optionales Feature `gui` von redact-cli)
 ```
 
@@ -681,15 +893,49 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   nicht übermalt. Für die geprüften Fälle ist das mit
   [`redact_pdf::leaks`](#pruefen) an der geschriebenen Datei abgesichert — also
   mit einem Orakel, das nicht auf dem eigenen Extraktor beruht.
+* **Pixel unter einer Schwärzung werden überschrieben**, nicht überdeckt. Das
+  gilt für Bild-XObjects wie für Inline-Bilder, auch in Form-XObjects und auch
+  bei gedrehten oder skalierten Platzierungen; wird dasselbe Bild von mehreren
+  Seiten benutzt, bekommt die geschwärzte Seite eine eigene Kopie. Lässt sich
+  ein betroffenes Bild nicht dekodieren, **bricht der Lauf ab**, statt eine
+  Datei zu erzeugen, deren Schwärzung nur obenauf liegt ([Details](#bilder)).
 * Text in Form-XObjects wird ebenfalls entfernt. Wird dasselbe XObject mehrfach
   platziert, wirkt die Entfernung auf alle Platzierungen — im Zweifel wird also
   eher zu viel als zu wenig geschwärzt.
 * Annotationen, die in einen Schwärzungsbereich ragen, werden gelöscht.
-* Metadaten werden entfernt: `/Info` aus dem Trailer, XMP (`/Metadata`) aus
-  Katalog und Seiten, `/PieceInfo`, `/StructTreeRoot` samt `/MarkInfo` und
-  `/StructParents` sowie `/Names` und `/Dests` des Katalogs (benannte Ziele,
-  JavaScript, eingebettete Dateien — Preis: benannte Sprünge im Dokument
-  funktionieren danach nicht mehr).
+* **Metadaten und Restdaten werden entfernt** — der Content-Stream ist nur
+  *eine* der Stellen, an denen ein Geheimnis in einer PDF-Datei steht:
+
+  | Woher | Was |
+  |---|---|
+  | Trailer | `/Info` (Titel, Autor …) |
+  | Katalog | XMP (`/Metadata`), `/PieceInfo`, `/StructTreeRoot` samt `/MarkInfo`, `/Names` und `/Dests` |
+  | Katalog | `/AcroForm` — **samt `/XFA`** (ein vollständiger zweiter Formulardatensatz als XML) |
+  | jedes Formularfeld | die Werte `/V`, `/DV` und `/RV` — auch bei Widgets, die nur noch über `/Annots` erreichbar sind |
+  | Katalog | `/OpenAction` und `/AA` — Aktionen, die beim Öffnen bzw. bei Ereignissen laufen und `/S /JavaScript` sein dürfen |
+  | Katalog | `/OCProperties` — die Verwaltung optionaler Inhalte („Ebenen“) |
+  | jede Seite | `/Metadata`, `/PieceInfo`, `/StructParents`, `/AA` |
+  | jede Seite | Annotationen vom Typ `/FileAttachment` — ein Dateianhang klebt nicht nur im `/Names`-Baum |
+
+  Preis: benannte Sprünge im Dokument funktionieren danach nicht mehr, und aus
+  einem Formular wird ein totes Blatt Papier. Das ist die sichere Richtung.
+  Objekte, die dadurch unerreichbar werden, werden zusätzlich aus der Datei
+  geworfen (`prune_unreachable`) — `lopdf` schriebe sonst auch alles mit, was
+  niemand mehr referenziert.
+
+  So sieht das an einer Datei aus, die all das trägt:
+
+  ```console
+  $ redact-rs meta.pdf -o meta_out.pdf --booking-list buchungen.csv
+  Metadaten entfernt: /Info-Dictionary, Formulardefinition (/AcroForm),
+  XFA-Formulardaten (/XFA), Öffnen-Aktion (/OpenAction), Ebenen (/OCProperties),
+  2 Feldwerte, 1 Dateianhang-Annotation, 2 Ereignisaktionen (/AA)
+  ```
+
+  Mit [`redact_pdf::leaks`](#pruefen) an der Ausgabedatei nachgeprüft: Feldwert,
+  XFA-Inhalt, `/Info`-Titel, OpenAction-JavaScript und Dateianhang sind
+  restlos weg. **Eine** Ausnahme bleibt — der Name einer Ebene, siehe
+  [Bekannte Lecks](#grenzen).
 * Alles läuft lokal und im Speicher; es werden keine Netzverbindungen
   aufgebaut. Beim Schreiben entsteht genau **eine** temporäre Datei, und zwar
   im Zielverzeichnis (`.<name>.redact-<pid>-<n>.tmp`); sie wird per `rename`
@@ -733,8 +979,8 @@ Alle Abweichungen sind bewusst:
 | Manuelle Regionen (JSON) werden angewendet | erfüllt | `manual_regions_are_applied` |
 | Metadaten im Ausgabe-PDF entfernt | erfüllt | `metadata_is_stripped`, `names_tree_is_removed_as_the_module_documentation_promises` |
 | GUI: Rechtecke ziehen, Treffer abwählen, Export | umgesetzt | Logik als reine Funktionen getestet; das Fensterverhalten selbst ist nicht automatisiert prüfbar |
-| GUI-Binary unter 30 MB | erfüllt | Windows 7,4 MB nachgemessen (`dist/redact-rs.exe`, 7 395 328 Byte). Der Linux-Wert (13 MB) stammt aus einer früheren Messung und wurde bei dieser Prüfung **nicht** nachgemessen. |
-| Export der GUI identisch zur CLI | **nicht nachgewiesen** | Der vorhandene Test (`export_matches_a_hand_built_pipeline_of_the_same_steps`) vergleicht den GUI-Export mit einem *im Test nachgebauten* Ablauf, nicht mit der CLI. `redact-gui` hängt nicht von `redact-cli` ab. Bekannte Unterschiede: [siehe oben](#grafische-oberfläche). |
+| GUI-Binary unter 30 MB | erfüllt (für die gemessene Datei) | Windows 7,4 MB nachgemessen (`dist/redact-rs.exe`, 7 395 328 Byte) — das ist die **Konsolenfassung**. `redact-rs-gui.exe` ist seitdem als zweite Datei dazugekommen und hier **nicht** nachgemessen; der Linux-Wert (13 MB) stammt ebenfalls aus einer früheren Messung. |
+| Export der GUI identisch zur CLI | **nicht end-to-end nachgewiesen** | Beide Programme gehen inzwischen durch dasselbe Crate `redact-pipeline`, und die früher dokumentierten Abweichungen sind geschlossen ([siehe oben](#grafische-oberfläche)). Es gibt aber weiterhin keinen Test, der beide *Programme* startet und die Ausgabedateien byteweise vergleicht. |
 
 Nicht umgesetzt (laut Konzept §11 außerhalb des MVP): OCR für gescannte PDFs,
 Entschlüsseln passwortgeschützter PDFs, Batch-Verarbeitung, Plugin-System.

@@ -11,17 +11,16 @@ repository.workspace = true
 redact-core.workspace = true
 redact-pdf.workspace = true
 redact-patterns.workspace = true
-redact-booking.workspace = true
+# Die Verarbeitungskette: Analyse, Schwärzung, Schreibpfad, Audit-Log. Die
+# Oberfläche hat davon keine eigene Fassung mehr — das war der Grund, warum
+# beide Programme auseinandergelaufen sind.
+redact-pipeline.workspace = true
 # Steht (noch) nicht in `[workspace.dependencies]` der Wurzel — die gehört
 # einem anderen Zuständigkeitsbereich, deshalb hier der direkte Pfad.
 redact-render = { path = "../redact-render" }
 
 lopdf.workspace = true
 serde_json.workspace = true
-# Für die Prüfsumme des Eingabedokuments in der Review-Datei. Dieselbe
-# Rechnung wie in `redact-cli`, damit beide Programme dieselben Dateien
-# annehmen bzw. ablehnen.
-sha2.workspace = true
 
 eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.29"

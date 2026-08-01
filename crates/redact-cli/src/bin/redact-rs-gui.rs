@@ -26,7 +26,12 @@ fn main() -> ExitCode {
         .map(PathBuf::from)
         .find(|p| !p.to_string_lossy().starts_with('-'));
 
-    match redact_gui::run(pdf, None, Vec::new()) {
+    let config = redact_pipeline::Config {
+        input: pdf.unwrap_or_default(),
+        ..redact_pipeline::Config::default()
+    };
+
+    match redact_gui::run(config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // Ohne Konsole sieht das niemand — die Meldung gehört deshalb in

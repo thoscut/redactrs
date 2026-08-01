@@ -18,13 +18,20 @@
 //! * [`AuditEntry::effective_rect`] — das Rechteck **nach** `--padding`, also
 //!   das, was tatsächlich gewirkt hat, plus [`AuditEntry::effect`] mit dem
 //!   Befund je Region,
-//! * [`EffectRecord`] — wie viele Zeichen, Deck-Rechtecke und Annotationen die
-//!   Schwärzung wirklich angefasst hat,
+//! * [`EffectRecord`] — wie viele Zeichen, Deck-Rechtecke, Annotationen und
+//!   Bilder die Schwärzung wirklich angefasst hat,
 //! * [`MetadataRecord`] — was der Metadatenlauf wirklich entfernt hat.
 //!
 //! Was sich nicht messen lässt, steht auch nicht drin: eine Zuordnung
 //! „Region → entfernte Zeichen“ liefert [`redact_pdf::RedactionReport`] nicht,
 //! deshalb nennt das Log Zeichenzahlen nur als Gesamtsumme.
+//!
+//! ## Eine Fassung für beide Programme
+//!
+//! Dieses Modul lag früher in `redact-cli`; die grafische Oberfläche hatte
+//! daneben ihr eigenes, von Hand gebautes JSON — mit leeren Prüfsummen, hart
+//! verdrahtetem `metadata_stripped: true` und ohne jede Wirkungsmessung. Es
+//! gibt jetzt nur noch dieses hier.
 
 use std::path::Path;
 
@@ -126,6 +133,17 @@ pub struct EffectRecord {
     pub drawn_rects: usize,
     /// Tatsächlich entfernte Annotationen.
     pub removed_annotations: usize,
+    /// Bilder, deren Pixel überschrieben wurden.
+    ///
+    /// Gehört ins Log, weil ein überschriebenes Bild **neu kodiert** wird:
+    /// außerhalb des Schwärzungsbereichs bleibt jedes Bildpunktbyte gleich
+    /// (`redact-pdf` schreibt immer verlustfrei mit Flate), die *Datei* ist
+    /// aber nicht mehr dieselbe — aus einem `/DCTDecode`-Bild wird
+    /// `/FlateDecode`, und das ist deutlich größer.
+    pub redacted_images: usize,
+    /// Davon Kopien, die angelegt wurden, weil dasselbe Bild mehrfach im
+    /// Dokument benutzt wird.
+    pub copied_images: usize,
 }
 
 /// Was der Metadatenlauf entfernt hat — die Zahlen aus [`MetadataReport`].
@@ -193,8 +211,16 @@ pub struct Applied<'a> {
 }
 
 impl AuditLog {
+    /// Baut das Log aus dem, was der Lauf gemessen hat.
+    ///
+    /// `input_sha` wird **übergeben** und nicht aus der Datei nachgerechnet:
+    /// die Prüfsumme gehört zu den Bytes, die tatsächlich verarbeitet wurden.
+    /// Wer sie nach dem Lauf neu läse, bekäme im ungünstigen Fall die einer
+    /// inzwischen geänderten Datei — und die grafische Oberfläche kann ein
+    /// Dokument verarbeiten, das gar nicht (mehr) auf der Platte liegt.
     pub fn build(
         input: &Path,
+        input_sha: &str,
         output: &Path,
         redactions: &[Redaction],
         blocked: &[BlockedRegion],
@@ -226,7 +252,7 @@ impl AuditLog {
             },
             input: FileInfo {
                 path: input.display().to_string(),
-                sha256: sha256_file(input)?,
+                sha256: input_sha.to_string(),
             },
             output: FileInfo {
                 path: output.display().to_string(),
@@ -240,6 +266,8 @@ impl AuditLog {
                 removed_glyphs: applied.redaction.removed_glyphs,
                 drawn_rects: applied.redaction.drawn_rects,
                 removed_annotations: applied.redaction.removed_annotations,
+                redacted_images: applied.redaction.redacted_images,
+                copied_images: applied.redaction.copied_images,
             },
             redactions: entries,
             blocked_by_negative_list: blocked
@@ -270,13 +298,16 @@ impl AuditLog {
 
 /// Warnungen, die sich aus dem *Ergebnis* eines Laufs ergeben.
 ///
-/// Zwei Fälle, die stillschweigend als Erfolg durchgingen:
+/// Drei Fälle, die stillschweigend als Erfolg durchgingen:
 ///
 /// 1. Eine Region, die nach `--padding` leer ist. Sie wird übersprungen — die
 ///    Zusammenfassung meldete trotzdem „Schwärzungen: 1“.
 /// 2. Ein Lauf, in dem keine einzige Region ein Zeichen entfernt hat. Das ist
 ///    nicht zwingend falsch (ein Bild lässt sich nur überdecken), aber es
 ///    gehört gesagt.
+/// 3. Überschriebene Bilder. Sie werden neu kodiert — pixelgenau verlustfrei,
+///    aber nicht mehr in der ursprünglichen Kodierung. Wer eine deutlich
+///    größere Ausgabedatei vorfindet, soll wissen, woher sie kommt.
 pub fn effect_warnings(
     redactions: &[Redaction],
     padding: f64,
@@ -297,13 +328,30 @@ pub fn effect_warnings(
         ));
     }
     let effective = redactions.len() - degenerate;
-    if effective > 0 && report.removed_glyphs == 0 {
+    if effective > 0 && report.removed_glyphs == 0 && report.redacted_images == 0 {
         warnings.push(format!(
             "Kein einziges Zeichen wurde aus dem Content-Stream entfernt, obwohl \
              {effective} Schwärzung(en) ein gültiges Rechteck hatten. Entweder steht \
              an diesen Stellen kein Text (etwa ein Rasterbild), oder die Bereiche \
              treffen daneben."
         ));
+    }
+    if report.redacted_images > 0 {
+        let mut text = format!(
+            "{} Bild(er) überschrieben: die Bildpunkte im Schwärzungsbereich sind \
+             wirklich weg. Das Bild wird dafür neu kodiert — außerhalb des Bereichs \
+             bleibt jeder Bildpunkt unverändert (verlustfrei), die Datei ist danach \
+             aber nicht mehr bitgleich und wird meist deutlich größer (aus JPEG wird \
+             ein Flate-Bild).",
+            report.redacted_images
+        );
+        if report.copied_images > 0 {
+            text.push_str(&format!(
+                " {} Kopie(n) angelegt, weil dasselbe Bild mehrfach benutzt wird.",
+                report.copied_images
+            ));
+        }
+        warnings.push(text);
     }
     warnings
 }
@@ -366,6 +414,7 @@ mod tests {
         let warnings = effect_warnings(redactions, padding, report);
         let log = AuditLog::build(
             &input,
+            &sha256_bytes(b"a"),
             &output,
             redactions,
             &[],
@@ -404,6 +453,20 @@ mod tests {
 
         let json = serde_json::to_string(&log).unwrap();
         assert!(json.contains("\"action\":\"blackout\""));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Beide Prüfsummen stehen im Log — ein Nachweis ohne sie bezeugt nichts.
+    #[test]
+    fn both_checksums_are_recorded() {
+        let (log, dir) = build(
+            &[iban_redaction()],
+            1.0,
+            &RedactionReport::default(),
+            &stripped_info(),
+        );
+        assert_eq!(log.input.sha256, sha256_bytes(b"a"));
+        assert_eq!(log.output.sha256, sha256_bytes(b"b"));
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -464,6 +527,34 @@ mod tests {
             ..Default::default()
         };
         assert!(effect_warnings(&[iban_redaction()], 1.0, &report).is_empty());
+    }
+
+    /// Ein überschriebenes Bild ist kein Randdetail: das Bild wird neu
+    /// kodiert und ist danach nicht mehr das Original.
+    #[test]
+    fn overwritten_images_are_reported_and_logged() {
+        let report = RedactionReport {
+            drawn_rects: 1,
+            redacted_images: 2,
+            copied_images: 1,
+            ..Default::default()
+        };
+        let warnings = effect_warnings(&[iban_redaction()], 1.0, &report);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("2 Bild(er) überschrieben"),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("verlustfrei"), "{warnings:?}");
+        // Und keine Behauptung, die nicht stimmt: außerhalb der Schwärzung
+        // bleibt jeder Bildpunkt gleich.
+        assert!(!warnings[0].contains("verlustbehaftet"), "{warnings:?}");
+        assert!(warnings[0].contains("1 Kopie(n)"), "{warnings:?}");
+
+        let (log, dir) = build(&[iban_redaction()], 1.0, &report, &stripped_info());
+        assert_eq!(log.effect.redacted_images, 2);
+        assert_eq!(log.effect.copied_images, 1);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     fn tempdir() -> std::path::PathBuf {

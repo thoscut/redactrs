@@ -2,12 +2,30 @@
 //!
 //! Buchungslisten enthalten Werte so, wie ein Mensch sie schreibt
 //! (`DE89 3704 0044 0532 0130 00`), im PDF steht derselbe Wert aber oft mit
-//! anderen Leerraum-Mengen oder über einen Zeilenumbruch verteilt
-//! (`DE89  3704\n0044 …`). Deshalb wird sowohl der Suchtext (Heuhaufen) als auch
-//! das Muster (Nadel) vor dem Vergleich normalisiert:
+//! einer anderen *Menge* an Leerraum — `DE89  3704 0044 …`, gesperrt gesetzt,
+//! oder ganz ohne Leerzeichen. Deshalb wird sowohl der Suchtext (Heuhaufen) als
+//! auch das Muster (Nadel) vor dem Vergleich normalisiert:
 //!
 //! * alle Zeichen werden klein geschrieben (Vergleich ohne Groß-/Kleinschreibung),
 //! * jede Folge von Leerraum wird zu genau einem Leerzeichen zusammengefasst.
+//!
+//! ## Was das *nicht* leistet: Zeilenumbrüche
+//!
+//! Die Zusammenfassung von Leerraum behandelt zwar auch `\n` wie jedes andere
+//! Leerraum-Zeichen — das nützt hier aber nichts, denn **im Eingabetext kommt
+//! nie eines vor**. [`crate::matcher::BookingMatcher::find_matches`] bekommt
+//! [`redact_core::TextRun`]s, und der Extraktor
+//! (`redact_pdf::extract::PdfExtractor::build_lines`) gruppiert Glyphen entlang
+//! der Grundlinie zu je einem Run pro *Zeile*; als Trennzeichen setzt
+//! `assemble_line` ausschließlich `' '`. Eine über zwei Zeilen verteilte IBAN
+//! ist also nicht ein Run mit `\n`, sondern **zwei getrennte Runs** — und der
+//! Abgleich läuft Run für Run. Sie wird deshalb nicht gefunden.
+//!
+//! Festgehalten von `iban_split_across_two_extracted_lines_is_not_found` in
+//! `tests/matcher_tests.rs`; nachgemessen am fertigen Programm liefert eine
+//! Seite mit `IBAN: DE89 3704` / `0044 0532 0130 00` in zwei Zeilen
+//! `Textzeilen: 2, Treffer gesamt: 0` — für die Buchungsliste wie für das
+//! Muster `iban_de`.
 //!
 //! Damit ein Treffer im normalisierten Text wieder auf die exakte Bounding-Box
 //! im PDF abgebildet werden kann, merkt sich [`Normalized`] für **jedes Byte**
@@ -107,10 +125,17 @@ pub(crate) fn normalize_needle(input: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Achtung beim Lesen: dass hier ein `\n` zusammengefasst wird, belegt
+    /// **nicht**, dass eine über zwei Zeilen verteilte IBAN gefunden wird. Der
+    /// Normalisierer bekommt einen fertigen `TextRun`, und ein Run enthält nie
+    /// einen Zeilenumbruch (siehe Modulkommentar). Der Fall `\n` ist hier nur
+    /// der Vollständigkeit halber mitgeprüft — die reale Lage hält
+    /// `iban_split_across_two_extracted_lines_is_not_found` in
+    /// `tests/matcher_tests.rs` fest.
     #[test]
     fn collapses_whitespace_and_lowercases() {
-        let n = Normalized::new("DE89  3704\n0044");
-        assert_eq!(n.text, "de89 3704 0044");
+        assert_eq!(Normalized::new("DE89  3704 0044").text, "de89 3704 0044");
+        assert_eq!(Normalized::new("DE89  3704\n0044").text, "de89 3704 0044");
     }
 
     #[test]

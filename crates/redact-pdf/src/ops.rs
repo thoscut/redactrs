@@ -458,11 +458,7 @@ impl ContentSink for OpsCollector {
             };
             // Stencil-Masken hängen an der aktuellen Füllfarbe und dürfen
             // deshalb nur zwischengespeichert werden, wenn sie keine sind.
-            let is_mask = stream
-                .dict
-                .get(b"ImageMask")
-                .and_then(Object::as_bool)
-                .unwrap_or(false);
+            let is_mask = dict_bool(cx.doc, &stream.dict, b"ImageMask", b"IM");
             let cached = id.filter(|_| !is_mask).and_then(|id| self.images.get(&id));
             match cached {
                 Some(index) => *index,
@@ -519,9 +515,8 @@ fn font_entry(
 
 fn load_font_program(doc: &Document, dict: &Dictionary) -> FontProgram {
     let info: FontInfo = font_from_dict(doc, dict);
-    let subtype = dict
-        .get(b"Subtype")
-        .and_then(Object::as_name)
+    let subtype = deref(doc, dict.get(b"Subtype").ok())
+        .and_then(|o| o.as_name().ok())
         .map(|n| n.to_vec())
         .unwrap_or_default();
     let is_cid = subtype == b"Type0";
@@ -558,7 +553,7 @@ fn load_font_program(doc: &Document, dict: &Dictionary) -> FontProgram {
     let units_per_em = data
         .as_deref()
         .and_then(sfnt_units_per_em)
-        .or_else(|| type3_units_per_em(dict))
+        .or_else(|| type3_units_per_em(doc, dict))
         .unwrap_or(1000.0);
 
     let code_to_gid = if is_cid {
@@ -598,7 +593,7 @@ fn load_font_program(doc: &Document, dict: &Dictionary) -> FontProgram {
 
     let flags = descriptor
         .as_ref()
-        .and_then(|d| d.get(b"Flags").ok())
+        .and_then(|d| deref(doc, d.get(b"Flags").ok()))
         .and_then(|o| o.as_i64().ok())
         .unwrap_or(0)
         .max(0) as u32;
@@ -691,12 +686,12 @@ fn sfnt_units_per_em(data: &[u8]) -> Option<f64> {
 }
 
 /// Type3-Fonts geben ihren Glyph-Space über `/FontMatrix` an.
-fn type3_units_per_em(dict: &Dictionary) -> Option<f64> {
-    let a = dict
-        .get(b"FontMatrix")
-        .and_then(Object::as_array)
+fn type3_units_per_em(doc: &Document, dict: &Dictionary) -> Option<f64> {
+    let a = deref(doc, dict.get(b"FontMatrix").ok())?
+        .as_array()
         .ok()?
         .first()
+        .and_then(|o| deref(doc, Some(o)))
         .and_then(as_f64)?;
     (a.abs() > 1e-9).then(|| 1.0 / a.abs())
 }
@@ -734,7 +729,8 @@ fn image_xobject<'a>(
     };
     let (_, resolved) = doc.dereference(entry).ok()?;
     let stream = resolved.as_stream().ok()?;
-    if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Image") {
+    let subtype = deref(doc, stream.dict.get(b"Subtype").ok()).and_then(|o| o.as_name().ok());
+    if subtype != Some(b"Image") {
         return None;
     }
     Some((id, stream))
@@ -764,8 +760,8 @@ fn decode_image(
     raw: &[u8],
     fill: Rgb,
 ) -> (RasterImage, Option<String>) {
-    let width = dict_int(dict, b"Width", b"W").unwrap_or(0).max(0) as u32;
-    let height = dict_int(dict, b"Height", b"H").unwrap_or(0).max(0) as u32;
+    let width = dict_int(doc, dict, b"Width", b"W").unwrap_or(0).max(0) as u32;
+    let height = dict_int(doc, dict, b"Height", b"H").unwrap_or(0).max(0) as u32;
     if width == 0 || height == 0 {
         return (
             RasterImage::solid([220, 220, 220, 255], true),
@@ -779,12 +775,12 @@ fn decode_image(
         );
     }
 
-    let payload = apply_filters(dict, raw);
-    let mask = dict_bool(dict, b"ImageMask", b"IM");
+    let payload = apply_filters(doc, dict, raw);
+    let mask = dict_bool(doc, dict, b"ImageMask", b"IM");
     let bpc = if mask {
         1
     } else {
-        dict_int(dict, b"BitsPerComponent", b"BPC")
+        dict_int(doc, dict, b"BitsPerComponent", b"BPC")
             .unwrap_or(8)
             .max(1) as usize
     };
@@ -867,17 +863,17 @@ fn decode_image(
 }
 
 /// Wendet alle Filter an, die keine Bildkompression sind.
-fn apply_filters(dict: &Dictionary, raw: &[u8]) -> Payload {
-    let filters = filter_names(dict);
+fn apply_filters(doc: &Document, dict: &Dictionary, raw: &[u8]) -> Payload {
+    let filters = filter_names(doc, dict);
     if filters.is_empty() {
         return Payload::Samples(raw.to_vec());
     }
     let mut data = raw.to_vec();
     for (index, filter) in filters.iter().enumerate() {
-        let params = filter_params(dict, index);
+        let params = filter_params(doc, dict, index);
         data = match filter.as_str() {
             "FlateDecode" | "Fl" => match inflate(&data) {
-                Some(out) => apply_predictor(out, params.as_ref()),
+                Some(out) => apply_predictor(doc, out, params.as_ref()),
                 None => return Payload::Unsupported("FlateDecode".into()),
             },
             "ASCII85Decode" | "A85" => decode_ascii85(&data),
@@ -891,14 +887,15 @@ fn apply_filters(dict: &Dictionary, raw: &[u8]) -> Payload {
     Payload::Samples(data)
 }
 
-fn filter_names(dict: &Dictionary) -> Vec<String> {
-    let Ok(filter) = dict.get(b"Filter").or_else(|_| dict.get(b"F")) else {
+fn filter_names(doc: &Document, dict: &Dictionary) -> Vec<String> {
+    let Some(filter) = deref(doc, dict.get(b"Filter").or_else(|_| dict.get(b"F")).ok()) else {
         return Vec::new();
     };
     match filter {
         Object::Name(name) => vec![String::from_utf8_lossy(name).into_owned()],
         Object::Array(items) => items
             .iter()
+            .filter_map(|o| deref(doc, Some(o)))
             .filter_map(|o| o.as_name().ok())
             .map(|n| String::from_utf8_lossy(n).into_owned())
             .collect(),
@@ -906,40 +903,38 @@ fn filter_names(dict: &Dictionary) -> Vec<String> {
     }
 }
 
-fn filter_params(dict: &Dictionary, index: usize) -> Option<Dictionary> {
-    let params = dict.get(b"DecodeParms").or_else(|_| dict.get(b"DP")).ok()?;
+fn filter_params(doc: &Document, dict: &Dictionary, index: usize) -> Option<Dictionary> {
+    let params = deref(
+        doc,
+        dict.get(b"DecodeParms").or_else(|_| dict.get(b"DP")).ok(),
+    )?;
     match params {
         Object::Dictionary(d) if index == 0 => Some(d.clone()),
-        Object::Array(items) => items.get(index).and_then(|o| o.as_dict().ok()).cloned(),
+        Object::Array(items) => items
+            .get(index)
+            .and_then(|o| deref(doc, Some(o)))
+            .and_then(|o| o.as_dict().ok())
+            .cloned(),
         _ => None,
     }
 }
 
 /// PNG-Prädiktoren (`/Predictor >= 10`); der TIFF-Prädiktor 2 wird übergangen.
-fn apply_predictor(data: Vec<u8>, params: Option<&Dictionary>) -> Vec<u8> {
+fn apply_predictor(doc: &Document, data: Vec<u8>, params: Option<&Dictionary>) -> Vec<u8> {
     let Some(params) = params else {
         return data;
     };
-    let predictor = params
-        .get(b"Predictor")
-        .and_then(Object::as_i64)
-        .unwrap_or(1);
+    let predictor = dict_int(doc, params, b"Predictor", b"Predictor").unwrap_or(1);
     if !(10..=15).contains(&predictor) {
         return data;
     }
-    let columns = params
-        .get(b"Columns")
-        .and_then(Object::as_i64)
+    let columns = dict_int(doc, params, b"Columns", b"Columns")
         .unwrap_or(1)
         .max(1) as usize;
-    let colors = params
-        .get(b"Colors")
-        .and_then(Object::as_i64)
+    let colors = dict_int(doc, params, b"Colors", b"Colors")
         .unwrap_or(1)
         .max(1) as usize;
-    let bits = params
-        .get(b"BitsPerComponent")
-        .and_then(Object::as_i64)
+    let bits = dict_int(doc, params, b"BitsPerComponent", b"BPC")
         .unwrap_or(8)
         .max(8) as usize;
     let bytes_per_pixel = (colors * bits / 8).max(1);
@@ -1470,21 +1465,23 @@ fn as_f64(obj: &Object) -> Option<f64> {
 }
 
 /// Ganzzahl aus einem Bild-Dictionary; Inline-Bilder benutzen Kurznamen.
-fn dict_int(dict: &Dictionary, long: &[u8], short: &[u8]) -> Option<i64> {
-    dict.get(long)
-        .or_else(|_| dict.get(short))
-        .ok()
-        .and_then(|o| match o {
-            Object::Integer(i) => Some(*i),
-            Object::Real(r) => Some(*r as i64),
-            _ => None,
-        })
+///
+/// **Mit Dereferenzierung.** `/Width 12 0 R` ist in freier Wildbahn üblich —
+/// wer den Wert direkt aus dem Dictionary liest, bekommt eine `Reference`,
+/// findet keine Zahl und hält das Bild für größenlos. Daraus wurde ein
+/// Platzhalter, und über einem Platzhalter bricht die Bildschwärzung ab
+/// ([`crate::image`]). Deshalb braucht schon das Auslesen das Dokument.
+fn dict_int(doc: &Document, dict: &Dictionary, long: &[u8], short: &[u8]) -> Option<i64> {
+    match deref(doc, dict.get(long).or_else(|_| dict.get(short)).ok())? {
+        Object::Integer(i) => Some(*i),
+        Object::Real(r) => Some(*r as i64),
+        _ => None,
+    }
 }
 
-fn dict_bool(dict: &Dictionary, long: &[u8], short: &[u8]) -> bool {
-    dict.get(long)
-        .or_else(|_| dict.get(short))
-        .ok()
+/// Wahrheitswert aus einem Bild-Dictionary — ebenfalls mit Dereferenzierung.
+fn dict_bool(doc: &Document, dict: &Dictionary, long: &[u8], short: &[u8]) -> bool {
+    deref(doc, dict.get(long).or_else(|_| dict.get(short)).ok())
         .and_then(|o| o.as_bool().ok())
         .unwrap_or(false)
 }

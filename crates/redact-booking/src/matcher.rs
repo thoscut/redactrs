@@ -173,6 +173,11 @@ impl BookingMatcher {
 
     /// Präzise Variante: eine Region je Fundstelle mit exakter Bounding-Box.
     ///
+    /// **Je Run, nicht über Runs hinweg.** Jeder `TextRun` ist eine extrahierte
+    /// Zeile und wird für sich normalisiert und durchsucht; ein Muster, das im
+    /// PDF über zwei Zeilen verteilt steht, trifft deshalb nicht (siehe
+    /// [`crate::normalize`]).
+    ///
     /// Reihenfolge (deterministisch): Runs in Eingabereihenfolge, je Run zuerst
     /// die Negativliste in Dateireihenfolge, dann die Positivliste, je Eintrag
     /// die Fundstellen von links nach rechts.

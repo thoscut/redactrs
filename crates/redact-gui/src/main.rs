@@ -33,8 +33,15 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let pdf = args.into_iter().next().map(PathBuf::from);
-    match redact_gui::run(pdf, None, Vec::new()) {
+    let config = redact_pipeline::Config {
+        input: args
+            .into_iter()
+            .next()
+            .map(PathBuf::from)
+            .unwrap_or_default(),
+        ..redact_pipeline::Config::default()
+    };
+    match redact_gui::run(config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Fehler: {e}");
@@ -53,4 +60,7 @@ Optionen:
   -h, --help      Diese Hilfe anzeigen
   -V, --version   Version anzeigen
 
-Buchungsliste und Pattern-Auswahl werden im Fenster gesetzt.";
+Die Buchungsliste wird im Fenster geladen. Alles Weitere — Musterauswahl,
+Mindestvertrauen, Polsterung, eigene Pattern-Konfiguration — kennt nur die
+Konsolenfassung: `redact-rs --gui [PDF] --patterns iban_de …` startet
+dasselbe Fenster mit diesen Einstellungen.";

@@ -78,7 +78,7 @@ fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         ui.label("Namenszusatz");
         ui.add(
-            egui::TextEdit::singleline(&mut state.output_suffix)
+            egui::TextEdit::singleline(&mut state.config.output_suffix)
                 .desired_width(SUFFIX_FIELD_WIDTH)
                 .hint_text(redact_core::DEFAULT_OUTPUT_SUFFIX),
         )
@@ -330,7 +330,7 @@ mod tests {
         populated
             .load_bytes(&redact_pdf::testing::demo_statement(), None)
             .unwrap();
-        populated.analyze(&["iban_de".to_string()], None).unwrap();
+        populated.analyze().unwrap();
         populated.regions.push(AnnotatedRegion::new(Region::new(
             0,
             Rect::new(0.0, 0.0, 50.0, 12.0),

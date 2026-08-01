@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, ValueEnum};
+use redact_pipeline::Config;
 
 /// Lokales Schwärzen sensibler Daten in PDF-Dokumenten.
 ///
@@ -67,13 +68,23 @@ pub struct Cli {
     #[arg(long)]
     pub review: bool,
 
-    /// Zieldatei für den Review-Export (Standard: `<input>.review.json`).
+    /// Zieldatei für den Review-Export (Standard: `<input>_review.json`).
     #[arg(long, value_name = "JSON")]
     pub review_out: Option<PathBuf>,
 
     /// Geprüfte Review-Datei anwenden (überspringt die Analyse).
     #[arg(long, value_name = "JSON", conflicts_with = "review")]
     pub apply_review: Option<PathBuf>,
+
+    /// Eine Review-Datei ohne Prüfsumme trotzdem anwenden.
+    ///
+    /// Eine Review-Datei nennt nur Koordinaten. Ohne die Prüfsumme ihres
+    /// Dokuments lässt sich nicht feststellen, ob sie zu dieser Eingabe
+    /// gehört — auf ein fremdes PDF angewendet lägen die Schwärzungen an
+    /// beliebigen Stellen, das Ergebnis sähe geschwärzt aus und wäre es nicht.
+    /// Deshalb wird sie sonst abgelehnt.
+    #[arg(long)]
+    pub allow_unverified_review: bool,
 
     /// Audit-Log schreiben.
     #[arg(long, value_name = "JSON")]
@@ -88,8 +99,20 @@ pub struct Cli {
     pub replace_with: String,
 
     /// Zusätzlicher Rand um jede Schwärzung, in Punkt.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = redact_pipeline::DEFAULT_PADDING)]
     pub padding: f64,
+
+    /// Bilder, die sich nicht dekodieren lassen, durchgehen lassen.
+    ///
+    /// **Unsicher.** JPEG-2000, CCITT-Fax und defekte Bildstreams kann
+    /// redact-rs nicht öffnen; ein Schwärzungsbereich darauf lässt sich dann
+    /// nur *überdecken*, die Bildpunkte bleiben in der Datei. Ohne diesen
+    /// Schalter bricht der Lauf in dem Fall ab — lieber ein Fehler als eine
+    /// Datei, in der die Schwärzung nur obenauf liegt. Mit ihm entsteht eine
+    /// Ausgabe, deren Bilder ungeschwärzt sind; die Warnung dazu steht in der
+    /// Zusammenfassung und im Audit-Log.
+    #[arg(long)]
+    pub allow_undecodable_images: bool,
 
     /// Obergrenze für die Summe aller entpackten Streams einer Eingabedatei.
     ///
@@ -111,7 +134,7 @@ pub struct Cli {
     /// Die Konfliktauflösung wächst quadratisch mit dieser Zahl; ohne Grenze
     /// genügt eine kleine Datei mit sehr vielen Treffern, um die Maschine
     /// stundenlang zu beschäftigen.
-    #[arg(long, value_name = "N", default_value_t = 100_000)]
+    #[arg(long, value_name = "N", default_value_t = redact_pipeline::DEFAULT_MAX_CANDIDATES)]
     pub max_candidates: usize,
 
     /// Grafische Oberfläche starten.
@@ -153,6 +176,41 @@ impl Cli {
             max_decompressed_bytes: mb(self.max_decompressed_mb),
             max_parsed_bytes: mb(self.max_parsed_mb),
             ..redact_pdf::document::Limits::default()
+        }
+    }
+
+    /// Die Einstellungen dieses Aufrufs als [`Config`] der Verarbeitungskette.
+    ///
+    /// **Ein** Bauplatz für beide Programme: `redact-rs auszug.pdf …` und
+    /// `redact-rs --gui auszug.pdf …` bekommen dieselbe Konfiguration, also
+    /// gelten `--patterns-config`, `--no-patterns`, `--min-confidence`,
+    /// `--manual-regions` und `--padding` auch in der Oberfläche. Vorher kannte
+    /// sie nichts davon und polsterte fest mit 1,0.
+    ///
+    /// Ohne Eingabedatei (nur die Oberfläche kommt so weit) bleibt
+    /// [`Config::input`] leer und wird beim Öffnen eines Dokuments gesetzt.
+    pub fn config(&self) -> Config {
+        Config {
+            input: self.input.clone().unwrap_or_default(),
+            output: self.output.clone(),
+            output_suffix: self.output_suffix.clone(),
+            force: self.force,
+            patterns: self.patterns.clone(),
+            no_patterns: self.no_patterns,
+            patterns_config: self.patterns_config.clone(),
+            min_confidence: self.min_confidence,
+            booking_list: self.booking_list.clone(),
+            manual_regions: self.manual_regions.clone(),
+            review: self.review,
+            review_out: self.review_out.clone(),
+            apply_review: self.apply_review.clone(),
+            allow_unverified_review: self.allow_unverified_review,
+            audit_log: self.audit_log.clone(),
+            action: self.action.to_action(&self.replace_with),
+            padding: self.padding,
+            allow_undecodable_images: self.allow_undecodable_images,
+            limits: self.limits(),
+            max_candidates: self.max_candidates,
         }
     }
 }

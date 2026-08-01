@@ -209,6 +209,57 @@ fn text_in_an_annotation_without_rect_is_redacted_not_merely_dropped() {
     strip_and_check(&mut doc);
 }
 
+// ---------------------------------------------------------------------------
+// Unlesbare Glyphen: die Schwelle zählt das Unlesbare, nicht das Vorhandene
+// ---------------------------------------------------------------------------
+
+/// Alle Warnungen eines Dokuments ohne Schwärzung.
+fn warnings_of(doc: &mut Document) -> Vec<String> {
+    PdfRedactor::new()
+        .apply_with_report(doc, &[])
+        .expect("Schwärzung")
+        .warnings
+}
+
+/// Drei unlesbare Glyphen sind wenig — und können trotzdem genau die Ziffern
+/// sein, auf die es ankommt. Früher schwieg der Scanner darüber, weil er die
+/// *insgesamt* gesetzten Zeichen zählte und unter vier gar nicht erst hinsah.
+#[test]
+fn three_undecodable_glyphs_are_reported() {
+    let (mut doc, ..) = page(b"BT /F1 10 Tf 1 0 0 1 72 700 Tm (\x81\x81\x81) Tj ET\n");
+    let warnings = warnings_of(&mut doc);
+    assert!(
+        warnings.iter().any(|w| w.contains("ToUnicode")),
+        "drei unlesbare Glyphen blieben unerwähnt: {warnings:?}"
+    );
+}
+
+/// Gegenprobe zur Menge: eine einzelne Sonderglyphe in einem sonst lesbaren
+/// Font ist Gestaltung, kein Text — und darf die echten Befunde nicht zudecken.
+#[test]
+fn a_single_stray_glyph_in_a_readable_font_stays_silent() {
+    let (mut doc, ..) = page(
+        b"BT /F1 10 Tf 1 0 0 1 72 700 Tm (Kontoinhaber: Max Mustermann, Konto 4711000 \x81) Tj ET\n",
+    );
+    let warnings = warnings_of(&mut doc);
+    assert!(
+        !warnings.iter().any(|w| w.contains("ToUnicode")),
+        "Fehlalarm wegen einer einzelnen Sonderglyphe: {warnings:?}"
+    );
+}
+
+/// Gegenprobe zum Anteil: setzt ein Font kaum Text, wiegt schon ein einziges
+/// unlesbares Zeichen schwer — dann ist ein Drittel der Stelle verloren.
+#[test]
+fn one_stray_glyph_in_a_font_that_sets_almost_nothing_is_reported() {
+    let (mut doc, ..) = page(b"BT /F1 10 Tf 1 0 0 1 72 700 Tm (ab\x81) Tj ET\n");
+    let warnings = warnings_of(&mut doc);
+    assert!(
+        warnings.iter().any(|w| w.contains("ToUnicode")),
+        "ein Drittel der Textstelle ist unlesbar und blieb unerwähnt: {warnings:?}"
+    );
+}
+
 /// Metadaten strippen, speichern, und dann in der *Datei* nachsehen.
 fn strip_and_check(doc: &mut Document) {
     redact_pdf::strip_metadata(doc);

@@ -26,6 +26,7 @@ use crate::state::{AppState, HitSummary, RegionColor, MAX_ZOOM, MIN_ZOOM};
 use crate::theme::Theme;
 use crate::toolbar::{self, ToolAction, ToolContext, ToolItem};
 use crate::viewer::{self, PagePreview};
+use redact_pipeline::Config;
 
 /// Was im Hauptbereich steht, solange nichts geladen ist.
 ///
@@ -407,8 +408,6 @@ fn empty_state(ui: &mut egui::Ui) {
 pub struct RedactApp {
     pub state: AppState,
     selector: RectangleSelector,
-    /// Vom Aufrufer gewünschte Pattern-IDs (leer = alle eingebauten).
-    pub pattern_ids: Vec<String>,
     /// Letzte Fehlermeldung; wird als roter Text in der Statuszeile gezeigt.
     error: Option<String>,
     /// Fläche des Hauptbereichs im letzten Frame — Grundlage für den
@@ -434,16 +433,21 @@ pub struct RedactApp {
 
 impl Default for RedactApp {
     fn default() -> Self {
-        Self::new(Vec::new())
+        Self::new(Config::default())
     }
 }
 
 impl RedactApp {
-    pub fn new(pattern_ids: Vec<String>) -> Self {
+    /// Baut die Oberfläche mit den Einstellungen eines Aufrufs.
+    ///
+    /// Es ist dieselbe [`Config`], die `redact_pipeline::run` bekäme — Muster,
+    /// Buchungsliste, Schwellwert, Polsterung, Ladegrenzen. Vorher reichte die
+    /// Nahtstelle nur die Muster-IDs durch, und der Rest der Kommandozeile
+    /// endete an der Fenstergrenze.
+    pub fn new(config: Config) -> Self {
         Self {
-            state: AppState::new(),
+            state: AppState::with_config(config),
             selector: RectangleSelector::new(),
-            pattern_ids,
             error: None,
             central_rect: None,
             pages: PageCache::new(),
@@ -457,10 +461,10 @@ impl RedactApp {
 
     /// Ohne Rückfragen — für Tests ohne Bildschirm.
     #[cfg(test)]
-    fn silent(pattern_ids: Vec<String>) -> Self {
+    fn silent(config: Config) -> Self {
         Self {
             ask_before_discarding: false,
-            ..Self::new(pattern_ids)
+            ..Self::new(config)
         }
     }
 
@@ -522,9 +526,7 @@ impl RedactApp {
             self.state.status = "Erst ein PDF öffnen".to_string();
             return;
         }
-        let booking = self.state.booking_path.clone();
-        let ids = self.pattern_ids.clone();
-        let result = self.state.analyze(&ids, booking.as_deref()).map(|_| ());
+        let result = self.state.analyze().map(|_| ());
         self.report(result);
     }
 
@@ -548,9 +550,7 @@ impl RedactApp {
         }
         self.hand_document_to_the_renderer();
         self.close_confirmed = false;
-        let booking = self.state.booking_path.clone();
-        let ids = self.pattern_ids.clone();
-        let analyzed = self.state.analyze(&ids, booking.as_deref()).map(|_| ());
+        let analyzed = self.state.analyze().map(|_| ());
         self.report(analyzed);
     }
 
@@ -594,16 +594,16 @@ impl RedactApp {
         let audit = AppState::audit_path_for(&out);
         let blocked = self.state.blocked_regions().len();
         match self.state.export(&out, Some(&audit)) {
-            Ok(report) => {
+            Ok(outcome) => {
                 self.error = None;
-                self.state.warnings = report.warnings.clone();
+                self.state.warnings = outcome.warnings.clone();
                 self.state.status = export_status(
-                    report.drawn_rects,
-                    report.removed_glyphs,
+                    outcome.drawn_rects,
+                    outcome.removed_glyphs,
                     &out,
                     &audit,
                     blocked,
-                    report.warnings.first().map(String::as_str),
+                    outcome.warnings.first().map(String::as_str),
                 );
             }
             Err(e) => self.report(Err(e)),
@@ -742,7 +742,7 @@ impl RedactApp {
             dialog = dialog.set_directory(dir);
         }
         if let Some(path) = dialog.pick_file() {
-            self.state.booking_path = Some(path);
+            self.state.config.booking_list = Some(path);
             self.analyze();
         }
     }
@@ -776,11 +776,7 @@ impl RedactApp {
             "review.json",
         );
         if let Some(path) = dialog.save_file() {
-            let result = self
-                .state
-                .to_review_file()
-                .to_json()
-                .and_then(|json| std::fs::write(&path, json).map_err(Into::into));
+            let result = self.state.save_review_file(&path);
             self.report(result);
         }
     }
@@ -1197,6 +1193,14 @@ mod tests {
 
     use redact_core::Rect;
 
+    /// Einstellungen, wie sie `redact-rs --gui --patterns iban_de` erzeugt.
+    fn iban_only() -> Config {
+        Config {
+            patterns: vec!["iban_de".to_string()],
+            ..Config::default()
+        }
+    }
+
     // ----------------------------------------------------------- Tastatur
 
     /// A1: Steht der Fokus in einem Textfeld, darf **keine** Taste bis in den
@@ -1245,7 +1249,7 @@ mod tests {
     /// Und derselbe Fall einmal ganz konkret, mit echtem Zustand.
     #[test]
     fn backspace_in_a_text_field_does_not_delete_the_selected_region() {
-        let mut app = RedactApp::silent(Vec::new());
+        let mut app = RedactApp::silent(Config::default());
         app.state
             .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
         let before = app.state.regions.clone();
@@ -1397,7 +1401,7 @@ mod tests {
     /// Strg+Z und Strg+Y wirken auf den echten Zustand.
     #[test]
     fn undo_and_redo_run_through_the_keyboard() {
-        let mut app = RedactApp::silent(Vec::new());
+        let mut app = RedactApp::silent(Config::default());
         app.state
             .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
         assert_eq!(app.state.regions.len(), 1);
@@ -1426,7 +1430,7 @@ mod tests {
     #[test]
     fn toolbar_actions_change_the_state() {
         let ctx = egui::Context::default();
-        let mut app = RedactApp::silent(vec!["iban_de".to_string()]);
+        let mut app = RedactApp::silent(iban_only());
         app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
         assert!(app.state.is_loaded());
 
@@ -1463,7 +1467,7 @@ mod tests {
     /// Der Zustand der Leiste folgt dem Zustand der Anwendung.
     #[test]
     fn the_toolbar_context_mirrors_the_application() {
-        let mut app = RedactApp::silent(vec!["iban_de".to_string()]);
+        let mut app = RedactApp::silent(iban_only());
         let empty = app.tool_context();
         assert!(!empty.loaded);
         assert!(!empty.can_undo);
@@ -1499,7 +1503,7 @@ mod tests {
     #[test]
     fn a_whole_frame_draws_in_both_themes() {
         let ctx = egui::Context::default();
-        let app = std::cell::RefCell::new(RedactApp::silent(vec!["iban_de".to_string()]));
+        let app = std::cell::RefCell::new(RedactApp::silent(iban_only()));
 
         for theme in crate::theme::THEMES {
             app.borrow_mut().theme = theme;
@@ -1558,7 +1562,7 @@ mod tests {
     /// Weg. `may_discard` fragt dafür `AppState::has_manual_work` ab.
     #[test]
     fn may_discard_passes_straight_through_without_hand_work() {
-        let mut app = RedactApp::new(vec!["iban_de".to_string()]);
+        let mut app = RedactApp::new(iban_only());
         // Frisch: nichts zu verlieren, also kein Dialog (sonst hinge der Test).
         assert!(app.may_discard("Test"));
 
@@ -1579,7 +1583,7 @@ mod tests {
     #[test]
     fn a_declined_drop_leaves_everything_untouched() {
         let ctx = egui::Context::default();
-        let app = std::cell::RefCell::new(RedactApp::new(vec!["iban_de".to_string()]));
+        let app = std::cell::RefCell::new(RedactApp::new(iban_only()));
         app.borrow_mut()
             .open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
         app.borrow_mut()
@@ -1619,7 +1623,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // Dokument A: Review speichern, wie es der Knopf „Review speichern“ tut.
-        let mut a = RedactApp::silent(vec!["iban_de".to_string()]);
+        let mut a = RedactApp::silent(iban_only());
         a.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "a.pdf");
         a.state
             .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
@@ -1633,7 +1637,7 @@ mod tests {
         );
 
         // Dokument B ist ein anderes — ein einzelnes leeres Blatt genügt.
-        let mut b = RedactApp::silent(vec!["iban_de".to_string()]);
+        let mut b = RedactApp::silent(iban_only());
         b.open_bytes_and_analyze(&one_page_pdf(), "b.pdf");
         assert!(b.state.is_loaded());
         let before = b.state.regions.clone();
@@ -1697,7 +1701,7 @@ mod tests {
 
     #[test]
     fn analyze_without_document_sets_status_instead_of_failing() {
-        let mut app = RedactApp::new(vec!["iban_de".to_string()]);
+        let mut app = RedactApp::new(iban_only());
         app.analyze();
         assert!(app.state.status.contains("PDF"));
         assert!(app.error.is_none());
@@ -1824,7 +1828,7 @@ mod tests {
 
     #[test]
     fn apply_drop_opens_a_pdf_from_bytes_and_notes_ignored_files() {
-        let mut app = RedactApp::new(vec!["iban_de".to_string()]);
+        let mut app = RedactApp::new(iban_only());
         app.apply_drop(DropAction::OpenBytes {
             name: "auszug.pdf".to_string(),
             bytes: std::sync::Arc::from(&redact_pdf::testing::demo_statement()[..]),

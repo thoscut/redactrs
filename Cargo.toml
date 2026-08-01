@@ -14,6 +14,7 @@ redact-core = { path = "crates/redact-core" }
 redact-pdf = { path = "crates/redact-pdf" }
 redact-patterns = { path = "crates/redact-patterns" }
 redact-booking = { path = "crates/redact-booking" }
+redact-pipeline = { path = "crates/redact-pipeline" }
 redact-gui = { path = "crates/redact-gui" }
 
 lopdf = { version = "0.34", default-features = false, features = ["nom_parser"] }
