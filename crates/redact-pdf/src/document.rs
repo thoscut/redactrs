@@ -132,6 +132,14 @@ const MAX_LEGACY_STREAM_BYTES: usize = 16 * 1024 * 1024;
 /// Anteil nicht druckbarer Bytes, ab dem eine Nutzlast als Binärdaten gilt.
 const BINARY_RATIO: f64 = 0.10;
 
+/// Wie viele Bytes vom Anfang eines Streams für die Entscheidung
+/// „Nutzlast oder Syntax?“ betrachtet werden.
+///
+/// Dieselbe Zahl dient als Größe der Vorprobe in [`Prescan::account`]: mehr
+/// auszupacken, nur um zu klassifizieren, wäre genau die Speicheranforderung,
+/// die diese Vorprüfung verhindern soll.
+const BINARY_SAMPLE_BYTES: u64 = 64 * 1024;
+
 /// Tiefengrenze für Nutzlasten, die wie Binärdaten aussehen.
 ///
 /// Auch sie werden gezählt — sonst genügte es, einen Content-Stream mit
@@ -144,9 +152,15 @@ const BINARY_RATIO: f64 = 0.10;
 /// Fehlalarm auslöst.
 ///
 /// Dass dieser Wert über [`Limits::max_nesting_depth`] liegt, ist kein
-/// Versehen: Nutzlast wird von `lopdf` nicht als PDF-Syntax gelesen. Käme es
-/// doch dazu, bliebe das Schlimmste, dass `lopdf` das Objekt fallen lässt —
-/// abstürzen kann es seit 0.42 nicht mehr.
+/// Versehen, aber es hat einen Preis, und der ist gemessen: ein
+/// Seiteninhalt mit Tiefe 150 und ein paar tausend Nullbytes am Ende sieht
+/// nach Nutzlast aus, kommt hier also durch — und `lopdf` liest ihn trotzdem
+/// als Seiteninhalt und lässt ihn fallen, weil seine eigene Grenze bei 100
+/// liegt. Abstürzen kann es dabei seit 0.42 nicht mehr; herauskommen würde
+/// aber eine Seite, deren Text nie jemand gesehen hat. Genau diesen Fall
+/// fängt [`crate::content::scan_page`] ab: dort ist ein Content-Stream ohne
+/// eine einzige Operation ein **Fehler**, keine Warnung. Der Test dazu ist
+/// `resource_bombs::a_page_whose_content_cannot_be_decoded_ends_the_run`.
 const MAX_BINARY_NESTING_DEPTH: usize = 256;
 
 /// Prüft die Rohbytes einer Datei, *bevor* `lopdf` sie zu sehen bekommt.
@@ -264,7 +278,14 @@ impl Prescan<'_> {
         Ok(())
     }
 
-    /// Verbucht einen Stream und untersucht ihn, wenn er später geparst wird.
+    /// Verbucht einen Stream und untersucht ihn.
+    ///
+    /// **Das Stream-Dictionary entscheidet hier nichts.** Es steht in der
+    /// Datei, die geprüft werden soll; wer sie baut, schreibt jeden Schlüssel
+    /// hinein, den er braucht. Über Budget und Tiefenprüfung entscheidet
+    /// deshalb ausschließlich der *Inhalt* des ausgepackten Streams — siehe
+    /// [`looks_binary`]. Aus dem Dictionary wird nur die Filterkette gelesen,
+    /// und die muss stimmen, sonst ließe sich der Stream gar nicht auspacken.
     fn account(&mut self, dict: &[u8], payload: &[u8]) -> Result<()> {
         let filters = filter_names(dict);
         // Nur diese Filter kann `lopdf` auspacken. Alles andere (DCT, JPX,
@@ -286,47 +307,59 @@ impl Prescan<'_> {
             .max_decompressed_bytes
             .saturating_sub(self.decompressed);
         let parsed_room = self.limits.max_parsed_bytes.saturating_sub(self.parsed);
-        // Solange das Dictionary nichts Gegenteiliges sagt, könnte hier
-        // PDF-Syntax stehen — dann gilt sofort das engere Budget, und die
-        // Bombe fliegt auf, bevor sie 16 MB belegt hat.
-        let maybe_syntax = !marked_binary(dict);
-        let room = if maybe_syntax {
-            total_room.min(parsed_room)
-        } else {
-            total_room
-        };
 
-        let mut decoded = self.decode(&filters, payload, room)?;
-        if let Some((data, true)) = &decoded {
-            if maybe_syntax && looks_binary(data) {
-                // Doch Binärdaten. Für die zählt nur das große Budget, also
-                // noch einmal messen — sonst wären sie zu klein verbucht.
-                decoded = self.decode(&filters, payload, total_room)?;
-            }
-        }
+        // Nutzlast oder Syntax? Dafür genügt der Anfang: [`looks_binary`]
+        // betrachtet ohnehin nur die ersten [`BINARY_SAMPLE_BYTES`]. Erst
+        // wenn diese Frage beantwortet ist, steht fest, welches Budget gilt —
+        // und damit, wie viel überhaupt ausgepackt werden darf.
+        let flate_only =
+            !filters.is_empty() && filters.iter().all(|f| f.as_slice() == b"FlateDecode");
+        let (binary, decoded) = if flate_only {
+            let probe = self.decode(&filters, payload, total_room.min(BINARY_SAMPLE_BYTES))?;
+            let binary = match &probe {
+                Some((data, _)) => looks_binary(data),
+                None => looks_binary(payload),
+            };
+            // Syntax bekommt sofort das enge Budget: die Bombe fliegt auf,
+            // bevor sie mehr als `max_parsed_bytes` belegt hat.
+            let room = if binary {
+                total_room
+            } else {
+                total_room.min(parsed_room)
+            };
+            (binary, self.decode(&filters, payload, room)?)
+        } else {
+            // Altlast-Filter werden nur einmal ausgepackt — ein zweiter Lauf
+            // durch `lopdf` wäre bei LZW teurer als die Klassifikation wert
+            // ist. Die Rohgröße begrenzt [`MAX_LEGACY_STREAM_BYTES`].
+            let decoded = self.decode(&filters, payload, total_room)?;
+            let binary = match &decoded {
+                Some((data, _)) => looks_binary(data),
+                None => looks_binary(payload),
+            };
+            (binary, decoded)
+        };
 
         let data = decoded
             .as_ref()
             .map(|(d, _)| d.as_slice())
             .unwrap_or(payload);
-        let binary = looks_binary(data);
-        let syntax = maybe_syntax && !binary;
-        self.charge(data.len() as u64, syntax)?;
+        self.charge(data.len() as u64, !binary)?;
 
-        // Bilddaten sind der einzige Fall, in dem das Überspringen *belegbar*
-        // ist: `lopdf::Stream::decompressed_content` verweigert Streams mit
-        // `/Subtype /Image`, sie werden also nie zu Objekten oder Operatoren.
-        // Alles andere wird gezählt — sonst genügte ein `/Length1` im
-        // Dictionary, um die Tiefenprüfung zu umgehen.
-        if !is_image(dict) {
-            let limit = if binary {
-                MAX_BINARY_NESTING_DEPTH
-            } else {
-                self.limits.max_nesting_depth
-            };
-            self.walk(data, false, limit)?;
-        }
-        Ok(())
+        // **Jeder** auspackbare Stream wird durchlaufen, auch einer, der sich
+        // als Bild ausgibt. Früher stand hier eine Ausnahme für
+        // `/Subtype /Image` mit der Begründung, `lopdf` weigere sich, solche
+        // Streams auszupacken. Das galt für `lopdf` 0.34 und ist seit 0.36
+        // nicht mehr wahr: `Stream::decompressed_content` prüft `/Subtype`
+        // nicht mehr, und `Document::get_page_content` packt einen
+        // Seiteninhalt mit `/Subtype /Image` ganz normal aus. Ein Dictionary
+        // ist ohnehin kein Beleg — es gehört dem Angreifer.
+        let limit = if binary {
+            MAX_BINARY_NESTING_DEPTH
+        } else {
+            self.limits.max_nesting_depth
+        };
+        self.walk(data, false, limit)
     }
 
     /// Packt einen Stream aus — speicherbegrenzt.
@@ -400,7 +433,11 @@ impl Prescan<'_> {
                 return Err(RedactError::Pdf(format!(
                     "die zu parsenden Streams (Seiteninhalt, Objekt-Streams) \
                      überschreiten das Budget von {} MB. Beim Parsen wird \
-                     daraus ein Vielfaches an Arbeitsspeicher.",
+                     daraus ein Vielfaches an Arbeitsspeicher. Ob ein Stream \
+                     hierher zählt, entscheidet sein Inhalt: sieht er wie \
+                     PDF-Syntax aus statt wie Nutzlast, gilt dieses engere \
+                     Budget. Ein wirklich so großes Dokument lässt sich mit \
+                     --max-parsed-mb durchlassen.",
                     self.limits.max_parsed_bytes / (1024 * 1024)
                 )));
             }
@@ -468,39 +505,16 @@ fn filter_names(dict: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-/// Ist das ein Bild-Stream?
+/// Sieht der Stream nach Nutzlast statt nach PDF-Syntax aus?
 ///
-/// Für die gilt eine belegbare Aussage: `lopdf` weigert sich, sie auszupacken
-/// (`Stream::decompressed_content` liefert `Error::Type`, sobald `/Subtype`
-/// gleich `/Image` ist). Ihr Inhalt wird deshalb nie zu Objekten oder
-/// Operatoren und kann auch keine Verschachtelung verstecken.
-fn is_image(dict: &[u8]) -> bool {
-    find_from(dict, b"/Image", 0).is_some()
-}
-
-/// Sagt das Dictionary, dass hier Nutzlast statt Syntax liegt?
-///
-/// Wird nur für die *Buchhaltung* benutzt: solche Streams zählen gegen das
-/// große Budget, nicht gegen das enge für geparste Bytes. Für die
-/// Tiefenprüfung taugt das Dictionary nicht als Kriterium — ein Angreifer
-/// schreibt sich jeden dieser Schlüssel selbst hinein.
-fn marked_binary(dict: &[u8]) -> bool {
-    const MARKERS: &[&[u8]] = &[
-        b"/Image",
-        b"/XRef",
-        b"/Metadata",
-        b"/EmbeddedFile",
-        b"/Length1",
-        b"/Type1C",
-        b"/CIDFontType0C",
-        b"/OpenType",
-    ];
-    MARKERS.iter().any(|m| find_from(dict, m, 0).is_some())
-}
-
-/// Notbremse für Streams, die das Dictionary nicht als Binärdaten ausweist.
+/// **Das einzige Kriterium, das nicht dem Angreifer gehört.** Ein Dictionary
+/// lässt sich beschriften, wie man will — `/Subtype /Image`, `/Length1`,
+/// `/Metadata`: alles frei wählbar, alles ohne Wirkung auf das, was `lopdf`
+/// später wirklich tut. Der ausgepackte Inhalt lässt sich dagegen nicht
+/// fälschen, ohne aufzuhören, das zu sein, was er vorgibt: wer PDF-Syntax
+/// unterbringen will, muss druckbare Zeichen schreiben.
 fn looks_binary(data: &[u8]) -> bool {
-    let sample = &data[..data.len().min(64 * 1024)];
+    let sample = &data[..data.len().min(BINARY_SAMPLE_BYTES as usize)];
     if sample.is_empty() {
         return false;
     }
@@ -1283,11 +1297,75 @@ mod tests {
 
     #[test]
     fn binary_streams_are_recognised() {
-        assert!(marked_binary(b"<< /Subtype /Image /Width 10 >>"));
-        assert!(marked_binary(b"<< /Length1 4711 >>"));
-        assert!(!marked_binary(b"<< /Length 10 >>"));
         assert!(looks_binary(&[0u8, 1, 2, 3, 4, 5, 6, 7]));
         assert!(!looks_binary(b"BT /F1 12 Tf (Hallo) Tj ET"));
+    }
+
+    /// Ein Content-Stream bleibt Syntax, egal was im Dictionary steht.
+    ///
+    /// Früher entschied das Dictionary: `/Image`, `/Length1`, `/Metadata` und
+    /// fünf weitere Zeichenketten genügten, um gegen das große statt gegen das
+    /// enge Budget verbucht zu werden — und ein `/Image` irgendwo schaltete
+    /// zusätzlich die Tiefenprüfung ab. Beides gehörte dem, der die Datei
+    /// baut.
+    #[test]
+    fn the_dictionary_does_not_decide_which_budget_applies() {
+        let payload = b"0 0 0 rg\n".repeat(4096); // 36 kB Syntax
+        let limits = Limits {
+            max_nesting_depth: 100,
+            max_decompressed_bytes: 1024 * 1024,
+            max_parsed_bytes: 16 * 1024,
+        };
+        for dict in [
+            "",
+            " /Harmlos /Image",
+            " /Subtype /Image",
+            " /Length1 4711",
+            " /Type /Metadata",
+            " /Type /XRef",
+        ] {
+            let raw = file_with_stream(dict, &payload);
+            let error = prescan(&raw, &limits).expect_err(&format!("Dictionary „{dict}“"));
+            assert!(
+                error.to_string().contains("zu parsenden Streams"),
+                "Dictionary „{dict}“: {error}"
+            );
+        }
+    }
+
+    /// Dieselbe Frage für die Tiefenprüfung.
+    #[test]
+    fn the_dictionary_does_not_switch_off_the_depth_check() {
+        let mut payload = vec![b'['; 200];
+        payload.extend(std::iter::repeat_n(b']', 200));
+        for dict in ["", " /Harmlos /Image", " /Subtype /Image", " /Length1 4711"] {
+            let raw = file_with_stream(dict, &payload);
+            let error =
+                prescan(&raw, &Limits::default()).expect_err(&format!("Dictionary „{dict}“"));
+            assert!(
+                error.to_string().contains("Verschachtelungstiefe"),
+                "Dictionary „{dict}“: {error}"
+            );
+        }
+    }
+
+    /// Eine Datei mit genau einem Flate-Stream und frei wählbarem Dictionary.
+    fn file_with_stream(extra_dict: &str, payload: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(payload).expect("komprimierbar");
+        let packed = encoder.finish().expect("komprimierbar");
+        let mut out = b"%PDF-1.7\n1 0 obj\n".to_vec();
+        out.extend_from_slice(
+            format!(
+                "<< /Filter /FlateDecode /Length {}{extra_dict} >>\nstream\n",
+                packed.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&packed);
+        out.extend_from_slice(b"\nendstream\nendobj\n%%EOF\n");
+        out
     }
 
     // -----------------------------------------------------------------------

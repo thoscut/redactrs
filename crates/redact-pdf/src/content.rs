@@ -37,7 +37,163 @@ use crate::matrix::Matrix;
 use crate::ops::{PathSeg, Rgb, Stroke};
 
 /// Maximale Rekursionstiefe für verschachtelte Form-XObjects.
+///
+/// Begrenzt die **Tiefe**, nicht die **Breite** — und die Breite ist die
+/// gefährlichere Größe. Sieben Ebenen, in denen jedes Form-XObject dasselbe
+/// Unterobjekt *n*-mal zeichnet, ergeben n⁷ Durchläufe: bei n = 8 sind das
+/// über zwei Millionen, aus einer Datei von 2 368 Byte, die jede einzelne
+/// hier dokumentierte Grenze einhält. Dagegen hilft keine Tiefengrenze,
+/// sondern nur das Aufwandskonto [`Budget`].
 const MAX_FORM_DEPTH: usize = 8;
+
+/// Grundausstattung des Aufwandskontos: so viele Zeichenoperationen darf ein
+/// Seiten-Scan immer auswerten, unabhängig davon, wie groß das Dokument ist.
+///
+/// Reichlich bemessen, weil hier echte Gestaltung hineinfällt: ein
+/// Tabellenraster, das dieselbe Zelle hundertmal zeichnet, ein Formular mit
+/// vielen platzierten Bausteinen. Die dichteste gemessene Seite eines
+/// 500-seitigen Kontoauszugs braucht rund 200 Operationen — Faktor 5 000.
+const BASE_OPERATIONS: usize = 1_000_000;
+
+/// Wie oft der Interpreter denselben Strom im Mittel durchlaufen darf.
+///
+/// Der springende Punkt bei einer Fächerung ist nicht die Menge an Inhalt,
+/// sondern die **Vervielfachung**: aus 400 Byte Zeichenanweisungen werden
+/// zwei Millionen Durchläufe. Deshalb wächst das Konto mit dem Inhalt, den
+/// die Datei tatsächlich mitbringt — jeder Strom, der zum ersten Mal
+/// dekodiert wird, bringt seine Operationen mal diesem Faktor als Guthaben
+/// ein.
+///
+/// Damit steht diese Grenze nicht quer zu `--max-parsed-mb`: wer das Budget
+/// für geparste Streams anhebt, hebt das Aufwandskonto automatisch mit an,
+/// weil mehr Inhalt auch mehr Guthaben bedeutet. Eine Fächerung profitiert
+/// davon nicht — sie bringt ja gerade keinen zusätzlichen Inhalt mit.
+const MAX_AMPLIFICATION: usize = 16;
+
+/// Wie viele Glyphen ein einzelner Seiten-Scan liefern darf.
+///
+/// Anders als das Operationskonto eine **feste Decke**, und zwar mit Absicht:
+/// dies ist die eigentliche Speichergröße der Textextraktion. Jede Glyphe wird
+/// als [`GlyphItem`] gehalten (Originalbytes, Text, Kasten, Grundlinie) und
+/// von [`crate::extract`] noch einmal als `Glyph` kopiert. Gemessen (Release,
+/// ein Seiteninhalt knapp unter dem Parse-Budget): 14,6 Mio. Glyphen auf
+/// **einer** Seite → 9 306 MB Spitzenspeicher, also rund 640 Byte je Glyphe.
+/// Ein Budget, das mit der erlaubten Dateigröße mitwüchse, wüchse hier also
+/// in den zweistelligen Gigabytebereich — genau das soll nicht passieren.
+///
+/// Eine Million Zeichen auf einer Seite ist keine Seite mehr. Eine dichte
+/// A4-Textseite trägt 3 000–6 000 Zeichen; die dichteste gemessene Seite eines
+/// 500-seitigen Kontoauszugs 6 000. Faktor 160 Luft.
+const MAX_GLYPHS_PER_SCAN: usize = 1_000_000;
+
+/// Aufwandskonto eines Seiten-Scans.
+///
+/// Die dokumentierten Grenzen für Eingabedateien messen **Bytes**. Was der
+/// Speicher wirklich kostet, sind aber *Interpretationen*: eine Datei von
+/// 2 368 Byte hält jede Byte-Grenze ein und erzeugt trotzdem zwei Millionen
+/// Durchläufe durch dieselben acht Ströme (siehe [`MAX_FORM_DEPTH`]). Deshalb
+/// zählt dieses Konto das, was tatsächlich anfällt, und wächst mit dem
+/// Inhalt, den die Datei mitbringt — nicht mit dem, was sie daraus macht.
+///
+/// Ist es leer, wird der Scan **abgebrochen und die Datei abgelehnt** — nicht
+/// gewarnt. Eine Seite, deren Text nur zum Teil durchsucht wurde, darf nicht
+/// als Erfolg enden: der ungeprüfte Rest ist genau der, in dem das Geheimnis
+/// stehen kann.
+#[derive(Debug)]
+struct Budget {
+    /// Verbleibendes Guthaben an Zeichenoperationen.
+    operations: usize,
+    glyphs: usize,
+    /// Ströme, deren Inhalt schon einmal Guthaben eingebracht hat. Ein
+    /// zweites Mal zählt er nicht — sonst finanzierte die Fächerung sich
+    /// selbst.
+    credited: HashSet<ObjectId>,
+    /// Begründung, sobald etwas aufgebraucht ist.
+    exceeded: Option<String>,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self {
+            operations: BASE_OPERATIONS,
+            glyphs: MAX_GLYPHS_PER_SCAN,
+            credited: HashSet::new(),
+            exceeded: None,
+        }
+    }
+}
+
+impl Budget {
+    /// Schreibt den Inhalt eines Stroms gut — einmal je Strom.
+    ///
+    /// `id` ist `None` für den Seitenstrom selbst; der wird ohnehin nur einmal
+    /// dekodiert.
+    fn credit(&mut self, id: Option<ObjectId>, operations: usize) {
+        if let Some(id) = id {
+            if !self.credited.insert(id) {
+                return;
+            }
+        }
+        self.operations = self
+            .operations
+            .saturating_add(operations.saturating_mul(MAX_AMPLIFICATION));
+    }
+
+    /// Verbucht eine Operation. `false` heißt: sofort aussteigen.
+    fn operation(&mut self) -> bool {
+        if self.exceeded.is_some() {
+            return false;
+        }
+        match self.operations.checked_sub(1) {
+            Some(rest) => {
+                self.operations = rest;
+                true
+            }
+            None => {
+                self.exceeded = Some(format!(
+                    "Der Seiteninhalt wird um mehr als das {MAX_AMPLIFICATION}-fache \
+                     vervielfacht: es sind mehr Zeichenoperationen auszuwerten, als der \
+                     Inhalt der Datei hergibt. So etwas entsteht nicht durch einen langen \
+                     Text, sondern dadurch, dass wenige Form-XObjects einander vielfach \
+                     zeichnen — aus wenigen Kilobyte werden Millionen Durchläufe. Die \
+                     Datei wird abgelehnt."
+                ));
+                false
+            }
+        }
+    }
+
+    /// Verbucht eine Glyphe. `false` heißt: sofort aussteigen.
+    fn glyph(&mut self) -> bool {
+        if self.exceeded.is_some() {
+            return false;
+        }
+        match self.glyphs.checked_sub(1) {
+            Some(rest) => {
+                self.glyphs = rest;
+                true
+            }
+            None => {
+                self.exceeded = Some(format!(
+                    "Eine Seite dieses Dokuments setzt mehr als {MAX_GLYPHS_PER_SCAN} \
+                     Zeichen. Eine dichte Textseite trägt einige tausend; diese Menge \
+                     entsteht nur, wenn derselbe Text vielfach gezeichnet wird. Beim \
+                     Vermessen der Zeichen würde daraus ein zweistelliges Gigabyte \
+                     Arbeitsspeicher. Die Datei wird abgelehnt."
+                ));
+                false
+            }
+        }
+    }
+
+    /// Der Befund, falls das Konto gerissen wurde.
+    fn result(&self) -> Result<()> {
+        match &self.exceeded {
+            Some(message) => Err(RedactError::Pdf(message.clone())),
+            None => Ok(()),
+        }
+    }
+}
 
 /// Ab wie vielen **unlesbaren** Zeichen ein Font ohne `/ToUnicode` gemeldet
 /// wird — unabhängig davon, wie klein ihr Anteil ist.
@@ -621,6 +777,12 @@ pub(crate) fn cmyk_to_rgb(c: f64, m: f64, y: f64, k: f64) -> Rgb {
 
 /// Scannt den Content-Stream einer Seite inklusive Form-XObjects und der
 /// Erscheinungsströme (`/AP`) ihrer Annotationen.
+///
+/// Gibt `Err` zurück, sobald der Seiteninhalt **nicht vollständig durchsucht
+/// werden konnte** — ein Strom, der sich nicht zerlegen lässt, oder einer, der
+/// das Aufwandskonto [`Budget`] sprengt. Eine solche Seite darf nicht als
+/// Erfolg durchgehen: „0 Schwärzungen, Rückgabewert 0“ liest sich wie
+/// „nichts gefunden, also sauber“, und genau das wäre es dann nicht.
 pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
     let content_data = doc
         .get_page_content(page_id)
@@ -632,24 +794,37 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
     // [`crate::ops::decode_content`] schneidet die Bilder vorher heraus.
     let operations = crate::ops::decode_content(&content_data);
 
+    // Früher eine Warnung, jetzt ein Abbruch. Der Unterschied ist der
+    // Rückgabewert: eine Warnung auf stderr macht aus einem Lauf, der den Text
+    // dieser Seite nachweislich nie gesehen hat, trotzdem eine Datei, die im
+    // Stapelbetrieb als „verarbeitet“ zählt. Gemessen an einer 1 122 Byte
+    // großen Datei: „Schwärzungen: 0“, Rückgabewert 0 — und die Kontonummer
+    // stand unverändert in der Ausgabe.
+    if operations.is_empty() && has_tokens(&content_data) {
+        return Err(RedactError::Pdf(
+            "Der Content-Stream dieser Seite ließ sich nicht in Operationen zerlegen; \
+             ihr Text wurde nicht durchsucht und kann deshalb nicht geschwärzt worden \
+             sein. Die Datei wird abgelehnt, statt eine ungeprüfte Seite als geschwärzt \
+             auszugeben."
+                .into(),
+        ));
+    }
+
     let resources = page_resources(doc, page_id);
     let mut result = ScanResult::default();
-    if operations.is_empty() && has_tokens(&content_data) {
-        result.warn(
-            "Der Content-Stream dieser Seite ließ sich nicht in Operationen zerlegen; \
-             ihr Text wurde nicht durchsucht und kann deshalb nicht geschwärzt worden sein."
-                .to_string(),
-        );
-    }
-    interpret(
+    let mut budget = Budget::default();
+    budget.credit(None, operations.len());
+    scan_with_budget(
         doc,
         &operations,
         StreamKey::Page,
         resources.as_ref(),
         Matrix::IDENTITY,
+        &mut budget,
         &mut result,
     );
-    scan_annotations(doc, page_id, resources.as_ref(), &mut result);
+    scan_annotations(doc, page_id, resources.as_ref(), &mut budget, &mut result);
+    budget.result()?;
     Ok(result)
 }
 
@@ -718,12 +893,41 @@ impl FontDecodeStats {
 /// Damit können Aufrufer den Stream selbst dekodieren (z. B. um Inline-Bilder
 /// vorher herauszutrennen) und trotzdem exakt dieselbe Zustandsführung
 /// benutzen wie [`scan_page`].
+///
+/// Gibt `Err` zurück, wenn das Aufwandskonto [`Budget`] gerissen wurde — der
+/// Durchlauf ist dann unvollständig, und was der Interpreter nicht gesehen
+/// hat, kann auch nicht geschwärzt werden.
 pub fn interpret(
     doc: &Document,
     operations: &[Operation],
     stream: StreamKey,
     resources: Option<&Dictionary>,
     initial_ctm: Matrix,
+    sink: &mut dyn ContentSink,
+) -> Result<()> {
+    let mut budget = Budget::default();
+    budget.credit(None, operations.len());
+    scan_with_budget(
+        doc,
+        operations,
+        stream,
+        resources,
+        initial_ctm,
+        &mut budget,
+        sink,
+    );
+    budget.result()
+}
+
+/// Der gemeinsame Kern von [`interpret`] und [`scan_page`] — mit einem
+/// Aufwandskonto, das über mehrere Ströme derselben Seite hinweg gilt.
+fn scan_with_budget(
+    doc: &Document,
+    operations: &[Operation],
+    stream: StreamKey,
+    resources: Option<&Dictionary>,
+    initial_ctm: Matrix,
+    budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
     let fonts = fonts_from_resources(doc, resources);
@@ -739,6 +943,7 @@ pub fn interpret(
         0,
         &mut visiting,
         &mut stats,
+        budget,
         sink,
     );
     for warning in stats.warnings() {
@@ -780,10 +985,11 @@ pub fn page_resources(doc: &Document, page_id: ObjectId) -> Option<Dictionary> {
 /// Die Datensätze tragen [`StreamKey::Form`] mit der Objekt-Id des
 /// Erscheinungsstroms; die Schwärzung kann sie damit genauso neu schreiben wie
 /// ein gewöhnliches Form-XObject.
-pub fn scan_annotations(
+fn scan_annotations(
     doc: &Document,
     page_id: ObjectId,
     page_resources: Option<&Dictionary>,
+    budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
     let annots = doc
@@ -842,7 +1048,7 @@ pub fn scan_annotations(
             if !seen.insert(id) {
                 continue;
             }
-            scan_appearance(doc, id, rect, page_resources, sink);
+            scan_appearance(doc, id, rect, page_resources, budget, sink);
         }
     }
 }
@@ -889,6 +1095,7 @@ fn scan_appearance(
     id: ObjectId,
     rect: Option<Rect>,
     page_resources: Option<&Dictionary>,
+    budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
     let Ok(stream) = doc.get_object(id).and_then(|o| o.as_stream()) else {
@@ -910,6 +1117,7 @@ fn scan_appearance(
     if operations.is_empty() {
         return;
     }
+    budget.credit(Some(id), operations.len());
 
     let matrix = stream
         .dict
@@ -934,12 +1142,13 @@ fn scan_appearance(
         .cloned()
         .or_else(|| page_resources.cloned());
 
-    interpret(
+    scan_with_budget(
         doc,
         &operations,
         StreamKey::Form(id),
         resources.as_ref(),
         appearance_matrix(&matrix, bbox, rect),
+        budget,
         sink,
     );
 }
@@ -1191,6 +1400,7 @@ fn scan_operations(
     depth: usize,
     visiting: &mut HashSet<ObjectId>,
     stats: &mut FontDecodeStats,
+    budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
     scan_marked_text(doc, operations, stream, resources, sink);
@@ -1209,6 +1419,12 @@ fn scan_operations(
     let mut pending_clip: Option<bool> = None;
 
     for (op_index, op) in operations.iter().enumerate() {
+        // Jede Interpretation kostet — auch die im hundertsten Durchlauf
+        // desselben Form-XObjects. Ohne diese Zeile begrenzt
+        // [`MAX_FORM_DEPTH`] nur die Tiefe, und die Breite bleibt frei.
+        if !budget.operation() {
+            return;
+        }
         let cx = SinkContext {
             doc,
             resources,
@@ -1298,6 +1514,7 @@ fn scan_operations(
                     &cx,
                     &op.operator,
                     stats,
+                    budget,
                     sink,
                     graphics,
                 );
@@ -1444,6 +1661,7 @@ fn scan_operations(
                         depth,
                         visiting,
                         stats,
+                        budget,
                         sink,
                     );
                 }
@@ -1519,7 +1737,7 @@ fn scan_operations(
                 let Some(Object::Name(name)) = op.operands.first() else {
                     continue;
                 };
-                match load_xobject(doc, resources, name) {
+                match load_xobject(doc, resources, name, budget) {
                     // Kein solcher Eintrag: es wird nichts gezeichnet, also
                     // versteckt sich hier auch nichts.
                     XObjectEntry::Missing => {}
@@ -1582,6 +1800,7 @@ fn scan_operations(
                             depth + 1,
                             visiting,
                             stats,
+                            budget,
                             sink,
                         );
                         visiting.remove(&form_id);
@@ -1696,7 +1915,12 @@ enum XObjectEntry {
 /// Jeder Weg, auf dem hier nichts Brauchbares herauskommt, wird benannt statt
 /// verschwiegen: ein Form-XObject ohne `/Subtype` oder mit einem Filter, den
 /// niemand dekodieren kann, versteckt seinen Text sonst lautlos.
-fn load_xobject(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> XObjectEntry {
+fn load_xobject(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    name: &[u8],
+    budget: &mut Budget,
+) -> XObjectEntry {
     let label = String::from_utf8_lossy(name).into_owned();
     let entry = resources
         .and_then(|r| r.get(b"XObject").ok())
@@ -1743,6 +1967,9 @@ fn load_xobject(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> 
                 ));
             };
             let operations = crate::ops::decode_content(&data);
+            // Der Inhalt dieses Stroms bringt einmal Guthaben ein; jede
+            // weitere Platzierung zehrt nur noch davon.
+            budget.credit(Some(id), operations.len());
             if operations.is_empty() && has_tokens(&data) {
                 return XObjectEntry::Unusable(format!(
                     "Der Inhalt des Form-XObjects „{label}“ ließ sich nicht in Operationen \
@@ -1778,6 +2005,7 @@ fn scan_tiling_pattern(
     depth: usize,
     visiting: &mut HashSet<ObjectId>,
     stats: &mut FontDecodeStats,
+    budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
     let label = String::from_utf8_lossy(name).into_owned();
@@ -1839,6 +2067,7 @@ fn scan_tiling_pattern(
     if !visiting.insert(id) {
         return;
     }
+    budget.credit(Some(id), operations.len());
 
     sink.warn(format!(
         "Kachelmuster „{label}“ enthält Text. Er wird an der Stelle der ersten Kachel \
@@ -1875,6 +2104,7 @@ fn scan_tiling_pattern(
         depth + 1,
         visiting,
         stats,
+        budget,
         sink,
     );
 }
@@ -1893,6 +2123,7 @@ fn show_text(
     cx: &SinkContext,
     operator: &str,
     stats: &mut FontDecodeStats,
+    budget: &mut Budget,
     sink: &mut dyn ContentSink,
     emit_glyphs: bool,
 ) -> Option<ShowRecord> {
@@ -1920,6 +2151,12 @@ fn show_text(
         match element {
             Object::String(bytes, _) => {
                 for (code, text, nbytes) in font.charmap.decode(bytes) {
+                    // Innerhalb der Schleife, nicht erst danach: eine einzige
+                    // `Tj`-Operation kann Millionen Zeichen tragen, und jedes
+                    // davon wird als [`GlyphItem`] gehalten.
+                    if !budget.glyph() {
+                        break;
+                    }
                     stats.record(&ts.font_name, &font, &text);
                     let w0 = font.width(code, &text);
                     let is_space = nbytes == 1 && code == 32;

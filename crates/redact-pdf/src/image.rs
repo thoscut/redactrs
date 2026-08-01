@@ -185,7 +185,7 @@ pub fn redact_images(
     let mut form_pages: BTreeMap<ObjectId, BTreeSet<usize>> = BTreeMap::new();
     for (index, page_id) in pages.iter().enumerate() {
         let zones = zones_per_page.get(&index).unwrap_or(&no_zones);
-        let (placements, forms) = scan_page_images(doc, *page_id, zones);
+        let (placements, forms) = scan_page_images(doc, *page_id, zones)?;
         for placement in &placements {
             if let Target::XObject { id: Some(id), .. } = &placement.target {
                 image_pages.entry(*id).or_default().insert(index);
@@ -564,9 +564,9 @@ fn scan_page_images(
     doc: &Document,
     page_id: ObjectId,
     zones: &[Zone],
-) -> (Vec<Placement>, BTreeSet<ObjectId>) {
+) -> Result<(Vec<Placement>, BTreeSet<ObjectId>)> {
     let Ok(data) = doc.get_page_content(page_id) else {
-        return (Vec::new(), BTreeSet::new());
+        return Ok((Vec::new(), BTreeSet::new()));
     };
     let operations = crate::ops::decode_content(&data);
     let resources = crate::content::page_resources(doc, page_id);
@@ -576,6 +576,9 @@ fn scan_page_images(
         zones,
         resource_cache: Vec::new(),
     };
+    // Das Aufwandskonto des Interpreters gilt hier genauso: was der Scanner
+    // nicht zu Ende lesen konnte, darf nicht als „keine Bilder gefunden“
+    // durchgehen.
     crate::content::interpret(
         doc,
         &operations,
@@ -583,8 +586,8 @@ fn scan_page_images(
         resources.as_ref(),
         Matrix::IDENTITY,
         &mut collector,
-    );
-    (collector.placements, collector.forms)
+    )?;
+    Ok((collector.placements, collector.forms))
 }
 
 /// `/Width` × `/Height` laut Dictionary, ohne irgendetwas auszupacken.

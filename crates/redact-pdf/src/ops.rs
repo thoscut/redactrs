@@ -324,7 +324,7 @@ pub fn page_ops(doc: &Document, page_index: usize) -> Result<PageOps> {
         resources.as_ref(),
         Matrix::IDENTITY,
         &mut collector,
-    );
+    )?;
     Ok(collector.out)
 }
 

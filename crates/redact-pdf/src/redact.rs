@@ -294,24 +294,19 @@ impl PdfRedactor {
             // Formular ohne `/Subtype` — sind genau dann das Einzige, was den
             // Nutzer erreicht: „0 Schwärzungen, Exit 0“ liest sich sonst wie
             // „nichts gefunden, also sauber“.
-            let scan = match crate::content::scan_page(doc, *page_id) {
-                Ok(scan) => scan,
-                // Ohne Schwärzung auf dieser Seite ist ein unlesbarer Strom
-                // kein Grund, die ganze Datei scheitern zu lassen — gemeldet
-                // wird er trotzdem.
-                Err(e) if page_redactions.is_empty() => {
-                    push_warning(
-                        &mut report,
-                        format!(
-                            "Seite {} ließ sich nicht lesen ({e}); ihr Inhalt wurde nicht \
-                             durchsucht.",
-                            page_index + 1
-                        ),
-                    );
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
+            // Kein Sonderweg mehr für Seiten ohne Schwärzung. Früher wurde ein
+            // unlesbarer Strom dort nur als Warnung gemeldet und der Lauf lief
+            // weiter — mit dem Ergebnis „0 Schwärzungen, Rückgabewert 0“ für
+            // eine Seite, deren Text nie jemand gesehen hat. Ausgerechnet die
+            // Seiten ohne Treffer sind die, bei denen das Fehlen von Treffern
+            // etwas bedeuten soll.
+            let scan = crate::content::scan_page(doc, *page_id).map_err(|e| {
+                RedactError::Pdf(format!(
+                    "Seite {} ließ sich nicht lesen: {e} Ihr Inhalt wurde nicht \
+                     durchsucht; die Datei wird nicht als geschwärzt ausgegeben.",
+                    page_index + 1
+                ))
+            })?;
             for warning in &scan.warnings {
                 push_warning(&mut report, warning.clone());
             }
