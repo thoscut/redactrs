@@ -295,7 +295,7 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
 
     let mut changed = false;
     // Der Vorschlag für den Ersatztext kommt aus der Konfiguration
-    // (`--replace-with`), sonst aus [`crate::state::DEFAULT_REPLACEMENT`] —
+    // (`--replace-with`), sonst aus [`redact_core::DEFAULT_REPLACEMENT`] —
     // hier stand fest das englische „[REDACTED]“.
     let default_replacement = state.default_replacement();
     egui::ComboBox::from_label("Aktion")

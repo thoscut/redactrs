@@ -52,9 +52,10 @@ pub const PROTECTION_OVERRIDDEN: &str =
 /// Vorgabe in `crates/redact-cli/src/cli.rs`). In der Oberfläche stand hier
 /// fest `"[REDACTED]"` — englisch in einer deutschen Oberfläche und anders als
 /// das, was ein Lauf ohne `--gui` schreibt. Eine gemeinsame Konstante in
-/// `redact-core` wäre der bessere Ort; solange es sie nicht gibt, sichert der
-/// Test `the_replacement_default_matches_the_command_line` die Gleichheit.
-pub const DEFAULT_REPLACEMENT: &str = "[GESCHWÄRZT]";
+/// Es gibt sie inzwischen in `redact-core` — das ist der richtige Ort, weil
+/// Kommandozeile und Oberfläche denselben Wert brauchen und zwei Literale
+/// zwangsläufig auseinanderlaufen.
+pub use redact_core::DEFAULT_REPLACEMENT;
 
 /// Kleinster und größter erlaubter Zoomfaktor.
 pub const MIN_ZOOM: f32 = 0.25;
@@ -1109,10 +1110,10 @@ impl AppState {
     /// Oberfläche, anders als die Vorgabe der Kommandozeile, und
     /// `--replace-with` blieb wirkungslos.
     pub fn default_replacement(&self) -> String {
-        match &self.config.action {
-            Action::Replace(text) => text.clone(),
-            _ => DEFAULT_REPLACEMENT.to_string(),
-        }
+        // Über `Config::replacement()`, nicht über `action` allein: sonst ginge
+        // `--replace-with X` bei `--action blackout` verloren, und wer hier auf
+        // „Ersetzen" umstellt, bekäme die Vorgabe statt seines Textes.
+        self.config.replacement().to_string()
     }
 
     /// Ändert den Ersatztext einer Region — **ein** Verlaufseintrag je
@@ -3092,6 +3093,18 @@ mod tests {
             ..Config::default()
         });
         assert_eq!(state.default_replacement(), DEFAULT_REPLACEMENT);
+
+        // Und der zweite Teil desselben Befunds: `--replace-with` gilt auch
+        // dann, wenn die Schwärzungsart etwas anderes ist. Wer die Datei mit
+        // `--action blackout --replace-with "[IBAN]"` öffnet und dann in der
+        // Trefferliste auf „Ersetzen" umstellt, meint seinen Text — nicht die
+        // Vorgabe. Vorher las `default_replacement` nur `action` und verlor ihn.
+        let state = AppState::with_config(Config {
+            action: Action::Blackout,
+            replace_with: "[IBAN]".into(),
+            ..Config::default()
+        });
+        assert_eq!(state.default_replacement(), "[IBAN]");
     }
 
     /// Was nichts ändert, gehört nicht in den Verlauf: sonst klickt man
