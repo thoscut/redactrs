@@ -335,6 +335,75 @@ fn optional_content_properties_do_not_survive() {
     assert_no_leak(&out, "/OCProperties");
 }
 
+/// **Aufgabe #57.** `/OCProperties` zu entfernen macht die Ebenenverwaltung
+/// unerreichbar — die Ebene selbst nicht. Die Seite referenziert dasselbe
+/// `/OCG` über `/Resources /Properties`; so löst ein Betrachter `/BDC /OC`
+/// auf. Der Ebenenname ist frei wählbarer Text und trug hier denselben
+/// Klartext, der gerade aus dem Strom entfernt wurde.
+#[test]
+fn an_ocg_still_referenced_by_the_page_loses_its_name() {
+    let mut d = base();
+    let ocg = d.add(Object::Dictionary(dictionary! {
+        "Type" => "OCG",
+        "Name" => Object::String(
+            common::utf16be_bom(&format!("Ebene {SECRET}")),
+            StringFormat::Literal,
+        ),
+    }));
+    d.catalog_set(
+        "OCProperties",
+        Object::Dictionary(dictionary! {
+            "OCGs" => vec![Object::Reference(ocg)],
+            "D" => dictionary! { "ON" => vec![Object::Reference(ocg)] },
+        }),
+    );
+    // Der zweite Weg zur selben Ebene: über die Seitenressourcen.
+    let resources_id = d.resources_id;
+    d.doc
+        .get_dictionary_mut(resources_id)
+        .expect("Ressourcen")
+        .set(
+            "Properties",
+            Object::Dictionary(dictionary! { "MC0" => Object::Reference(ocg) }),
+        );
+    let pdf = d.finish();
+    assert_present(&pdf, "der Ebenenname");
+
+    let (out, meta) = pipeline(&pdf, &[whole_text_area()]);
+    assert!(meta.optional_content_removed);
+    assert_eq!(meta.optional_content_names_cleared, 1);
+    assert_no_leak(&out, "/OCG /Name über /Resources /Properties");
+}
+
+/// Dieselbe Ebene, aber als *direkt* eingebettetes Dictionary in den
+/// Ressourcen — ein `/OCG` muss kein indirektes Objekt sein.
+#[test]
+fn an_ocg_embedded_directly_in_the_resources_loses_its_name_too() {
+    let mut d = base();
+    let resources_id = d.resources_id;
+    d.doc
+        .get_dictionary_mut(resources_id)
+        .expect("Ressourcen")
+        .set(
+            "Properties",
+            Object::Dictionary(dictionary! {
+                "MC0" => Object::Dictionary(dictionary! {
+                    "Type" => "OCG",
+                    "Name" => Object::String(
+                        common::utf16be_bom(&format!("Ebene {SECRET}")),
+                        StringFormat::Literal,
+                    ),
+                }),
+            }),
+        );
+    let pdf = d.finish();
+    assert_present(&pdf, "der eingebettete Ebenenname");
+
+    let (out, meta) = pipeline(&pdf, &[whole_text_area()]);
+    assert_eq!(meta.optional_content_names_cleared, 1);
+    assert_no_leak(&out, "direkt eingebettetes /OCG /Name");
+}
+
 // ---------------------------------------------------------------------------
 // Seiten-/Metadata und die Gegenprobe
 // ---------------------------------------------------------------------------

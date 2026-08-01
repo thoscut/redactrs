@@ -129,6 +129,21 @@ pub struct Cli {
     #[arg(long, value_name = "MB", default_value_t = 16)]
     pub max_parsed_mb: u64,
 
+    /// Obergrenze für die gleichzeitig gehaltenen **dekodierten** Bildbytes.
+    ///
+    /// Eine Schwärzung auf einem Bild überschreibt dessen Bildpunkte, dafür
+    /// muss das Bild nach RGBA8 ausgepackt werden: 4 Byte je Bildpunkt. Ein
+    /// gewöhnlicher Schwarzweiß-Scan (`/BitsPerComponent 1`) wächst dabei um
+    /// den Faktor 32 — deshalb greifen `--max-decompressed-mb` und
+    /// `--max-parsed-mb` hier nicht, die zählen die Rohbytes des Streams.
+    ///
+    /// Reicht die Grenze nicht, bricht der Lauf mit einer Meldung ab, statt
+    /// die Speicheranforderung scheitern zu lassen. Sie deckt nicht den
+    /// gesamten Prozessbedarf ab: beim Umkodieren *eines* Bildes entstehen
+    /// vorübergehend rund anderthalb weitere Kopien.
+    #[arg(long, value_name = "MB", default_value_t = 256)]
+    pub max_image_mb: u64,
+
     /// Obergrenze für die Zahl der Trefferkandidaten in einer Datei.
     ///
     /// Die Konfliktauflösung wächst quadratisch mit dieser Zahl; ohne Grenze
@@ -209,6 +224,7 @@ impl Cli {
             action: self.action.to_action(&self.replace_with),
             padding: self.padding,
             allow_undecodable_images: self.allow_undecodable_images,
+            max_decoded_image_bytes: self.max_image_mb.saturating_mul(1024 * 1024),
             limits: self.limits(),
             max_candidates: self.max_candidates,
         }

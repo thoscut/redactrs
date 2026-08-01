@@ -38,8 +38,12 @@ use crate::content::{
 use crate::font::{font_from_dict, FontInfo};
 use crate::matrix::Matrix;
 
-/// Obergrenze für dekodierte Bilder (sonst frisst eine kaputte Datei den RAM).
-const MAX_IMAGE_PIXELS: u64 = 40_000_000;
+/// Obergrenze für dekodierte Bilder, **je Bild**.
+///
+/// Sie sagt nichts über die Summe: ein Dokument darf beliebig viele Bilder
+/// knapp unterhalb dieser Grenze enthalten. Was gleichzeitig gehalten werden
+/// darf, regelt [`crate::image::ImageOptions::max_decoded_bytes`].
+pub const MAX_IMAGE_PIXELS: u64 = 40_000_000;
 
 // ---------------------------------------------------------------------------
 // Datentypen
@@ -231,6 +235,11 @@ impl RasterImage {
             rgba: color.to_vec(),
             placeholder,
         }
+    }
+
+    /// Ein Platzhalter für ein Bild, das gar nicht erst geöffnet werden konnte.
+    pub fn placeholder() -> Self {
+        Self::solid([220, 220, 220, 255], true)
     }
 }
 
@@ -753,7 +762,11 @@ enum Payload {
 /// Schlägt irgendetwas fehl, entsteht eine einfarbige Platzhalterfläche — eine
 /// leere Seite wäre genau der Fehler, den wir beheben wollen. Der zweite
 /// Rückgabewert beschreibt in dem Fall, was schiefging.
-fn decode_image(
+///
+/// Öffentlich, weil [`crate::image`] genau **ein** Bild auspacken muss und
+/// nicht die ganze Seite: der Grund, aus dem es nicht ging, gehört wörtlich in
+/// die Fehlermeldung — „zu groß (8000x8000)“ ist etwas anderes als der Filter.
+pub fn decode_image(
     doc: &Document,
     resources: Option<&Dictionary>,
     dict: &Dictionary,

@@ -86,11 +86,21 @@ laufenden Prozess. Gegen den hilft kein Anwendungsprogramm.
 | davon: Streams, die geparst werden | 16 MB | `--max-parsed-mb` |
 | Trefferkandidaten je Datei | 100 000 | `--max-candidates` |
 | Rohgröße eines LZW-/ASCII85-Streams | 16 MB | fest |
+| Bildpunkte **je Bild** (Dekodieren) | 40 000 000 | fest |
+| gleichzeitig gehaltene **dekodierte** Bildbytes | 256 MB | `--max-image-mb` |
 
 Die Vorprüfung (`redact_pdf::document::prescan`) läuft über die **Rohbytes**,
 bevor `lopdf` die Datei zu sehen bekommt, und schließt die ausgepackten Streams
 mit ein. Sie muss davor laufen: der Stapelüberlauf beendet den Prozess, bevor
 irgendein Fehlerwert entstehen könnte.
+
+Die beiden letzten Zeilen sind eine **eigene** Klasse und stehen bewusst
+getrennt: `--max-decompressed-mb` und `--max-parsed-mb` verbuchen die
+*Rohbytes* eines Streams. Ein Bild, das geschwärzt wird, muss aber nach RGBA8
+ausgepackt werden — 4 Byte je Bildpunkt. Bei einem gewöhnlichen
+Schwarzweiß-Scan (`/DeviceGray`, `/BitsPerComponent 1`) liegt zwischen beidem
+der **Faktor 32**; die Rohbyte-Grenzen greifen dort also nicht. Siehe
+„Speicherbedarf der Bildschwärzung“ unter „Messungen“.
 
 ---
 
@@ -144,6 +154,55 @@ ein großes für alle Streams (Bilder, Schriften, eingebettete Dateien werden nu
 gespeichert) und ein sehr viel engeres für die Streams, die tatsächlich geparst
 werden. 16 MB × 62 ≈ 1 GB ist die Obergrenze, die daraus folgt.
 
+### Speicherbedarf der Bildschwärzung
+
+Eingaben: 1-Bit-Graustufenbilder (`/DeviceGray`, `/BitsPerComponent 1`,
+`/FlateDecode`) — die gewöhnliche Kodierung eines Schwarzweiß-Scans, Faktor 32
+zwischen roh und dekodiert. Je Zeile eine Schwärzung. „vorher“ ist der Stand
+vor Aufgabe #58.
+
+| Eingabe | Inhalt | vorher | nachher |
+|---|---|---|---|
+| 23 kB | 5 Bilder 6000×6000, 1 Seite | 8,3 s, **1 387 MB** | 6,3 s, **186 MB** |
+| 46 kB | 10 Bilder | 19,0 s, **2 761 MB** | 12,8 s, **186 MB** |
+| 92 kB | 20 Bilder | 34,3 s, **5 508 MB** | 25,5 s, **187 MB** |
+| 92 kB | 20 Bilder, **nur eines** geschwärzt | 24,1 s, **2 898 MB** | **1,4 s**, **186 MB** |
+| 92 kB | dito mit `--max-decompressed-mb 128 --max-parsed-mb 1` | 25,7 s, **2 898 MB** | 1,4 s, 186 MB |
+| 5,9 kB | 20 Seiten, **ein** geteiltes A4-300-dpi-Bild | 6,8 s, **705 MB** | 6,1 s, **49 MB** |
+| 61 kB | 40-seitiger A4-300-dpi-Scan, je 1 Schwärzung | 13,1 s, **1 369 MB** | 12,1 s, **50 MB** |
+| 183 kB | 40 Bilder, `ulimit -v 4194304` | **SIGABRT, Exit 134** | Exit 0, 51,0 s, **189 MB** |
+
+Der Normalfall — der 40-seitige Scan — kostete rund 34 MB je Seite, die bis
+zum Ende liegen blieben; ein 200-Seiten-Stapel wäre bei etwa 7 GB gelandet.
+Heute ist der Bedarf von der Seitenzahl unabhängig.
+
+Drei Ursachen, die sich multiplizierten, und was an ihre Stelle getreten ist:
+
+1. Die Bildschwärzung ließ sich die ganze Seite über `ops::page_ops` dekodieren
+   und griff sich daraus das eine Bild. 19 unbeteiligte Bilder kosteten so
+   2,9 GB. Heute trägt jede Bildplatzierung selbst, was zum Dekodieren nötig
+   ist, und es wird nur ausgepackt, was eine Schwärzung wirklich schneidet.
+2. Der Arbeitspuffer war eine *Kopie* der dekodierten Pixel, während das
+   Original noch stand — daher der Unterschied 5 508 MB (alle Bilder berührt)
+   zu 2 898 MB (eines berührt). Heute wird der dekodierte Puffer verbraucht,
+   nicht geklont.
+3. Alle Arbeitspuffer wurden über *alle* Seiten gesammelt und erst am Ende
+   geschrieben. Deshalb genügten 5,9 kB Datei für 705 MB. Heute wird jedes
+   Bild geschrieben und freigegeben, bevor das nächste ausgepackt wird.
+
+Die Zusicherung „kontrollierter Abbruch statt Speicherfehler“ ist damit auch
+für Bilder eingelöst. Zu eng gesetzt sieht das so aus:
+
+```
+$ redact-rs 40bilder.pdf -o out.pdf --manual-regions r.json --max-image-mb 64
+Fehler: PDF-Fehler: Bild /Im0 auf Seite 1 bräuchte 137 MB dekodierte
+Bildpunkte; zusammen mit den bereits gehaltenen 0 MB überschreitet das die
+Grenze von 64 MB. Der Lauf wird abgebrochen, bevor die Speicheranforderung
+scheitert — mit --max-image-mb lässt sich die Grenze bewusst anheben.
+$ echo $?
+1
+```
+
 ### Rechenzeit
 
 212-kB-Datei, 500 Seiten × 88 Zeilen, 264 000 Treffer:
@@ -161,6 +220,30 @@ bereits behaltenen geprüft. Eine knappe Megabyte-Datei genügte damit, um die
 Maschine eine Stunde zu beschäftigen. Bis das dort behoben ist (Bucketing nach
 Seite macht daraus O(n log n)), begrenzt die Kette die Zahl der
 Trefferkandidaten; der Lauf endet dann nach 4,7 s mit Exit 2.
+
+### Rechenzeit über die Seitenzahl (Aufgabe #59)
+
+Eine zweite, unabhängige quadratische Stelle — im Schreibpfad, nicht in der
+Konfliktauflösung. 2,6-MB-Datei, je eine Schwärzung pro Seite:
+
+| Seiten | vorher | nachher |
+|---|---|---|
+| 1 000 | 0,48 s | 0,10 s |
+| 2 000 | 2,11 s | 0,18 s |
+| 4 000 | 8,50 s | 0,38 s |
+| 8 000 | **35,01 s** | **0,83 s** |
+| 8 000, aber nur **eine** Schwärzung im ganzen Dokument | 0,64 s | 0,62 s |
+
+Wieder Vervierfachung bei Verdopplung, und die letzte Zeile zeigt woran es
+hing: die Kosten wuchsen mit dem *Produkt* aus Seitenzahl und Zahl der
+geschwärzten Seiten. `replace_page_content` suchte je geschwärzter Seite über
+**alle** Seiten nach geteilten Content-Streams, obwohl diese Menge von der
+gerade geschwärzten Seite gar nicht abhängt. Sie wird jetzt einmal gebildet
+(`ContentUsers` in `crates/redact-pdf/src/redact.rs`) und beim Ersetzen
+fortgeschrieben — der Index antwortet Schritt für Schritt genau so wie die
+wiederholte Suche, ein geteilter Strom wird also weiterhin nur dann gelöscht,
+wenn ihn keine Seite mehr benutzt. Ebenfalls einmal statt je Seite gebildet:
+die Zuordnung Schwärzung → Seite.
 
 ### Rückverfolgung in Mustern
 
@@ -233,15 +316,49 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
 
   Nachtrag zur Bildschwärzung: Seit Schwärzungen die **Pixel** eines Bildes
   überschreiben, wird ein betroffenes Bild sehr wohl dekodiert — nach RGBA8,
-  also 4 Byte je Pixel. Dagegen steht eine eigene Grenze von
-  **40 000 000 Pixeln** (`MAX_IMAGE_PIXELS` in
-  `crates/redact-pdf/src/ops.rs`), das sind rund 160 MB je Bild. Ein Bild
-  darüber wird nicht dekodiert, sondern als Platzhalter geführt — und ein
-  Platzhalter unter einer Schwärzung **bricht den Lauf ab** (dieselbe
-  Behandlung wie `/JPXDecode` und `/CCITTFaxDecode`, siehe
-  `crates/redact-pdf/src/image.rs`). Lieber ein Fehler als eine Datei, in der
-  die Schwärzung nur obenauf liegt; `--allow-undecodable-images` hebt das
-  bewusst auf.
+  also 4 Byte je Pixel. Dagegen stehen **zwei** Grenzen, und beide werden
+  gebraucht:
+
+  * **40 000 000 Bildpunkte je Bild** (`MAX_IMAGE_PIXELS` in
+    `crates/redact-pdf/src/ops.rs`), also rund 160 MB. Ein Bild darüber wird
+    nicht dekodiert, sondern als Platzhalter geführt — und ein Platzhalter
+    unter einer Schwärzung **bricht den Lauf ab** (dieselbe Behandlung wie
+    `/JPXDecode` und `/CCITTFaxDecode`, siehe
+    `crates/redact-pdf/src/image.rs`). Lieber ein Fehler als eine Datei, in der
+    die Schwärzung nur obenauf liegt; `--allow-undecodable-images` hebt das
+    bewusst auf.
+  * **256 MB gleichzeitig gehaltene dekodierte Bildbytes** (`--max-image-mb`).
+
+  **Richtigstellung.** Bis einschließlich Aufgabe #58 stand hier allein die
+  Grenze je Bild — und las sich, als wäre damit der Speicherbedarf gedeckelt.
+  Das war die gefährlichere Hälfte der Wahrheit: eine Grenze *je Bild* sagt
+  nichts über die *Summe*. Gemessen an 1-Bit-Graustufenbildern (die gewöhnliche
+  Kodierung eines Schwarzweiß-Scans) brachte eine **92-kB-Datei** mit 20 Bildern
+  den Prozess auf **5 508 MB**, eine 183-kB-Datei mit 40 Bildern auf SIGABRT
+  („memory allocation of 144000000 bytes failed“, Exit 134) — trotz gesetzter
+  `--max-decompressed-mb` und `--max-parsed-mb`, denn die zählen Rohbytes. Und
+  es traf nicht nur konstruierte Eingaben: ein gewöhnlicher 40-seitiger
+  A4-Scan mit je einer Schwärzung brauchte 1 369 MB, ein 200-Seiten-Stapel
+  entsprechend rund 7 GB. Die Zahlen vorher und nachher stehen unter
+  „Speicherbedarf der Bildschwärzung“.
+
+  Was heute gilt: es wird nur noch dekodiert, was eine Schwärzung wirklich
+  schneidet, und immer nur **ein Bild zur Zeit** — geschrieben und freigegeben,
+  bevor das nächste kommt. Die einzige Ausnahme ist ein Inline-Bild in einem
+  Form-XObject, das von mehreren Seiten gezeichnet wird; es muss bis zum Ende
+  gehalten werden und zählt gegen dasselbe Budget. Reicht das Budget nicht,
+  endet der Lauf mit einer Meldung — geprüft wird **vor** dem Auspacken, anhand
+  von `/Width` und `/Height`.
+
+  Was das Budget **nicht** abdeckt: die Puffer, die *während* des Umkodierens
+  eines einzelnen Bildes zusätzlich entstehen (entpackte Abtastwerte, die
+  Graustufen- bzw. RGB-Bytes vor dem Deflate). Sie betragen zusammen rund das
+  Anderthalbfache eines Bildes — der wirkliche Spitzenbedarf liegt also über
+  dem eingestellten Wert. Bei der Vorgabe von 256 MB wurden 189 MB gemessen;
+  der Grenzfall ist ein einzelnes Bild knapp unter 40 000 000 Bildpunkten, das
+  mit rund 400 MB zu Buche schlägt. Die Grenze ist ein Riegel gegen das
+  *Anhäufen* vieler Bilder, keine Zusage über den Gesamtverbrauch des
+  Prozesses.
 
 ### Die Zusicherungen oben gelten für die Kommandozeile, nicht für die Oberfläche
 

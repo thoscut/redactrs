@@ -10,23 +10,34 @@
 //! ## Ablauf
 //!
 //! ```text
-//!  Seite ──interpret──► Platzierungen (Name/Inline, CTM, Stream)
+//!  Seite ──interpret──► Platzierungen (Name/Inline, CTM, Stream, Ressourcen)
 //!                            │
-//!            ops::page_ops ──┴──► dieselben Bilder, aber dekodiert (RGBA8)
+//!                  schneidet eine Schwärzung diese Fläche?  ── nein ──► fertig
+//!                            │ ja
+//!            ops::decode_image ──► genau *dieses* Bild, dekodiert (RGBA8)
 //!                            │
 //!                       Pixel füllen  (inverse CTM je Platzierung)
 //!                            │
-//!                    neu kodieren (Flate) ──► XObject ersetzen/kopieren
+//!         neu kodieren (Flate), XObject ersetzen/kopieren, Puffer freigeben
 //! ```
 //!
 //! ## Entscheidungen
 //!
-//! * **Dekodiert wird nicht neu.** [`crate::ops`] kann bereits Flate, DCT,
-//!   Bitmasken, `/SMask` und alle Bittiefen. [`crate::ops::page_ops`] liefert
-//!   die Bilder einer Seite als RGBA8 in genau der Reihenfolge, in der der
-//!   Interpreter sie meldet — deshalb genügt hier ein zweiter, sehr schlanker
-//!   Durchlauf, der nur Name, CTM und Herkunft einsammelt und beides paart.
-//!   Stimmen die beiden Läufe nicht überein, wird abgebrochen statt geraten.
+//! * **Es wird nur dekodiert, was eine Schwärzung wirklich schneidet.** Früher
+//!   lief hier [`crate::ops::page_ops`], das *jedes* Bild der Seite nach RGBA8
+//!   auspackt und alle gleichzeitig hält; 19 unbeteiligte Bilder kosteten so
+//!   2,9 GB. Heute entscheidet der Schnitt zwischen Bildfläche und
+//!   Schwärzungsbereich je Platzierung, und die Bildbytes stehen nur zwischen
+//!   dem Dekodieren und dem Zurückschreiben *eines* Bildes im Speicher.
+//! * **Ein Bild nach dem anderen.** Sobald ein Bild gefüllt ist, wird es neu
+//!   kodiert, in das Dokument geschrieben und sein RGBA-Puffer freigegeben —
+//!   erst dann kommt das nächste. Die einzige Ausnahme ist ein Inline-Bild in
+//!   einem Form-XObject: das kann von zwei Seiten aus geschwärzt werden und
+//!   muss deshalb bis zum Ende gehalten werden.
+//! * **Es gibt eine harte Obergrenze.** [`ImageOptions::max_decoded_bytes`]
+//!   begrenzt die Summe der gleichzeitig gehaltenen dekodierten Bildbytes.
+//!   Wird sie überschritten, endet der Lauf mit einer Meldung — nicht mit
+//!   einer gescheiterten Speicheranforderung. Siehe `SECURITY.md`.
 //! * **Neu kodiert wird immer verlustfrei (Flate).** Ein `/DCTDecode`-Bild
 //!   wird dabei zu `/FlateDecode`. Das ist gewollt: JPEG neu zu kodieren wäre
 //!   verlustbehaftet, und die DCT-Blöcke am Rand der Schwärzung könnten Reste
@@ -41,6 +52,7 @@
 //!   auf — dann bleibt es bei einer Warnung und einem übermalten Bild.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use lopdf::content::Operation;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
@@ -48,17 +60,26 @@ use redact_core::{Rect, RedactError, Redaction, Result};
 
 use crate::content::{ContentSink, ImageEvent, SinkContext, StreamKey};
 use crate::matrix::Matrix;
-use crate::ops::DrawOp;
+use crate::ops::{RasterImage, Rgb};
 
 /// Wie tief die Suche nach Bildern in verschachtelte Form-XObjects steigt.
 const MAX_RESOURCE_DEPTH: usize = 8;
+
+/// Vorgabe für [`ImageOptions::max_decoded_bytes`]: 256 MB.
+///
+/// Ein dekodiertes Bild kostet 4 Byte je Bildpunkt. Das größte Bild, das
+/// [`crate::ops`] überhaupt auspackt, hat 40 000 000 Bildpunkte, also 160 MB —
+/// die Vorgabe lässt genau eines davon zu und noch etwas Luft für ein
+/// gleichzeitig gehaltenes Inline-Bild aus einem Form-XObject. Alles darüber
+/// ist eine bewusste Entscheidung des Aufrufers (`--max-image-mb`).
+pub const DEFAULT_MAX_DECODED_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Schnittstelle
 // ---------------------------------------------------------------------------
 
 /// Stellschrauben der Bild-Schwärzung.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageOptions {
     /// Nicht dekodierbare Bilder (`JPXDecode`, `CCITTFaxDecode`, defekte
     /// Streams) durchgehen lassen, statt abzubrechen.
@@ -68,6 +89,30 @@ pub struct ImageOptions {
     /// Aufrufer, die das bewusst in Kauf nehmen — die Kommandozeile bietet es
     /// (noch) nicht an.
     pub allow_undecodable: bool,
+    /// Obergrenze für die Summe der **gleichzeitig** gehaltenen dekodierten
+    /// Bildbytes (RGBA8, 4 Byte je Bildpunkt).
+    ///
+    /// Geprüft wird **vor** dem Auspacken, anhand von `/Width` und `/Height`
+    /// aus dem Bild-Dictionary. Reicht das Budget nicht, endet der Lauf mit
+    /// einem Fehler statt mit einer gescheiterten Speicheranforderung.
+    ///
+    /// **Was die Grenze nicht abdeckt:** die Puffer, die *während* des
+    /// Umkodierens eines einzelnen Bildes zusätzlich entstehen (entpackte
+    /// Abtastwerte, die Graustufen- bzw. RGB-Bytes vor dem Deflate). Sie
+    /// betragen zusammen rund das Anderthalbfache eines Bildes; der wirkliche
+    /// Spitzenbedarf liegt also über dem hier genannten Wert. Die Grenze ist
+    /// ein Riegel gegen das *Anhäufen* vieler Bilder, keine Zusage über den
+    /// Gesamtverbrauch des Prozesses.
+    pub max_decoded_bytes: u64,
+}
+
+impl Default for ImageOptions {
+    fn default() -> Self {
+        Self {
+            allow_undecodable: false,
+            max_decoded_bytes: DEFAULT_MAX_DECODED_IMAGE_BYTES,
+        }
+    }
 }
 
 /// Was die Bild-Schwärzung getan hat.
@@ -81,6 +126,14 @@ pub struct ImageOutcome {
     /// Summe der gefüllten Pixel. Überlappen sich zwei Schwärzungsbereiche in
     /// einem Bild, zählt der gemeinsame Teil je Bereich einmal.
     pub filled_pixels: u64,
+    /// Höchstzahl der **gleichzeitig** dekodiert gehaltenen Bilder.
+    ///
+    /// Der Speicherbedarf selbst lässt sich im Test kaum messen; diese Zahl
+    /// schon. Sie muss 1 sein, solange kein Inline-Bild eines Form-XObjects im
+    /// Spiel ist — steigt sie, sammelt jemand wieder Bilder an.
+    pub peak_decoded_images: usize,
+    /// Dasselbe in Bytes (RGBA8).
+    pub peak_decoded_bytes: u64,
     pub warnings: Vec<String>,
     /// Ersatzoperationen für Inline-Bilder, je Strom und Index im dekodierten
     /// Operationsstrom. Inline-Bilder stehen im Content-Stream selbst — sie
@@ -120,14 +173,22 @@ pub fn redact_images(
         return Ok(outcome);
     }
 
+    // Vorab: welche Schwärzung liegt auf welcher Seite. Einmal gebildet statt
+    // je Seite aus der vollständigen Liste gefiltert.
+    let zones_per_page = zones_by_page(redactions, padding);
+
     // Phase 1 — Bestandsaufnahme über *alle* Seiten. Erst danach ist bekannt,
     // ob ein Bild nur an einer Stelle benutzt wird (dann darf es überschrieben
-    // werden) oder mehrfach (dann muss kopiert werden).
+    // werden) oder mehrfach (dann muss kopiert werden). Dekodiert wird hier
+    // noch nichts; die Rohdaten eines Inline-Bildes werden nur dann behalten,
+    // wenn eine Schwärzung seine Fläche überhaupt schneidet.
+    let no_zones: Vec<Zone> = Vec::new();
     let mut per_page: Vec<Vec<Placement>> = Vec::with_capacity(pages.len());
     let mut image_pages: BTreeMap<ObjectId, BTreeSet<usize>> = BTreeMap::new();
     let mut form_pages: BTreeMap<ObjectId, BTreeSet<usize>> = BTreeMap::new();
     for (index, page_id) in pages.iter().enumerate() {
-        let (placements, forms) = scan_page_images(doc, *page_id);
+        let zones = zones_per_page.get(&index).unwrap_or(&no_zones);
+        let (placements, forms) = scan_page_images(doc, *page_id, zones);
         for placement in &placements {
             if let Target::XObject { id: Some(id), .. } = &placement.target {
                 image_pages.entry(*id).or_default().insert(index);
@@ -139,14 +200,14 @@ pub fn redact_images(
         per_page.push(placements);
     }
 
-    // Phase 2 — Pixel füllen. Das Dokument bleibt dabei unangetastet, damit
-    // alle Messungen auf demselben Stand beruhen. Die Arbeitspuffer sind
-    // seitenübergreifend: ein Inline-Bild in einem Form-XObject kann von zwei
-    // Seiten aus geschwärzt werden und darf dann nicht zweimal geschrieben
-    // werden, sondern einmal mit beiden Bereichen.
+    // Phase 2 — füllen und **sofort** schreiben. `works` hält nur, was sich
+    // nicht sofort abschließen lässt: ein Inline-Bild in einem Form-XObject
+    // kann von zwei Seiten aus geschwärzt werden und muss deshalb einmal mit
+    // den Bereichen beider Seiten geschrieben werden.
     let mut works: BTreeMap<Key, Work> = BTreeMap::new();
+    let mut budget = Budget::new(options.max_decoded_bytes);
     for (index, page_id) in pages.iter().enumerate() {
-        let zones = zones_for_page(redactions, index, padding);
+        let zones = zones_per_page.get(&index).unwrap_or(&no_zones);
         let placements = &per_page[index];
         if zones.is_empty() || placements.is_empty() {
             continue;
@@ -164,80 +225,104 @@ pub fn redact_images(
             index,
             *page_id,
             placements,
-            &zones,
+            zones,
             options,
             &mut works,
+            &mut budget,
             &mut outcome,
+            &image_pages,
+            &form_pages,
         )?;
     }
 
-    // Phase 3 — schreiben.
-    for (key, work) in works {
-        if work.filled == 0 {
-            continue;
+    // Phase 3 — der Rest: die über Seitengrenzen gehaltenen Inline-Bilder.
+    let leftovers: Vec<(Key, Work)> = std::mem::take(&mut works).into_iter().collect();
+    for (key, work) in leftovers {
+        budget.release(&work);
+        write_work(doc, key, work, &image_pages, &form_pages, &mut outcome)?;
+    }
+
+    outcome.peak_decoded_images = budget.peak_images;
+    outcome.peak_decoded_bytes = budget.peak_bytes;
+    Ok(outcome)
+}
+
+/// Schreibt ein fertig gefülltes Bild in das Dokument und gibt seine Bytes frei.
+///
+/// Das ist der Schritt, der früher erst ganz am Ende für *alle* Bilder lief.
+/// Jetzt läuft er, sobald ein Bild fertig ist — deshalb liegt zu jedem
+/// Zeitpunkt höchstens ein dekodiertes Bild im Speicher.
+fn write_work(
+    doc: &mut Document,
+    key: Key,
+    work: Work,
+    image_pages: &BTreeMap<ObjectId, BTreeSet<usize>>,
+    form_pages: &BTreeMap<ObjectId, BTreeSet<usize>>,
+    outcome: &mut ImageOutcome,
+) -> Result<()> {
+    if work.filled == 0 {
+        return Ok(());
+    }
+    outcome.filled_pixels += work.filled;
+    match key {
+        Key::Inline(target, op_index) => {
+            let (dict, data) = encode_inline(&work)?;
+            outcome
+                .inline_replacements
+                .entry(target)
+                .or_default()
+                .insert(
+                    op_index,
+                    Operation::new(
+                        "BI",
+                        vec![
+                            Object::Dictionary(dict),
+                            Object::String(data, StringFormat::Literal),
+                        ],
+                    ),
+                );
+            outcome.redacted_images += 1;
         }
-        outcome.filled_pixels += work.filled;
-        match key {
-            Key::Inline(target, op_index) => {
-                let (dict, data) = encode_inline(&work)?;
-                outcome
-                    .inline_replacements
-                    .entry(target)
-                    .or_default()
-                    .insert(
-                        op_index,
-                        Operation::new(
-                            "BI",
-                            vec![
-                                Object::Dictionary(dict),
-                                Object::String(data, StringFormat::Literal),
-                            ],
-                        ),
-                    );
-                outcome.redacted_images += 1;
-            }
-            Key::XObject(_, id) => {
-                let shared = image_pages.get(&id).map(BTreeSet::len).unwrap_or(1) > 1;
-                // Kopieren geht nur, wenn sich der Verweis isolieren lässt:
-                // in den Seitenressourcen immer, in einem Form-XObject nur,
-                // wenn dieses Formular allein von dieser Seite benutzt wird.
-                let isolable = work.streams.iter().all(|stream| match stream {
-                    StreamKey::Page => true,
-                    StreamKey::Form(form) => form_pages.get(form).map(BTreeSet::len) == Some(1),
-                });
-                let stream = build_stream(doc, encode_xobject(&work));
-                if !shared {
-                    doc.objects.insert(id, Object::Stream(stream));
-                } else if isolable {
-                    let new_id = doc.add_object(Object::Stream(stream));
-                    for source in &work.streams {
-                        match source {
-                            StreamKey::Page => repoint_page(doc, work.page_id, &work.name, new_id)?,
-                            StreamKey::Form(form) => {
-                                if !repoint_form(doc, *form, &work.name, new_id)? {
-                                    repoint_page(doc, work.page_id, &work.name, new_id)?;
-                                }
+        Key::XObject(_, id) => {
+            let shared = image_pages.get(&id).map(BTreeSet::len).unwrap_or(1) > 1;
+            // Kopieren geht nur, wenn sich der Verweis isolieren lässt:
+            // in den Seitenressourcen immer, in einem Form-XObject nur,
+            // wenn dieses Formular allein von dieser Seite benutzt wird.
+            let isolable = work.streams.iter().all(|stream| match stream {
+                StreamKey::Page => true,
+                StreamKey::Form(form) => form_pages.get(form).map(BTreeSet::len) == Some(1),
+            });
+            let stream = build_stream(doc, encode_xobject(&work));
+            if !shared {
+                doc.objects.insert(id, Object::Stream(stream));
+            } else if isolable {
+                let new_id = doc.add_object(Object::Stream(stream));
+                for source in &work.streams {
+                    match source {
+                        StreamKey::Page => repoint_page(doc, work.page_id, &work.name, new_id)?,
+                        StreamKey::Form(form) => {
+                            if !repoint_form(doc, *form, &work.name, new_id)? {
+                                repoint_page(doc, work.page_id, &work.name, new_id)?;
                             }
                         }
                     }
-                    outcome.copied_images += 1;
-                } else {
-                    // Letzter Ausweg: überschreiben. Lieber zu viel
-                    // geschwärzt als eine Datei, in der die Pixel bleiben.
-                    doc.objects.insert(id, Object::Stream(stream));
-                    outcome.warnings.push(format!(
-                        "Bild /{} steckt in einem Form-XObject, das mehrere Seiten benutzen. \
-                         Es wurde überschrieben — die Schwärzung wirkt deshalb auch auf die \
-                         anderen Seiten.",
-                        String::from_utf8_lossy(&work.name)
-                    ));
                 }
-                outcome.redacted_images += 1;
+                outcome.copied_images += 1;
+            } else {
+                // Letzter Ausweg: überschreiben. Lieber zu viel
+                // geschwärzt als eine Datei, in der die Pixel bleiben.
+                doc.objects.insert(id, Object::Stream(stream));
+                outcome.warnings.push(format!(
+                    "Bild /{} steckt in einem Form-XObject, das mehrere Seiten benutzen. \
+                     Es wurde überschrieben — die Schwärzung wirkt deshalb auch auf die \
+                     anderen Seiten.",
+                    String::from_utf8_lossy(&work.name)
+                ));
             }
+            outcome.redacted_images += 1;
         }
     }
-
-    Ok(outcome)
+    Ok(())
 }
 
 /// Enthält die Seite Rasterbilder — auch in Form-XObjects und als Inline-Bild?
@@ -333,10 +418,21 @@ enum Target {
         name: Vec<u8>,
         is_mask: bool,
         filters: String,
+        /// `/Width` × `/Height` laut Dictionary — für die Budgetprüfung, die
+        /// *vor* dem Auspacken greifen muss.
+        pixels: u64,
     },
     Inline {
         is_mask: bool,
         filters: String,
+        pixels: u64,
+        /// Das `BI`-Dictionary. Es steht im Content-Stream und ist beim
+        /// Dekodieren nicht mehr greifbar.
+        dict: Dictionary,
+        /// Die (noch gefilterten) Rohdaten — nur dann behalten, wenn eine
+        /// Schwärzung diese Fläche überhaupt schneidet. Sonst hielte eine
+        /// Datei mit vielen unbeteiligten Inline-Bildern sie alle im Speicher.
+        data: Option<Vec<u8>>,
     },
 }
 
@@ -345,6 +441,12 @@ struct Placement {
     stream: StreamKey,
     op_index: usize,
     ctm: Matrix,
+    /// Die Ressourcen des Stroms, in dem gezeichnet wird. Das Dekodieren
+    /// braucht sie für benannte Farbräume und `/SMask`; mehrere Platzierungen
+    /// desselben Stroms teilen sich eine Kopie.
+    resources: Option<Rc<Dictionary>>,
+    /// Füllfarbe an dieser Stelle — eine Stencil-Maske malt damit.
+    fill: Rgb,
     target: Target,
 }
 
@@ -365,15 +467,56 @@ impl Placement {
             Target::XObject { filters, .. } | Target::Inline { filters, .. } => filters,
         }
     }
+
+    fn pixels(&self) -> u64 {
+        match &self.target {
+            Target::XObject { pixels, .. } | Target::Inline { pixels, .. } => *pixels,
+        }
+    }
+
+    fn is_mask(&self) -> bool {
+        match &self.target {
+            Target::XObject { is_mask, .. } | Target::Inline { is_mask, .. } => *is_mask,
+        }
+    }
+
+    fn name(&self) -> Vec<u8> {
+        match &self.target {
+            Target::XObject { name, .. } => name.clone(),
+            Target::Inline { .. } => Vec::new(),
+        }
+    }
 }
 
-#[derive(Default)]
-struct Collector {
+struct Collector<'a> {
     placements: Vec<Placement>,
     forms: BTreeSet<ObjectId>,
+    /// Nur Bilder, deren Fläche eine dieser Zonen schneidet, brauchen später
+    /// ihre Rohdaten.
+    zones: &'a [Zone],
+    /// Bereits gesehene Ressourcen-Dictionaries. Ein Strom hat genau eines;
+    /// zwanzig Platzierungen darin sollen es nicht zwanzigmal kopieren.
+    resource_cache: Vec<Rc<Dictionary>>,
 }
 
-impl ContentSink for Collector {
+impl Collector<'_> {
+    fn resources(&mut self, resources: Option<&Dictionary>) -> Option<Rc<Dictionary>> {
+        let resources = resources?;
+        if let Some(found) = self.resource_cache.iter().find(|c| c.as_ref() == resources) {
+            return Some(Rc::clone(found));
+        }
+        let shared = Rc::new(resources.clone());
+        self.resource_cache.push(Rc::clone(&shared));
+        Some(shared)
+    }
+
+    fn touches_a_zone(&self, ctm: &Matrix) -> bool {
+        let bounds = ctm_bounds(ctm);
+        self.zones.iter().any(|z| bounds.intersects(&z.rect))
+    }
+}
+
+impl ContentSink for Collector<'_> {
     fn wants_graphics(&self) -> bool {
         true
     }
@@ -384,11 +527,14 @@ impl ContentSink for Collector {
 
     fn image(&mut self, cx: &SinkContext, event: &ImageEvent) {
         // Dieselben Abbruchbedingungen wie in `ops::OpsCollector::image` —
-        // sonst geraten die beiden Läufe außer Takt.
+        // sonst zählen die beiden Läufe verschieden viele Bilder.
         let target = match event.inline {
-            Some((dict, _)) => Target::Inline {
+            Some((dict, data)) => Target::Inline {
                 is_mask: dict_flag(dict, b"ImageMask", b"IM"),
                 filters: filter_label(dict),
+                pixels: declared_pixels(cx.doc, dict),
+                dict: dict.clone(),
+                data: self.touches_a_zone(&event.ctm).then(|| data.to_vec()),
             },
             None => {
                 let Some(name) = event.name else {
@@ -402,25 +548,38 @@ impl ContentSink for Collector {
                     name: name.to_vec(),
                     is_mask: dict_flag(&dict, b"ImageMask", b"IM"),
                     filters: filter_label(&dict),
+                    pixels: declared_pixels(cx.doc, &dict),
                 }
             }
         };
+        let resources = self.resources(cx.resources);
         self.placements.push(Placement {
             stream: cx.stream,
             op_index: cx.op_index,
             ctm: event.ctm,
+            resources,
+            fill: event.fill,
             target,
         });
     }
 }
 
-fn scan_page_images(doc: &Document, page_id: ObjectId) -> (Vec<Placement>, BTreeSet<ObjectId>) {
+fn scan_page_images(
+    doc: &Document,
+    page_id: ObjectId,
+    zones: &[Zone],
+) -> (Vec<Placement>, BTreeSet<ObjectId>) {
     let Ok(data) = doc.get_page_content(page_id) else {
         return (Vec::new(), BTreeSet::new());
     };
     let operations = crate::ops::decode_content(&data);
     let resources = crate::content::page_resources(doc, page_id);
-    let mut collector = Collector::default();
+    let mut collector = Collector {
+        placements: Vec::new(),
+        forms: BTreeSet::new(),
+        zones,
+        resource_cache: Vec::new(),
+    };
     crate::content::interpret(
         doc,
         &operations,
@@ -430,6 +589,24 @@ fn scan_page_images(doc: &Document, page_id: ObjectId) -> (Vec<Placement>, BTree
         &mut collector,
     );
     (collector.placements, collector.forms)
+}
+
+/// `/Width` × `/Height` laut Dictionary, ohne irgendetwas auszupacken.
+///
+/// Grundlage der Budgetprüfung: sie muss entscheiden können, *bevor* der
+/// Puffer angefordert wird. Fehlt eine Angabe oder ist sie unsinnig, zählt 0 —
+/// das Dekodieren liefert dann ohnehin nur einen Platzhalter.
+fn declared_pixels(doc: &Document, dict: &Dictionary) -> u64 {
+    let value = |long: &[u8], short: &[u8]| -> u64 {
+        dict.get(long)
+            .or_else(|_| dict.get(short))
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_i64().ok())
+            .unwrap_or(0)
+            .max(0) as u64
+    };
+    value(b"Width", b"W").saturating_mul(value(b"Height", b"H"))
 }
 
 /// Bild-XObject aus den Ressourcen — Gegenstück zu `ops::image_xobject`, aber
@@ -494,23 +671,90 @@ struct Zone {
     color: [u8; 3],
 }
 
-fn zones_for_page(redactions: &[Redaction], page_index: usize, padding: f64) -> Vec<Zone> {
-    redactions
-        .iter()
-        .filter(|r| r.region.page == page_index)
-        .filter_map(|r| {
-            let rect = r.region.rect.expanded(padding);
-            if rect.is_empty() {
-                return None;
-            }
-            let (red, green, blue) = r.action.fill_color().unwrap_or((0.0, 0.0, 0.0));
-            let to_u8 = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-            Some(Zone {
-                rect,
-                color: [to_u8(red), to_u8(green), to_u8(blue)],
-            })
-        })
-        .collect()
+/// Alle Schwärzungsbereiche, nach Seite sortiert — einmal statt je Seite neu
+/// aus der vollständigen Liste gefiltert.
+fn zones_by_page(redactions: &[Redaction], padding: f64) -> BTreeMap<usize, Vec<Zone>> {
+    let mut out: BTreeMap<usize, Vec<Zone>> = BTreeMap::new();
+    for redaction in redactions {
+        let rect = redaction.region.rect.expanded(padding);
+        if rect.is_empty() {
+            continue;
+        }
+        let (red, green, blue) = redaction.action.fill_color().unwrap_or((0.0, 0.0, 0.0));
+        let to_u8 = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        out.entry(redaction.region.page).or_default().push(Zone {
+            rect,
+            color: [to_u8(red), to_u8(green), to_u8(blue)],
+        });
+    }
+    out
+}
+
+/// Buchführung über die gleichzeitig gehaltenen dekodierten Bildbytes.
+///
+/// Der Sinn ist ein **kontrollierter** Abbruch: geprüft wird vor dem
+/// Auspacken, aus `/Width` und `/Height`. Eine Datei, die mehr verlangt, endet
+/// mit einer Meldung statt mit `memory allocation of … bytes failed`.
+struct Budget {
+    limit: u64,
+    held: u64,
+    held_images: usize,
+    /// Höchststände — die einzige im Test messbare Zusicherung darüber, dass
+    /// wirklich ein Bild nach dem anderen bearbeitet wird.
+    peak_bytes: u64,
+    peak_images: usize,
+}
+
+impl Budget {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            held: 0,
+            held_images: 0,
+            peak_bytes: 0,
+            peak_images: 0,
+        }
+    }
+
+    /// Fordert Platz für ein Bild an. `pixels` ist die Zahl der Bildpunkte
+    /// laut Dictionary; gerechnet wird mit 4 Byte je Punkt (RGBA8).
+    fn reserve(&mut self, pixels: u64, what: &str) -> Result<()> {
+        let needed = pixels.saturating_mul(4);
+        if self.held.saturating_add(needed) > self.limit {
+            let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+            return Err(RedactError::Pdf(format!(
+                "{what} bräuchte {:.0} MB dekodierte Bildpunkte; zusammen mit den bereits \
+                 gehaltenen {:.0} MB überschreitet das die Grenze von {:.0} MB. Der Lauf \
+                 wird abgebrochen, bevor die Speicheranforderung scheitert — mit \
+                 --max-image-mb lässt sich die Grenze bewusst anheben.",
+                mb(needed),
+                mb(self.held),
+                mb(self.limit),
+            )));
+        }
+        self.held += needed;
+        Ok(())
+    }
+
+    /// Nimmt zurück, was [`Budget::reserve`] veranschlagt hatte, und bucht
+    /// stattdessen die tatsächliche Puffergröße.
+    fn settle(&mut self, reserved_pixels: u64, actual: &Work) {
+        self.cancel(reserved_pixels);
+        self.held = self.held.saturating_add(actual.rgba.len() as u64);
+        self.held_images += 1;
+        self.peak_bytes = self.peak_bytes.max(self.held);
+        self.peak_images = self.peak_images.max(self.held_images);
+    }
+
+    /// Gibt eine Reservierung zurück, aus der nichts geworden ist.
+    fn cancel(&mut self, reserved_pixels: u64) {
+        self.held = self.held.saturating_sub(reserved_pixels.saturating_mul(4));
+    }
+
+    fn release(&mut self, work: &Work) {
+        self.held = self.held.saturating_sub(work.rgba.len() as u64);
+        self.held_images = self.held_images.saturating_sub(1);
+    }
 }
 
 /// Welches Objekt am Ende geschrieben wird.
@@ -541,49 +785,33 @@ struct Work {
     filled: u64,
 }
 
+/// Schwärzt die Bilder **einer** Seite — und zwar nur die, die eine Zone
+/// wirklich schneidet.
+///
+/// Der Ablauf ist bewusst nach Zielobjekt gruppiert und nicht nach
+/// Platzierung: dasselbe Bild kann auf einer Seite mehrfach gezeichnet sein
+/// und darf trotzdem nur einmal ausgepackt werden. Ist eine Gruppe fertig,
+/// wird sie sofort geschrieben und ihr Puffer freigegeben.
 #[allow(clippy::too_many_arguments)]
 fn fill_page(
-    doc: &Document,
+    doc: &mut Document,
     page_index: usize,
     page_id: ObjectId,
     placements: &[Placement],
     zones: &[Zone],
     options: &ImageOptions,
     works: &mut BTreeMap<Key, Work>,
+    budget: &mut Budget,
     outcome: &mut ImageOutcome,
+    image_pages: &BTreeMap<ObjectId, BTreeSet<usize>>,
+    form_pages: &BTreeMap<ObjectId, BTreeSet<usize>>,
 ) -> Result<()> {
-    let page = crate::ops::page_ops(doc, page_index)?;
-    let drawn: Vec<(usize, Matrix)> = page
-        .ops
-        .iter()
-        .filter_map(|op| match op {
-            DrawOp::Image { image, ctm, .. } => Some((*image, *ctm)),
-            _ => None,
-        })
-        .collect();
-    // Die Paarung beruht darauf, dass beide Läufe denselben Interpreter mit
-    // denselben Abbruchbedingungen benutzen. Weicht sie ab, ist unklar, welches
-    // Bild zu welcher Platzierung gehört — dann lieber abbrechen als das
-    // falsche Bild schwärzen.
-    if drawn.len() != placements.len() {
-        return Err(RedactError::Pdf(format!(
-            "Seite {}: {} Bildplatzierungen, aber {} dekodierte Bilder — die Zuordnung ist \
-             nicht eindeutig, die Schwärzung wird abgebrochen.",
-            page_index + 1,
-            placements.len(),
-            drawn.len()
-        )));
-    }
-
-    for (placement, (image_index, ctm)) in placements.iter().zip(drawn) {
-        if !same_matrix(&placement.ctm, &ctm) {
-            return Err(RedactError::Pdf(format!(
-                "Seite {}: die Bild-CTM der beiden Durchläufe stimmt nicht überein — die \
-                 Schwärzung wird abgebrochen.",
-                page_index + 1
-            )));
-        }
-        let bounds = ctm_bounds(&ctm);
+    // 1. Zuordnen: welche Platzierung trifft welche Zonen, und auf welches
+    //    Zielobjekt zeigt sie? Hier wird noch nichts ausgepackt.
+    let mut order: Vec<Key> = Vec::new();
+    let mut groups: BTreeMap<Key, Vec<(usize, Vec<Zone>)>> = BTreeMap::new();
+    for (index, placement) in placements.iter().enumerate() {
+        let bounds = ctm_bounds(&placement.ctm);
         let touching: Vec<Zone> = zones
             .iter()
             .filter(|z| bounds.intersects(&z.rect))
@@ -592,28 +820,8 @@ fn fill_page(
         if touching.is_empty() {
             continue;
         }
-
-        let raster = &page.images[image_index];
-        if raster.placeholder {
-            let message = format!(
-                "{} lässt sich nicht dekodieren (Filter: {}). Die Schwärzung läge nur \
-                 darüber; die Pixel blieben in der Datei.",
-                placement.label(page_index),
-                placement.filters()
-            );
-            if options.allow_undecodable {
-                outcome.warnings.push(message);
-                continue;
-            }
-            return Err(RedactError::Pdf(message));
-        }
-
-        let (key, is_mask) = match &placement.target {
-            Target::XObject {
-                id: Some(id),
-                is_mask,
-                ..
-            } => (Key::XObject(page_index, *id), *is_mask),
+        let key = match &placement.target {
+            Target::XObject { id: Some(id), .. } => Key::XObject(page_index, *id),
             Target::XObject { id: None, .. } => {
                 let message = format!(
                     "{} ist kein eigenständiges Objekt und kann nicht ersetzt werden.",
@@ -625,33 +833,148 @@ fn fill_page(
                 }
                 return Err(RedactError::Pdf(message));
             }
-            Target::Inline { is_mask, .. } => {
+            Target::Inline { .. } => {
                 let target = match placement.stream {
                     StreamKey::Page => InlineTarget::Page(page_id),
                     StreamKey::Form(form) => InlineTarget::Form(form),
                 };
-                (Key::Inline(target, placement.op_index), *is_mask)
+                Key::Inline(target, placement.op_index)
+            }
+        };
+        groups
+            .entry(key)
+            .or_insert_with(|| {
+                order.push(key);
+                Vec::new()
+            })
+            .push((index, touching));
+    }
+
+    // 2. Ein Bild nach dem anderen: auspacken, füllen, schreiben, freigeben.
+    for key in order {
+        let entries = groups.remove(&key).unwrap_or_default();
+        let Some((first, _)) = entries.first() else {
+            continue;
+        };
+        let first = &placements[*first];
+
+        // Ein Inline-Bild in einem Form-XObject kann schon von einer früheren
+        // Seite her in Arbeit sein; dann wird derselbe Puffer weiterbenutzt.
+        let mut work = match works.remove(&key) {
+            Some(work) => work,
+            None => {
+                // Was [`crate::ops`] ohnehin nicht auspackt, kostet auch kein
+                // Budget — und soll „zu groß“ melden statt „Grenze
+                // überschritten“.
+                let reserved = if first.pixels() <= crate::ops::MAX_IMAGE_PIXELS {
+                    budget.reserve(first.pixels(), &first.label(page_index))?;
+                    first.pixels()
+                } else {
+                    0
+                };
+                let (raster, note) = decode_placement(doc, first);
+                if raster.placeholder {
+                    budget.cancel(reserved);
+                    // Der **echte** Grund steht in `note` — der Filter ist nur
+                    // der häufigste Fall, nicht der einzige. Ein Bild über
+                    // `MAX_IMAGE_PIXELS` etwa hat einen tadellosen Filter.
+                    let reason = note.unwrap_or_else(|| format!("Filter: {}", first.filters()));
+                    let message = format!(
+                        "{} lässt sich nicht dekodieren ({reason}). Die Schwärzung läge nur \
+                         darüber; die Pixel blieben in der Datei.",
+                        first.label(page_index),
+                    );
+                    if options.allow_undecodable {
+                        outcome.warnings.push(message);
+                        continue;
+                    }
+                    return Err(RedactError::Pdf(message));
+                }
+                let work = Work {
+                    width: raster.width,
+                    height: raster.height,
+                    rgba: raster.rgba,
+                    is_mask: first.is_mask(),
+                    name: first.name(),
+                    page_id,
+                    streams: BTreeSet::new(),
+                    filled: 0,
+                };
+                budget.settle(reserved, &work);
+                work
             }
         };
 
-        let name = match &placement.target {
-            Target::XObject { name, .. } => name.clone(),
-            Target::Inline { .. } => Vec::new(),
-        };
-        let work = works.entry(key).or_insert_with(|| Work {
-            width: raster.width,
-            height: raster.height,
-            rgba: raster.rgba.clone(),
-            is_mask,
-            name,
-            page_id,
-            streams: BTreeSet::new(),
-            filled: 0,
-        });
-        work.streams.insert(placement.stream);
-        work.fill(&ctm, &touching);
+        for (index, touching) in &entries {
+            let placement = &placements[*index];
+            work.streams.insert(placement.stream);
+            work.fill(&placement.ctm, touching);
+        }
+
+        // Ein Inline-Bild in einem Form-XObject wird von der nächsten Seite
+        // vielleicht noch gebraucht — alles andere ist hier fertig.
+        if matches!(key, Key::Inline(InlineTarget::Form(_), _)) {
+            works.insert(key, work);
+        } else {
+            budget.release(&work);
+            write_work(doc, key, work, image_pages, form_pages, outcome)?;
+        }
     }
     Ok(())
+}
+
+/// Packt genau das Bild aus, auf das diese Platzierung zeigt.
+///
+/// Der Rückgabewert ist derselbe wie bei [`crate::ops::decode_image`]: das
+/// Bild und, falls es nicht ging, der Grund dafür.
+fn decode_placement(doc: &Document, placement: &Placement) -> (RasterImage, Option<String>) {
+    let resources = placement.resources.as_deref();
+    match &placement.target {
+        Target::Inline { dict, data, .. } => {
+            let Some(data) = data else {
+                // Kann nicht vorkommen: die Rohdaten werden genau dann
+                // behalten, wenn die Fläche eine Zone schneidet — und nur
+                // dann kommt diese Funktion überhaupt her.
+                return (
+                    RasterImage::placeholder(),
+                    Some("Rohdaten des Inline-Bildes nicht mitgeführt".into()),
+                );
+            };
+            crate::ops::decode_image(doc, resources, dict, data, placement.fill)
+        }
+        Target::XObject { name, .. } => {
+            let Some(stream) = image_stream(doc, resources, name) else {
+                return (
+                    RasterImage::placeholder(),
+                    Some("das Bild-XObject ist nicht mehr auflösbar".into()),
+                );
+            };
+            crate::ops::decode_image(
+                doc,
+                resources,
+                &stream.dict,
+                &stream.content,
+                placement.fill,
+            )
+        }
+    }
+}
+
+/// Wie [`image_xobject`], liefert aber den Strom samt Nutzdaten.
+fn image_stream<'a>(
+    doc: &'a Document,
+    resources: Option<&'a Dictionary>,
+    name: &[u8],
+) -> Option<&'a Stream> {
+    let xobjects = resources?.get(b"XObject").ok()?;
+    let (_, xobjects) = doc.dereference(xobjects).ok()?;
+    let entry = xobjects.as_dict().ok()?.get(name).ok()?;
+    let (_, resolved) = doc.dereference(entry).ok()?;
+    let stream = resolved.as_stream().ok()?;
+    if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Image") {
+        return None;
+    }
+    Some(stream)
 }
 
 impl Work {
@@ -760,15 +1083,9 @@ fn ctm_bounds(ctm: &Matrix) -> Rect {
     rect
 }
 
-fn same_matrix(a: &Matrix, b: &Matrix) -> bool {
-    let close = |x: f64, y: f64| (x - y).abs() <= 1e-9 * (1.0 + x.abs().max(y.abs()));
-    close(a.a, b.a)
-        && close(a.b, b.b)
-        && close(a.c, b.c)
-        && close(a.d, b.d)
-        && close(a.e, b.e)
-        && close(a.f, b.f)
-}
+// Der frühere `same_matrix` verglich die Bild-CTM zweier Durchläufe. Es gibt
+// nur noch einen: die Platzierung trägt jetzt selbst, was zum Dekodieren nötig
+// ist, und kann deshalb gar nicht mehr mit einem fremden Bild gepaart werden.
 
 // ---------------------------------------------------------------------------
 // Neu kodieren

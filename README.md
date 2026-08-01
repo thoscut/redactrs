@@ -734,15 +734,6 @@ eines:
 
 Dazu diese Grenzen, für die es keinen Testfall gibt:
 
-* **Ebenennamen (`/OCG /Name`) überleben.** `/OCProperties` wird aus dem Katalog
-  entfernt, aber ein `/OCG`-Dictionary, das eine Seite über
-  `/Resources /Properties` weiterhin referenziert, bleibt erreichbar — samt
-  seinem `/Name`. Heißt eine Ebene „Ebene Mustermann“, steht dieser Name
-  hinterher noch in der Datei. Nachgemessen mit
-  [`redact_pdf::leaks`](#pruefen) an einer Ausgabedatei: 3 Fundstellen, während
-  Feldwerte, XFA, `/Info`, OpenAction-JavaScript und Dateianhang derselben
-  Datei sauber waren. Das ist die eine bekannte Restdatenstelle, die
-  `crates/redact-pdf/src/meta.rs` bewusst offen lässt.
 * **Vektorgrafiken** werden nicht durchsucht — Text, der als Pfad gezeichnet
   ist, ist für die Analyse unsichtbar.
 * **Eingebettete Dateien** werden nicht durchsucht. Sie werden allerdings
@@ -933,9 +924,11 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   ```
 
   Mit [`redact_pdf::leaks`](#pruefen) an der Ausgabedatei nachgeprüft: Feldwert,
-  XFA-Inhalt, `/Info`-Titel, OpenAction-JavaScript und Dateianhang sind
-  restlos weg. **Eine** Ausnahme bleibt — der Name einer Ebene, siehe
-  [Bekannte Lecks](#grenzen).
+  XFA-Inhalt, `/Info`-Titel, OpenAction-JavaScript, Dateianhang und der Name
+  einer Ebene (`/OCG /Name`) sind restlos weg. Der Ebenenname war zuletzt die
+  einzige verbliebene Fundstelle; er wird jetzt auch dann geleert, wenn eine
+  Seite das `/OCG` über `/Resources /Properties` weiterhin referenziert und es
+  deshalb das Entfernen von `/OCProperties` überlebt.
 * Alles läuft lokal und im Speicher; es werden keine Netzverbindungen
   aufgebaut. Beim Schreiben entsteht genau **eine** temporäre Datei, und zwar
   im Zielverzeichnis (`.<name>.redact-<pid>-<n>.tmp`); sie wird per `rename`

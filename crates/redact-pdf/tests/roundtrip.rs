@@ -279,3 +279,97 @@ fn empty_redaction_list_is_a_no_op() {
     let report = PdfRedactor::new().apply_with_report(&mut doc, &[]).unwrap();
     assert_eq!(report.removed_glyphs, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Aufgabe #59 — geteilte Content-Streams, ohne die quadratische Suche
+// ---------------------------------------------------------------------------
+
+/// Zwei Seiten, **ein** Content-Stream.
+///
+/// `replace_page_content` darf den alten Strom nur löschen, wenn ihn keine
+/// andere Seite mehr benutzt. Diese Auskunft kommt seit Aufgabe #59 aus einem
+/// einmal gebildeten Index statt aus einer Suche über alle Seiten je
+/// geschwärzter Seite. Der Index wird fortgeschrieben — dieser Test hält fest,
+/// dass er dabei dasselbe Ergebnis liefert wie die Suche: nach der ersten
+/// Seite muss der geteilte Strom noch stehen (Seite 2 zeichnet ihn), nach der
+/// zweiten darf er weg sein.
+fn two_pages_sharing_one_content_stream(secret: &str) -> Vec<u8> {
+    use lopdf::{dictionary, Document, Object, Stream};
+
+    let mut doc = Document::with_version("1.5");
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1",
+        "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding",
+    });
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let content_id = doc.add_object(Stream::new(
+        dictionary! {},
+        format!("BT /F1 10 Tf 72 700 Td ({secret}) Tj ET\n").into_bytes(),
+    ));
+    let pages_id = doc.new_object_id();
+    let page_ids: Vec<Object> = (0..2)
+        .map(|_| {
+            Object::Reference(doc.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages_id,
+                "Contents" => content_id, "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            }))
+        })
+        .collect();
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => page_ids, "Count" => 2_i64,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog_id);
+    save_to_bytes(&doc).expect("Speichern")
+}
+
+#[test]
+fn a_shared_content_stream_survives_a_redaction_on_only_one_page() {
+    let secret = "DE89 3704 0044 0532 0130 00";
+    let pdf = two_pages_sharing_one_content_stream(secret);
+    let runs = extract_text(&pdf);
+    assert_eq!(runs.len(), 2, "beide Seiten müssen den Text zeigen");
+
+    // Nur Seite 0 wird geschwärzt — Seite 1 muss ihren Text behalten.
+    let only_first = redaction_for(&runs, secret);
+    assert_eq!(only_first.region.page, 0);
+    let out = redact(&pdf, &[only_first]);
+    let text = extractor_text(&out);
+    assert!(
+        text.contains(secret),
+        "der geteilte Strom wurde gelöscht, obwohl Seite 2 ihn noch zeichnet: {text:?}"
+    );
+}
+
+#[test]
+fn a_shared_content_stream_is_gone_when_every_page_is_redacted() {
+    let secret = "DE89 3704 0044 0532 0130 00";
+    let pdf = two_pages_sharing_one_content_stream(secret);
+    let runs = extract_text(&pdf);
+    let both: Vec<Redaction> = runs
+        .iter()
+        .map(|run| {
+            let pos = run.text.find(secret).expect("Text auf der Seite");
+            Redaction::new(
+                Region::new(
+                    run.page,
+                    run.rect_for_byte_range(pos, pos + secret.len())
+                        .expect("Bounding-Box"),
+                    Some(secret.to_string()),
+                    Source::Manual {
+                        reason: "geteilter Strom".into(),
+                    },
+                ),
+                Action::Blackout,
+            )
+        })
+        .collect();
+    let out = redact(&pdf, &both);
+    assert_no_leak(&out, secret);
+}

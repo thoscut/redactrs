@@ -433,6 +433,188 @@ fn the_library_can_be_told_to_go_ahead_anyway() {
 }
 
 // ---------------------------------------------------------------------------
+// Speicherbedarf (Aufgabe #58) und der wahre Grund (Aufgabe #60)
+// ---------------------------------------------------------------------------
+
+/// Ein 1-Bit-Graustufenbild mit `/FlateDecode` — die gewöhnliche Kodierung
+/// eines Schwarzweiß-Scans. Zwischen Rohbytes und dekodiertem RGBA8 liegt der
+/// Faktor 32; genau daran hing der Speicherbedarf.
+fn bilevel_image(width: u32, height: u32) -> Stream {
+    let stride = (width as usize).div_ceil(8);
+    image_stream(
+        width,
+        height,
+        b"DeviceGray",
+        1,
+        vec![0u8; stride * height as usize],
+    )
+}
+
+/// Ein Bild, das nur *behauptet*, groß zu sein — die Nutzdaten sind ein
+/// winziger Strom. Es wird gar nicht erst ausgepackt, deshalb genügt das.
+fn oversized_flate_image(width: u32, height: u32) -> Stream {
+    let mut stream = image_stream(1, 1, b"DeviceGray", 1, vec![0u8; 1]);
+    stream.dict.set("Width", i64::from(width));
+    stream.dict.set("Height", i64::from(height));
+    stream
+}
+
+/// **Aufgabe #60.** Ein Bild über `MAX_IMAGE_PIXELS` lässt sich nicht öffnen —
+/// aber nicht *wegen des Filters*. Die Meldung nannte trotzdem nur den Filter
+/// und schickte damit jeden, der ihr folgt, in die falsche Richtung.
+#[test]
+fn the_message_names_the_real_reason_not_the_filter() {
+    let mut doc = build(
+        vec![("Im0", oversized_flate_image(8000, 8000))],
+        &["q 100 0 0 100 50 600 cm /Im0 Do Q\n"],
+    );
+    let error = PdfRedactor::with_padding(0.0)
+        .apply_with_report(
+            &mut doc,
+            &[blackout(0, Rect::new(75.0, 650.0, 100.0, 675.0))],
+        )
+        .expect_err("hätte fehlschlagen müssen");
+    let text = error.to_string();
+    assert!(
+        text.contains("zu groß") && text.contains("8000x8000"),
+        "der wahre Grund fehlt: {text}"
+    );
+    assert!(
+        !text.contains("Filter: FlateDecode"),
+        "der Filter ist nicht das Problem und darf nicht als solches dastehen: {text}"
+    );
+}
+
+/// **Aufgabe #58 (a) und (c).** Der Speicherbedarf selbst ist im Test kaum zu
+/// messen — die Zahl, an der er hing, schon: wie viele Bilder gleichzeitig
+/// dekodiert gehalten werden. Vorher waren das alle Bilder aller berührten
+/// Seiten (deshalb 5,5 GB bei 20 Bildern in einer 92-kB-Datei), heute genau
+/// eines.
+#[test]
+fn only_one_image_is_held_decoded_at_a_time() {
+    // Fünf Bilder, alle deckungsgleich unter derselben Schwärzung.
+    let images: Vec<(&str, Stream)> = vec![
+        ("Im0", rgb_image(40, 40)),
+        ("Im1", rgb_image(40, 40)),
+        ("Im2", rgb_image(40, 40)),
+        ("Im3", rgb_image(40, 40)),
+        ("Im4", rgb_image(40, 40)),
+    ];
+    let content = "q 100 0 0 100 50 600 cm /Im0 Do Q\n\
+                   q 100 0 0 100 50 600 cm /Im1 Do Q\n\
+                   q 100 0 0 100 50 600 cm /Im2 Do Q\n\
+                   q 100 0 0 100 50 600 cm /Im3 Do Q\n\
+                   q 100 0 0 100 50 600 cm /Im4 Do Q\n";
+    let mut doc = build(images, &[content]);
+    let report = redact(
+        &mut doc,
+        &[blackout(0, Rect::new(75.0, 650.0, 100.0, 675.0))],
+    );
+    assert_eq!(
+        report.redacted_images, 5,
+        "alle fünf müssen geschwärzt sein"
+    );
+    assert_eq!(
+        report.peak_decoded_images, 1,
+        "es darf immer nur ein Bild gleichzeitig dekodiert gehalten werden"
+    );
+    assert_eq!(
+        report.peak_decoded_image_bytes,
+        40 * 40 * 4,
+        "gehalten werden darf nur genau ein Bildpuffer"
+    );
+}
+
+/// Dieselbe Zusicherung über Seiten hinweg: 20 Seiten mit je einem Bild und je
+/// einer Schwärzung häufen nichts an. Das war Ursache (c) — die Arbeitspuffer
+/// wurden über *alle* Seiten gesammelt und erst am Ende geschrieben.
+#[test]
+fn images_are_not_accumulated_across_pages() {
+    let images: Vec<(&str, Stream)> = (0..20)
+        .map(|i| (IMAGE_NAMES[i], rgb_image(40, 40)))
+        .collect();
+    let pages: Vec<String> = (0..20)
+        .map(|i| format!("q 100 0 0 100 50 600 cm /{} Do Q\n", IMAGE_NAMES[i]))
+        .collect();
+    let page_refs: Vec<&str> = pages.iter().map(String::as_str).collect();
+    let mut doc = build(images, &page_refs);
+    let redactions: Vec<Redaction> = (0..20)
+        .map(|page| blackout(page, Rect::new(75.0, 650.0, 100.0, 675.0)))
+        .collect();
+    let report = redact(&mut doc, &redactions);
+    assert_eq!(report.redacted_images, 20);
+    assert_eq!(report.peak_decoded_images, 1, "{report:?}");
+}
+
+/// **Aufgabe #58 (a).** Ein Bild, das keine Schwärzung schneidet, wird gar
+/// nicht erst ausgepackt. Vorher entschied der Vorfilter nur, *ob* die Seite
+/// angefasst wird — 19 unbeteiligte Bilder kosteten trotzdem 2,9 GB.
+#[test]
+fn an_untouched_image_on_a_redacted_page_is_never_decoded() {
+    let images: Vec<(&str, Stream)> = vec![("Im0", rgb_image(40, 40)), ("Im1", rgb_image(80, 80))];
+    // Im0 liegt unter der Schwärzung, Im1 ganz woanders auf derselben Seite.
+    let content = "q 100 0 0 100 50 600 cm /Im0 Do Q\n\
+                   q 100 0 0 100 300 100 cm /Im1 Do Q\n";
+    let mut doc = build(images, &[content]);
+    let report = redact(
+        &mut doc,
+        &[blackout(0, Rect::new(75.0, 650.0, 100.0, 675.0))],
+    );
+    assert_eq!(report.redacted_images, 1);
+    assert_eq!(
+        report.peak_decoded_image_bytes,
+        40 * 40 * 4,
+        "das unbeteiligte 80x80-Bild wurde ausgepackt, obwohl es niemand braucht"
+    );
+}
+
+/// **Aufgabe #58, die Obergrenze.** Reicht das Budget nicht, endet der Lauf
+/// mit einer Meldung — nicht mit einer gescheiterten Speicheranforderung.
+/// `SECURITY.md` sichert genau das zu.
+#[test]
+fn the_decoded_image_budget_ends_the_run_in_a_controlled_way() {
+    let mut doc = build(
+        vec![("Im0", bilevel_image(2000, 2000))],
+        &["q 100 0 0 100 50 600 cm /Im0 Do Q\n"],
+    );
+    // 2000x2000 sind 16 MB dekodiert; erlaubt wird 1 MB.
+    let error = PdfRedactor::with_padding(0.0)
+        .with_max_decoded_image_bytes(1024 * 1024)
+        .apply_with_report(
+            &mut doc,
+            &[blackout(0, Rect::new(75.0, 650.0, 100.0, 675.0))],
+        )
+        .expect_err("hätte an der Grenze abbrechen müssen");
+    let text = error.to_string();
+    assert!(
+        text.contains("Grenze") && text.contains("max-image-mb"),
+        "die Meldung muss sagen, welche Grenze griff und wie man sie ändert: {text}"
+    );
+}
+
+/// Und mit ausreichendem Budget läuft dasselbe Dokument durch.
+#[test]
+fn the_same_document_passes_with_enough_budget() {
+    let mut doc = build(
+        vec![("Im0", bilevel_image(2000, 2000))],
+        &["q 100 0 0 100 50 600 cm /Im0 Do Q\n"],
+    );
+    let report = PdfRedactor::with_padding(0.0)
+        .with_max_decoded_image_bytes(64 * 1024 * 1024)
+        .apply_with_report(
+            &mut doc,
+            &[blackout(0, Rect::new(75.0, 650.0, 100.0, 675.0))],
+        )
+        .expect("64 MB reichen für 16 MB Bild");
+    assert_eq!(report.redacted_images, 1);
+}
+
+const IMAGE_NAMES: [&str; 20] = [
+    "Im0", "Im1", "Im2", "Im3", "Im4", "Im5", "Im6", "Im7", "Im8", "Im9", "Im10", "Im11", "Im12",
+    "Im13", "Im14", "Im15", "Im16", "Im17", "Im18", "Im19",
+];
+
+// ---------------------------------------------------------------------------
 // Der Beweis am Dateibyte
 // ---------------------------------------------------------------------------
 

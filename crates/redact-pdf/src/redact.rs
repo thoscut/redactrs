@@ -63,6 +63,13 @@ pub struct RedactionReport {
     pub redacted_images: usize,
     /// Davon: Kopien, die angelegt wurden, weil das Bild mehrfach benutzt wird.
     pub copied_images: usize,
+    /// Höchstzahl der **gleichzeitig** dekodiert gehaltenen Bilder.
+    ///
+    /// Siehe [`crate::image::ImageOutcome::peak_decoded_images`]: der
+    /// Speicherbedarf ist im Test kaum messbar, diese Zahl schon.
+    pub peak_decoded_images: usize,
+    /// Dasselbe in Bytes (RGBA8, 4 Byte je Bildpunkt).
+    pub peak_decoded_image_bytes: u64,
     /// Warnungen — z.B. Seiten, deren Bildinhalt mangels OCR nicht durchsucht
     /// werden konnte.
     pub warnings: Vec<String>,
@@ -159,6 +166,12 @@ pub struct PdfRedactor {
     /// Standard ist `false`: lieber ein Fehler als eine Datei, in der die
     /// Schwärzung nur obenauf liegt.
     pub allow_undecodable_images: bool,
+    /// Obergrenze für die gleichzeitig gehaltenen dekodierten Bildbytes.
+    ///
+    /// Siehe [`crate::image::ImageOptions::max_decoded_bytes`]. Wird sie
+    /// überschritten, endet der Lauf mit einem Fehler — nicht mit einer
+    /// gescheiterten Speicheranforderung.
+    pub max_decoded_image_bytes: u64,
 }
 
 impl Default for PdfRedactor {
@@ -166,6 +179,7 @@ impl Default for PdfRedactor {
         Self {
             padding: 1.0,
             allow_undecodable_images: false,
+            max_decoded_image_bytes: crate::image::DEFAULT_MAX_DECODED_IMAGE_BYTES,
         }
     }
 }
@@ -185,6 +199,12 @@ impl PdfRedactor {
     /// Siehe [`PdfRedactor::allow_undecodable_images`].
     pub fn allowing_undecodable_images(mut self, allow: bool) -> Self {
         self.allow_undecodable_images = allow;
+        self
+    }
+
+    /// Siehe [`PdfRedactor::max_decoded_image_bytes`].
+    pub fn with_max_decoded_image_bytes(mut self, bytes: u64) -> Self {
+        self.max_decoded_image_bytes = bytes;
         self
     }
 
@@ -222,10 +242,13 @@ impl PdfRedactor {
             self.padding,
             &crate::image::ImageOptions {
                 allow_undecodable: self.allow_undecodable_images,
+                max_decoded_bytes: self.max_decoded_image_bytes,
             },
         )?;
         report.redacted_images = images.redacted_images;
         report.copied_images = images.copied_images;
+        report.peak_decoded_images = images.peak_decoded_images;
+        report.peak_decoded_image_bytes = images.peak_decoded_bytes;
         for warning in images.warnings {
             push_warning(&mut report, warning);
         }
@@ -236,14 +259,22 @@ impl PdfRedactor {
         let no_inline: BTreeMap<usize, Operation> = BTreeMap::new();
         let no_plans: BTreeMap<usize, Plan> = BTreeMap::new();
 
+        // Einmal statt je Seite: welche Seite benutzt welchen Content-Stream.
+        // Siehe [`ContentUsers`] — die wiederholte Suche war der quadratische
+        // Anteil an der Laufzeit.
+        let mut content_users = ContentUsers::build(doc, &pages);
+        // Ebenso die Zuordnung Schwärzung → Seite. Sie je Seite aus der
+        // vollständigen Liste zu filtern kostet Seiten × Schwärzungen.
+        let by_page = redactions_by_page(redactions);
+        let no_redactions: Vec<(usize, &Redaction)> = Vec::new();
+
         for (page_index, page_id) in pages.iter().enumerate() {
             // Der Index in der **übergebenen** Liste wird mitgeführt: nur so
             // lässt sich am Ende je Schwärzung sagen, was sie bewirkt hat.
-            let on_this_page: Vec<(usize, &Redaction)> = redactions
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| r.region.page == page_index)
-                .collect();
+            let on_this_page: &[(usize, &Redaction)] = by_page
+                .get(&page_index)
+                .map(Vec::as_slice)
+                .unwrap_or(&no_redactions);
             let page_redactions: Vec<&Redaction> = on_this_page.iter().map(|(_, r)| *r).collect();
 
             // Gescannt wird *jede* Seite, auch die ohne Schwärzung. Die
@@ -280,7 +311,8 @@ impl PdfRedactor {
             // im Bericht steht für sie eine ehrliche 0.
             let indexed_rects: Vec<(usize, Rect)> = on_this_page
                 .iter()
-                .map(|(index, r)| (*index, r.region.rect.expanded(self.padding)))
+                .copied()
+                .map(|(index, r)| (index, r.region.rect.expanded(self.padding)))
                 .filter(|(_, r)| !r.is_empty())
                 .collect();
             let rects: Vec<Rect> = indexed_rects.iter().map(|(_, r)| *r).collect();
@@ -312,6 +344,7 @@ impl PdfRedactor {
                 inline,
                 &page_redactions,
                 &mut report,
+                &mut content_users,
             )?;
             report.removed_annotations += remove_annotations(doc, *page_id, &rects)?;
         }
@@ -348,6 +381,7 @@ impl PdfRedactor {
         inline_images: &BTreeMap<usize, Operation>,
         redactions: &[&Redaction],
         report: &mut RedactionReport,
+        content_users: &mut ContentUsers,
     ) -> Result<()> {
         let data = doc
             .get_page_content(page_id)
@@ -401,7 +435,7 @@ impl PdfRedactor {
         if needs_font {
             add_placeholder_font(doc, page_id)?;
         }
-        replace_page_content(doc, page_id, encoded)
+        replace_page_content(doc, page_id, encoded, content_users)
     }
 }
 
@@ -804,22 +838,86 @@ fn add_placeholder_font(doc: &mut Document, page_id: ObjectId) -> Result<()> {
     Ok(())
 }
 
+/// Wer benutzt welchen Content-Stream?
+///
+/// [`replace_page_content`] darf einen alten Strom nur löschen, wenn ihn keine
+/// andere Seite mehr braucht. Diese Auskunft je geschwärzter Seite neu zu
+/// suchen hieß, `get_page_contents` über **alle** Seiten laufen zu lassen —
+/// die Kosten wuchsen mit dem Produkt aus Seitenzahl und Zahl der
+/// geschwärzten Seiten (8000 Seiten mit je einer Schwärzung: 50 s; mit einer
+/// einzigen Schwärzung: 0,6 s).
+///
+/// Der Index bildet dieselbe Auskunft **einmal** und wird beim Ersetzen
+/// fortgeschrieben. Das ist kein Zwischenspeicher, der veralten darf: eine
+/// Seite, deren Inhalt bereits ersetzt wurde, benutzt ihre alten Ströme nicht
+/// mehr — genau das trägt [`ContentUsers::release`] nach. Damit antwortet der
+/// Index Schritt für Schritt so, wie es die wiederholte Suche täte.
+#[derive(Debug, Default)]
+struct ContentUsers {
+    users: BTreeMap<ObjectId, BTreeSet<ObjectId>>,
+}
+
+impl ContentUsers {
+    fn build(doc: &Document, pages: &[ObjectId]) -> Self {
+        let mut users: BTreeMap<ObjectId, BTreeSet<ObjectId>> = BTreeMap::new();
+        for page_id in pages {
+            for stream in doc.get_page_contents(*page_id) {
+                users.entry(stream).or_default().insert(*page_id);
+            }
+        }
+        Self { users }
+    }
+
+    /// Benutzt außer `page_id` noch jemand diesen Strom?
+    fn shared_with_others(&self, stream: ObjectId, page_id: ObjectId) -> bool {
+        self.users
+            .get(&stream)
+            .is_some_and(|pages| pages.iter().any(|p| *p != page_id))
+    }
+
+    /// `page_id` benutzt diesen Strom nicht mehr.
+    fn release(&mut self, stream: ObjectId, page_id: ObjectId) {
+        if let Some(pages) = self.users.get_mut(&stream) {
+            pages.remove(&page_id);
+        }
+    }
+
+    /// Der neue Strom gehört ab jetzt zu dieser Seite.
+    fn claim(&mut self, stream: ObjectId, page_id: ObjectId) {
+        self.users.entry(stream).or_default().insert(page_id);
+    }
+}
+
+/// Ordnet jede Schwärzung ihrer Seite zu — mit dem Index in der übergebenen
+/// Liste, denn nur damit lässt sich am Ende je Schwärzung berichten.
+///
+/// Einmal gebildet statt je Seite gefiltert: bei 8000 Seiten und 8000
+/// Schwärzungen sind das 64 Millionen Vergleiche weniger.
+fn redactions_by_page(redactions: &[Redaction]) -> BTreeMap<usize, Vec<(usize, &Redaction)>> {
+    let mut out: BTreeMap<usize, Vec<(usize, &Redaction)>> = BTreeMap::new();
+    for (index, redaction) in redactions.iter().enumerate() {
+        out.entry(redaction.region.page)
+            .or_default()
+            .push((index, redaction));
+    }
+    out
+}
+
 /// Ersetzt den Content-Stream einer Seite und entfernt die alten Objekte.
-fn replace_page_content(doc: &mut Document, page_id: ObjectId, data: Vec<u8>) -> Result<()> {
+fn replace_page_content(
+    doc: &mut Document,
+    page_id: ObjectId,
+    data: Vec<u8>,
+    content_users: &mut ContentUsers,
+) -> Result<()> {
     let old: BTreeSet<ObjectId> = doc.get_page_contents(page_id).into_iter().collect();
 
     // Streams, die auch von anderen Seiten benutzt werden, bleiben erhalten.
-    let mut shared = BTreeSet::new();
-    for other in doc.get_pages().values() {
-        if *other == page_id {
-            continue;
-        }
-        for id in doc.get_page_contents(*other) {
-            if old.contains(&id) {
-                shared.insert(id);
-            }
-        }
-    }
+    let shared: BTreeSet<ObjectId> = old
+        .iter()
+        .copied()
+        .filter(|id| content_users.shared_with_others(*id, page_id))
+        .collect();
 
     let mut stream = Stream::new(Dictionary::new(), data);
     let _ = stream.compress();
@@ -829,6 +927,13 @@ fn replace_page_content(doc: &mut Document, page_id: ObjectId, data: Vec<u8>) ->
         .get_dictionary_mut(page_id)
         .map_err(|e| RedactError::Pdf(e.to_string()))?;
     page.set("Contents", Object::Reference(new_id));
+
+    // Der Index wird mitgeführt, *bevor* gelöscht wird: die Seite benutzt ihre
+    // alten Ströme nicht mehr, dafür den neuen.
+    for id in &old {
+        content_users.release(*id, page_id);
+    }
+    content_users.claim(new_id, page_id);
 
     for id in old.difference(&shared) {
         doc.objects.remove(id);

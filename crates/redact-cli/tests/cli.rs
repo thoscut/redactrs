@@ -1244,3 +1244,107 @@ fn the_switch_does_not_help_a_review_file_of_another_document() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("andere Eingabe"));
 }
+
+// ---------------------------------------------------------------------------
+// Aufgabe #58 — die Obergrenze für dekodierte Bildbytes
+// ---------------------------------------------------------------------------
+
+/// Ein 1-Bit-Graustufenbild mit `/FlateDecode` — die gewöhnliche Kodierung
+/// eines Schwarzweiß-Scans. 2000×2000 Bildpunkte sind 500 kB roh und 16 MB
+/// dekodiert; genau dieser Faktor 32 machte `--max-decompressed-mb` wirkungslos.
+fn pdf_with_a_bilevel_scan(dir: &Path) -> PathBuf {
+    use lopdf::{dictionary, Document, Object, Stream};
+
+    let (width, height) = (2000_i64, 2000_i64);
+    let stride = (width as usize).div_ceil(8);
+    let mut image = Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Image",
+            "Width" => width, "Height" => height,
+            "ColorSpace" => "DeviceGray", "BitsPerComponent" => 1_i64,
+        },
+        vec![0u8; stride * height as usize],
+    );
+    let _ = image.compress();
+
+    let mut doc = Document::with_version("1.5");
+    let image_id = doc.add_object(Object::Stream(image));
+    let resources_id = doc.add_object(dictionary! {
+        "XObject" => dictionary! { "Im0" => image_id },
+    });
+    // Das Bild liegt bei (50,600)–(150,700), genau unter `region_on_the_image`.
+    let content_id = doc.add_object(Stream::new(
+        dictionary! {},
+        b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec(),
+    ));
+    let pages_id = doc.new_object_id();
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id,
+        "Contents" => content_id, "Resources" => resources_id,
+        "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1_i64,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog_id);
+
+    let path = dir.join("scan.pdf");
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// Zu enge Grenze: der Lauf endet mit einer Meldung und einem Rückgabewert —
+/// nicht mit SIGABRT und nicht mit einer gescheiterten Speicheranforderung.
+/// Genau das sichert `SECURITY.md` zu.
+#[test]
+fn the_image_budget_ends_the_run_with_a_message_not_a_crash() {
+    let dir = workdir("image-budget");
+    let input = pdf_with_a_bilevel_scan(&dir);
+    let regions = region_on_the_image(&dir);
+    let out = dir.join("out.pdf");
+
+    let refused = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--manual-regions",
+        regions.to_str().unwrap(),
+        "--no-patterns",
+        "--max-image-mb",
+        "1",
+    ]);
+    assert!(!refused.status.success(), "hätte abbrechen müssen");
+    assert_ne!(
+        refused.status.code(),
+        Some(134),
+        "SIGABRT ist kein kontrollierter Abbruch"
+    );
+    let message = stderr(&refused);
+    assert!(
+        message.contains("Grenze") && message.contains("max-image-mb"),
+        "{message}"
+    );
+    assert!(!out.exists(), "es darf keine Ausgabe entstanden sein");
+
+    // Mit ausreichender Grenze — und mit der Vorgabe — läuft dieselbe Datei durch.
+    let allowed = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--manual-regions",
+        regions.to_str().unwrap(),
+        "--no-patterns",
+        "--max-image-mb",
+        "64",
+    ]);
+    assert!(allowed.status.success(), "{}", stderr(&allowed));
+    assert!(out.exists());
+}

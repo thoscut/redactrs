@@ -88,6 +88,13 @@ pub struct Config {
     /// Bilder, die sich nicht dekodieren lassen, durchgehen lassen statt
     /// abzubrechen — **unsicher**, siehe `--allow-undecodable-images`.
     pub allow_undecodable_images: bool,
+    /// Obergrenze für die gleichzeitig gehaltenen **dekodierten** Bildbytes
+    /// (`--max-image-mb`).
+    ///
+    /// Das ist die einzige Grenze, die den Speicherbedarf der Bildschwärzung
+    /// deckelt: `--max-decompressed-mb` verbucht die *Rohbytes* eines Streams,
+    /// und ein 1-Bit-Scan wächst beim Auspacken nach RGBA8 um den Faktor 32.
+    pub max_decoded_image_bytes: u64,
     /// Obergrenzen für die Eingabedatei (siehe `SECURITY.md`).
     pub limits: Limits,
     /// Obergrenze für die Zahl der Trefferkandidaten (Zeitbremse).
@@ -115,6 +122,7 @@ impl Default for Config {
             action: Action::Blackout,
             padding: DEFAULT_PADDING,
             allow_undecodable_images: false,
+            max_decoded_image_bytes: redact_pdf::image::DEFAULT_MAX_DECODED_IMAGE_BYTES,
             limits: Limits::default(),
             max_candidates: DEFAULT_MAX_CANDIDATES,
         }
@@ -272,6 +280,7 @@ pub fn apply(
     // 9. Schwärzung anwenden.
     let report = PdfRedactor::with_padding(config.padding)
         .allowing_undecodable_images(config.allow_undecodable_images)
+        .with_max_decoded_image_bytes(config.max_decoded_image_bytes)
         .apply_with_report(doc, redactions)?;
     outcome.removed_glyphs = report.removed_glyphs;
     outcome.drawn_rects = report.drawn_rects;

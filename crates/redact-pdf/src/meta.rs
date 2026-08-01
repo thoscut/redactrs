@@ -34,6 +34,13 @@
 //!   laufen. Beide dürfen `/S /JavaScript` mit beliebigem Quelltext sein,
 //! * `/OCProperties` — die Verwaltung optionaler Inhalte („Ebenen“).
 //!
+//! Aus **jedem verbliebenen `/OCG`**:
+//!
+//! * `/Name` (auf einen leeren String gesetzt — das Feld ist Pflicht) und
+//!   `/Usage`. `/OCProperties` zu löschen genügt nicht: eine Seite hält ein
+//!   `/OCG` über `/Resources /Properties` am Leben, und der Ebenenname ist
+//!   frei wählbarer Text.
+//!
 //! Aus **jeder Seite**:
 //!
 //! * `/Metadata` (seitenweites XMP), `/PieceInfo`, `/StructParents`, `/AA`,
@@ -47,16 +54,15 @@
 //!   [`crate::document::prune_unreachable`]: `lopdf` schreibt beim Speichern
 //!   alles, was in `doc.objects` steht — Erreichbarkeit interessiert den Writer
 //!   nicht.
-//! * Ein `/OCG`-Dictionary, das eine Seite über `/Resources /Properties`
-//!   weiterhin referenziert, überlebt das Entfernen von `/OCProperties` samt
-//!   seinem `/Name`. Der Ebenenname ist damit die eine bekannte Restdatenstelle,
-//!   die dieses Modul offen lässt.
+//! * Der Inhalt einer Ebene wird nicht angerührt. Entfernt wird ihr *Name*,
+//!   nicht der Text, den sie zeichnet — der geht denselben Weg wie jeder
+//!   andere Seiteninhalt durch [`crate::redact`].
 //! * Annotationen außerhalb eines Schwärzungsbereichs bleiben stehen (das
 //!   entscheidet [`crate::redact`]), ihre Appearance-Streams also auch.
 
 use std::collections::BTreeSet;
 
-use lopdf::{Dictionary, Document, Object, ObjectId};
+use lopdf::{Dictionary, Document, Object, ObjectId, StringFormat};
 
 /// Maximale Verschachtelungstiefe beim Ablaufen von Feld- und Namensbäumen.
 const MAX_TREE_DEPTH: usize = 32;
@@ -89,6 +95,14 @@ pub struct MetadataReport {
     /// `/AA`-Dictionaries aus Katalog und Seiten.
     pub additional_actions_removed: usize,
     pub optional_content_removed: bool,
+    /// Ebenennamen (`/OCG /Name`), die aus der Datei entfernt wurden.
+    ///
+    /// `/OCProperties` zu löschen genügt nicht: eine Seite kann dasselbe
+    /// `/OCG` über `/Resources /Properties` weiter referenzieren, und dann
+    /// bleibt sein `/Name` in der Datei stehen — frei wählbarer Text, der
+    /// denselben Klartext tragen kann, der gerade aus dem Strom entfernt
+    /// wurde.
+    pub optional_content_names_cleared: usize,
 }
 
 impl MetadataReport {
@@ -145,6 +159,11 @@ impl MetadataReport {
             self.additional_actions_removed,
             "Ereignisaktion (/AA)",
             "Ereignisaktionen (/AA)",
+        );
+        count(
+            self.optional_content_names_cleared,
+            "Ebenenname (/OCG /Name)",
+            "Ebenennamen (/OCG /Name)",
         );
         out
     }
@@ -262,7 +281,75 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
         doc.objects.remove(&id);
     }
 
+    // --- Ebenennamen ----------------------------------------------------
+    //
+    // Erst *nach* dem Löschen: was mit `/OCProperties` verschwunden ist, muss
+    // hier nicht mehr angefasst werden. Was übrig bleibt, ist genau der Fall,
+    // den dieses Modul bis Aufgabe #57 offen gelassen hat.
+    report.optional_content_names_cleared = clear_optional_content_names(doc);
+
     report
+}
+
+/// Leert den Klartextnamen jedes verbliebenen `/OCG`-Dictionaries.
+///
+/// Warum überhaupt: `/OCProperties` aus dem Katalog zu entfernen macht die
+/// Ebenenverwaltung unerreichbar, nicht aber die Ebenen selbst. Eine Seite,
+/// die ein `/OCG` über `/Resources /Properties` benutzt (so wird `/BDC /OC`
+/// aufgelöst), hält es weiterhin am Leben — samt `/Name`, und der ist frei
+/// wählbarer Text: „Ebene Mustermann“ ist ein Ebenenname, wie ihn jedes
+/// Layout-Programm schreibt.
+///
+/// Warum leeren statt löschen: `/Name` ist bei `/OCG` ein Pflichtfeld. Ein
+/// leerer String hält die Datei regelkonform und trägt nichts mehr.
+///
+/// Gesucht wird in **allen** Objekten und rekursiv auch in direkt
+/// eingebetteten Dictionaries — ein `/OCG` muss kein indirektes Objekt sein,
+/// und über welchen Weg es erreichbar ist, spielt für den Klartext keine
+/// Rolle. `/Usage` fällt mit: dort steht unter `/CreatorInfo` ebenfalls frei
+/// wählbarer Text.
+fn clear_optional_content_names(doc: &mut Document) -> usize {
+    let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
+    let mut cleared = 0;
+    for id in ids {
+        if let Some(object) = doc.objects.get_mut(&id) {
+            cleared += clear_ocg_names(object, 0);
+        }
+    }
+    cleared
+}
+
+fn clear_ocg_names(object: &mut Object, depth: usize) -> usize {
+    if depth > MAX_TREE_DEPTH {
+        return 0;
+    }
+    match object {
+        Object::Dictionary(dict) => clear_ocg_names_in_dict(dict, depth),
+        Object::Stream(stream) => clear_ocg_names_in_dict(&mut stream.dict, depth),
+        Object::Array(items) => items
+            .iter_mut()
+            .map(|item| clear_ocg_names(item, depth + 1))
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn clear_ocg_names_in_dict(dict: &mut Dictionary, depth: usize) -> usize {
+    let mut cleared = 0;
+    if dict.get(b"Type").and_then(Object::as_name).ok() == Some(b"OCG") {
+        let has_text = dict
+            .get(b"Name")
+            .is_ok_and(|name| !matches!(name, Object::String(bytes, _) if bytes.is_empty()));
+        if has_text {
+            dict.set("Name", Object::String(Vec::new(), StringFormat::Literal));
+            cleared += 1;
+        }
+        dict.remove(b"Usage");
+    }
+    for (_, value) in dict.iter_mut() {
+        cleared += clear_ocg_names(value, depth + 1);
+    }
+    cleared
 }
 
 // ---------------------------------------------------------------------------
