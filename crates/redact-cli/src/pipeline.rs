@@ -11,14 +11,14 @@ use std::path::{Path, PathBuf};
 use redact_booking::{BookingMatcher, CsvBookingLoader};
 use redact_core::{
     output_path_with_suffix, resolve_conflicts, sibling_path, Action, BlockedRegion, BookingLoader,
-    Extractor, RedactError, Redaction, Region, Renderer, Result, ReviewFile, ReviewInput, TextRun,
+    RedactError, Redaction, Region, Renderer, Result, ReviewFile, ReviewInput, TextRun,
     REVIEW_SUFFIX,
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::document::{check_target, load_with_limits, write_file, Limits, WriteOptions};
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
-use crate::audit::{sha256_bytes, AuditLog};
+use crate::audit::{effect_warnings, sha256_bytes, Applied, AuditLog, EntryEffect};
 
 /// Alle Einstellungen eines Laufs.
 #[derive(Debug, Clone)]
@@ -32,6 +32,8 @@ pub struct Config {
     pub patterns: Vec<String>,
     pub no_patterns: bool,
     pub patterns_config: Option<PathBuf>,
+    /// Mindestvertrauen; ohne Angabe gilt `redact_patterns::DEFAULT_MIN_CONFIDENCE`.
+    pub min_confidence: Option<f32>,
     pub booking_list: Option<PathBuf>,
     pub manual_regions: Option<PathBuf>,
     pub review: bool,
@@ -56,9 +58,16 @@ pub struct Outcome {
     pub text_runs: usize,
     pub candidates: usize,
     pub redactions: usize,
+    /// Davon wirksam — Regionen, die nach `--padding` noch ein Rechteck haben.
+    pub effective_redactions: usize,
+    /// Davon entartet: leeres Rechteck, also ohne jede Wirkung.
+    pub degenerate_redactions: usize,
     pub blocked: usize,
     pub removed_glyphs: usize,
+    pub drawn_rects: usize,
     pub removed_annotations: usize,
+    /// Klartext dessen, was der Metadatenlauf wirklich entfernt hat.
+    pub metadata_removed: Vec<String>,
     pub audit_log: Option<String>,
     /// Klartextbeschreibung der von der Negativliste blockierten Treffer.
     pub blocked_details: Vec<String>,
@@ -94,7 +103,13 @@ pub fn run(config: &Config) -> Result<Outcome> {
             (review.redactions(), blocked)
         }
         None => {
-            let runs = PdfExtractor::new().extract(&doc)?;
+            // `extract_with_warnings` statt `extract`: der Interpreter bricht
+            // an mehreren Stellen still ab (XObject ohne `/Subtype`, Form mit
+            // unbekanntem Filter, zu tiefe Verschachtelung, Kachelmuster).
+            // Dort steht Text, den die Analyse nicht sieht — wer das nicht
+            // erfährt, hält eine Datei mit „0 Schwärzungen“ für sauber.
+            let (runs, extract_warnings) = PdfExtractor::new().extract_with_warnings(&doc)?;
+            push_warnings(&mut outcome.warnings, extract_warnings);
             outcome.text_runs = runs.len();
 
             let candidates = collect_regions(config, &runs)?;
@@ -143,11 +158,26 @@ pub fn run(config: &Config) -> Result<Outcome> {
     let report =
         PdfRedactor::with_padding(config.padding).apply_with_report(&mut doc, &redactions)?;
     outcome.removed_glyphs = report.removed_glyphs;
+    outcome.drawn_rects = report.drawn_rects;
     outcome.removed_annotations = report.removed_annotations;
-    outcome.warnings = report.warnings.clone();
+    // Anfügen, nicht ersetzen: die Warnungen des Extraktors stehen schon drin
+    // und sind die einzige Stelle, an der „auf dieser Seite konnten wir nichts
+    // lesen“ überhaupt sichtbar wird.
+    push_warnings(&mut outcome.warnings, report.warnings.clone());
+
+    // Was die Schwärzung *nicht* bewirkt hat, gehört genauso gemeldet.
+    // `--padding=-100` etwa lässt von jedem Rechteck nichts übrig; solche
+    // Regionen werden übersprungen und dürfen nicht als Erfolg zählen.
+    outcome.degenerate_redactions = degenerate_count(&redactions, config.padding);
+    outcome.effective_redactions = redactions.len() - outcome.degenerate_redactions;
+    push_warnings(
+        &mut outcome.warnings,
+        effect_warnings(&redactions, config.padding, &report),
+    );
 
     // 10. Metadaten strippen.
-    redact_pdf::strip_metadata(&mut doc);
+    let metadata = redact_pdf::strip_metadata(&mut doc);
+    outcome.metadata_removed = metadata.summary();
 
     // 11. Ausgabe schreiben.
     PdfRenderer::with_options(output_options(config)).render(&doc, output)?;
@@ -160,13 +190,43 @@ pub fn run(config: &Config) -> Result<Outcome> {
             output,
             &redactions,
             &blocked,
-            &report.warnings,
+            Applied {
+                padding: config.padding,
+                redaction: &report,
+                metadata: &metadata,
+            },
+            &outcome.warnings,
         )?;
         log.write(path, &secret_options(config).protect(output.clone()))?;
         outcome.audit_log = Some(path.display().to_string());
     }
 
     Ok(outcome)
+}
+
+/// Hängt Warnungen an, ohne Dubletten.
+///
+/// Die Warnungen kommen aus mehreren Quellen — Extraktor, Schwärzung,
+/// Wirkungsprüfung — und beschreiben teils denselben Befund (etwa ein
+/// Rasterbild, das sowohl beim Lesen als auch beim Überdecken auffällt). Im
+/// Audit-Log soll jeder Befund genau einmal stehen.
+fn push_warnings(target: &mut Vec<String>, warnings: Vec<String>) {
+    for warning in warnings {
+        if !target.contains(&warning) {
+            target.push(warning);
+        }
+    }
+}
+
+/// Zählt die Regionen, von denen `--padding` nichts übrig lässt.
+///
+/// Dieselbe Bewertung wie im Audit-Log — bewusst *eine* Quelle, damit
+/// Zusammenfassung und Nachweis nicht auseinanderlaufen können.
+fn degenerate_count(redactions: &[Redaction], padding: f64) -> usize {
+    redactions
+        .iter()
+        .filter(|r| EntryEffect::of(r.region.rect, padding) == EntryEffect::Degenerate)
+        .count()
 }
 
 /// Zeitbremse: die Konfliktauflösung wächst quadratisch mit der Trefferzahl.
@@ -208,10 +268,15 @@ fn collect_regions(config: &Config, runs: &[TextRun]) -> Result<Vec<Region>> {
 
     // 5. Pattern-Matching.
     if !config.no_patterns {
-        let matcher = match &config.patterns_config {
+        let mut matcher = match &config.patterns_config {
             Some(path) => PatternMatcher::from_config_file(path)?,
             None => PatternMatcher::new(&config.patterns)?,
         };
+        // `--min-confidence` gewinnt gegen die Schwelle aus der
+        // Konfigurationsdatei: die Kommandozeile ist die spätere Anweisung.
+        if let Some(min) = config.min_confidence {
+            matcher = matcher.with_min_confidence(min)?;
+        }
         regions.extend(matcher.find_matches(runs)?);
     }
 

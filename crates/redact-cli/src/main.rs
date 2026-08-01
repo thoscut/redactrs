@@ -65,6 +65,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         patterns: cli.patterns.clone(),
         no_patterns: cli.no_patterns,
         patterns_config: cli.patterns_config.clone(),
+        min_confidence: cli.min_confidence,
         booking_list: cli.booking_list.clone(),
         manual_regions: cli.manual_regions.clone(),
         review: cli.review,
@@ -108,10 +109,28 @@ fn report(outcome: &pipeline::Outcome) {
             println!("  redact-rs {} --apply-review {path}", outcome.input);
         }
         None => {
+            // Absicht und Ergebnis werden getrennt ausgewiesen: eine Region,
+            // von der `--padding` nichts übrig lässt, wird übersprungen und
+            // darf nicht als Schwärzung durchgehen.
             println!("Schwärzungen:       {}", outcome.redactions);
+            if outcome.degenerate_redactions > 0 {
+                println!(
+                    "  davon wirkungslos:  {} (leeres Rechteck nach --padding)",
+                    outcome.degenerate_redactions
+                );
+            }
             println!("Entfernte Zeichen:  {}", outcome.removed_glyphs);
+            println!("Deck-Rechtecke:     {}", outcome.drawn_rects);
             if outcome.removed_annotations > 0 {
                 println!("Entfernte Annotationen: {}", outcome.removed_annotations);
+            }
+            if outcome.metadata_removed.is_empty() {
+                println!("Metadaten:          nichts zu entfernen");
+            } else {
+                println!(
+                    "Metadaten entfernt: {}",
+                    outcome.metadata_removed.join(", ")
+                );
             }
             if let Some(path) = &outcome.output {
                 println!("Ausgabe:            {path}");
@@ -127,19 +146,37 @@ fn report(outcome: &pipeline::Outcome) {
 }
 
 fn list_patterns() -> Result<()> {
+    let min = redact_patterns::DEFAULT_MIN_CONFIDENCE;
     println!("Eingebaute Patterns:\n");
+    println!(
+        "  [an/aus] {:<14} {:<8} {:<8} Beschreibung",
+        "id", "mit Kt.", "ohne"
+    );
     for def in redact_patterns::builtin_patterns() {
         let state = if def.enabled { "an " } else { "aus" };
+        // Zwei Spalten, weil dasselbe Pattern je nach Umfeld unterschiedlich
+        // bewertet wird: „mit Kt." gilt, wenn die Gruppe `context` gegriffen
+        // hat, „ohne" sonst. Ein `-` heißt: das Pattern kennt keinen Kontext,
+        // der eine Wert gilt immer.
+        let weak = match def.confidence_without_context {
+            Some(value) => format!("{value:.2}"),
+            None => "-".to_string(),
+        };
         println!(
-            "  [{state}] {:<14} {:<8} {}",
+            "  [{state}]    {:<14} {:<8} {:<8} {}",
             def.id,
             format!("{:.2}", def.confidence),
+            weak,
             def.description
         );
     }
     println!(
         "\nAuswahl mit --patterns id1,id2 — standardmäßig ausgeschaltete Patterns\n\
-         lassen sich so gezielt einschalten."
+         lassen sich so gezielt einschalten.\n\n\
+         Treffer unterhalb des Mindestvertrauens werden verworfen; die Vorgabe\n\
+         ist {min:.2}. Ein Pattern, dessen Spalte „ohne“ darunter liegt, findet\n\
+         also nichts, solange kein Schlüsselwort danebensteht — mit\n\
+         `--min-confidence 0.25` kommen auch diese Verdachtsfälle durch."
     );
     Ok(())
 }

@@ -5,6 +5,10 @@
 //! geschwärzt wird, entscheidet [`AppState::hit_summary`]; hier wird das nur
 //! angezeigt.
 //!
+//! Die Seitenauswahl steckt seit den Miniaturansichten in
+//! [`crate::thumbnails`] — zwei Seitenlisten nebeneinander sind eine zu viel,
+//! und ein Bild sagt mehr als eine Zahl.
+//!
 //! ## Was hier bewusst anders ist als früher
 //!
 //! * Die Überschrift nennt **beide** Zahlen: gefundene Treffer und die, die
@@ -30,9 +34,6 @@ use crate::state::{AppState, HitOutcome, HitSummary, RegionColor, REGION_COLORS}
 /// `float_literal_f32_fallback`.
 const SUFFIX_FIELD_WIDTH: f32 = 120.0;
 
-/// Höhe der Seitenliste.
-const PAGE_LIST_HEIGHT: f32 = 64.0;
-
 /// Farbe einer Region als egui-Farbe.
 pub fn dot_color(color: RegionColor) -> Color32 {
     let (r, g, b) = color.rgb();
@@ -45,10 +46,6 @@ pub fn dot_color(color: RegionColor) -> Color32 {
 /// hereingereicht — die Konfliktauflösung soll nicht je Trefferzeile laufen.
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     output_name(ui, state);
-    ui.separator();
-
-    ui.heading("Seiten");
-    pages(ui, state);
     ui.separator();
 
     ui.heading("Treffer");
@@ -96,33 +93,6 @@ fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "— kein Dokument geladen —".to_string());
     ui.label(RichText::new(suggestion).small().weak());
-}
-
-fn pages(ui: &mut egui::Ui, state: &mut AppState) {
-    let count = state.page_count();
-    if count == 0 {
-        ui.label(RichText::new("kein Dokument").weak());
-        return;
-    }
-    egui::ScrollArea::horizontal()
-        .id_salt("page_list")
-        .max_height(PAGE_LIST_HEIGHT)
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for page in 0..count {
-                    let hits = state.regions_on_page(page).len();
-                    let label = if hits > 0 {
-                        format!("{} ({hits})", page + 1)
-                    } else {
-                        format!("{}", page + 1)
-                    };
-                    let selected = page == state.current_page;
-                    if ui.selectable_label(selected, label).clicked() {
-                        state.set_page(page);
-                    }
-                }
-            });
-        });
 }
 
 fn legend(ui: &mut egui::Ui) {

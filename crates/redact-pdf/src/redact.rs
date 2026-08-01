@@ -8,8 +8,10 @@
 //! 2. Zeichen, die in einem Schwärzungsbereich liegen, werden aus der
 //!    Text-Operation entfernt. Damit der restliche Text an seiner Stelle
 //!    bleibt, wird der entfallende Vorschub als `TJ`-Kerningwert eingesetzt.
-//! 3. Anschließend wird ein deckendes Rechteck gezeichnet.
-//! 4. Überlappende Annotationen werden gelöscht (auch dort steht Text).
+//! 3. Bilder, die ein Schwärzungsbereich schneidet, werden in ihren Pixeln
+//!    überschrieben und neu kodiert ([`crate::image`]).
+//! 4. Anschließend wird ein deckendes Rechteck gezeichnet.
+//! 5. Überlappende Annotationen werden gelöscht (auch dort steht Text).
 //!
 //! Zeichen in Form-XObjects werden ebenfalls entfernt. Wird dasselbe XObject
 //! mehrfach platziert, wirkt die Entfernung notwendigerweise auf alle
@@ -22,7 +24,8 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 use redact_core::{Rect, RedactError, Redaction, Redactor, Result};
 
-use crate::content::{ScanResult, ShowItem, ShowRecord, StreamKey};
+use crate::content::{ShowItem, ShowRecord, StreamKey};
+use crate::image::InlineTarget;
 use crate::matrix::Matrix;
 
 /// Ab welchem Überdeckungsgrad ein Zeichen als geschwärzt gilt.
@@ -40,7 +43,12 @@ pub struct RedactionReport {
     pub drawn_rects: usize,
     /// Anzahl entfernter Annotationen.
     pub removed_annotations: usize,
-    /// Warnungen — z.B. Bilder, die nur überdeckt, aber nicht neu kodiert werden.
+    /// Anzahl Bilder, deren Pixel überschrieben wurden.
+    pub redacted_images: usize,
+    /// Davon: Kopien, die angelegt wurden, weil das Bild mehrfach benutzt wird.
+    pub copied_images: usize,
+    /// Warnungen — z.B. Seiten, deren Bildinhalt mangels OCR nicht durchsucht
+    /// werden konnte.
     pub warnings: Vec<String>,
 }
 
@@ -96,11 +104,21 @@ impl Plan {
 pub struct PdfRedactor {
     /// Zusätzlicher Rand (in Punkt) um jeden Schwärzungsbereich.
     pub padding: f64,
+    /// Bilder, die sich nicht dekodieren lassen (JPX, CCITT, defekte Streams),
+    /// durchgehen lassen, statt abzubrechen.
+    ///
+    /// **Unsicher** — siehe [`crate::image::ImageOptions::allow_undecodable`].
+    /// Standard ist `false`: lieber ein Fehler als eine Datei, in der die
+    /// Schwärzung nur obenauf liegt.
+    pub allow_undecodable_images: bool,
 }
 
 impl Default for PdfRedactor {
     fn default() -> Self {
-        Self { padding: 1.0 }
+        Self {
+            padding: 1.0,
+            allow_undecodable_images: false,
+        }
     }
 }
 
@@ -110,7 +128,16 @@ impl PdfRedactor {
     }
 
     pub fn with_padding(padding: f64) -> Self {
-        Self { padding }
+        Self {
+            padding,
+            ..Self::default()
+        }
+    }
+
+    /// Siehe [`PdfRedactor::allow_undecodable_images`].
+    pub fn allowing_undecodable_images(mut self, allow: bool) -> Self {
+        self.allow_undecodable_images = allow;
+        self
     }
 
     /// Wie [`Redactor::apply`], liefert aber zusätzlich einen Bericht.
@@ -133,18 +160,64 @@ impl PdfRedactor {
                     .to_string(),
             );
         }
-        if redactions.is_empty() {
-            return Ok(report);
+        warn_about_images(doc, &mut report);
+
+        // Bilder zuerst — dafür werden die *unveränderten* Content-Streams
+        // gebraucht, und die Ersatzoperationen für Inline-Bilder gehen unten in
+        // das Neuschreiben der Seite ein.
+        let images = crate::image::redact_images(
+            doc,
+            redactions,
+            self.padding,
+            &crate::image::ImageOptions {
+                allow_undecodable: self.allow_undecodable_images,
+            },
+        )?;
+        report.redacted_images = images.redacted_images;
+        report.copied_images = images.copied_images;
+        for warning in images.warnings {
+            push_warning(&mut report, warning);
         }
+        let inline_images = images.inline_replacements;
 
         let pages: Vec<ObjectId> = doc.get_pages().values().copied().collect();
         let mut form_plans: BTreeMap<ObjectId, BTreeMap<usize, Plan>> = BTreeMap::new();
+        let no_inline: BTreeMap<usize, Operation> = BTreeMap::new();
+        let no_plans: BTreeMap<usize, Plan> = BTreeMap::new();
 
         for (page_index, page_id) in pages.iter().enumerate() {
             let page_redactions: Vec<&Redaction> = redactions
                 .iter()
                 .filter(|r| r.region.page == page_index)
                 .collect();
+
+            // Gescannt wird *jede* Seite, auch die ohne Schwärzung. Die
+            // Befunde des Scanners — ein Font, dessen Text sich nicht
+            // dekodieren lässt, ein Strom, der nicht zerlegbar war, ein
+            // Formular ohne `/Subtype` — sind genau dann das Einzige, was den
+            // Nutzer erreicht: „0 Schwärzungen, Exit 0“ liest sich sonst wie
+            // „nichts gefunden, also sauber“.
+            let scan = match crate::content::scan_page(doc, *page_id) {
+                Ok(scan) => scan,
+                // Ohne Schwärzung auf dieser Seite ist ein unlesbarer Strom
+                // kein Grund, die ganze Datei scheitern zu lassen — gemeldet
+                // wird er trotzdem.
+                Err(e) if page_redactions.is_empty() => {
+                    push_warning(
+                        &mut report,
+                        format!(
+                            "Seite {} ließ sich nicht lesen ({e}); ihr Inhalt wurde nicht \
+                             durchsucht.",
+                            page_index + 1
+                        ),
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            for warning in &scan.warnings {
+                push_warning(&mut report, warning.clone());
+            }
             if page_redactions.is_empty() {
                 continue;
             }
@@ -154,7 +227,6 @@ impl PdfRedactor {
                 .filter(|r| !r.is_empty())
                 .collect();
 
-            let scan = scan_page_complete(doc, *page_id)?;
             let mut page_plans: BTreeMap<usize, Plan> = BTreeMap::new();
 
             for record in &scan.shows {
@@ -171,25 +243,49 @@ impl PdfRedactor {
 
             report.removed_glyphs += page_plans.values().map(Plan::hidden_count).sum::<usize>();
 
-            self.rewrite_page(doc, *page_id, &page_plans, &page_redactions, &mut report)?;
+            let inline = inline_images
+                .get(&InlineTarget::Page(*page_id))
+                .unwrap_or(&no_inline);
+            self.rewrite_page(
+                doc,
+                *page_id,
+                &page_plans,
+                inline,
+                &page_redactions,
+                &mut report,
+            )?;
             report.removed_annotations += remove_annotations(doc, *page_id, &rects)?;
-            warn_about_images(doc, *page_id, &rects, &mut report);
         }
 
-        // Form-XObjects werden einmalig neu geschrieben.
-        for (form_id, plans) in form_plans {
+        // Form-XObjects werden einmalig neu geschrieben — auch die, in denen
+        // nur ein Inline-Bild zu ersetzen ist und kein Zeichen entfällt.
+        let form_ids: BTreeSet<ObjectId> = form_plans
+            .keys()
+            .copied()
+            .chain(inline_images.keys().filter_map(|target| match target {
+                InlineTarget::Form(id) => Some(*id),
+                InlineTarget::Page(_) => None,
+            }))
+            .collect();
+        for form_id in form_ids {
+            let plans = form_plans.get(&form_id).unwrap_or(&no_plans);
+            let inline = inline_images
+                .get(&InlineTarget::Form(form_id))
+                .unwrap_or(&no_inline);
             report.removed_glyphs += plans.values().map(Plan::hidden_count).sum::<usize>();
-            rewrite_form(doc, form_id, &plans)?;
+            rewrite_form(doc, form_id, plans, inline)?;
         }
 
         Ok(report)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rewrite_page(
         &self,
         doc: &mut Document,
         page_id: ObjectId,
         plans: &BTreeMap<usize, Plan>,
+        inline_images: &BTreeMap<usize, Operation>,
         redactions: &[&Redaction],
         report: &mut RedactionReport,
     ) -> Result<()> {
@@ -198,7 +294,7 @@ impl PdfRedactor {
             .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
         let decoded = crate::ops::decode_content(&data);
 
-        let mut operations = rewrite_operations(&decoded, plans);
+        let mut operations = rewrite_operations(&decoded, plans, inline_images);
 
         // Grafikzustand auf den Ausgangszustand zurückfahren, damit die
         // Rechtecke im unveränderten User-Space liegen.
@@ -259,32 +355,11 @@ impl Redactor for PdfRedactor {
 // Content-Streams mit Inline-Bildern
 // ---------------------------------------------------------------------------
 
-/// Scannt eine Seite — anders als [`crate::content::scan_page`] mit einer
-/// Dekodierung, die Inline-Bilder übersteht.
-///
-/// `lopdf::content::Content::decode` kennt kein `BI … ID … EI`: die Binärdaten
-/// hinter dem `ID` bringen den Parser aus dem Tritt, alles dahinter fehlt im
-/// Operationsstrom. Für die Schwärzung heißt das doppelt Ärger — der Text
-/// dahinter wird nicht gefunden (Leck) und beim Neuschreiben nicht wieder
-/// ausgegeben (Datenverlust). [`crate::ops::decode_content`] schneidet die
-/// Bilder vorher heraus; [`crate::content::interpret`] führt denselben
-/// Zustand wie `scan_page`.
-fn scan_page_complete(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
-    let data = doc
-        .get_page_content(page_id)
-        .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
-    let operations = crate::ops::decode_content(&data);
-    let resources = crate::content::page_resources(doc, page_id);
-    let mut result = ScanResult::default();
-    crate::content::interpret(
-        doc,
-        &operations,
-        StreamKey::Page,
-        resources.as_ref(),
-        Matrix::IDENTITY,
-        &mut result,
-    );
-    Ok(result)
+/// Nimmt eine Warnung in den Bericht auf — jede höchstens einmal.
+fn push_warning(report: &mut RedactionReport, message: String) {
+    if !report.warnings.contains(&message) {
+        report.warnings.push(message);
+    }
 }
 
 /// Kodiert einen Operationsstrom zurück in Streambytes.
@@ -398,13 +473,19 @@ fn merge_plan(target: &mut BTreeMap<usize, Plan>, record: &ShowRecord, hidden: V
     }
 }
 
-/// Ersetzt die betroffenen Text-Operationen durch bereinigte Fassungen.
-fn rewrite_operations(operations: &[Operation], plans: &BTreeMap<usize, Plan>) -> Vec<Operation> {
+/// Ersetzt die betroffenen Text-Operationen durch bereinigte Fassungen und
+/// geschwärzte Inline-Bilder durch ihre neu kodierte Fassung.
+fn rewrite_operations(
+    operations: &[Operation],
+    plans: &BTreeMap<usize, Plan>,
+    inline_images: &BTreeMap<usize, Operation>,
+) -> Vec<Operation> {
     let mut out = Vec::with_capacity(operations.len() + plans.len() * 2);
     for (index, op) in operations.iter().enumerate() {
-        match plans.get(&index) {
-            Some(plan) => out.extend(rebuild_show(plan)),
-            None => out.push(op.clone()),
+        match (plans.get(&index), inline_images.get(&index)) {
+            (Some(plan), _) => out.extend(rebuild_show(plan)),
+            (None, Some(image)) => out.push(image.clone()),
+            (None, None) => out.push(op.clone()),
         }
     }
     out
@@ -612,7 +693,11 @@ fn rewrite_form(
     doc: &mut Document,
     form_id: ObjectId,
     plans: &BTreeMap<usize, Plan>,
+    inline_images: &BTreeMap<usize, Operation>,
 ) -> Result<()> {
+    if plans.is_empty() && inline_images.is_empty() {
+        return Ok(());
+    }
     let data = {
         let stream = doc
             .get_object(form_id)
@@ -624,7 +709,7 @@ fn rewrite_form(
             .map_err(|e| RedactError::Pdf(e.to_string()))?
     };
     let decoded = crate::ops::decode_content(&data);
-    let operations = rewrite_operations(&decoded, plans);
+    let operations = rewrite_operations(&decoded, plans, inline_images);
     let encoded = encode_operations(&operations)?;
 
     if let Ok(Object::Stream(stream)) = doc.get_object_mut(form_id) {
@@ -677,28 +762,36 @@ fn remove_annotations(doc: &mut Document, page_id: ObjectId, rects: &[Rect]) -> 
     Ok(removed)
 }
 
-/// Rasterbilder können nicht neu kodiert werden — darauf muss hingewiesen werden.
-fn warn_about_images(
-    doc: &Document,
-    page_id: ObjectId,
-    rects: &[Rect],
-    report: &mut RedactionReport,
-) {
-    if rects.is_empty() {
+/// Weist auf Rasterbilder hin, deren Inhalt niemand gelesen hat.
+///
+/// Die Schwärzung selbst greift inzwischen bis in die Pixel ([`crate::image`]).
+/// Was bleibt, ist die *Analyse*: was in einem Bild steht, findet kein Muster
+/// und keine Buchungsliste — dafür bräuchte es OCR. Deshalb wird gewarnt,
+/// sobald eine Seite überhaupt ein Bild enthält.
+///
+/// Drei frühere Lücken sind damit geschlossen:
+///
+/// * Der Hinweis kam nie bei einem reinen Scan, weil bei 0 Schwärzungen vorher
+///   zurückgesprungen wurde — ausgerechnet der Fall, in dem er zählt.
+/// * `lopdf::Document::get_page_images` betritt keine Form-XObjects.
+/// * Es scheiterte an einem indirekten `/Width`; jetzt wird die Größe für die
+///   Frage „gibt es hier ein Bild?“ gar nicht mehr gebraucht.
+fn warn_about_images(doc: &Document, report: &mut RedactionReport) {
+    let pages: Vec<ObjectId> = doc.get_pages().values().copied().collect();
+    let with_images = pages
+        .iter()
+        .filter(|page_id| crate::image::page_has_images(doc, **page_id))
+        .count();
+    if with_images == 0 {
         return;
     }
-    let has_images = doc
-        .get_page_images(page_id)
-        .map(|imgs| !imgs.is_empty())
-        .unwrap_or(false);
-    if has_images {
-        let msg = "Seite enthält Rasterbilder. Sie werden überdeckt, aber nicht neu kodiert — \
-                   bei gescannten Dokumenten ist zusätzlich OCR bzw. Neurendern nötig."
-            .to_string();
-        if !report.warnings.contains(&msg) {
-            report.warnings.push(msg);
-        }
-    }
+    let msg = format!(
+        "{with_images} von {} Seite(n) enthalten Rasterbilder. Geschwärzte Bereiche werden im \
+         Bild selbst überschrieben; gelesen wird der Bildinhalt aber nicht — Text *in* einem \
+         Bild (Scan, Foto) findet die Analyse ohne OCR nicht.",
+        pages.len()
+    );
+    push_warning(report, msg);
 }
 
 fn rect_from_object(obj: &Object) -> Option<Rect> {

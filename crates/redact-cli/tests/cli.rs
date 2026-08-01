@@ -551,29 +551,15 @@ fn run_audit_case(name: &str) -> PathBuf {
     output
 }
 
-/// Verbleibende Ursache: das `/V` des AcroForm-Feldes wird nie betrachtet.
-/// Die verwaisten `/AP`-, `/Metadata`- und `/StructElem`-Objekte werden
-/// inzwischen vor dem Schreiben entfernt.
+/// Behoben: die verwaisten `/AP`-, `/Metadata`- und `/StructElem`-Objekte
+/// werden vor dem Schreiben entfernt, und `strip_metadata` löscht seit
+/// Aufgabe #4 auch das `/V` des AcroForm-Feldes (samt `/DV`, `/RV` und `/XFA`).
+/// Der Kanarienvogel dazu ist entfallen.
 #[test]
-#[ignore = "bekannter Leak, siehe Aufgabe #27"]
 fn binary_does_not_leak_the_iban_outside_the_page_content() {
     let output = run_audit_case("audit-clean");
     assert_no_leak(&output, AUDIT_IBAN, "Audit-Dokument");
-}
-
-/// Kanarienvogel zum vorigen Test: hält den aktuellen Zustand fest. Schlägt er
-/// fehl, ist der Defekt behoben — dann kann das `#[ignore]` oben weg und dieser
-/// Test hier verschwinden.
-#[test]
-fn canary_binary_still_leaks_the_iban_outside_the_page_content() {
-    let output = run_audit_case("audit-canary");
-    let hits = leaks_in(&output, AUDIT_IBAN);
-    assert!(
-        !hits.is_empty(),
-        "Der Defekt scheint behoben. Dann bitte das #[ignore] an \
-         binary_does_not_leak_the_iban_outside_the_page_content entfernen."
-    );
-    // Der sichtbare Seitentext selbst ist geschwärzt — das Leck sitzt daneben.
+    // Und der sichtbare Seitentext ist ebenfalls geschwärzt.
     assert!(!visible_text(&output).contains("DE89"));
 }
 

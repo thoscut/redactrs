@@ -40,15 +40,34 @@ pub struct CharMap {
     ligatures: BTreeMap<u32, String>,
     /// Aus `/ToUnicode` gewonnene Zuordnung; hat Vorrang vor `simple`.
     to_unicode: BTreeMap<u32, String>,
+    /// Selbst **hergeleitete** Zuordnung, wenn der Font kein `/ToUnicode`
+    /// mitbringt (cmap des eingebetteten Fontprogramms über `/CIDToGIDMap`).
+    ///
+    /// Bewusst getrennt von `to_unicode`: [`CharMap::has_to_unicode`] muss
+    /// weiterhin „der Font sagt es selbst“ bedeuten. Eine hergeleitete
+    /// Zuordnung ist oft nur teilweise; die Warnstatistik im Interpreter zählt
+    /// deshalb weiter die tatsächlich unlesbaren Zeichen, statt den Font
+    /// pauschal für geklärt zu halten.
+    derived: BTreeMap<u32, String>,
+    /// Der Code **ist** der Unicode-Codepoint (vordefinierte CMaps der Bauart
+    /// `UniXXX-UCS2-H` bzw. `-UTF16-`). Dann braucht es keine Tabelle.
+    code_is_unicode: bool,
+    /// Ob `simple` aus einem echten Basis-Encoding stammt (WinAnsi & Co.) und
+    /// nicht bloß eine leere Hülle ist.
+    has_base_table: bool,
 }
 
 impl CharMap {
     pub fn one_byte(table: [Option<char>; 256]) -> Self {
+        let has_base_table = table.iter().any(Option::is_some);
         Self {
             width: CodeWidth::One,
             simple: Some(Box::new(table)),
             ligatures: BTreeMap::new(),
             to_unicode: BTreeMap::new(),
+            derived: BTreeMap::new(),
+            code_is_unicode: false,
+            has_base_table,
         }
     }
 
@@ -58,6 +77,9 @@ impl CharMap {
             simple: None,
             ligatures: BTreeMap::new(),
             to_unicode: BTreeMap::new(),
+            derived: BTreeMap::new(),
+            code_is_unicode: false,
+            has_base_table: false,
         }
     }
 
@@ -65,8 +87,25 @@ impl CharMap {
         self.to_unicode = map;
     }
 
+    /// Übernimmt eine selbst hergeleitete Code→Text-Zuordnung.
+    pub fn set_derived(&mut self, map: BTreeMap<u32, String>) {
+        self.derived = map;
+    }
+
+    /// Erklärt die Codes selbst für Unicode-Codepoints (UCS2-/UTF16-CMaps).
+    pub fn set_code_is_unicode(&mut self, yes: bool) {
+        self.code_is_unicode = yes;
+    }
+
+    /// Ob der Font selbst sagt, was seine Codes bedeuten (`/ToUnicode`).
     pub fn has_to_unicode(&self) -> bool {
         !self.to_unicode.is_empty()
+    }
+
+    /// Ob es überhaupt eine Auskunft über die Codes gibt — eigene oder
+    /// hergeleitete.
+    pub fn has_text_mapping(&self) -> bool {
+        self.has_to_unicode() || self.code_is_unicode || !self.derived.is_empty()
     }
 
     /// Wendet `/Differences` auf die Basis-Tabelle an.
@@ -106,6 +145,11 @@ impl CharMap {
                 return s.clone();
             }
         }
+        if let Some(s) = self.derived.get(&code) {
+            if !s.is_empty() {
+                return s.clone();
+            }
+        }
         if let Some(s) = self.ligatures.get(&code) {
             return s.clone();
         }
@@ -116,11 +160,29 @@ impl CharMap {
                 }
             }
         }
-        // Identity-Fallback: viele Subset-Fonts ohne ToUnicode benutzen
-        // ASCII-kompatible Codes.
-        if let Some(c) = char::from_u32(code) {
-            if !c.is_control() {
-                return c.to_string();
+        if self.code_is_unicode {
+            if let Some(c) = char::from_u32(code) {
+                if !c.is_control() {
+                    return c.to_string();
+                }
+            }
+            return REPLACEMENT.to_string();
+        }
+        // Identity-Rückfall — aber **nur** bei einem echten Basis-Encoding.
+        //
+        // Bei einem Type0/Identity-H-Font ist der Code die Glyphnummer des
+        // Subsets. Dass die zufällig im druckbaren ASCII-Bereich liegt, macht
+        // sie nicht zu Text: aus „Kontonummer 532013000“ wird dann
+        // „()*+)*,--./0123452444“ — lesbar aussehender Unsinn, in dem kein
+        // Muster mehr greift. Schlimmer noch: ohne Ersatzzeichen hält die
+        // Warnstatistik des Interpreters den Font für dekodiert und schweigt.
+        // Der Nutzer bekäme eine „erfolgreich geschwärzte“ Datei, in der alles
+        // stehen geblieben ist. Wo wir es nicht wissen, sagen wir es.
+        if self.has_base_table {
+            if let Some(c) = char::from_u32(code) {
+                if !c.is_control() {
+                    return c.to_string();
+                }
             }
         }
         REPLACEMENT.to_string()
@@ -658,6 +720,67 @@ endbfrange";
         assert_eq!(decoded[0].1, "A");
         assert_eq!(decoded[1].1, "B");
         assert_eq!(decoded[1].2, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Aufgabe #19 — ohne Auskunft wird nicht geraten
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn two_byte_codes_without_any_mapping_stay_unreadable() {
+        // Identity-H-Subset ohne /ToUnicode und ohne herleitbare Zuordnung:
+        // die CIDs liegen hier zufällig im druckbaren ASCII-Bereich. Sie als
+        // Text durchzureichen erzeugt lesbar aussehenden Unsinn — und damit
+        // eine Schwärzung, die nichts findet und trotzdem Erfolg meldet.
+        let cm = CharMap::two_byte();
+        for code in [1u32, 40, 65, 0x1234] {
+            assert_eq!(cm.text_for(code), REPLACEMENT.to_string(), "Code {code}");
+        }
+        assert!(!cm.has_text_mapping());
+    }
+
+    #[test]
+    fn a_derived_mapping_decodes_but_is_not_a_to_unicode() {
+        let mut cm = CharMap::two_byte();
+        let mut m = BTreeMap::new();
+        m.insert(1u32, "K".to_string());
+        cm.set_derived(m);
+        assert_eq!(cm.text_for(1), "K");
+        assert_eq!(cm.text_for(2), REPLACEMENT.to_string());
+        assert!(cm.has_text_mapping());
+        // Hergeleitet ist nicht dasselbe wie „der Font sagt es selbst“: die
+        // Warnstatistik muss die Lücken weiterhin zählen dürfen.
+        assert!(!cm.has_to_unicode());
+    }
+
+    #[test]
+    fn a_real_to_unicode_beats_a_derived_mapping() {
+        let mut cm = CharMap::two_byte();
+        let mut derived = BTreeMap::new();
+        derived.insert(1u32, "X".to_string());
+        cm.set_derived(derived);
+        let mut real = BTreeMap::new();
+        real.insert(1u32, "K".to_string());
+        cm.set_to_unicode(real);
+        assert_eq!(cm.text_for(1), "K");
+    }
+
+    #[test]
+    fn ucs2_cmaps_treat_the_code_as_a_codepoint() {
+        let mut cm = CharMap::two_byte();
+        cm.set_code_is_unicode(true);
+        assert_eq!(cm.text_for(0x004B), "K");
+        assert_eq!(cm.text_for(0x00E4), "ä");
+        assert_eq!(cm.text_for(0x0001), REPLACEMENT.to_string());
+    }
+
+    #[test]
+    fn one_byte_encodings_keep_their_identity_fallback() {
+        // Bei einem echten Basis-Encoding deckt die Tabelle 32..255 ab; der
+        // Rückfall bleibt für den Rest erhalten und ändert nichts.
+        let cm = CharMap::one_byte(win_ansi_encoding());
+        assert_eq!(cm.text_for(b'A' as u32), "A");
+        assert_eq!(cm.text_for(0x81), REPLACEMENT.to_string());
     }
 
     #[test]

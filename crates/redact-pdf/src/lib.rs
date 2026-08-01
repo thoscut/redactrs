@@ -32,6 +32,7 @@ pub mod encoding;
 pub mod extract;
 pub mod font;
 pub mod glyphnames;
+pub mod image;
 pub mod matrix;
 pub mod meta;
 pub mod ops;

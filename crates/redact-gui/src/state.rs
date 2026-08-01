@@ -27,7 +27,9 @@ use redact_pdf::{
     load_from_bytes, page_boxes, strip_metadata, PdfExtractor, PdfRedactor, PdfRenderer,
     RedactionReport,
 };
+use sha2::{Digest, Sha256};
 
+use crate::history::History;
 use crate::viewer::{normalize_rotation, PageView};
 
 /// A4 als Rückfallwert, wenn noch kein Dokument geladen ist.
@@ -43,6 +45,11 @@ pub const DEFAULT_PAGE_BOX: Rect = Rect {
 pub const MIN_ZOOM: f32 = 0.25;
 /// Siehe [`MIN_ZOOM`].
 pub const MAX_ZOOM: f32 = 4.0;
+/// Faktor je Druck auf „Größer“ bzw. „Kleiner“.
+///
+/// Multiplikativ, nicht additiv: bei 0,25 ist ein Schritt von 0,05 kaum zu
+/// sehen, bei 4,0 ein Sprung.
+pub const ZOOM_STEP: f32 = 1.25;
 
 /// Kategorie einer Region in der Trefferliste und im Seitenbild.
 ///
@@ -322,6 +329,63 @@ pub fn shorten(text: &str, max: usize) -> String {
     s
 }
 
+// ------------------------------------------------------------ Identität
+//
+// Siehe [`review_identity`]: eine Review-Datei ist eine Liste von Rechtecken
+// ohne jeden Bezug zum Inhalt. Landet sie auf einem anderen Dokument, sitzen
+// die Schwärzungen an falschen Stellen — und die Geheimnisse bleiben stehen.
+
+/// SHA-256 als Hex-Zeichenkette.
+///
+/// Gleiche Rechnung wie `redact_cli::audit::sha256_bytes`; der Test unten
+/// prüft denselben bekannten Wert, damit die Prüfsummen beider Programme
+/// austauschbar bleiben.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Gehört eine Review-Datei zum geladenen Dokument?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewIdentity {
+    /// Prüfsummen vorhanden und gleich.
+    Matches,
+    /// Nicht prüfbar: die Datei nennt keine Prüfsumme (so schrieb die GUI
+    /// früher **jede** Review-Datei) oder es ist kein Dokument geladen.
+    Unchecked,
+    /// Prüfsummen vorhanden und verschieden — die Datei gehört woandershin.
+    Mismatch,
+}
+
+/// Vergleicht die Prüfsumme aus der Review-Datei mit der des geladenen
+/// Dokuments.
+///
+/// Reine Funktion, damit die Entscheidung ohne Dateien und ohne Fenster
+/// prüfbar ist. Die Regel ist dieselbe wie in der CLI
+/// (`verify_review_matches_input`): eine leere Prüfsumme in der Datei kann
+/// nicht widerlegt werden und blockiert deshalb nicht — die GUI schreibt
+/// jetzt aber immer eine.
+pub fn review_identity(review_sha: &str, document_sha: &str) -> ReviewIdentity {
+    if review_sha.is_empty() || document_sha.is_empty() {
+        return ReviewIdentity::Unchecked;
+    }
+    if review_sha.eq_ignore_ascii_case(document_sha) {
+        ReviewIdentity::Matches
+    } else {
+        ReviewIdentity::Mismatch
+    }
+}
+
+/// Die ersten Stellen einer Prüfsumme — mehr braucht eine Meldung nicht.
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
 /// Der gesamte Zustand der Anwendung.
 #[derive(Debug)]
 pub struct AppState {
@@ -332,6 +396,11 @@ pub struct AppState {
     /// eigenen Thread darauf zugreift. Ohne den `Arc` müsste für jede Vorschau
     /// eine vollständige Kopie des Dokuments angelegt werden.
     pub document: Option<Arc<lopdf::Document>>,
+    /// SHA-256 der geladenen Datei; leer, solange nichts geladen ist.
+    ///
+    /// Identität des Dokuments — sie steht in der Review-Datei und wird beim
+    /// Anwenden verglichen (siehe [`review_identity`]).
+    pub input_sha256: String,
     /// MediaBox je Seite.
     pub page_boxes: Vec<Rect>,
     /// `/Rotate` je Seite (0/90/180/270), inklusive Vererbung vom Seitenbaum.
@@ -352,6 +421,8 @@ pub struct AppState {
     /// Statuszeile.
     pub status: String,
     pub warnings: Vec<String>,
+    /// Schnappschüsse für Rückgängig/Wiederholen.
+    pub history: History,
 }
 
 impl Default for AppState {
@@ -359,6 +430,7 @@ impl Default for AppState {
         Self {
             pdf_path: None,
             document: None,
+            input_sha256: String::new(),
             page_boxes: Vec::new(),
             rotations: Vec::new(),
             runs: Vec::new(),
@@ -370,6 +442,7 @@ impl Default for AppState {
             output_suffix: DEFAULT_OUTPUT_SUFFIX.to_string(),
             status: "Kein Dokument geladen".to_string(),
             warnings: Vec::new(),
+            history: History::new(),
         }
     }
 }
@@ -401,11 +474,16 @@ impl AppState {
         self.rotations = page_rotations(&doc);
         self.runs = runs;
         self.document = Some(Arc::new(doc));
+        // Über die Bytes, nicht über das geparste Dokument: die Review-Datei
+        // soll die Datei benennen, die die Nutzerin geöffnet hat.
+        self.input_sha256 = sha256_hex(bytes);
         self.pdf_path = path;
         self.current_page = 0;
         self.selected_region = None;
         self.regions.clear();
         self.warnings.clear();
+        // Der Verlauf gehörte zum vorigen Dokument.
+        self.history.clear();
         self.status = format!(
             "{} Seite(n), {} Textabschnitte geladen",
             self.page_boxes.len(),
@@ -470,8 +548,51 @@ impl AppState {
         self.current_page = self.current_page.saturating_sub(1);
     }
 
+    /// Erste Seite (Pos1).
+    pub fn first_page(&mut self) {
+        self.current_page = 0;
+    }
+
+    /// Letzte Seite (Ende).
+    pub fn last_page(&mut self) {
+        self.current_page = self.page_count().saturating_sub(1);
+    }
+
+    /// Steht die Anzeige auf der ersten Seite?
+    pub fn is_first_page(&self) -> bool {
+        self.current_page == 0
+    }
+
+    /// Steht die Anzeige auf der letzten Seite (oder ist nichts geladen)?
+    pub fn is_last_page(&self) -> bool {
+        self.current_page + 1 >= self.page_count()
+    }
+
     pub fn set_zoom(&mut self, zoom: f32) {
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    }
+
+    /// Eine Stufe größer.
+    pub fn zoom_in(&mut self) {
+        self.set_zoom(self.zoom * ZOOM_STEP);
+    }
+
+    /// Eine Stufe kleiner.
+    pub fn zoom_out(&mut self) {
+        self.set_zoom(self.zoom / ZOOM_STEP);
+    }
+
+    /// Originalgröße (100 %).
+    pub fn zoom_reset(&mut self) {
+        self.set_zoom(1.0);
+    }
+
+    pub fn can_zoom_in(&self) -> bool {
+        self.zoom < MAX_ZOOM
+    }
+
+    pub fn can_zoom_out(&self) -> bool {
+        self.zoom > MIN_ZOOM
     }
 
     /// Text-Runs der angegebenen Seite.
@@ -504,6 +625,8 @@ impl AppState {
     ///
     /// Gibt die Gesamtzahl der Regionen zurück.
     pub fn analyze(&mut self, pattern_ids: &[String], booking: Option<&Path>) -> Result<usize> {
+        // Erst rechnen, dann den Verlauf anfassen: scheitert die Analyse,
+        // bleibt der Stapel unberührt.
         let matcher = PatternMatcher::new(pattern_ids)?;
         let mut found = matcher.find_matches(&self.runs)?;
 
@@ -521,6 +644,7 @@ impl AppState {
             .cloned()
             .collect();
 
+        self.history.record(&self.regions);
         self.regions = found.into_iter().map(AnnotatedRegion::new).collect();
         self.regions.extend(manual);
         self.selected_region = None;
@@ -549,6 +673,7 @@ impl AppState {
                 reason: reason.into(),
             },
         );
+        self.history.record(&self.regions);
         self.regions.push(AnnotatedRegion::new(region));
         let index = self.regions.len() - 1;
         self.selected_region = Some(index);
@@ -565,6 +690,7 @@ impl AppState {
             self.selected_region = None;
             return false;
         }
+        self.history.record(&self.regions);
         self.regions.remove(index);
         self.selected_region = None;
         self.status = "Region gelöscht".to_string();
@@ -577,9 +703,11 @@ impl AppState {
         let Some(index) = self.selected_region else {
             return false;
         };
-        let Some(entry) = self.regions.get_mut(index) else {
+        if index >= self.regions.len() {
             return false;
-        };
+        }
+        self.history.record(&self.regions);
+        let entry = &mut self.regions[index];
         let r = entry.region.rect;
         entry.region.rect = Rect::new(r.ll.x + dx, r.ll.y + dy, r.ur.x + dx, r.ur.y + dy);
         true
@@ -591,13 +719,18 @@ impl AppState {
     /// einschalten — das würde die Semantik der Negativliste aushebeln. In dem
     /// Fall wird `false` zurückgegeben und nichts geändert.
     pub fn set_enabled(&mut self, index: usize, enabled: bool) -> bool {
-        let Some(entry) = self.regions.get_mut(index) else {
+        let Some(entry) = self.regions.get(index) else {
             return false;
         };
         if enabled && entry.is_blocking() {
             return false;
         }
-        entry.enabled = enabled;
+        // Nur echte Änderungen kommen in den Verlauf — sonst kostete ein
+        // Rückgängig mehrere Klicks, bevor sichtbar etwas passiert.
+        if entry.enabled != enabled {
+            self.history.record(&self.regions);
+            self.regions[index].enabled = enabled;
+        }
         true
     }
 
@@ -612,12 +745,58 @@ impl AppState {
 
     /// Setzt die Schwärzungsart einer Region.
     pub fn set_action(&mut self, index: usize, action: Action) -> bool {
-        match self.regions.get_mut(index) {
-            Some(entry) => {
-                entry.action = action;
+        let Some(entry) = self.regions.get(index) else {
+            return false;
+        };
+        if entry.action != action {
+            self.history.record(&self.regions);
+            self.regions[index].action = action;
+        }
+        true
+    }
+
+    // ------------------------------------------- Rückgängig / Wiederholen
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    /// Stellt den Stand vor der letzten Änderung wieder her.
+    ///
+    /// Die Auswahl wird dabei aufgehoben: nach einem Schritt zurück kann der
+    /// Eintrag, auf den der Index zeigte, verschwunden oder ein anderer sein.
+    pub fn undo(&mut self) -> bool {
+        match self.history.undo(&self.regions) {
+            Some(previous) => {
+                self.regions = previous;
+                self.selected_region = None;
+                self.status = "Rückgängig".to_string();
                 true
             }
-            None => false,
+            None => {
+                self.status = "Nichts mehr rückgängig zu machen".to_string();
+                false
+            }
+        }
+    }
+
+    /// Nimmt ein Rückgängig zurück.
+    pub fn redo(&mut self) -> bool {
+        match self.history.redo(&self.regions) {
+            Some(next) => {
+                self.regions = next;
+                self.selected_region = None;
+                self.status = "Wiederhergestellt".to_string();
+                true
+            }
+            None => {
+                self.status = "Nichts mehr wiederherzustellen".to_string();
+                false
+            }
         }
     }
 
@@ -851,9 +1030,12 @@ impl AppState {
 
     /// Schreibt den aktuellen Zustand in eine Review-Datei.
     ///
-    /// **Einschränkung**: `input.sha256` bleibt leer — dieses Crate hat bewusst
-    /// keine `sha2`-Abhängigkeit. Die CLI füllt das Feld; die GUI liest es und
-    /// gibt es beim Speichern nicht weiter (sie kennt es nicht).
+    /// `input.sha256` trägt die Prüfsumme des geladenen Dokuments. Früher blieb
+    /// das Feld leer, weil dieses Crate keine `sha2`-Abhängigkeit hatte — mit
+    /// der Folge, dass **jede** aus der GUI stammende Review-Datei auf jedes
+    /// beliebige PDF angewendet werden konnte, in der GUI wie in der CLI (die
+    /// eine leere Prüfsumme überspringt). Die Rechtecke säßen dann an falschen
+    /// Stellen, und die Geheimnisse blieben stehen.
     pub fn to_review_file(&self) -> ReviewFile {
         let input = ReviewInput {
             path: self
@@ -861,7 +1043,7 @@ impl AppState {
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
-            sha256: String::new(),
+            sha256: self.input_sha256.clone(),
             pages: self.page_count(),
         };
         let regions = self.regions.iter().map(|a| a.region.clone()).collect();
@@ -874,7 +1056,30 @@ impl AppState {
     }
 
     /// Übernimmt eine Review-Datei (z.B. aus `redact-rs --review-out`).
-    pub fn apply_review_file(&mut self, review: ReviewFile) {
+    ///
+    /// **Prüft zuerst die Identität.** Eine Review-Datei sagt nur „schwärze
+    /// bei diesen Koordinaten“ — auf ein anderes Dokument angewendet liegen
+    /// die Rechtecke auf beliebigen Stellen, das Ergebnis sieht geschwärzt aus
+    /// und ist es nicht. Stimmen die Prüfsummen nicht überein, wird die Datei
+    /// deshalb **abgelehnt** und nichts verändert.
+    pub fn apply_review_file(&mut self, review: ReviewFile) -> Result<()> {
+        let identity = review_identity(&review.input.sha256, &self.input_sha256);
+        if identity == ReviewIdentity::Mismatch {
+            return Err(RedactError::Config(format!(
+                "Diese Review-Datei gehört zu einem anderen Dokument \
+                 (Datei: {}…, geladen: {}…). Sie wurde nicht angewendet — \
+                 die Schwärzungen lägen an falschen Stellen. \
+                 Bitte „{}“ öffnen oder eine passende Review-Datei wählen.",
+                short_sha(&review.input.sha256),
+                short_sha(&self.input_sha256),
+                match review.input.path.trim() {
+                    "" => "das zugehörige PDF",
+                    path => path,
+                }
+            )));
+        }
+
+        self.history.record(&self.regions);
         self.regions = review
             .items
             .into_iter()
@@ -887,7 +1092,20 @@ impl AppState {
             })
             .collect();
         self.selected_region = None;
-        self.status = format!("Review übernommen: {} Einträge", self.regions.len());
+        self.status = match identity {
+            ReviewIdentity::Matches => format!(
+                "Review übernommen: {} Einträge (Prüfsumme stimmt)",
+                self.regions.len()
+            ),
+            // Ohne Prüfsumme lässt sich die Zugehörigkeit nicht widerlegen —
+            // aber auch nicht bestätigen. Das gehört gesagt.
+            _ => format!(
+                "Review übernommen: {} Einträge — ohne Prüfsumme, \
+                 Zugehörigkeit zum Dokument ungeprüft",
+                self.regions.len()
+            ),
+        };
+        Ok(())
     }
 }
 
@@ -1421,8 +1639,14 @@ mod tests {
         let json = state.to_review_file().to_json().unwrap();
         let parsed = ReviewFile::from_json(&json).unwrap();
 
-        let mut restored = AppState::new();
-        restored.apply_review_file(parsed);
+        // Dasselbe Dokument, deshalb dieselbe Prüfsumme — die Datei passt.
+        let mut restored = loaded_state();
+        restored.apply_review_file(parsed).expect("Review passt");
+        assert!(
+            restored.status.contains("Prüfsumme stimmt"),
+            "{}",
+            restored.status
+        );
 
         assert_eq!(restored.regions.len(), state.regions.len());
         for (a, b) in restored.regions.iter().zip(state.regions.iter()) {
@@ -1447,18 +1671,116 @@ mod tests {
         let mut review = state.to_review_file();
         // Von Hand manipulierte Datei: `enabled` steht auf true.
         review.items[0].enabled = true;
-        state.apply_review_file(review);
+        state.apply_review_file(review).unwrap();
         assert!(!state.regions[0].enabled);
         assert!(state.enabled_redactions().is_empty());
     }
 
+    // ------------------------------------------------- Identität (Aufgabe 36)
+
+    /// Dieselbe Rechnung wie in `redact-cli` — sonst lehnte das eine Programm
+    /// ab, was das andere schreibt.
     #[test]
-    fn review_input_has_pages_and_empty_sha() {
+    fn sha256_matches_the_known_value_of_the_cli() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(sha256_hex(b"").len(), 64);
+        assert_ne!(sha256_hex(b"a"), sha256_hex(b"b"));
+    }
+
+    /// **Die Review-Datei trägt die Prüfsumme ihres Dokuments.** Ohne sie
+    /// ließe sie sich auf jedes beliebige PDF anwenden — die Rechtecke lägen
+    /// dann an willkürlichen Stellen.
+    #[test]
+    fn review_input_names_pages_path_and_the_checksum_of_the_document() {
         let state = loaded_state();
         let review = state.to_review_file();
         assert_eq!(review.input.pages, 2);
-        assert_eq!(review.input.sha256, "");
         assert_eq!(review.input.path, "demo.pdf");
+        assert_eq!(review.input.sha256.len(), 64, "{}", review.input.sha256);
+        assert_eq!(
+            review.input.sha256,
+            sha256_hex(&redact_pdf::testing::demo_statement())
+        );
+
+        // Ohne Dokument gibt es nichts zu prüfen und nichts zu behaupten.
+        assert_eq!(AppState::new().to_review_file().input.sha256, "");
+    }
+
+    #[test]
+    fn review_identity_only_objects_when_both_sides_are_known() {
+        let a = sha256_hex(b"Dokument A");
+        let b = sha256_hex(b"Dokument B");
+        assert_eq!(review_identity(&a, &a), ReviewIdentity::Matches);
+        // Groß-/Kleinschreibung der Hexziffern darf nicht entscheiden.
+        assert_eq!(
+            review_identity(&a.to_uppercase(), &a),
+            ReviewIdentity::Matches
+        );
+        assert_eq!(review_identity(&a, &b), ReviewIdentity::Mismatch);
+        // Alte Dateien ohne Prüfsumme bzw. kein Dokument geladen.
+        assert_eq!(review_identity("", &a), ReviewIdentity::Unchecked);
+        assert_eq!(review_identity(&a, ""), ReviewIdentity::Unchecked);
+        assert_eq!(review_identity("", ""), ReviewIdentity::Unchecked);
+    }
+
+    /// **Aufgabe 36.** Eine Review-Datei zu einem *anderen* Dokument wird
+    /// abgelehnt, und zwar bevor irgendetwas am Zustand geändert ist. Vorher
+    /// wurde sie stillschweigend angewendet: die Rechtecke saßen dann an den
+    /// Koordinaten des fremden Dokuments, das Ergebnis sah geschwärzt aus und
+    /// die Geheimnisse standen weiter da.
+    #[test]
+    fn a_review_file_for_a_different_document_is_refused() {
+        // Review zu Dokument A, erstellt auf dem gedrehten Demo-PDF.
+        let mut origin = AppState::new();
+        origin
+            .load_bytes(&rotated_demo(&[90, 90]), Some(PathBuf::from("anderes.pdf")))
+            .unwrap();
+        origin.add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
+        let review = origin.to_review_file();
+        assert!(!review.input.sha256.is_empty());
+
+        // Dokument B ist ein anderes.
+        let mut target = loaded_state();
+        target.analyze(&["iban_de".to_string()], None).unwrap();
+        let before = target.regions.clone();
+        let history_before = target.history.undo_depth();
+        assert_ne!(target.input_sha256, origin.input_sha256);
+
+        let error = target
+            .apply_review_file(review.clone())
+            .expect_err("fremde Review-Datei muss abgelehnt werden")
+            .to_string();
+        assert!(error.contains("anderen Dokument"), "{error}");
+        // Die Meldung nennt beide Prüfsummen und die gemeinte Datei.
+        assert!(error.contains(&origin.input_sha256[..12]), "{error}");
+        assert!(error.contains(&target.input_sha256[..12]), "{error}");
+        assert!(error.contains("anderes.pdf"), "{error}");
+        // Und es wurde nichts angefasst — auch kein Schnappschuss abgelegt.
+        assert_eq!(target.regions, before);
+        assert_eq!(target.history.undo_depth(), history_before);
+
+        // Zum richtigen Dokument geht dieselbe Datei durch.
+        let mut right = AppState::new();
+        right
+            .load_bytes(&rotated_demo(&[90, 90]), Some(PathBuf::from("anderes.pdf")))
+            .unwrap();
+        right.apply_review_file(review).expect("passt");
+        assert_eq!(right.regions.len(), 1);
+    }
+
+    /// Eine Datei ohne Prüfsumme (alte GUI-Dateien, von Hand geschriebene)
+    /// wird angewendet — aber die Statuszeile sagt, dass nichts geprüft wurde.
+    #[test]
+    fn a_review_file_without_a_checksum_is_applied_but_flagged() {
+        let mut state = loaded_state();
+        let mut review = state.to_review_file();
+        review.input.sha256 = String::new();
+        review.items.clear();
+        state.apply_review_file(review).expect("wird angewendet");
+        assert!(state.status.contains("ungeprüft"), "{}", state.status);
     }
 
     #[test]
@@ -1595,6 +1917,168 @@ mod tests {
         assert_eq!(state.zoom, MIN_ZOOM);
     }
 
+    /// Die Zoomknöpfe der Symbolleiste gehen stufenweise und laufen an den
+    /// Anschlag, statt darüber hinaus.
+    #[test]
+    fn zoom_steps_stay_inside_the_limits() {
+        let mut state = AppState::new();
+        assert_eq!(state.zoom, 1.0);
+        state.zoom_in();
+        assert!((state.zoom - ZOOM_STEP).abs() < 1e-6, "{}", state.zoom);
+        state.zoom_out();
+        assert!((state.zoom - 1.0).abs() < 1e-6, "{}", state.zoom);
+
+        for _ in 0..50 {
+            state.zoom_in();
+        }
+        assert_eq!(state.zoom, MAX_ZOOM);
+        assert!(!state.can_zoom_in());
+        assert!(state.can_zoom_out());
+
+        for _ in 0..50 {
+            state.zoom_out();
+        }
+        assert_eq!(state.zoom, MIN_ZOOM);
+        assert!(!state.can_zoom_out());
+        assert!(state.can_zoom_in());
+
+        state.zoom_reset();
+        assert_eq!(state.zoom, 1.0);
+    }
+
+    /// Pos1 und Ende springen an die Enden des Dokuments.
+    #[test]
+    fn home_and_end_jump_to_the_first_and_last_page() {
+        let mut state = loaded_state();
+        assert!(state.is_first_page());
+        assert!(!state.is_last_page());
+
+        state.last_page();
+        assert_eq!(state.current_page, 1);
+        assert!(state.is_last_page());
+        assert!(!state.is_first_page());
+
+        state.first_page();
+        assert_eq!(state.current_page, 0);
+
+        // Ohne Dokument gibt es keine Seite — und keinen Absturz.
+        let mut empty = AppState::new();
+        empty.last_page();
+        assert_eq!(empty.current_page, 0);
+        assert!(empty.is_first_page());
+        assert!(empty.is_last_page());
+    }
+
+    // ------------------------------------------ Rückgängig / Wiederholen
+
+    /// Jede Änderung an der Trefferliste ist zurücknehmbar — und ein
+    /// Rückgängig ist selbst wieder zurücknehmbar.
+    #[test]
+    fn every_kind_of_edit_can_be_undone_and_redone() {
+        let mut state = loaded_state();
+        assert!(
+            !state.can_undo(),
+            "frisch geladen gibt es nichts zurückzunehmen"
+        );
+        assert!(!state.can_redo());
+        assert!(!state.undo(), "ohne Verlauf passiert nichts");
+
+        // 1) Analyse.
+        state.analyze(&["iban_de".to_string()], None).unwrap();
+        let after_analysis = state.regions.clone();
+        assert!(!after_analysis.is_empty());
+        assert!(state.can_undo());
+
+        // 2) Rechteck von Hand.
+        state.add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
+        // 3) Abwählen.
+        assert!(state.set_enabled(0, false));
+        // 4) Schwärzungsart.
+        assert!(state.set_action(0, Action::Whiteout));
+        // 5) Verschieben.
+        state.selected_region = Some(0);
+        assert!(state.move_selected(3.0, 0.0));
+        // 6) Löschen.
+        assert!(state.delete_selected());
+        let after_all_edits = state.regions.clone();
+
+        // Sechs Schritte zurück landen wieder beim Ergebnis der Analyse.
+        for _ in 0..5 {
+            assert!(state.undo());
+        }
+        assert_eq!(state.regions, after_analysis);
+        assert_eq!(state.selected_region, None, "die Auswahl wird aufgehoben");
+
+        // Noch einer: vor der Analyse war die Liste leer.
+        assert!(state.undo());
+        assert!(state.regions.is_empty());
+        assert!(!state.can_undo());
+
+        // Und wieder vor bis ganz nach hinten.
+        for _ in 0..6 {
+            assert!(state.redo());
+        }
+        assert!(!state.can_redo());
+        assert_eq!(state.regions, after_all_edits);
+    }
+
+    /// Nach einer neuen Änderung darf das Wiederholen nicht in einen Zweig
+    /// führen, den es nicht mehr gibt — und der Stapel ist begrenzt.
+    #[test]
+    fn redo_expires_after_a_new_change_and_the_stack_is_bounded() {
+        use crate::history::HISTORY_LIMIT;
+
+        let mut state = AppState::new();
+        state.add_manual_region(0, Rect::new(0.0, 0.0, 10.0, 10.0), "eins");
+        assert!(state.undo());
+        assert!(state.can_redo());
+
+        state.add_manual_region(0, Rect::new(20.0, 20.0, 30.0, 30.0), "zwei");
+        assert!(!state.can_redo(), "Wiederholen muss verfallen sein");
+        assert!(!state.redo());
+
+        // Mehr Änderungen als der Stapel fasst.
+        let mut state = AppState::new();
+        for i in 0..(HISTORY_LIMIT + 20) {
+            state.add_manual_region(0, Rect::new(i as f64, 0.0, i as f64 + 1.0, 1.0), "viele");
+        }
+        assert_eq!(state.history.undo_depth(), HISTORY_LIMIT);
+        while state.undo() {}
+        // 70 Rechtecke, 50 aufbewahrte Schritte → 20 bleiben stehen.
+        assert_eq!(state.regions.len(), 20);
+    }
+
+    /// Ein neues Dokument bringt einen neuen Verlauf mit.
+    #[test]
+    fn loading_a_document_clears_the_history() {
+        let mut state = loaded_state();
+        state.add_manual_region(0, Rect::new(0.0, 0.0, 10.0, 10.0), "Gehalt");
+        assert!(state.can_undo());
+        state
+            .load_bytes(&redact_pdf::testing::demo_statement(), None)
+            .unwrap();
+        assert!(!state.can_undo());
+        assert!(!state.can_redo());
+    }
+
+    /// Was nichts ändert, gehört nicht in den Verlauf: sonst klickt man
+    /// dreimal Rückgängig, bevor überhaupt etwas passiert.
+    #[test]
+    fn unchanged_values_do_not_fill_the_history() {
+        let mut state = AppState::new();
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+        )));
+        assert!(state.set_enabled(0, true), "war schon an");
+        assert!(state.set_action(0, Action::Blackout), "war schon schwarz");
+        assert!(!state.can_undo());
+
+        // Eine echte Änderung dagegen schon.
+        assert!(state.set_enabled(0, false));
+        assert!(state.can_undo());
+    }
+
     #[test]
     fn timestamp_formatting_matches_known_values() {
         assert_eq!(format_rfc3339_utc(0), "1970-01-01T00:00:00Z");
@@ -1704,22 +2188,46 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
-    /// Grafische Elemente brauchen nach WCAG 1.4.11 mindestens 3:1.
+    /// Grafische Elemente brauchen nach WCAG 1.4.11 mindestens 3:1 — **in
+    /// beiden Themen**.
+    ///
+    /// Die Flächen kommen nicht mehr von Hand notiert, sondern aus
+    /// [`crate::theme::Theme::backgrounds`], also aus den Werten, die egui
+    /// wirklich malt: weißes Blatt, Bereichs- und Fensterfüllung sowie der
+    /// „extreme“ Hintergrund (Textfelder, Listen). Ein Wechsel des Themas
+    /// darf keine der vier Trefferfarben unsichtbar machen.
     #[test]
     fn region_colours_reach_the_graphic_contrast_minimum() {
-        // Weißes Blatt, heller und dunkler Bereichshintergrund von egui.
-        let backgrounds = [(255, 255, 255), (248, 248, 248), (27, 27, 27)];
-        for color in REGION_COLORS {
-            for background in backgrounds {
-                let ratio = contrast(color.rgb(), background);
-                assert!(
-                    ratio >= 3.0,
-                    "{color:?} erreicht gegen {background:?} nur {ratio:.2}:1"
-                );
+        use crate::theme::{Theme, THEMES};
+
+        for theme in THEMES {
+            for background in theme.backgrounds() {
+                for color in REGION_COLORS {
+                    let ratio = contrast(color.rgb(), background);
+                    assert!(
+                        ratio >= 3.0,
+                        "{color:?} erreicht im Thema {theme:?} gegen {background:?} \
+                         nur {ratio:.2}:1"
+                    );
+                }
             }
         }
+
+        // Die beiden Themen müssen sich überhaupt unterscheiden, sonst prüfte
+        // die Schleife oben zweimal dasselbe.
+        assert_ne!(Theme::Light.backgrounds(), Theme::Dark.backgrounds());
+
         // Das alte Orange scheiterte genau daran — Beleg, dass der Test greift.
         assert!(contrast((240, 150, 30), (255, 255, 255)) < 3.0);
+        // Und ein dunkles Blau bestünde die Prüfung gegen weißes Papier
+        // mühelos, verschwände aber im dunklen Thema. Dass dieser Fall
+        // auffällt, ist der ganze Zweck der Erweiterung auf beide Themen.
+        let navy = (30, 40, 90);
+        assert!(contrast(navy, crate::theme::PAPER) >= 3.0);
+        assert!(Theme::Dark
+            .backgrounds()
+            .iter()
+            .any(|bg| contrast(navy, *bg) < 3.0));
     }
 
     #[test]
@@ -1728,7 +2236,9 @@ mod tests {
             pattern_id: "konto_nr".into(),
             confidence: 0.4,
         });
-        assert_eq!(konto, "Kontonummer (Heuristik, 6–10 Ziffern)");
+        // Der genaue Wortlaut gehört `redact-patterns`; hier zählt, dass die
+        // **Beschreibung** des Musters gezeigt wird und nicht dessen ID.
+        assert!(konto.starts_with("Kontonummer"), "{konto}");
         // Weder interne ID noch die bedeutungslose Zahl.
         assert!(!konto.contains("konto_nr"));
         assert!(!konto.contains("0.4"));

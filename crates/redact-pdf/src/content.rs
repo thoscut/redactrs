@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use lopdf::content::{Content, Operation};
+use lopdf::content::Operation;
 use lopdf::{Dictionary, Document, Object, ObjectId};
 use redact_core::{Point, Rect, RedactError, Result};
 
@@ -534,25 +534,43 @@ pub(crate) fn cmyk_to_rgb(c: f64, m: f64, y: f64, k: f64) -> Rgb {
     )
 }
 
-/// Scannt den Content-Stream einer Seite inklusive Form-XObjects.
+/// Scannt den Content-Stream einer Seite inklusive Form-XObjects und der
+/// Erscheinungsströme (`/AP`) ihrer Annotationen.
 pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
     let content_data = doc
         .get_page_content(page_id)
         .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
-    let content = Content::decode(&content_data)
-        .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht dekodierbar: {e}")))?;
+    // Nicht `lopdf::content::Content::decode`: dessen Parser kennt kein
+    // `BI … ID … EI`. Die Binärdaten hinter dem `ID` bringen ihn aus dem Tritt,
+    // der Rest des Streams geht verloren — Text hinter einem Inline-Bild wäre
+    // für die Analyse unsichtbar und könnte nie geschwärzt werden.
+    // [`crate::ops::decode_content`] schneidet die Bilder vorher heraus.
+    let operations = crate::ops::decode_content(&content_data);
 
     let resources = page_resources(doc, page_id);
     let mut result = ScanResult::default();
+    if operations.is_empty() && has_tokens(&content_data) {
+        result.warn(
+            "Der Content-Stream dieser Seite ließ sich nicht in Operationen zerlegen; \
+             ihr Text wurde nicht durchsucht und kann deshalb nicht geschwärzt worden sein."
+                .to_string(),
+        );
+    }
     interpret(
         doc,
-        &content.operations,
+        &operations,
         StreamKey::Page,
         resources.as_ref(),
         Matrix::IDENTITY,
         &mut result,
     );
+    scan_annotations(doc, page_id, resources.as_ref(), &mut result);
     Ok(result)
+}
+
+/// Enthält der Stream überhaupt etwas anderes als Leerraum?
+fn has_tokens(data: &[u8]) -> bool {
+    data.iter().any(|b| !b.is_ascii_whitespace())
 }
 
 /// Zählt je Font, wie viel des dekodierten Textes unbrauchbar ist.
@@ -655,6 +673,236 @@ pub fn page_resources(doc: &Document, page_id: ObjectId) -> Option<Dictionary> {
         merge_resources(&mut merged, d);
     }
     Some(merged)
+}
+
+// ---------------------------------------------------------------------------
+// Annotationen
+// ---------------------------------------------------------------------------
+
+/// Zieht die Erscheinungsströme (`/AP`) der Seitenannotationen mit in die
+/// Extraktion.
+///
+/// Eine `/FreeText`-Annotation trägt ihren sichtbaren Text nicht im
+/// Seiten-Content-Stream, sondern in einem eigenen Form-XObject unter
+/// `/AP /N`. Wer nur den Seitenstrom liest, sieht davon nichts: ein Muster
+/// kann dort nichts treffen, und was nicht getroffen wird, wird auch nicht
+/// geschwärzt. Die Ströme werden deshalb wie Form-XObjects durchlaufen —
+/// transformiert mit der Abbildung aus PDF 32000-1, 12.5.5 (Algorithmus 8.1),
+/// damit die Glyphen dort liegen, wo die Annotation auf der Seite steht.
+///
+/// Die Datensätze tragen [`StreamKey::Form`] mit der Objekt-Id des
+/// Erscheinungsstroms; die Schwärzung kann sie damit genauso neu schreiben wie
+/// ein gewöhnliches Form-XObject.
+pub fn scan_annotations(
+    doc: &Document,
+    page_id: ObjectId,
+    page_resources: Option<&Dictionary>,
+    sink: &mut dyn ContentSink,
+) {
+    let annots = doc
+        .get_dictionary(page_id)
+        .ok()
+        .and_then(|d| d.get(b"Annots").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_array().ok())
+        .cloned()
+        .unwrap_or_default();
+
+    // Ein Strom, der von zwei Annotationen (oder zwei Zuständen) benutzt wird,
+    // wird nur einmal gelesen — sonst stünde derselbe Text doppelt im Ergebnis.
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    for annot in &annots {
+        let Some(dict) = doc
+            .dereference(annot)
+            .ok()
+            .and_then(|(_, o)| o.as_dict().ok())
+        else {
+            continue;
+        };
+        let rect = dict
+            .get(b"Rect")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| annot_rect(o));
+
+        let appearance = dict
+            .get(b"AP")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_dict().ok());
+        let mut streams = Vec::new();
+        if let Some(appearance) = appearance {
+            for (_state, value) in appearance.iter() {
+                streams.extend(appearance_streams(doc, value));
+            }
+        }
+
+        // Ohne Erscheinungsstrom bleibt nur der Klartext in `/Contents` — der
+        // hat keine Glyphengeometrie, kann also weder verortet noch geschwärzt
+        // werden. Verschwiegen werden darf er trotzdem nicht.
+        if streams.is_empty() {
+            if annot_has_text(doc, dict) {
+                sink.warn(
+                    "Eine Annotation trägt Text in /Contents, hat aber keinen lesbaren \
+                     Erscheinungsstrom (/AP). Dieser Text wurde nicht durchsucht und \
+                     kann deshalb nicht geschwärzt worden sein."
+                        .to_string(),
+                );
+            }
+            continue;
+        }
+        for id in streams {
+            if !seen.insert(id) {
+                continue;
+            }
+            scan_appearance(doc, id, rect, page_resources, sink);
+        }
+    }
+}
+
+/// Trägt die Annotation überhaupt Text in `/Contents` (oder `/RC`)?
+fn annot_has_text(doc: &Document, dict: &Dictionary) -> bool {
+    [b"Contents".as_slice(), b"RC".as_slice()]
+        .iter()
+        .any(|key| {
+            dict.get(key)
+                .ok()
+                .and_then(|o| doc.dereference(o).ok())
+                .is_some_and(|(_, o)| match o {
+                    Object::String(bytes, _) => bytes.iter().any(|b| !b.is_ascii_whitespace()),
+                    _ => false,
+                })
+        })
+}
+
+/// Objekt-Ids aller Ströme unter einem `/AP`-Eintrag.
+///
+/// Der Eintrag ist entweder direkt ein Strom oder ein Dictionary von
+/// Erscheinungszuständen (`/Off`, `/On`, …). Es werden **alle** Zustände
+/// gelesen: was in irgendeinem Zustand steht, steht in der Datei.
+fn appearance_streams(doc: &Document, value: &Object) -> Vec<ObjectId> {
+    let Ok((id, resolved)) = doc.dereference(value) else {
+        return Vec::new();
+    };
+    match resolved {
+        Object::Stream(_) => id.into_iter().collect(),
+        Object::Dictionary(states) => states
+            .iter()
+            .filter_map(|(_, state)| match doc.dereference(state) {
+                Ok((Some(id), Object::Stream(_))) => Some(id),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn scan_appearance(
+    doc: &Document,
+    id: ObjectId,
+    rect: Option<Rect>,
+    page_resources: Option<&Dictionary>,
+    sink: &mut dyn ContentSink,
+) {
+    let Ok(stream) = doc.get_object(id).and_then(|o| o.as_stream()) else {
+        return;
+    };
+    let Ok(data) = stream
+        .decompressed_content()
+        .or_else(|_| stream.get_plain_content())
+    else {
+        sink.warn(format!(
+            "Der Erscheinungsstrom einer Annotation (Objekt {} {}) ließ sich nicht \
+             dekodieren; sein Text wurde nicht durchsucht und kann deshalb nicht \
+             geschwärzt worden sein.",
+            id.0, id.1
+        ));
+        return;
+    };
+    let operations = crate::ops::decode_content(&data);
+    if operations.is_empty() {
+        return;
+    }
+
+    let matrix = stream
+        .dict
+        .get(b"Matrix")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_array().ok())
+        .and_then(|a| matrix_from(a))
+        .unwrap_or(Matrix::IDENTITY);
+    let bbox = stream
+        .dict
+        .get(b"BBox")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| annot_rect(o));
+    let resources = stream
+        .dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .cloned()
+        .or_else(|| page_resources.cloned());
+
+    interpret(
+        doc,
+        &operations,
+        StreamKey::Form(id),
+        resources.as_ref(),
+        appearance_matrix(&matrix, bbox, rect),
+        sink,
+    );
+}
+
+/// Abbildung des Erscheinungsstroms auf `/Rect` (PDF 32000-1, 12.5.5,
+/// Algorithmus 8.1): die mit `/Matrix` transformierte `/BBox` wird auf das
+/// Annotationsrechteck geschoben und skaliert.
+fn appearance_matrix(matrix: &Matrix, bbox: Option<Rect>, rect: Option<Rect>) -> Matrix {
+    let (Some(bbox), Some(rect)) = (bbox, rect) else {
+        return *matrix;
+    };
+    let corners = [
+        matrix.apply(bbox.ll.x, bbox.ll.y),
+        matrix.apply(bbox.ur.x, bbox.ll.y),
+        matrix.apply(bbox.ur.x, bbox.ur.y),
+        matrix.apply(bbox.ll.x, bbox.ur.y),
+    ];
+    let mut min = Point::new(f64::MAX, f64::MAX);
+    let mut max = Point::new(f64::MIN, f64::MIN);
+    for c in corners {
+        min.x = min.x.min(c.x);
+        min.y = min.y.min(c.y);
+        max.x = max.x.max(c.x);
+        max.y = max.y.max(c.y);
+    }
+    // Entartete Kästen werden nur verschoben, nicht skaliert.
+    let sx = if max.x - min.x > 1e-9 {
+        rect.width() / (max.x - min.x)
+    } else {
+        1.0
+    };
+    let sy = if max.y - min.y > 1e-9 {
+        rect.height() / (max.y - min.y)
+    } else {
+        1.0
+    };
+    let fit = Matrix::translate(-min.x, -min.y)
+        .mul(&Matrix::scale(sx, sy))
+        .mul(&Matrix::translate(rect.ll.x, rect.ll.y));
+    matrix.mul(&fit)
+}
+
+/// Rechteck aus einem PDF-Array `[x0 y0 x1 y1]`; die Ecken werden normalisiert.
+fn annot_rect(obj: &Object) -> Option<Rect> {
+    let array = obj.as_array().ok()?;
+    let v: Vec<f64> = array.iter().take(4).filter_map(num).collect();
+    if v.len() < 4 {
+        return None;
+    }
+    Some(Rect::new(v[0], v[1], v[2], v[3]))
 }
 
 fn merge_resources(target: &mut Dictionary, source: &Dictionary) {
@@ -918,7 +1166,29 @@ fn scan_operations(
                 let color = space.initial_color();
                 set_color(&mut state, &op.operator, space, color);
             }
-            "sc" | "scn" | "SC" | "SCN" if graphics => {
+            "sc" | "scn" | "SC" | "SCN" => {
+                // Ein Namensoperand benennt ein Muster. Kachelmuster sind
+                // eigene Content-Streams — dort kann Text stehen, den sonst
+                // niemand zu Gesicht bekommt. Das gilt auch für die reine
+                // Textextraktion, deshalb steht dieser Zweig **vor** der
+                // Grafikschranke.
+                if let Some(Object::Name(pattern)) =
+                    op.operands.iter().find(|o| matches!(o, Object::Name(_)))
+                {
+                    scan_tiling_pattern(
+                        doc,
+                        resources,
+                        pattern,
+                        initial_ctm,
+                        depth,
+                        visiting,
+                        stats,
+                        sink,
+                    );
+                }
+                if !graphics {
+                    continue;
+                }
                 let stroking = op.operator.starts_with('S');
                 let space = if stroking {
                     state.stroke_space.clone()
@@ -988,56 +1258,74 @@ fn scan_operations(
                 let Some(Object::Name(name)) = op.operands.first() else {
                     continue;
                 };
-                if graphics && xobject_subtype(doc, resources, name).as_deref() == Some(b"Image") {
-                    sink.image(
-                        &cx,
-                        &ImageEvent {
-                            name: Some(name),
-                            inline: None,
-                            ctm: state.ctm,
-                            fill: state.fill,
-                            fill_alpha: state.fill_alpha,
-                            clip: state.clip,
-                        },
-                    );
+                match load_xobject(doc, resources, name) {
+                    // Kein solcher Eintrag: es wird nichts gezeichnet, also
+                    // versteckt sich hier auch nichts.
+                    XObjectEntry::Missing => {}
+                    XObjectEntry::Image => {
+                        if graphics {
+                            sink.image(
+                                &cx,
+                                &ImageEvent {
+                                    name: Some(name),
+                                    inline: None,
+                                    ctm: state.ctm,
+                                    fill: state.fill,
+                                    fill_alpha: state.fill_alpha,
+                                    clip: state.clip,
+                                },
+                            );
+                        }
+                    }
+                    // Vorhanden, aber nicht lesbar. Früher ein stilles
+                    // `continue`: der Text darin fehlte in der Analyse, die
+                    // Schwärzung meldete „nichts gefunden“, und die Datei galt
+                    // als sauber.
+                    XObjectEntry::Unusable(message) => sink.warn(message),
+                    XObjectEntry::Form(form_id, form_dict, form_ops) => {
+                        if depth >= MAX_FORM_DEPTH {
+                            sink.warn(format!(
+                                "Form-XObject „{}“ ist tiefer als {MAX_FORM_DEPTH} Ebenen \
+                                 verschachtelt; ab dort wurde nicht weitergelesen. Text in \
+                                 den tieferen Ebenen wurde nicht durchsucht und kann \
+                                 deshalb nicht geschwärzt worden sein.",
+                                String::from_utf8_lossy(name)
+                            ));
+                            continue;
+                        }
+                        sink.form(form_id);
+                        if !visiting.insert(form_id) {
+                            continue; // Zyklus
+                        }
+                        let form_matrix = form_dict
+                            .get(b"Matrix")
+                            .ok()
+                            .and_then(|o| o.as_array().ok())
+                            .and_then(|a| matrix_from(a))
+                            .unwrap_or(Matrix::IDENTITY);
+                        let form_resources = form_dict
+                            .get(b"Resources")
+                            .ok()
+                            .and_then(|o| doc.dereference(o).ok())
+                            .and_then(|(_, o)| o.as_dict().ok())
+                            .cloned()
+                            .or_else(|| resources.cloned());
+                        let form_fonts = fonts_from_resources(doc, form_resources.as_ref());
+                        scan_operations(
+                            doc,
+                            &form_ops,
+                            StreamKey::Form(form_id),
+                            form_resources.as_ref(),
+                            &form_fonts,
+                            form_matrix.mul(&state.ctm),
+                            depth + 1,
+                            visiting,
+                            stats,
+                            sink,
+                        );
+                        visiting.remove(&form_id);
+                    }
                 }
-                if depth >= MAX_FORM_DEPTH {
-                    continue;
-                }
-                let Some((form_id, form_dict, form_ops)) = load_form(doc, resources, name) else {
-                    continue;
-                };
-                sink.form(form_id);
-                if !visiting.insert(form_id) {
-                    continue; // Zyklus
-                }
-                let form_matrix = form_dict
-                    .get(b"Matrix")
-                    .ok()
-                    .and_then(|o| o.as_array().ok())
-                    .and_then(|a| matrix_from(a))
-                    .unwrap_or(Matrix::IDENTITY);
-                let form_resources = form_dict
-                    .get(b"Resources")
-                    .ok()
-                    .and_then(|o| doc.dereference(o).ok())
-                    .and_then(|(_, o)| o.as_dict().ok())
-                    .cloned()
-                    .or_else(|| resources.cloned());
-                let form_fonts = fonts_from_resources(doc, form_resources.as_ref());
-                scan_operations(
-                    doc,
-                    &form_ops,
-                    StreamKey::Form(form_id),
-                    form_resources.as_ref(),
-                    &form_fonts,
-                    form_matrix.mul(&state.ctm),
-                    depth + 1,
-                    visiting,
-                    stats,
-                    sink,
-                );
-                visiting.remove(&form_id);
             }
             // `sh` (Schattierungen) und alles Unbekannte werden übergangen.
             _ => {}
@@ -1124,43 +1412,206 @@ fn rect_path(operands: &[Object], ctm: &Matrix) -> Option<Vec<PathSeg>> {
     ])
 }
 
-/// `/Subtype` eines XObjects, ohne den Stream zu dekodieren.
-fn xobject_subtype(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> Option<Vec<u8>> {
-    let xobjects = resources?.get(b"XObject").ok()?;
-    let (_, xobjects) = doc.dereference(xobjects).ok()?;
-    let entry = xobjects.as_dict().ok()?.get(name).ok()?;
-    let (_, entry) = doc.dereference(entry).ok()?;
-    let stream = entry.as_stream().ok()?;
-    stream
+/// Was hinter einem `Do`-Namen in den Ressourcen steckt.
+enum XObjectEntry {
+    Image,
+    /// Form-XObject: Objekt-Id, Dictionary und dekodierter Operationsstrom.
+    Form(ObjectId, Dictionary, Vec<Operation>),
+    /// Vorhanden, aber nicht auswertbar — mit fertiger Begründung für die
+    /// Warnung. Was hier steht, wird nicht durchsucht; das muss der Nutzer
+    /// erfahren.
+    Unusable(String),
+    /// Kein solcher Eintrag in den Ressourcen.
+    Missing,
+}
+
+/// Löst einen `Do`-Namen auf und dekodiert bei einem Form-XObject gleich den
+/// Inhalt.
+///
+/// Jeder Weg, auf dem hier nichts Brauchbares herauskommt, wird benannt statt
+/// verschwiegen: ein Form-XObject ohne `/Subtype` oder mit einem Filter, den
+/// niemand dekodieren kann, versteckt seinen Text sonst lautlos.
+fn load_xobject(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> XObjectEntry {
+    let label = String::from_utf8_lossy(name).into_owned();
+    let entry = resources
+        .and_then(|r| r.get(b"XObject").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(name).ok());
+    let Some(entry) = entry else {
+        return XObjectEntry::Missing;
+    };
+    let Ok((id, resolved)) = doc.dereference(entry) else {
+        return XObjectEntry::Unusable(format!(
+            "XObject „{label}“ verweist auf ein Objekt, das es nicht gibt; sein \
+             Inhalt wurde nicht durchsucht."
+        ));
+    };
+    let Ok(stream) = resolved.as_stream() else {
+        return XObjectEntry::Unusable(format!(
+            "XObject „{label}“ ist kein Stream; sein Inhalt wurde nicht durchsucht."
+        ));
+    };
+    let subtype = stream
         .dict
         .get(b"Subtype")
         .and_then(Object::as_name)
         .ok()
-        .map(|n| n.to_vec())
+        .map(|n| n.to_vec());
+    match subtype.as_deref() {
+        Some(b"Image") => XObjectEntry::Image,
+        Some(b"Form") => {
+            let Some(id) = id else {
+                return XObjectEntry::Unusable(format!(
+                    "Form-XObject „{label}“ ist kein eigenständiges Objekt; sein Text \
+                     wurde nicht durchsucht und kann deshalb nicht geschwärzt worden sein."
+                ));
+            };
+            let Ok(data) = stream
+                .decompressed_content()
+                .or_else(|_| stream.get_plain_content())
+            else {
+                return XObjectEntry::Unusable(format!(
+                    "Form-XObject „{label}“ ließ sich nicht dekodieren (unbekannter oder \
+                     defekter Filter); sein Text wurde nicht durchsucht und kann deshalb \
+                     nicht geschwärzt worden sein."
+                ));
+            };
+            let operations = crate::ops::decode_content(&data);
+            if operations.is_empty() && has_tokens(&data) {
+                return XObjectEntry::Unusable(format!(
+                    "Der Inhalt des Form-XObjects „{label}“ ließ sich nicht in Operationen \
+                     zerlegen; sein Text wurde nicht durchsucht und kann deshalb nicht \
+                     geschwärzt worden sein."
+                ));
+            }
+            XObjectEntry::Form(id, stream.dict.clone(), operations)
+        }
+        // Ohne `/Subtype /Form` steigt der Interpreter aus — und stünde dann
+        // vor genau dem Text, den er hätte finden sollen.
+        _ => XObjectEntry::Unusable(format!(
+            "XObject „{label}“ hat kein bekanntes /Subtype (weder /Form noch /Image); \
+             sein Inhalt wurde nicht durchsucht. Steht dort Text, blieb er ungeschwärzt."
+        )),
+    }
 }
 
-fn load_form(
+/// Durchläuft ein Kachelmuster (`/PatternType 1`) — dessen Content-Stream kann
+/// Text enthalten.
+///
+/// Das Muster wird gekachelt gemalt; durchlaufen wird nur die Kachel im
+/// Ursprung des Musterraums. Für die Schwärzung reicht das: gefunden wird der
+/// Text an der Stelle dieser einen Kachel, entfernt wird er aus dem
+/// Musterstrom — und damit aus **allen** Kacheln. Dass die weiteren Kacheln
+/// nicht einzeln vermessen werden, sagt die Warnung.
+#[allow(clippy::too_many_arguments)]
+fn scan_tiling_pattern(
     doc: &Document,
     resources: Option<&Dictionary>,
     name: &[u8],
-) -> Option<(ObjectId, Dictionary, Vec<Operation>)> {
-    let xobjects = resources?.get(b"XObject").ok()?;
-    let (_, xobjects) = doc.dereference(xobjects).ok()?;
-    let entry = xobjects.as_dict().ok()?.get(name).ok()?;
-    let id = match entry {
-        Object::Reference(id) => *id,
-        _ => return None,
+    base_ctm: Matrix,
+    depth: usize,
+    visiting: &mut HashSet<ObjectId>,
+    stats: &mut FontDecodeStats,
+    sink: &mut dyn ContentSink,
+) {
+    let label = String::from_utf8_lossy(name).into_owned();
+    let entry = resources
+        .and_then(|r| r.get(b"Pattern").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(name).ok());
+    let Some(entry) = entry else {
+        return;
     };
-    let stream = doc.get_object(id).ok()?.as_stream().ok()?;
-    if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Form") {
-        return None;
+    let Ok((id, resolved)) = doc.dereference(entry) else {
+        return;
+    };
+    // Ein Schattierungsmuster (`/PatternType 2`) ist ein Dictionary ohne
+    // Content-Stream; dort steht kein Text.
+    let Ok(stream) = resolved.as_stream() else {
+        return;
+    };
+    if stream.dict.get(b"PatternType").ok().and_then(num) == Some(2.0) {
+        return;
     }
-    let data = stream
+    let Ok(data) = stream
         .decompressed_content()
         .or_else(|_| stream.get_plain_content())
-        .ok()?;
-    let content = Content::decode(&data).ok()?;
-    Some((id, stream.dict.clone(), content.operations))
+    else {
+        sink.warn(format!(
+            "Kachelmuster „{label}“ ließ sich nicht dekodieren; sein Inhalt wurde nicht \
+             durchsucht. Steht dort Text, blieb er ungeschwärzt."
+        ));
+        return;
+    };
+    let operations = crate::ops::decode_content(&data);
+    // Ein Muster ohne Textoperator ist ein Schraffur- oder Logomuster: kein
+    // Befund, keine Meldung.
+    if !operations
+        .iter()
+        .any(|op| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
+    {
+        return;
+    }
+    if depth >= MAX_FORM_DEPTH {
+        sink.warn(format!(
+            "Kachelmuster „{label}“ liegt tiefer als {MAX_FORM_DEPTH} Ebenen \
+             verschachtelt; sein Text wurde nicht durchsucht und kann deshalb nicht \
+             geschwärzt worden sein."
+        ));
+        return;
+    }
+    let Some(id) = id else {
+        sink.warn(format!(
+            "Kachelmuster „{label}“ ist kein eigenständiges Objekt; sein Text wurde \
+             nicht durchsucht und kann deshalb nicht geschwärzt worden sein."
+        ));
+        return;
+    };
+    // Einmal je Dokumentobjekt: ein zweiter Durchlauf brächte nur denselben
+    // Text ein zweites Mal (und bei Zyklen gar keinen).
+    if !visiting.insert(id) {
+        return;
+    }
+
+    sink.warn(format!(
+        "Kachelmuster „{label}“ enthält Text. Er wird an der Stelle der ersten Kachel \
+         gesucht und beim Schwärzen aus dem Muster entfernt — die übrigen Kacheln \
+         werden dabei nicht einzeln vermessen. Bitte das Ergebnis dort prüfen."
+    ));
+
+    // Der Musterraum hängt am Ausgangszustand des Streams, nicht an der CTM
+    // zum Zeitpunkt des `scn` (PDF 32000-1, 8.7.3.1).
+    let matrix = stream
+        .dict
+        .get(b"Matrix")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_array().ok())
+        .and_then(|a| matrix_from(a))
+        .unwrap_or(Matrix::IDENTITY);
+    let pattern_resources = stream
+        .dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .cloned()
+        .or_else(|| resources.cloned());
+    let fonts = fonts_from_resources(doc, pattern_resources.as_ref());
+    scan_operations(
+        doc,
+        &operations,
+        StreamKey::Form(id),
+        pattern_resources.as_ref(),
+        &fonts,
+        matrix.mul(&base_ctm),
+        depth + 1,
+        visiting,
+        stats,
+        sink,
+    );
 }
 
 /// Berechnet die Glyphen einer Text-Ausgabe-Operation und schreibt `tm` fort.
@@ -1416,6 +1867,7 @@ pub fn trailing_state(operations: &[Operation]) -> (Matrix, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lopdf::content::Content;
     use lopdf::{dictionary, Stream, StringFormat};
 
     fn ops(src: &[u8]) -> Vec<Operation> {
@@ -1524,6 +1976,39 @@ endcmap"
         let r = glyph_rect(&trm, 0.5, 0.75, -0.25);
         assert!((r.width() - 10.0).abs() < 1e-9);
         assert!((r.height() - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn appearance_is_fitted_into_the_annotation_rect() {
+        // `/BBox` 100 × 50, um 90° gedreht (Hülle also 50 × 100), soll in ein
+        // `/Rect` von 100 × 200 passen: Faktor 2 in beiden Achsen. Ohne diese
+        // Abbildung läge der Annotationstext im Ursprung des Formularraums —
+        // also irgendwo, nur nicht dort, wo er zu sehen ist.
+        let rotate = Matrix::new(0.0, 1.0, -1.0, 0.0, 0.0, 0.0);
+        let m = appearance_matrix(
+            &rotate,
+            Some(Rect::new(0.0, 0.0, 100.0, 50.0)),
+            Some(Rect::new(10.0, 20.0, 110.0, 220.0)),
+        );
+        let a = m.apply(0.0, 0.0);
+        let b = m.apply(100.0, 50.0);
+        assert!(
+            (a.x - 110.0).abs() < 1e-9 && (a.y - 20.0).abs() < 1e-9,
+            "{a:?}"
+        );
+        assert!(
+            (b.x - 10.0).abs() < 1e-9 && (b.y - 220.0).abs() < 1e-9,
+            "{b:?}"
+        );
+    }
+
+    #[test]
+    fn an_appearance_without_bbox_keeps_its_own_matrix() {
+        let m = Matrix::translate(5.0, 7.0);
+        assert_eq!(
+            appearance_matrix(&m, None, Some(Rect::new(0.0, 0.0, 10.0, 10.0))),
+            m
+        );
     }
 
     // -----------------------------------------------------------------------

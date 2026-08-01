@@ -106,13 +106,16 @@ fn assert_still_leaking(bytes: &[u8], hint: &str) {
 // #25 — Inline-Bilder zerreißen den Content-Stream
 // ---------------------------------------------------------------------------
 //
-// Ursache: `lopdf::content::Content::decode` kennt keine Inline-Bilder
-// (`BI … ID … EI`). Der Parser verliert alles hinter dem `ID`, deshalb wird
+// Ursache war: `lopdf::content::Content::decode` kennt keine Inline-Bilder
+// (`BI … ID … EI`). Der Parser verliert alles hinter dem `ID`, deshalb wurde
 // der Text dahinter weder gefunden noch beim Neuschreiben wieder ausgegeben —
-// und ein `Do` auf ein Form-XObject dahinter wird nie ausgeführt.
+// und ein `Do` auf ein Form-XObject dahinter wurde nie ausgeführt.
+//
+// Behoben: **beide** Pfade dekodieren inzwischen mit `crate::ops::decode_content`,
+// der Schreibpfad (`redact.rs`) wie der Lesepfad (`content.rs`). Die Tests
+// laufen deshalb wieder als Zusicherung; ihre Kanarienvögel sind entfallen.
 
 #[test]
-#[ignore = "bekannter Leak, siehe Aufgabe #25"]
 fn text_after_an_inline_image_is_still_found_by_the_extractor() {
     let pdf = common::inline_image_before_text(SECRET);
     let runs = extract(&pdf);
@@ -127,21 +130,9 @@ fn text_after_an_inline_image_is_still_found_by_the_extractor() {
     );
 }
 
-#[test]
-fn canary_inline_image_hides_the_following_text_from_the_extractor() {
-    let pdf = common::inline_image_before_text(SECRET);
-    let runs = extract(&pdf);
-    assert!(
-        !runs.iter().any(|r| r.text.contains(SECRET)),
-        "Der Defekt scheint behoben (Inline-Bild). Dann bitte das #[ignore] an \
-         text_after_an_inline_image_is_still_found_by_the_extractor entfernen."
-    );
-}
-
-/// Läuft grün — aber aus dem falschen Grund: der Text hinter dem Inline-Bild
-/// wird beim Neuschreiben komplett **gelöscht**. Das Geheimnis ist weg, weil
-/// die Seite kaputtgeht, nicht weil geschwärzt wurde. Der Kollateralschaden
-/// steht in [`unrelated_text_after_an_inline_image_survives_the_rewrite`].
+/// Das Geheimnis ist weg, **weil** geschwärzt wurde — nicht mehr, weil die
+/// Seite dabei kaputtgeht. Die Gegenprobe dazu steht in
+/// [`unrelated_text_after_an_inline_image_survives_the_rewrite`].
 #[test]
 fn redacting_a_page_with_an_inline_image_removes_the_secret() {
     let pdf = common::inline_image_before_text(SECRET);
@@ -150,7 +141,6 @@ fn redacting_a_page_with_an_inline_image_removes_the_secret() {
 }
 
 #[test]
-#[ignore = "bekannter Datenverlust, siehe Aufgabe #25"]
 fn unrelated_text_after_an_inline_image_survives_the_rewrite() {
     let pdf = common::inline_image_before_text(SECRET);
     // Geschwärzt wird nur die IBAN-Zeile bei y≈685.
@@ -163,22 +153,6 @@ fn unrelated_text_after_an_inline_image_survives_the_rewrite() {
     assert!(
         text.contains("Kontoinhaber"),
         "unbeteiligter Text hinter dem Inline-Bild wurde mitgelöscht: {text:?}"
-    );
-}
-
-#[test]
-fn canary_text_after_an_inline_image_is_lost_on_rewrite() {
-    let pdf = common::inline_image_before_text(SECRET);
-    let out = pipeline(&pdf, &[manual(0, Rect::new(40.0, 678.0, 560.0, 696.0))]);
-    let text = extract(&out)
-        .iter()
-        .map(|r| r.text.clone())
-        .collect::<Vec<_>>()
-        .join("|");
-    assert!(
-        !text.contains("Kontoinhaber"),
-        "Der Defekt scheint behoben (Datenverlust hinter Inline-Bild). Dann bitte \
-         das #[ignore] an unrelated_text_after_an_inline_image_survives_the_rewrite entfernen."
     );
 }
 
@@ -269,25 +243,19 @@ fn page_level_xmp_metadata_is_removed_not_just_dereferenced() {
 // #27 — Formularfelder und die Historie inkrementeller Updates
 // ---------------------------------------------------------------------------
 
+/// Behoben (Aufgabe #4): `strip_metadata` löscht `/V`, `/DV` und `/RV` in
+/// jedem Feld des Formularbaums und entfernt anschließend `/AcroForm`. Vorher
+/// wurde nur der sichtbare Text geschwärzt — im Feldwert stand das Geheimnis
+/// als UTF-16BE weiter. Die übrigen Restdatenstellen (Dateianhänge,
+/// JavaScript, `/OpenAction`, `/AA`, `/OCProperties`) prüft
+/// `tests/residual_data.rs`.
 #[test]
-#[ignore = "bekannter Leak, siehe Aufgabe #27"]
 fn form_field_value_is_redacted_too() {
-    // Der sichtbare Text wird geschwärzt, `/V` des AcroForm-Feldes nicht —
-    // dort steht das Geheimnis als UTF-16BE und übersteht alles.
     let pdf = common::form_field_value(SECRET);
     let runs = extract(&pdf);
     let redaction = redaction_for(&runs, SECRET).expect("IBAN auf der Seite gefunden");
     let out = pipeline(&pdf, &[redaction]);
     assert_no_leak(&out, "AcroForm /V");
-}
-
-#[test]
-fn canary_form_field_value_still_leaks() {
-    let pdf = common::form_field_value(SECRET);
-    let runs = extract(&pdf);
-    let redaction = redaction_for(&runs, SECRET).expect("IBAN auf der Seite gefunden");
-    let out = pipeline(&pdf, &[redaction]);
-    assert_still_leaking(&out, "AcroForm /V");
 }
 
 /// Läuft grün, weil das Werkzeug die Datei komplett neu schreibt statt

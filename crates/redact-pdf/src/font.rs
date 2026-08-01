@@ -5,8 +5,11 @@
 //! einiges an Aufwand getrieben:
 //!
 //! * `/Widths` einfacher Fonts, `/W`+`/DW` bei CID-Fonts, `/MissingWidth`
-//! * Metriken der 14 Standard-Fonts als Fallback (Helvetica/Times/Courier)
+//! * Metriken der 14 Standard-Fonts — als **letzte** Rückfallebene
 //! * `/ToUnicode` hat Vorrang, danach `/Encoding` + `/Differences`
+//! * Type0 ohne `/ToUnicode`: Zuordnung aus der `cmap` des eingebetteten
+//!   Fontprogramms plus `/CIDToGIDMap` herleiten, sonst aus dem Namen der
+//!   vordefinierten CMap
 
 use std::collections::BTreeMap;
 
@@ -170,7 +173,140 @@ fn load_font(doc: &Document, font: &Dictionary) -> FontInfo {
         }
     }
 
+    // Ohne `/ToUnicode` bleibt bei Type0 sonst nur der Identity-Rückfall, und
+    // der macht aus den CIDs eines Subsets (ab 1 durchnummeriert) lauter
+    // Steuerzeichen. Vorher wird deshalb alles ausgereizt, was das Dokument
+    // sonst noch hergibt.
+    if subtype == b"Type0" && !info.charmap.has_to_unicode() {
+        derive_cid_to_unicode(doc, font, &mut info);
+    }
+
     info
+}
+
+// ---------------------------------------------------------------------------
+// Type0 ohne /ToUnicode: Zuordnung herleiten statt raten
+// ---------------------------------------------------------------------------
+
+/// Versucht, für einen Type0-Font ohne `/ToUnicode` doch noch eine
+/// Code→Text-Zuordnung zu gewinnen.
+///
+/// Zwei Wege, in dieser Reihenfolge:
+///
+/// 1. Eine **vordefinierte CMap** der Bauart `UniXXX-UCS2-H`/`-UTF16-`: dort
+///    *ist* der Code der Unicode-Codepoint, es braucht keine Tabelle.
+/// 2. Die **cmap des eingebetteten Fontprogramms** (`/FontFile2`, oder
+///    `/FontFile3` mit vollständigem sfnt) rückwärts gelesen: sie ordnet
+///    Unicode → Glyph-ID zu, `/CIDToGIDMap` ordnet CID → Glyph-ID zu. Beides
+///    zusammen ergibt CID → Unicode.
+///
+/// Bleibt beides erfolglos, wird nichts gesetzt — dann greift der Rückfall,
+/// und die Warnstatistik des Interpreters schlägt an.
+fn derive_cid_to_unicode(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
+    if let Some(Object::Name(name)) = deref(doc, font.get(b"Encoding").ok()) {
+        if predefined_cmap_is_unicode(name) {
+            info.charmap.set_code_is_unicode(true);
+            return;
+        }
+    }
+
+    let Some(cid_font) = deref(doc, font.get(b"DescendantFonts").ok())
+        .and_then(|o| o.as_array().ok())
+        .and_then(|a| a.first())
+        .and_then(|o| deref(doc, Some(o)))
+        .and_then(|o| o.as_dict().ok())
+    else {
+        return;
+    };
+
+    let Some(data) = embedded_sfnt(doc, cid_font) else {
+        return;
+    };
+    let gid_to_unicode = sfnt_gid_to_unicode(&data);
+    if gid_to_unicode.is_empty() {
+        return;
+    }
+
+    let cid_to_gid = cid_to_gid_map(doc, cid_font);
+    let mut derived = BTreeMap::new();
+    match cid_to_gid {
+        // `/CIDToGIDMap /Identity` (oder fehlend): CID ist die Glyph-ID.
+        None => {
+            for (gid, text) in &gid_to_unicode {
+                derived.insert(*gid as u32, text.clone());
+            }
+        }
+        Some(table) => {
+            for (cid, gid) in table.iter().enumerate() {
+                if let Some(text) = gid_to_unicode.get(gid) {
+                    derived.insert(cid as u32, text.clone());
+                }
+            }
+        }
+    }
+    if !derived.is_empty() {
+        info.charmap.set_derived(derived);
+    }
+}
+
+/// Vordefinierte CMaps, deren Codes bereits Unicode sind.
+///
+/// Adobe benennt sie einheitlich `<Registry>-UCS2-H` bzw. `-UTF16-H`
+/// (z. B. `UniGB-UCS2-H`, `UniJIS-UTF16-V`). Die CJK-CMaps mit
+/// zeichensatzeigenen Codes (`90ms-RKSJ-H` & Co.) fallen bewusst **nicht**
+/// darunter: dort wäre der Code eben *kein* Codepoint.
+fn predefined_cmap_is_unicode(name: &[u8]) -> bool {
+    let name = String::from_utf8_lossy(name);
+    (name.contains("-UCS2") || name.contains("-UTF16")) && name.starts_with("Uni")
+}
+
+/// `/CIDToGIDMap`: `None` bedeutet Identity, sonst CID → Glyph-ID.
+fn cid_to_gid_map(doc: &Document, cid_font: &Dictionary) -> Option<Vec<u16>> {
+    let Some(Object::Stream(stream)) = deref(doc, cid_font.get(b"CIDToGIDMap").ok()) else {
+        return None;
+    };
+    let data = stream
+        .decompressed_content()
+        .or_else(|_| stream.get_plain_content())
+        .ok()?;
+    Some(
+        data.chunks_exact(2)
+            .map(|c| ((c[0] as u16) << 8) | c[1] as u16)
+            .collect(),
+    )
+}
+
+/// Holt ein eingebettetes sfnt-Fontprogramm aus dem `/FontDescriptor`.
+///
+/// Nur sfnt (TrueType/OpenType) trägt eine `cmap`-Tabelle; ein blankes CFF
+/// aus `/FontFile3 /Subtype /CIDFontType0C` bringt keine mit.
+fn embedded_sfnt(doc: &Document, cid_font: &Dictionary) -> Option<Vec<u8>> {
+    let descriptor = deref(doc, cid_font.get(b"FontDescriptor").ok())?
+        .as_dict()
+        .ok()?;
+    for key in [&b"FontFile2"[..], &b"FontFile3"[..], &b"FontFile"[..]] {
+        let Some(Object::Stream(stream)) = deref(doc, descriptor.get(key).ok()) else {
+            continue;
+        };
+        let Ok(data) = stream
+            .decompressed_content()
+            .or_else(|_| stream.get_plain_content())
+        else {
+            continue;
+        };
+        if is_sfnt(&data) {
+            return Some(data);
+        }
+    }
+    None
+}
+
+fn is_sfnt(data: &[u8]) -> bool {
+    data.len() >= 12
+        && (data.starts_with(b"OTTO")
+            || data.starts_with(&[0x00, 0x01, 0x00, 0x00])
+            || data.starts_with(b"true")
+            || data.starts_with(b"ttcf"))
 }
 
 fn load_simple(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
@@ -228,6 +364,15 @@ fn load_simple(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
                     .insert(first_char + i as u32, w * scale / 1000.0);
             }
         }
+        // Sobald `/Widths` da ist, hat der Font seine Metrik selbst erklärt.
+        // Für Codes außerhalb des Bereichs gilt dann `/MissingWidth` — laut
+        // PDF 32000-1 (Tabelle 122) mit Vorgabe 0 —, nicht die Schätzung aus
+        // dem Fontnamen. Sonst gewönne die Standard-14-Tabelle gegen die
+        // Erklärung des Dokuments, und der Stift liefe voraus.
+        if !info.widths.is_empty() {
+            info.default_width = 0.0;
+            info.explicit_default_width = true;
+        }
     }
 
     load_descriptor(doc, font.get(b"FontDescriptor").ok(), info);
@@ -263,14 +408,17 @@ fn load_type0(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
         return;
     };
 
-    match cid_font.get(b"DW").ok().and_then(as_f64) {
-        Some(dw) => {
-            info.default_width = dw / 1000.0;
-            info.explicit_default_width = true;
-        }
-        // Ohne `/DW` gilt laut PDF 32000-1 (9.7.4.3) 1000.
-        None => info.default_width = 1.0,
-    }
+    // Bei CID-Fonts ist die Vorgabebreite **immer** erklärt: entweder durch
+    // `/DW` oder durch den Normwert 1000 aus PDF 32000-1 (9.7.4.3). Die
+    // Schätzung aus dem Fontnamen darf hier nie zum Zug kommen — sie liefert
+    // für 32..126 immer einen Wert und verdrängte damit still die Norm.
+    info.default_width = cid_font
+        .get(b"DW")
+        .ok()
+        .and_then(as_f64)
+        .map(|dw| dw / 1000.0)
+        .unwrap_or(1.0);
+    info.explicit_default_width = true;
 
     if let Some(Object::Array(w)) = deref(doc, cid_font.get(b"W").ok()) {
         parse_cid_widths(doc, w, &mut info.widths);
@@ -348,6 +496,222 @@ fn as_f64(obj: &Object) -> Option<f64> {
         Object::Real(r) => Some(*r as f64),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// sfnt-`cmap`: Unicode → Glyph-ID, rückwärts gelesen
+// ---------------------------------------------------------------------------
+
+/// Kappt absurde Tabellen aus kaputten oder feindlichen Dateien.
+const MAX_CMAP_ENTRIES: usize = 200_000;
+
+/// Liest die `cmap` eines sfnt-Fonts und dreht sie um: Glyph-ID → Text.
+///
+/// Mehrere Codepoints können auf dieselbe Glyphe zeigen; es gewinnt der
+/// kleinste, weil das in der Praxis der „echte“ Buchstabe ist und die
+/// Doppelbelegungen in den Bereichen für Ligaturen und die private Zone
+/// liegen.
+fn sfnt_gid_to_unicode(data: &[u8]) -> BTreeMap<u16, String> {
+    let mut out = BTreeMap::new();
+    let Some(table) = sfnt_table(data, b"cmap") else {
+        return out;
+    };
+    for (code, gid) in parse_cmap(table) {
+        if gid == 0 {
+            continue;
+        }
+        let Some(ch) = char::from_u32(code) else {
+            continue;
+        };
+        if ch.is_control() {
+            continue;
+        }
+        out.entry(gid).or_insert_with(|| ch.to_string());
+    }
+    out
+}
+
+/// Sucht eine Tabelle im sfnt-Verzeichnis. Bei `ttcf` zählt der erste Font.
+fn sfnt_table<'a>(data: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {
+    let mut base = 0usize;
+    if data.starts_with(b"ttcf") {
+        base = be_u32(data, 12)? as usize;
+    }
+    let num_tables = be_u16(data, base + 4)? as usize;
+    for i in 0..num_tables {
+        let rec = base + 12 + i * 16;
+        let name = data.get(rec..rec + 4)?;
+        if name == tag {
+            let offset = be_u32(data, rec + 8)? as usize;
+            let length = be_u32(data, rec + 12)? as usize;
+            return data.get(offset..offset.checked_add(length)?);
+        }
+    }
+    None
+}
+
+/// Wählt die beste Unterabelle der `cmap` und liest sie aus.
+fn parse_cmap(table: &[u8]) -> BTreeMap<u32, u16> {
+    let Some(count) = be_u16(table, 2) else {
+        return BTreeMap::new();
+    };
+    // Je höher, desto lieber: volles Unicode vor BMP, BMP vor Symbol.
+    let mut best: Option<(u8, usize, bool)> = None;
+    for i in 0..count as usize {
+        let rec = 4 + i * 8;
+        let (Some(platform), Some(encoding), Some(offset)) = (
+            be_u16(table, rec),
+            be_u16(table, rec + 2),
+            be_u32(table, rec + 4),
+        ) else {
+            continue;
+        };
+        let (rank, symbol) = match (platform, encoding) {
+            (3, 10) | (0, 4) | (0, 6) => (4, false),
+            (3, 1) | (0, 3) => (3, false),
+            (0, 0) | (0, 1) | (0, 2) => (2, false),
+            // (3,0) ist die Symbol-Belegung: Codes liegen in F000..F0FF.
+            (3, 0) => (1, true),
+            (1, 0) => (0, false),
+            _ => continue,
+        };
+        if best.map_or(true, |(r, _, _)| rank > r) {
+            best = Some((rank, offset as usize, symbol));
+        }
+    }
+    let Some((_, offset, symbol)) = best else {
+        return BTreeMap::new();
+    };
+    let Some(sub) = table.get(offset..) else {
+        return BTreeMap::new();
+    };
+    let mut map = parse_cmap_subtable(sub);
+    if symbol {
+        // Symbol-cmaps führen ASCII unter F020..F0FF; für die Textsuche ist
+        // das untere Byte die brauchbare Auskunft.
+        map = map
+            .into_iter()
+            .map(|(code, gid)| {
+                if (0xF000..=0xF0FF).contains(&code) {
+                    (code & 0xFF, gid)
+                } else {
+                    (code, gid)
+                }
+            })
+            .collect();
+    }
+    map
+}
+
+fn parse_cmap_subtable(sub: &[u8]) -> BTreeMap<u32, u16> {
+    let mut map = BTreeMap::new();
+    let Some(format) = be_u16(sub, 0) else {
+        return map;
+    };
+    match format {
+        0 => {
+            for code in 0u32..256 {
+                if let Some(&gid) = sub.get(6 + code as usize) {
+                    if gid != 0 {
+                        map.insert(code, gid as u16);
+                    }
+                }
+            }
+        }
+        4 => parse_cmap_format4(sub, &mut map),
+        6 => {
+            let (Some(first), Some(count)) = (be_u16(sub, 6), be_u16(sub, 8)) else {
+                return map;
+            };
+            for i in 0..count as usize {
+                if let Some(gid) = be_u16(sub, 10 + i * 2) {
+                    if gid != 0 {
+                        map.insert(first as u32 + i as u32, gid);
+                    }
+                }
+            }
+        }
+        12 => {
+            let Some(groups) = be_u32(sub, 12) else {
+                return map;
+            };
+            for i in 0..(groups as usize).min(MAX_CMAP_ENTRIES) {
+                let rec = 16 + i * 12;
+                let (Some(start), Some(end), Some(gid)) =
+                    (be_u32(sub, rec), be_u32(sub, rec + 4), be_u32(sub, rec + 8))
+                else {
+                    break;
+                };
+                if end < start || end - start > MAX_CMAP_ENTRIES as u32 {
+                    continue;
+                }
+                for code in start..=end {
+                    let g = gid + (code - start);
+                    if g != 0 && g <= u16::MAX as u32 {
+                        map.insert(code, g as u16);
+                    }
+                }
+                if map.len() > MAX_CMAP_ENTRIES {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+    map
+}
+
+/// Format 4: segmentierte Bereiche mit `idDelta`/`idRangeOffset`.
+fn parse_cmap_format4(sub: &[u8], map: &mut BTreeMap<u32, u16>) {
+    let Some(seg_x2) = be_u16(sub, 6) else {
+        return;
+    };
+    let segs = seg_x2 as usize / 2;
+    let ends = 14;
+    let starts = ends + seg_x2 as usize + 2;
+    let deltas = starts + seg_x2 as usize;
+    let ranges = deltas + seg_x2 as usize;
+    for s in 0..segs {
+        let (Some(end), Some(start), Some(delta), Some(range_offset)) = (
+            be_u16(sub, ends + s * 2),
+            be_u16(sub, starts + s * 2),
+            be_u16(sub, deltas + s * 2),
+            be_u16(sub, ranges + s * 2),
+        ) else {
+            return;
+        };
+        if start > end || start == 0xFFFF {
+            continue;
+        }
+        for code in start..=end {
+            let gid = if range_offset == 0 {
+                code.wrapping_add(delta)
+            } else {
+                // Der Offset zählt ab der Position *dieses* idRangeOffset.
+                let at = ranges + s * 2 + range_offset as usize + (code - start) as usize * 2;
+                match be_u16(sub, at) {
+                    Some(0) | None => continue,
+                    Some(g) => g.wrapping_add(delta),
+                }
+            };
+            if gid != 0 {
+                map.insert(code as u32, gid);
+            }
+            if map.len() > MAX_CMAP_ENTRIES {
+                return;
+            }
+        }
+    }
+}
+
+fn be_u16(data: &[u8], at: usize) -> Option<u16> {
+    let b = data.get(at..at.checked_add(2)?)?;
+    Some(((b[0] as u16) << 8) | b[1] as u16)
+}
+
+fn be_u32(data: &[u8], at: usize) -> Option<u32> {
+    let b = data.get(at..at.checked_add(4)?)?;
+    Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 // ---------------------------------------------------------------------------
@@ -547,5 +911,136 @@ mod tests {
         assert_eq!(out.get(&10), Some(&0.7));
         assert_eq!(out.get(&12), Some(&0.7));
         assert_eq!(out.get(&13), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Aufgabe #19 — Zuordnung herleiten statt raten
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn predefined_unicode_cmaps_are_recognised() {
+        for name in [
+            &b"UniGB-UCS2-H"[..],
+            b"UniJIS-UCS2-HW-V",
+            b"UniKS-UTF16-H",
+            b"UniCNS-UCS2-V",
+        ] {
+            assert!(predefined_cmap_is_unicode(name), "{name:?}");
+        }
+        // Identity und die zeichensatzeigenen CJK-CMaps gehören *nicht* dazu:
+        // dort ist der Code kein Codepoint.
+        for name in [
+            &b"Identity-H"[..],
+            b"Identity-V",
+            b"90ms-RKSJ-H",
+            b"GBK-EUC-H",
+            b"",
+        ] {
+            assert!(!predefined_cmap_is_unicode(name), "{name:?}");
+        }
+    }
+
+    /// Format-4-`cmap` mit einem Segment je Zeichen, in einem sfnt verpackt.
+    fn sfnt(pairs: &[(char, u16)]) -> Vec<u8> {
+        let mut segs: Vec<(u16, u16)> = pairs.iter().map(|(c, g)| (*c as u16, *g)).collect();
+        segs.sort_unstable();
+        segs.push((0xFFFF, 1));
+        let mut sub: Vec<u8> = Vec::new();
+        let push = |v: &mut Vec<u8>, n: u16| v.extend_from_slice(&n.to_be_bytes());
+        push(&mut sub, 4);
+        push(&mut sub, 0);
+        push(&mut sub, 0);
+        push(&mut sub, segs.len() as u16 * 2);
+        push(&mut sub, 2);
+        push(&mut sub, 0);
+        push(&mut sub, 0);
+        for (code, _) in &segs {
+            push(&mut sub, *code);
+        }
+        push(&mut sub, 0);
+        for (code, _) in &segs {
+            push(&mut sub, *code);
+        }
+        for (code, gid) in &segs {
+            push(&mut sub, gid.wrapping_sub(*code));
+        }
+        for _ in &segs {
+            push(&mut sub, 0);
+        }
+        let len = sub.len() as u16;
+        sub[2..4].copy_from_slice(&len.to_be_bytes());
+
+        let mut cmap: Vec<u8> = Vec::new();
+        push(&mut cmap, 0);
+        push(&mut cmap, 1);
+        push(&mut cmap, 3);
+        push(&mut cmap, 1);
+        cmap.extend_from_slice(&12u32.to_be_bytes());
+        cmap.extend_from_slice(&sub);
+
+        let mut out: Vec<u8> = vec![0x00, 0x01, 0x00, 0x00];
+        push(&mut out, 1);
+        push(&mut out, 16);
+        push(&mut out, 0);
+        push(&mut out, 0);
+        out.extend_from_slice(b"cmap");
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&28u32.to_be_bytes());
+        out.extend_from_slice(&(cmap.len() as u32).to_be_bytes());
+        out.extend_from_slice(&cmap);
+        out
+    }
+
+    #[test]
+    fn sfnt_cmap_is_read_backwards() {
+        let data = sfnt(&[('K', 1), ('o', 2), ('n', 3), ('ä', 40), ('€', 300)]);
+        let map = sfnt_gid_to_unicode(&data);
+        assert_eq!(map.get(&1).map(String::as_str), Some("K"));
+        assert_eq!(map.get(&2).map(String::as_str), Some("o"));
+        assert_eq!(map.get(&3).map(String::as_str), Some("n"));
+        assert_eq!(map.get(&40).map(String::as_str), Some("ä"));
+        assert_eq!(map.get(&300).map(String::as_str), Some("€"));
+        assert_eq!(map.get(&999), None);
+    }
+
+    #[test]
+    fn truncated_font_programs_do_not_panic() {
+        let data = sfnt(&[('A', 1), ('B', 2)]);
+        for cut in 0..data.len() {
+            let _ = sfnt_gid_to_unicode(&data[..cut]);
+        }
+        for junk in [&b""[..], b"OTTO", b"\x00\x01\x00\x00", b"nonsense"] {
+            let _ = sfnt_gid_to_unicode(junk);
+        }
+    }
+
+    #[test]
+    fn cmap_format_12_and_6_are_understood() {
+        // Format 12: eine Gruppe 0x41..0x43 → GID 7..9.
+        let mut sub: Vec<u8> = Vec::new();
+        sub.extend_from_slice(&12u16.to_be_bytes());
+        sub.extend_from_slice(&0u16.to_be_bytes());
+        sub.extend_from_slice(&0u32.to_be_bytes());
+        sub.extend_from_slice(&0u32.to_be_bytes());
+        sub.extend_from_slice(&1u32.to_be_bytes());
+        sub.extend_from_slice(&0x41u32.to_be_bytes());
+        sub.extend_from_slice(&0x43u32.to_be_bytes());
+        sub.extend_from_slice(&7u32.to_be_bytes());
+        let map = parse_cmap_subtable(&sub);
+        assert_eq!(map.get(&0x41), Some(&7));
+        assert_eq!(map.get(&0x43), Some(&9));
+
+        // Format 6: firstCode 0x30, zwei Einträge.
+        let mut sub: Vec<u8> = Vec::new();
+        sub.extend_from_slice(&6u16.to_be_bytes());
+        sub.extend_from_slice(&0u16.to_be_bytes());
+        sub.extend_from_slice(&0u16.to_be_bytes());
+        sub.extend_from_slice(&0x30u16.to_be_bytes());
+        sub.extend_from_slice(&2u16.to_be_bytes());
+        sub.extend_from_slice(&11u16.to_be_bytes());
+        sub.extend_from_slice(&12u16.to_be_bytes());
+        let map = parse_cmap_subtable(&sub);
+        assert_eq!(map.get(&0x30), Some(&11));
+        assert_eq!(map.get(&0x31), Some(&12));
     }
 }

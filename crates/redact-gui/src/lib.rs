@@ -6,12 +6,16 @@
 //! ## Aufbau
 //!
 //! ```text
-//!  state.rs    Zustand + Fachlogik (ohne egui, vollständig unit-getestet)
-//!  viewer.rs   Koordinatenumrechnung PDF ↔ Bildschirm, schematische Notvorschau
-//!  render.rs   Seitenbilder aus `redact-render`, im Hintergrund-Thread
-//!  selector.rs Rechteck aufziehen, Treffersuche
-//!  sidebar.rs  Seiten- und Trefferliste
-//!  app.rs      eframe-App: Leisten, Tasten, Dialoge
+//!  state.rs      Zustand + Fachlogik (ohne egui, vollständig unit-getestet)
+//!  history.rs    Rückgängig/Wiederholen als Schnappschuss-Stapel
+//!  viewer.rs     Koordinatenumrechnung PDF ↔ Bildschirm, schematische Notvorschau
+//!  render.rs     Seitenbilder aus `redact-render`, im Hintergrund-Thread
+//!  selector.rs   Rechteck aufziehen, Treffersuche
+//!  thumbnails.rs Miniaturansichten (nutzt die Kleinbilder aus render.rs)
+//!  sidebar.rs    Trefferliste und Details
+//!  toolbar.rs    Symbolleiste als Daten (Symbol + Text, Freigaberegeln)
+//!  theme.rs      helles und dunkles Thema
+//!  app.rs        eframe-App: Leisten, Tasten, Dialoge
 //! ```
 //!
 //! Die Trennung ist Absicht: alle Rechnungen (Drehung, Y-Spiegelung, Zoom),
@@ -40,6 +44,34 @@
 //! [`viewer::PageView`]; ohne sie säßen die Rechtecke auf gedrehten Seiten an
 //! der falschen Stelle.
 //!
+//! Links steht eine Spalte mit Miniaturansichten ([`thumbnails`]). Sie zeigt
+//! **dieselben** Kleinbilder, die der Hauptbereich ohnehin anfordert — es wird
+//! nichts doppelt gerendert.
+//!
+//! ## Bedienung
+//!
+//! * Symbolleiste ([`toolbar`]): jeder Knopf trägt Symbol **und** Wort; welche
+//!   Knöpfe wann benutzbar sind, entscheidet [`toolbar::is_enabled`].
+//! * Thema ([`theme`]): hell oder dunkel, umschaltbar. Die vier Trefferfarben
+//!   sind in beiden Themen dieselben und erreichen überall mindestens 3:1
+//!   (WCAG 1.4.11) — geprüft gegen die Flächen, die egui wirklich malt.
+//! * Rückgängig/Wiederholen ([`history`]): bis zu [`HISTORY_LIMIT`]
+//!   Schnappschüsse der Trefferliste, Strg+Z und Strg+Y.
+//! * Tastatur: Bild auf/ab und Pos1/Ende blättern, Pfeiltasten verschieben die
+//!   Auswahl (sonst blättern sie), Entf löscht, Strg+O öffnet, Strg+S
+//!   exportiert. Liegt der Fokus in einem Textfeld, gehören **alle** Tasten
+//!   dorthin — siehe [`key_commands`].
+//!
+//! ## Review-Dateien gehören zu genau einem Dokument
+//!
+//! Eine Review-Datei ist eine Liste von Rechtecken ohne Bezug zum Inhalt. Auf
+//! ein anderes PDF angewendet läge jedes Rechteck an einer beliebigen Stelle:
+//! das Ergebnis sähe geschwärzt aus, und die Geheimnisse stünden noch da.
+//! Deshalb schreibt [`AppState::to_review_file`] die SHA-256-Prüfsumme des
+//! Eingabedokuments mit, und [`AppState::apply_review_file`] lehnt eine Datei
+//! mit abweichender Prüfsumme ab ([`review_identity`]) — dieselbe Regel, die
+//! die CLI mit `--apply-review` anwendet.
+//!
 //! ## Beispiel
 //!
 //! ```no_run
@@ -51,18 +83,29 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod history;
 pub mod render;
 pub mod selector;
 pub mod sidebar;
 pub mod state;
+pub mod theme;
+pub mod thumbnails;
+pub mod toolbar;
 pub mod viewer;
 
 pub use app::{
     classify_drop, is_pdf_name, key_commands, DropAction, KeyCommand, KeyState, RedactApp,
+    EMPTY_DOCUMENT_HINT,
 };
+pub use history::{History, HISTORY_LIMIT};
 pub use render::{PageCache, PageMeta};
 pub use selector::{hit_test, RectangleSelector};
-pub use state::{AnnotatedRegion, AppState, HitOutcome, HitSummary, RegionColor};
+pub use state::{
+    review_identity, sha256_hex, AnnotatedRegion, AppState, HitOutcome, HitSummary, RegionColor,
+    ReviewIdentity,
+};
+pub use theme::Theme;
+pub use toolbar::{ToolAction, ToolButton, ToolContext, ToolItem};
 pub use viewer::{pdf_to_screen, screen_to_pdf, PagePreview, PageView, RegionStyle};
 
 use std::path::PathBuf;

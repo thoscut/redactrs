@@ -23,7 +23,15 @@ use redact_core::ReviewFile;
 use crate::render::PageCache;
 use crate::selector::{hit_test, RectangleSelector};
 use crate::state::{AppState, HitSummary, RegionColor, MAX_ZOOM, MIN_ZOOM};
+use crate::theme::Theme;
+use crate::toolbar::{self, ToolAction, ToolContext, ToolItem};
 use crate::viewer::{self, PagePreview};
+
+/// Was im Hauptbereich steht, solange nichts geladen ist.
+///
+/// Ein leerer grauer Bereich sagt nichts; dieser Satz nennt beide Wege, die
+/// zum Ziel führen.
+pub const EMPTY_DOCUMENT_HINT: &str = "Noch kein PDF geladen — öffnen oder hierher ziehen";
 
 /// Rand zwischen Scrollbereich und Seitenblatt.
 const SHEET_MARGIN: f32 = 24.0;
@@ -43,8 +51,10 @@ const SIDEBAR_MIN_WIDTH: f32 = 220.0;
 const SIDEBAR_MAX_WIDTH: f32 = 520.0;
 /// Vertikaler Abstand in der oberen Leiste.
 const BAR_PADDING: f32 = 2.0;
-/// Grober Platzbedarf von Seitenleiste und Leisten für „Einpassen“.
-const CHROME_SIZE: Vec2 = Vec2::new(360.0, 140.0);
+/// Grober Platzbedarf der Ränder für „Passend“: Trefferliste, Miniaturspalte,
+/// obere Leiste und Statuszeile. Wird das zu klein geschätzt, ragt die Seite
+/// nach dem Einpassen aus dem Fenster.
+const CHROME_SIZE: Vec2 = Vec2::new(360.0 + crate::thumbnails::PANEL_WIDTH, 140.0);
 
 // Maße des Hinweises beim Ziehen von Dateien über das Fenster.
 
@@ -198,7 +208,15 @@ pub struct KeyState {
     pub down: bool,
     pub page_up: bool,
     pub page_down: bool,
+    pub home: bool,
+    pub end: bool,
     pub shift: bool,
+    /// Steuerungstaste (unter macOS die Befehlstaste).
+    pub ctrl: bool,
+    pub key_o: bool,
+    pub key_s: bool,
+    pub key_z: bool,
+    pub key_y: bool,
     /// Liegt der Eingabefokus in einem Textfeld?
     pub text_focus: bool,
 }
@@ -216,6 +234,14 @@ pub enum KeyCommand {
     },
     PrevPage,
     NextPage,
+    FirstPage,
+    LastPage,
+    Undo,
+    Redo,
+    /// Strg+O — Dateidialog „PDF öffnen“.
+    Open,
+    /// Strg+S — Dateidialog „Geschwärztes PDF speichern“.
+    Export,
 }
 
 /// Übersetzt gedrückte Tasten in Befehle.
@@ -230,6 +256,25 @@ pub enum KeyCommand {
 pub fn key_commands(keys: KeyState, has_selection: bool) -> Vec<KeyCommand> {
     if keys.text_focus {
         return Vec::new();
+    }
+
+    // Tastenkürzel mit Steuerungstaste stehen für sich: Strg+Z ist Rückgängig
+    // und nicht zusätzlich irgendein Buchstabe im Blätterwerk.
+    if keys.ctrl {
+        let mut commands = Vec::new();
+        if keys.key_o {
+            commands.push(KeyCommand::Open);
+        }
+        if keys.key_s {
+            commands.push(KeyCommand::Export);
+        }
+        if keys.key_z {
+            commands.push(KeyCommand::Undo);
+        }
+        if keys.key_y {
+            commands.push(KeyCommand::Redo);
+        }
+        return commands;
     }
 
     let mut commands = Vec::new();
@@ -266,12 +311,18 @@ pub fn key_commands(keys: KeyState, has_selection: bool) -> Vec<KeyCommand> {
             commands.push(KeyCommand::NextPage);
         }
     }
-    // Bild auf/ab blättert immer, auch mit ausgewählter Region.
+    // Bild auf/ab und Pos1/Ende blättern immer, auch mit ausgewählter Region.
     if keys.page_up {
         commands.push(KeyCommand::PrevPage);
     }
     if keys.page_down {
         commands.push(KeyCommand::NextPage);
+    }
+    if keys.home {
+        commands.push(KeyCommand::FirstPage);
+    }
+    if keys.end {
+        commands.push(KeyCommand::LastPage);
     }
     commands
 }
@@ -335,6 +386,23 @@ pub fn export_status(
     text
 }
 
+/// Der leere Hauptbereich: großer Satz, darunter der zweite Weg.
+fn empty_state(ui: &mut egui::Ui) {
+    ui.centered_and_justified(|ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() / 3.0);
+            ui.label(RichText::new("🗁").size(48.0).weak());
+            ui.add_space(8.0);
+            ui.label(RichText::new(EMPTY_DOCUMENT_HINT).size(20.0));
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("„🗁 Öffnen“ in der Leiste oben, Strg+O — oder eine PDF-Datei in dieses Fenster ziehen.")
+                    .weak(),
+            );
+        });
+    });
+}
+
 /// Zustand der Oberfläche.
 pub struct RedactApp {
     pub state: AppState,
@@ -348,6 +416,13 @@ pub struct RedactApp {
     central_rect: Option<egui::Rect>,
     /// Gerasterte Seitenbilder; rechnet auf einem eigenen Thread.
     pages: PageCache,
+    /// Helles oder dunkles Thema.
+    pub theme: Theme,
+    /// Zuletzt an egui übergebenes Thema — damit `set_visuals` nur bei einer
+    /// Änderung läuft und nicht in jedem Bild.
+    applied_theme: Option<Theme>,
+    /// Seite des vorigen Bildes; wechselt sie, rollt die Miniaturspalte mit.
+    shown_page: Option<usize>,
     /// Wurde das Schließen des Fensters bereits bestätigt?
     close_confirmed: bool,
     /// Rückfragen unterdrücken (nur für Tests ohne Bildschirm).
@@ -372,6 +447,9 @@ impl RedactApp {
             error: None,
             central_rect: None,
             pages: PageCache::new(),
+            theme: Theme::default(),
+            applied_theme: None,
+            shown_page: None,
             close_confirmed: false,
             ask_before_discarding: true,
         }
@@ -534,103 +612,45 @@ impl RedactApp {
 
     // ------------------------------------------------------------- Zeichnen
 
+    /// Zustand, von dem abhängt, welche Knöpfe benutzbar sind.
+    fn tool_context(&self) -> ToolContext {
+        ToolContext {
+            loaded: self.state.is_loaded(),
+            can_undo: self.state.can_undo(),
+            can_redo: self.state.can_redo(),
+            first_page: self.state.is_first_page(),
+            last_page: self.state.is_last_page(),
+            can_zoom_in: self.state.can_zoom_in(),
+            can_zoom_out: self.state.can_zoom_out(),
+        }
+    }
+
+    /// Die Symbolleiste: Symbol **und** Text je Knopf, dahinter der
+    /// Zoomregler und der Themenschalter.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let context = self.tool_context();
+        let mut clicked: Option<ToolAction> = None;
+
         ui.horizontal_wrapped(|ui| {
-            if ui.button("PDF öffnen …").clicked() && self.may_discard("Ein anderes PDF zu öffnen")
-            {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PDF", &["pdf"])
-                    .set_title("PDF öffnen")
-                    .pick_file()
-                {
-                    self.open_and_analyze(path);
-                }
-            }
-
-            let loaded = self.state.is_loaded();
-            if ui
-                .add_enabled(loaded, egui::Button::new("Analysieren"))
-                .clicked()
-            {
-                self.analyze();
-            }
-
-            if ui.button("Buchungsliste …").clicked() {
-                let mut dialog = rfd::FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .set_title("Buchungsliste laden");
-                if let Some(dir) = self.state.dialog_directory() {
-                    dialog = dialog.set_directory(dir);
-                }
-                if let Some(path) = dialog.pick_file() {
-                    self.state.booking_path = Some(path);
-                    self.analyze();
+            for item in toolbar::items() {
+                match item {
+                    ToolItem::Separator => {
+                        ui.separator();
+                    }
+                    ToolItem::Button(button) => {
+                        let enabled = toolbar::is_enabled(button.action, &context);
+                        if ui
+                            .add_enabled(enabled, egui::Button::new(button.label()))
+                            .on_hover_text(button.hint)
+                            .clicked()
+                        {
+                            clicked = Some(button.action);
+                        }
+                    }
                 }
             }
 
             ui.separator();
-
-            if ui
-                .add_enabled(loaded, egui::Button::new("Exportieren …"))
-                .clicked()
-            {
-                // Vorgabe: neben dem Original, Stamm + Namenszusatz.
-                let suggested = self.state.suggested_output_path();
-                let dialog = save_dialog(
-                    "Geschwärztes PDF speichern",
-                    "PDF",
-                    &["pdf"],
-                    self.state.dialog_directory(),
-                    suggested,
-                    "geschwaerzt.pdf",
-                );
-                if let Some(path) = dialog.save_file() {
-                    self.export_to(path);
-                }
-            }
-
-            if ui
-                .add_enabled(loaded, egui::Button::new("Review speichern …"))
-                .clicked()
-            {
-                let dialog = save_dialog(
-                    "Review-Datei speichern",
-                    "JSON",
-                    &["json"],
-                    self.state.dialog_directory(),
-                    self.state.suggested_review_path(),
-                    "review.json",
-                );
-                if let Some(path) = dialog.save_file() {
-                    let result = self
-                        .state
-                        .to_review_file()
-                        .to_json()
-                        .and_then(|json| std::fs::write(&path, json).map_err(Into::into));
-                    self.report(result);
-                }
-            }
-
-            if ui.button("Review laden …").clicked()
-                && self.may_discard("Ein Review zu laden ersetzt die Trefferliste und")
-            {
-                let mut dialog = rfd::FileDialog::new()
-                    .add_filter("JSON", &["json"])
-                    .set_title("Review-Datei laden");
-                if let Some(dir) = self.state.dialog_directory() {
-                    dialog = dialog.set_directory(dir);
-                }
-                if let Some(path) = dialog.pick_file() {
-                    let result = std::fs::read_to_string(&path)
-                        .map_err(redact_core::RedactError::from)
-                        .and_then(|data| ReviewFile::from_json(&data))
-                        .map(|review| self.state.apply_review_file(review));
-                    self.report(result);
-                }
-            }
-
-            ui.separator();
-
             ui.label("Zoom");
             let mut zoom = self.state.zoom;
             if ui
@@ -639,12 +659,172 @@ impl RedactApp {
             {
                 self.state.set_zoom(zoom);
             }
-            if ui.button("Einpassen").clicked() {
-                let view = self.state.current_page_view();
-                let available = ui.ctx().screen_rect().size() - CHROME_SIZE;
-                self.state.set_zoom(viewer::fit_zoom(available, &view));
+
+            // Der Themenschalter gehört ans Ende: er ist Einstellung, nicht
+            // Arbeitsschritt.
+            ui.separator();
+            if ui
+                .button(format!(
+                    "{} {}",
+                    self.theme.switch_icon(),
+                    self.theme.switch_text()
+                ))
+                .on_hover_text(format!(
+                    "Zur {}-Darstellung wechseln (aktuell: {})",
+                    self.theme.switch_text(),
+                    self.theme.label()
+                ))
+                .clicked()
+            {
+                clicked = Some(ToolAction::ToggleTheme);
             }
         });
+
+        if let Some(action) = clicked {
+            self.apply_tool_action(action, ui.ctx());
+        }
+    }
+
+    /// Führt aus, was ein Knopf der Symbolleiste bedeutet.
+    ///
+    /// Dieselbe Stelle bedient auch die Tastenkürzel — „Öffnen“ soll über
+    /// Strg+O genau dasselbe tun wie über den Knopf.
+    fn apply_tool_action(&mut self, action: ToolAction, ctx: &egui::Context) {
+        match action {
+            ToolAction::Open => self.open_dialog(),
+            ToolAction::Analyze => self.analyze(),
+            ToolAction::Booking => self.booking_dialog(),
+            ToolAction::Export => self.export_dialog(),
+            ToolAction::ReviewSave => self.review_save_dialog(),
+            ToolAction::ReviewLoad => self.review_load_dialog(),
+            ToolAction::Undo => {
+                self.state.undo();
+                self.error = None;
+            }
+            ToolAction::Redo => {
+                self.state.redo();
+                self.error = None;
+            }
+            ToolAction::ZoomOut => self.state.zoom_out(),
+            ToolAction::ZoomIn => self.state.zoom_in(),
+            ToolAction::ZoomFit => {
+                let view = self.state.current_page_view();
+                let available = ctx.screen_rect().size() - CHROME_SIZE;
+                self.state.set_zoom(viewer::fit_zoom(available, &view));
+            }
+            ToolAction::ZoomReset => self.state.zoom_reset(),
+            ToolAction::PrevPage => self.state.prev_page(),
+            ToolAction::NextPage => self.state.next_page(),
+            ToolAction::ToggleTheme => self.theme = self.theme.toggled(),
+        }
+    }
+
+    // -------------------------------------------------------------- Dialoge
+
+    fn open_dialog(&mut self) {
+        if !self.may_discard("Ein anderes PDF zu öffnen") {
+            return;
+        }
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_title("PDF öffnen")
+            .pick_file()
+        {
+            self.open_and_analyze(path);
+        }
+    }
+
+    fn booking_dialog(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("CSV", &["csv"])
+            .set_title("Buchungsliste laden");
+        if let Some(dir) = self.state.dialog_directory() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.pick_file() {
+            self.state.booking_path = Some(path);
+            self.analyze();
+        }
+    }
+
+    fn export_dialog(&mut self) {
+        if !self.state.is_loaded() {
+            self.state.status = "Erst ein PDF öffnen".to_string();
+            return;
+        }
+        // Vorgabe: neben dem Original, Stamm + Namenszusatz.
+        let dialog = save_dialog(
+            "Geschwärztes PDF speichern",
+            "PDF",
+            &["pdf"],
+            self.state.dialog_directory(),
+            self.state.suggested_output_path(),
+            "geschwaerzt.pdf",
+        );
+        if let Some(path) = dialog.save_file() {
+            self.export_to(path);
+        }
+    }
+
+    fn review_save_dialog(&mut self) {
+        let dialog = save_dialog(
+            "Review-Datei speichern",
+            "JSON",
+            &["json"],
+            self.state.dialog_directory(),
+            self.state.suggested_review_path(),
+            "review.json",
+        );
+        if let Some(path) = dialog.save_file() {
+            let result = self
+                .state
+                .to_review_file()
+                .to_json()
+                .and_then(|json| std::fs::write(&path, json).map_err(Into::into));
+            self.report(result);
+        }
+    }
+
+    fn review_load_dialog(&mut self) {
+        if !self.may_discard("Ein Review zu laden ersetzt die Trefferliste und") {
+            return;
+        }
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .set_title("Review-Datei laden");
+        if let Some(dir) = self.state.dialog_directory() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.pick_file() {
+            self.load_review_file(&path);
+        }
+    }
+
+    /// Liest eine Review-Datei und übernimmt sie — **wenn** sie zum geladenen
+    /// Dokument gehört.
+    ///
+    /// Passt die Prüfsumme nicht, meldet [`AppState::apply_review_file`] einen
+    /// Fehler; der landet rot in der Statuszeile und **zusätzlich** in einem
+    /// Hinweisfenster. Eine Zeile am unteren Rand ginge hier zu leicht unter:
+    /// wer eine fremde Review-Datei anwendet, bekommt ein Ergebnis, das
+    /// geschwärzt aussieht und keines ist.
+    pub fn load_review_file(&mut self, path: &std::path::Path) {
+        let result = std::fs::read_to_string(path)
+            .map_err(redact_core::RedactError::from)
+            .and_then(|data| ReviewFile::from_json(&data))
+            .and_then(|review| self.state.apply_review_file(review));
+        if let Err(error) = &result {
+            let message = error.to_string();
+            if self.ask_before_discarding {
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_title("Review-Datei passt nicht zum Dokument")
+                    .set_description(&message)
+                    .set_buttons(rfd::MessageButtons::Ok)
+                    .show();
+            }
+        }
+        self.report(result);
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -656,23 +836,6 @@ impl RedactApp {
                 self.state.current_page + 1
             };
             ui.label(RichText::new(format!("Seite {current} / {pages}")).strong());
-            ui.separator();
-
-            if ui
-                .add_enabled(self.state.current_page > 0, egui::Button::new("◀"))
-                .clicked()
-            {
-                self.state.prev_page();
-            }
-            if ui
-                .add_enabled(
-                    pages > 0 && self.state.current_page + 1 < pages,
-                    egui::Button::new("▶"),
-                )
-                .clicked()
-            {
-                self.state.next_page();
-            }
             ui.separator();
 
             match &self.error {
@@ -913,14 +1076,24 @@ impl RedactApp {
             down: i.key_pressed(Key::ArrowDown),
             page_up: i.key_pressed(Key::PageUp),
             page_down: i.key_pressed(Key::PageDown),
+            home: i.key_pressed(Key::Home),
+            end: i.key_pressed(Key::End),
             shift: i.modifiers.shift,
+            // `command` ist unter macOS die Befehlstaste, sonst Strg — das
+            // erwartet man dort so.
+            ctrl: i.modifiers.command,
+            key_o: i.key_pressed(Key::O),
+            key_s: i.key_pressed(Key::S),
+            key_z: i.key_pressed(Key::Z),
+            key_y: i.key_pressed(Key::Y),
             text_focus,
         })
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
         let keys = Self::read_keys(ctx);
-        self.apply_key_commands(&key_commands(keys, self.state.selected_region.is_some()));
+        let commands = key_commands(keys, self.state.selected_region.is_some());
+        self.apply_key_commands(&commands);
     }
 
     fn apply_key_commands(&mut self, commands: &[KeyCommand]) {
@@ -938,6 +1111,18 @@ impl RedactApp {
                 }
                 KeyCommand::PrevPage => self.state.prev_page(),
                 KeyCommand::NextPage => self.state.next_page(),
+                KeyCommand::FirstPage => self.state.first_page(),
+                KeyCommand::LastPage => self.state.last_page(),
+                KeyCommand::Undo => {
+                    self.state.undo();
+                    self.error = None;
+                }
+                KeyCommand::Redo => {
+                    self.state.redo();
+                    self.error = None;
+                }
+                KeyCommand::Open => self.open_dialog(),
+                KeyCommand::Export => self.export_dialog(),
             }
         }
     }
@@ -945,6 +1130,12 @@ impl RedactApp {
 
 impl eframe::App for RedactApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Thema nur bei Änderung setzen — `set_visuals` kopiert den ganzen Stil.
+        if self.applied_theme != Some(self.theme) {
+            ctx.set_visuals(self.theme.visuals());
+            self.applied_theme = Some(self.theme);
+        }
+
         // Fertige Seitenbilder abholen, bevor gezeichnet wird.
         self.pages.poll(ctx);
         self.handle_dropped_files(ctx);
@@ -962,6 +1153,17 @@ impl eframe::App for RedactApp {
             self.status_bar(ui);
         });
 
+        // Miniaturansichten ganz links; sie leben von denselben Kleinbildern,
+        // die der Hauptbereich ohnehin anfordert.
+        let page_changed = self.shown_page != Some(self.state.current_page);
+        self.shown_page = Some(self.state.current_page);
+        egui::SidePanel::left("thumbnails")
+            .default_width(crate::thumbnails::PANEL_WIDTH)
+            .width_range(crate::thumbnails::PANEL_MIN_WIDTH..=crate::thumbnails::PANEL_MAX_WIDTH)
+            .show(ctx, |ui| {
+                crate::thumbnails::show(ui, &mut self.state, &mut self.pages, page_changed);
+            });
+
         egui::SidePanel::left("sidebar")
             .default_width(SIDEBAR_WIDTH)
             .width_range(SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH)
@@ -974,15 +1176,7 @@ impl eframe::App for RedactApp {
             if self.state.is_loaded() {
                 self.paint_page(ui, &summary);
             } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label(
-                        RichText::new(
-                            "Kein Dokument geladen.\n\n\
-                             „PDF öffnen …“ oben links — oder eine PDF-Datei hier ablegen.",
-                        )
-                        .weak(),
-                    );
-                });
+                empty_state(ui);
             }
         });
 
@@ -1010,6 +1204,8 @@ mod tests {
     /// die ausgewählte Region — ohne Rückfrage und ohne Rückgängig.
     #[test]
     fn a_focused_text_field_swallows_every_key() {
+        // Wirklich jede Taste, auch die neuen Kürzel: Strg+Z im Textfeld
+        // gehört dem Textfeld.
         let every_key = KeyState {
             delete: true,
             escape: true,
@@ -1019,7 +1215,14 @@ mod tests {
             down: true,
             page_up: true,
             page_down: true,
+            home: true,
+            end: true,
             shift: true,
+            ctrl: true,
+            key_o: true,
+            key_s: true,
+            key_z: true,
+            key_y: true,
             text_focus: true,
         };
         assert!(key_commands(every_key, true).is_empty());
@@ -1031,6 +1234,12 @@ mod tests {
             ..every_key
         };
         assert!(!key_commands(unfocused, true).is_empty());
+        // Und ohne Steuerungstaste ebenfalls.
+        let without_ctrl = KeyState {
+            ctrl: false,
+            ..unfocused
+        };
+        assert!(!key_commands(without_ctrl, true).is_empty());
     }
 
     /// Und derselbe Fall einmal ganz konkret, mit echtem Zustand.
@@ -1120,6 +1329,212 @@ mod tests {
         assert!(key_commands(delete, false).is_empty());
     }
 
+    /// Pos1 und Ende blättern an die Enden — auch mit ausgewählter Region.
+    #[test]
+    fn home_and_end_always_jump_to_the_first_and_last_page() {
+        let home = KeyState {
+            home: true,
+            ..KeyState::default()
+        };
+        let end = KeyState {
+            end: true,
+            ..KeyState::default()
+        };
+        assert_eq!(key_commands(home, false), vec![KeyCommand::FirstPage]);
+        assert_eq!(key_commands(end, true), vec![KeyCommand::LastPage]);
+    }
+
+    /// Die Kürzel mit Steuerungstaste stehen für sich: Strg+Z ist Rückgängig
+    /// und blättert nicht nebenbei.
+    #[test]
+    fn control_shortcuts_are_exclusive() {
+        let with_ctrl = |o, s, z, y| KeyState {
+            ctrl: true,
+            key_o: o,
+            key_s: s,
+            key_z: z,
+            key_y: y,
+            ..KeyState::default()
+        };
+        assert_eq!(
+            key_commands(with_ctrl(true, false, false, false), false),
+            vec![KeyCommand::Open]
+        );
+        assert_eq!(
+            key_commands(with_ctrl(false, true, false, false), false),
+            vec![KeyCommand::Export]
+        );
+        assert_eq!(
+            key_commands(with_ctrl(false, false, true, false), true),
+            vec![KeyCommand::Undo]
+        );
+        assert_eq!(
+            key_commands(with_ctrl(false, false, false, true), true),
+            vec![KeyCommand::Redo]
+        );
+
+        // Strg + Pfeiltaste verschiebt nichts und blättert nicht — das Kürzel
+        // gehört dem Betriebssystem bzw. der Textnavigation.
+        let ctrl_and_arrow = KeyState {
+            ctrl: true,
+            left: true,
+            delete: true,
+            ..KeyState::default()
+        };
+        assert!(key_commands(ctrl_and_arrow, true).is_empty());
+
+        // Ohne Steuerungstaste sind O, S, Z und Y gewöhnliche Buchstaben.
+        let letters = KeyState {
+            key_o: true,
+            key_s: true,
+            key_z: true,
+            key_y: true,
+            ..KeyState::default()
+        };
+        assert!(key_commands(letters, true).is_empty());
+    }
+
+    /// Strg+Z und Strg+Y wirken auf den echten Zustand.
+    #[test]
+    fn undo_and_redo_run_through_the_keyboard() {
+        let mut app = RedactApp::silent(Vec::new());
+        app.state
+            .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
+        assert_eq!(app.state.regions.len(), 1);
+
+        let ctrl_z = KeyState {
+            ctrl: true,
+            key_z: true,
+            ..KeyState::default()
+        };
+        app.apply_key_commands(&key_commands(ctrl_z, false));
+        assert!(app.state.regions.is_empty(), "Strg+Z nimmt zurück");
+
+        let ctrl_y = KeyState {
+            ctrl: true,
+            key_y: true,
+            ..KeyState::default()
+        };
+        app.apply_key_commands(&key_commands(ctrl_y, false));
+        assert_eq!(app.state.regions.len(), 1, "Strg+Y stellt wieder her");
+    }
+
+    // ------------------------------------------------------- Symbolleiste
+
+    /// Die Knöpfe der Leiste wirken auf den Zustand — hier ohne Fenster, über
+    /// dieselbe Stelle, die auch der Klick benutzt.
+    #[test]
+    fn toolbar_actions_change_the_state() {
+        let ctx = egui::Context::default();
+        let mut app = RedactApp::silent(vec!["iban_de".to_string()]);
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        assert!(app.state.is_loaded());
+
+        // Blättern.
+        app.apply_tool_action(ToolAction::NextPage, &ctx);
+        assert_eq!(app.state.current_page, 1);
+        app.apply_tool_action(ToolAction::PrevPage, &ctx);
+        assert_eq!(app.state.current_page, 0);
+
+        // Zoom.
+        app.apply_tool_action(ToolAction::ZoomIn, &ctx);
+        assert!(app.state.zoom > 1.0);
+        app.apply_tool_action(ToolAction::ZoomReset, &ctx);
+        assert_eq!(app.state.zoom, 1.0);
+        app.apply_tool_action(ToolAction::ZoomOut, &ctx);
+        assert!(app.state.zoom < 1.0);
+
+        // Thema.
+        let before = app.theme;
+        app.apply_tool_action(ToolAction::ToggleTheme, &ctx);
+        assert_ne!(app.theme, before);
+        app.apply_tool_action(ToolAction::ToggleTheme, &ctx);
+        assert_eq!(app.theme, before);
+
+        // Rückgängig — die Analyse beim Öffnen ist der erste Schritt.
+        let found = app.state.regions.clone();
+        assert!(!found.is_empty());
+        app.apply_tool_action(ToolAction::Undo, &ctx);
+        assert!(app.state.regions.is_empty());
+        app.apply_tool_action(ToolAction::Redo, &ctx);
+        assert_eq!(app.state.regions, found);
+    }
+
+    /// Der Zustand der Leiste folgt dem Zustand der Anwendung.
+    #[test]
+    fn the_toolbar_context_mirrors_the_application() {
+        let mut app = RedactApp::silent(vec!["iban_de".to_string()]);
+        let empty = app.tool_context();
+        assert!(!empty.loaded);
+        assert!(!empty.can_undo);
+        assert!(empty.first_page && empty.last_page);
+        assert!(!toolbar::is_enabled(ToolAction::Export, &empty));
+
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        let loaded = app.tool_context();
+        assert!(loaded.loaded);
+        assert!(loaded.can_undo, "die Analyse ist zurücknehmbar");
+        assert!(loaded.first_page && !loaded.last_page);
+        assert!(toolbar::is_enabled(ToolAction::Export, &loaded));
+        assert!(toolbar::is_enabled(ToolAction::NextPage, &loaded));
+        assert!(!toolbar::is_enabled(ToolAction::PrevPage, &loaded));
+
+        app.state.last_page();
+        let last = app.tool_context();
+        assert!(!last.first_page && last.last_page);
+    }
+
+    // ------------------------------------------------------- Leerer Zustand
+
+    /// Der leere Hauptbereich muss beide Wege nennen.
+    #[test]
+    fn the_empty_state_names_both_ways_in() {
+        assert!(EMPTY_DOCUMENT_HINT.contains("Noch kein PDF geladen"));
+        assert!(EMPTY_DOCUMENT_HINT.contains("öffnen"));
+        assert!(EMPTY_DOCUMENT_HINT.contains("ziehen"));
+    }
+
+    /// Rauchtest ohne Bildschirm: ein ganzes Bild zeichnen, leer und mit
+    /// Dokument, in beiden Themen.
+    #[test]
+    fn a_whole_frame_draws_in_both_themes() {
+        let ctx = egui::Context::default();
+        let app = std::cell::RefCell::new(RedactApp::silent(vec!["iban_de".to_string()]));
+
+        for theme in crate::theme::THEMES {
+            app.borrow_mut().theme = theme;
+            // `eframe::Frame` lässt sich ohne Fenster nicht bauen — deshalb
+            // werden die Panels hier einzeln über dieselben Bausteine
+            // gezeichnet wie in `update`.
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                ctx.set_visuals(theme.visuals());
+                let summary = app.borrow().state.hit_summary();
+                egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+                    app.borrow_mut().top_bar(ui);
+                });
+                egui::SidePanel::left("thumbnails").show(ctx, |ui| {
+                    let mut app = app.borrow_mut();
+                    let RedactApp { state, pages, .. } = &mut *app;
+                    crate::thumbnails::show(ui, state, pages, false);
+                });
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if app.borrow().state.is_loaded() {
+                        app.borrow_mut().paint_page(ui, &summary);
+                    } else {
+                        empty_state(ui);
+                    }
+                });
+            });
+            assert!(!output.shapes.is_empty(), "{theme:?}: nichts gezeichnet");
+
+            if !app.borrow().state.is_loaded() {
+                app.borrow_mut()
+                    .open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+            }
+        }
+        assert!(app.borrow().state.is_loaded());
+    }
+
     // ------------------------------------------------- Rückfrage vor Verlust
 
     /// A8: die Rückfrage kommt genau dann, wenn wirklich etwas verloren geht.
@@ -1186,6 +1601,68 @@ mod tests {
         let _ = ctx.run(input, |ctx| app.borrow_mut().handle_dropped_files(ctx));
         assert_eq!(app.borrow().state.regions, before);
         assert!(app.borrow().state.status.contains("Keine PDF-Datei"));
+    }
+
+    // ------------------------------------------------- Review-Dateien (36)
+
+    /// **Aufgabe 36, der ganze Weg.** Eine in der GUI gespeicherte
+    /// Review-Datei trägt die Prüfsumme ihres Dokuments; beim Laden zu einem
+    /// anderen Dokument wird sie abgelehnt, statt die Rechtecke an falsche
+    /// Stellen zu setzen.
+    #[test]
+    fn a_review_file_from_another_document_is_refused_on_load() {
+        let dir = std::env::temp_dir().join(format!(
+            "redact-gui-review-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Dokument A: Review speichern, wie es der Knopf „Review speichern“ tut.
+        let mut a = RedactApp::silent(vec!["iban_de".to_string()]);
+        a.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "a.pdf");
+        a.state
+            .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
+        let path = dir.join("a_review.json");
+        std::fs::write(&path, a.state.to_review_file().to_json().unwrap()).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(&crate::state::sha256_hex(&redact_pdf::testing::demo_statement())[..12]),
+            "die Prüfsumme muss in der Datei stehen"
+        );
+
+        // Dokument B ist ein anderes — ein einzelnes leeres Blatt genügt.
+        let mut b = RedactApp::silent(vec!["iban_de".to_string()]);
+        b.open_bytes_and_analyze(&one_page_pdf(), "b.pdf");
+        assert!(b.state.is_loaded());
+        let before = b.state.regions.clone();
+
+        b.load_review_file(&path);
+        let error = b.error.clone().expect("die Datei muss abgelehnt werden");
+        assert!(error.contains("anderen Dokument"), "{error}");
+        assert!(error.contains("a.pdf"), "{error}");
+        assert_eq!(b.state.regions, before, "es darf nichts übernommen werden");
+
+        // Zum eigenen Dokument geht dieselbe Datei durch.
+        a.state.regions.clear();
+        a.load_review_file(&path);
+        assert!(a.error.is_none(), "{:?}", a.error);
+        assert!(!a.state.regions.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Ein zweites, anderes PDF für den Test oben.
+    fn one_page_pdf() -> Vec<u8> {
+        let mut doc = redact_pdf::load_from_bytes(&redact_pdf::testing::demo_statement()).unwrap();
+        // Irgendeine Änderung, die den Inhalt verschiebt — es geht nur darum,
+        // dass eine andere Datei entsteht.
+        doc.version = "1.6".to_string();
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        assert_ne!(bytes, redact_pdf::testing::demo_statement());
+        bytes
     }
 
     // ------------------------------------------------------------ Statuszeile

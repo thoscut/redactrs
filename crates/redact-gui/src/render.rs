@@ -313,12 +313,9 @@ impl PageCache {
             self.pending_full = None;
         }
 
-        let has_thumb = self
-            .entries
-            .get(&page)
-            .map(|e| e.thumb.is_some())
-            .unwrap_or(false);
-        if !has_thumb && self.pending_thumb != Some(page) {
+        if !self.has_thumb(page) && self.pending_thumb != Some(page) {
+            // Die sichtbare Seite hat Vorrang: sie überschreibt einen laufenden
+            // Kleinbildauftrag der Miniaturspalte.
             self.pending_thumb = Some(page);
             self.send(page, THUMB_WIDTH, true, ctx);
         }
@@ -344,6 +341,38 @@ impl PageCache {
                 ctx: ctx.clone(),
             }));
         }
+    }
+
+    /// Fordert das Kleinbild einer Seite an, die gerade **nicht** angezeigt
+    /// wird — für die Miniaturspalte.
+    ///
+    /// Es ist immer höchstens ein Kleinbildauftrag unterwegs. Das ist Absicht:
+    /// der Arbeits-Thread fasst wartende Aufträge zusammen und behält je Art
+    /// nur den jüngsten, ein Schwall von fünfzig Anforderungen ließe also
+    /// neunundvierzig davon verfallen. So kommt je Bild eines dazu, und der
+    /// Repaint nach jedem Ergebnis holt das nächste.
+    ///
+    /// Gibt zurück, ob ein Auftrag hinausgegangen ist.
+    pub fn request_thumb(&mut self, page: usize, ctx: &egui::Context) -> bool {
+        if !self.has_document || self.pending_thumb.is_some() || self.has_thumb(page) {
+            return false;
+        }
+        self.pending_thumb = Some(page);
+        self.send(page, THUMB_WIDTH, true, ctx);
+        true
+    }
+
+    /// Liegt das Kleinbild dieser Seite schon vor?
+    pub fn has_thumb(&self, page: usize) -> bool {
+        self.entries
+            .get(&page)
+            .map(|e| e.thumb.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Das Kleinbild einer Seite, sofern vorhanden.
+    pub fn thumb(&self, page: usize) -> Option<&TextureHandle> {
+        self.entries.get(&page).and_then(|e| e.thumb.as_ref())
     }
 
     pub fn page(&self, page: usize) -> Option<&CachedPage> {
@@ -601,6 +630,57 @@ mod tests {
                 stray * 100.0
             );
         }
+    }
+
+    /// Wartet, bis `ready` erfüllt ist, und holt dabei Ergebnisse ab.
+    fn wait_for(cache: &mut PageCache, ctx: &egui::Context, ready: impl Fn(&PageCache) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !ready(cache) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Rendern dauert zu lang"
+            );
+            cache.poll(ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Die Miniaturspalte holt die Kleinbilder **nacheinander** — würde sie
+    /// alle auf einmal anfordern, behielte der Arbeits-Thread nur den letzten
+    /// Auftrag, und die übrigen Seiten blieben für immer leer.
+    #[test]
+    fn thumbnails_for_the_side_column_are_fetched_one_at_a_time() {
+        let ctx = egui::Context::default();
+        let doc = redact_pdf::load_from_bytes(&redact_pdf::testing::demo_statement()).unwrap();
+
+        let mut cache = PageCache::new();
+        // Ohne Dokument gibt es nichts anzufordern.
+        assert!(!cache.request_thumb(0, &ctx));
+
+        cache.set_document(Arc::new(doc));
+        assert!(cache.request_thumb(1, &ctx), "erster Auftrag geht raus");
+        assert!(
+            !cache.request_thumb(0, &ctx),
+            "solange einer unterwegs ist, kommt kein zweiter"
+        );
+
+        wait_for(&mut cache, &ctx, |c| c.has_thumb(1));
+        assert!(cache.thumb(1).is_some());
+        assert!(!cache.has_thumb(0));
+
+        // Jetzt ist der Weg frei für die nächste Seite …
+        assert!(cache.request_thumb(0, &ctx));
+        wait_for(&mut cache, &ctx, |c| c.has_thumb(0));
+
+        // … und was schon da ist, wird nie erneut gerechnet.
+        assert!(!cache.request_thumb(0, &ctx));
+        assert!(!cache.request_thumb(1, &ctx));
+        assert!(!cache.is_busy());
+
+        // Ein neues Dokument macht auch die Kleinbilder ungültig.
+        cache.reset();
+        assert!(!cache.has_thumb(0));
+        assert!(cache.thumb(1).is_none());
     }
 
     /// Ein Durchlauf durch den echten Thread: Dokument setzen, anfordern,

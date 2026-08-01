@@ -45,6 +45,16 @@ pub struct Cli {
     #[arg(long, value_name = "DATEI")]
     pub patterns_config: Option<PathBuf>,
 
+    /// Mindestvertrauen eines Treffers (0.0 … 1.0). Ohne Angabe 0.5.
+    ///
+    /// Ein Pattern mit einer Gruppe `context` bewertet denselben Treffer je
+    /// nach Umfeld unterschiedlich: „Kto. 532013000“ ist eine Kontonummer,
+    /// eine nackte Ziffernkette bestenfalls ein Verdacht. Wer auch die
+    /// Verdachtsfälle sehen will, senkt die Schwelle (`--min-confidence 0.25`);
+    /// `--list-patterns` zeigt beide Werte je Pattern.
+    #[arg(long, value_name = "WERT")]
+    pub min_confidence: Option<f32>,
+
     /// Buchungsliste (CSV) mit Positiv- und Negativeinträgen.
     #[arg(long, value_name = "CSV")]
     pub booking_list: Option<PathBuf>,
