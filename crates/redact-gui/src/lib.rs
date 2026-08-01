@@ -7,6 +7,7 @@
 //!
 //! ```text
 //!  state.rs      Zustand + Fachlogik (ohne egui, vollständig unit-getestet)
+//!  focus.rs      Wem ein Tastendruck gehört: Textfeld oder Oberfläche
 //!  history.rs    Rückgängig/Wiederholen als Schnappschuss-Stapel
 //!  viewer.rs     Koordinatenumrechnung PDF ↔ Bildschirm, schematische Notvorschau
 //!  render.rs     Seitenbilder aus `redact-render`, im Hintergrund-Thread
@@ -59,8 +60,10 @@
 //!   Schnappschüsse der Trefferliste, Strg+Z und Strg+Y.
 //! * Tastatur: Bild auf/ab und Pos1/Ende blättern, Pfeiltasten verschieben die
 //!   Auswahl (sonst blättern sie), Entf löscht, Strg+O öffnet, Strg+S
-//!   exportiert. Liegt der Fokus in einem Textfeld, gehören **alle** Tasten
-//!   dorthin — siehe [`key_commands`].
+//!   exportiert. Liegt der Fokus in einem **Textfeld**, gehören **alle** Tasten
+//!   dorthin — siehe [`key_commands`] und [`focus`]. „Textfeld“ heißt dabei
+//!   genau das: ein Knopf mit Fokus (nach einem Druck auf Tabulator) ist keins,
+//!   und Escape gehört noch dem Feld, dem egui den Fokus schon genommen hat.
 //!
 //! ## Review-Dateien gehören zu genau einem Dokument
 //!
@@ -94,13 +97,21 @@
 //! * `--audit-log`: der genannte Pfad gilt auch hier
 //!   ([`AppState::audit_target`]); ohne ihn
 //!   bleibt es beim Namen neben der Ausgabedatei.
+//! * `--review-out`: der genannte Pfad ist der Vorschlag im Dialog „Review
+//!   speichern“ ([`AppState::suggested_review_path`]) — dieselbe Regel wie
+//!   `redact_pipeline::run`. Vorher kam der Schalter in diesem Crate überhaupt
+//!   nicht vor.
 //!
 //! Zwei Schalter können in einem Fenster **nicht** wörtlich gelten, und das ist
 //! sichtbar, nicht stillschweigend:
 //!
 //! * `--output`/`-o` und `--force`: geschrieben wird erst auf Knopfdruck, und
 //!   der Speichern-Dialog fragt vor dem Überschreiben selbst. Der Pfad aus `-o`
-//!   ist der **Vorschlag** im Dialog, den man sieht und ändern kann.
+//!   ist der **Vorschlag** im Dialog, den man sieht und ändern kann. Er gehört
+//!   dem Dokument, für das er genannt wurde: solange er gilt, ist das Feld
+//!   „Namenszusatz“ abgeschaltet (es bewirkte sonst sichtbar nichts), und beim
+//!   Öffnen eines **anderen** Dokuments verfällt er
+//!   ([`AppState::output_name_is_fixed`]).
 //! * `--review`: die Oberfläche *ist* die Durchsicht. Wer hier „Exportieren“
 //!   drückt, will eine geschwärzte Datei — siehe
 //!   [`AppState::export_config`].
@@ -127,6 +138,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod focus;
 pub mod history;
 pub mod render;
 pub mod selector;
@@ -141,6 +153,7 @@ pub use app::{
     classify_drop, is_pdf_name, key_commands, DropAction, KeyCommand, KeyState, RedactApp,
     EMPTY_DOCUMENT_HINT,
 };
+pub use focus::TextFieldFocus;
 pub use history::{History, HISTORY_LIMIT};
 pub use render::{PageCache, PageMeta};
 pub use selector::{hit_handle, hit_test, Handle, HandleDrag, PointerFrame, RectangleSelector};

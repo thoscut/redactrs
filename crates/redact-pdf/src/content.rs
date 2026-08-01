@@ -160,21 +160,75 @@ impl ShowRecord {
     }
 }
 
+/// Schlüssel einer Eigenschaftsliste, die den Text darunter **spiegeln**.
+///
+/// * `/ActualText` — der kanonische Ersatz für die Glyphen des Abschnitts
+///   (PDF 32000-1, 14.9.4). Word, InDesign und jeder PDF/UA-Erzeuger schreiben
+///   ihn routinemäßig, etwa für Ligaturen und Sonderzeichen.
+/// * `/Alt` — die Beschreibung für Hilfsmittel (14.9.3); bei `/Figure` steht
+///   dort regelmäßig genau der Text, den das Bild zeigt.
+/// * `/E` — die ausgeschriebene Form einer Abkürzung (14.9.5).
+///
+/// Alle drei geben wieder, was die Glyphen sagen; `pdftotext` bevorzugt in der
+/// Voreinstellung sogar den Spiegel. Verschwinden die Glyphen, muss er mit.
+pub const MIRROR_KEYS: [&[u8]; 3] = [b"ActualText", b"Alt", b"E"];
+
+/// Ein `BDC`/`DP`, dessen Eigenschaftsliste einen Textspiegel trägt.
+///
+/// `shows` nennt die Textoperationen, die dieser Spiegel wiedergibt — die
+/// Marked-Content-Klammer kennt ihre Glyphen. Damit kann die Schwärzung genau
+/// die Frage beantworten, auf die es ankommt: *ist von diesem Abschnitt etwas
+/// entfernt worden?*
+#[derive(Debug, Clone)]
+pub struct MarkedTextRecord {
+    pub stream: StreamKey,
+    /// Index der `BDC`/`DP`-Operation im dekodierten Strom.
+    pub op_index: usize,
+    /// Die aufgelöste Eigenschaftsliste — gleich, ob sie inline im Strom stand
+    /// oder über `/Resources /Properties` erreichbar war.
+    pub properties: Dictionary,
+    /// Objekt-Id der Eigenschaftsliste, falls sie ein **eigenes** Objekt ist
+    /// (`/Properties /MC0 12 0 R`). Sonst `None`: dann steht die Liste inline
+    /// im Strom oder direkt im `/Properties`-Dictionary, und der Spiegel ist
+    /// nur über die Operation selbst zu erreichen.
+    pub property_id: Option<ObjectId>,
+    /// Indizes der Textoperationen im Geltungsbereich (siehe
+    /// [`scan_marked_text`]).
+    pub shows: Vec<usize>,
+}
+
 /// Ergebnis eines Seiten-Scans.
 #[derive(Debug, Default)]
 pub struct ScanResult {
     pub shows: Vec<ShowRecord>,
+    /// Marked-Content-Abschnitte mit Textspiegel.
+    pub marked: Vec<MarkedTextRecord>,
     /// Wie oft ein Form-XObject auf dieser Seite gezeichnet wurde.
     pub form_placements: BTreeMap<ObjectId, usize>,
     /// Befunde, die den Nutzer erreichen müssen — allen voran Fonts, deren
     /// Text sich nicht dekodieren lässt. Aus solchem Text kann die Analyse
     /// nichts erkennen; ohne Warnung hielte man die Datei für sauber.
     pub warnings: Vec<String>,
+    /// Welche Spiegel schon in `marked` stehen. Als Menge geführt, nicht durch
+    /// Durchsuchen der Liste: eine getaggte Seite bringt leicht Tausende
+    /// Abschnitte mit, und ein mehrfach platziertes Formular liefert sie
+    /// mehrfach.
+    seen_marked: HashSet<(StreamKey, usize)>,
 }
 
 impl ContentSink for ScanResult {
     fn show(&mut self, record: ShowRecord) {
         self.shows.push(record);
+    }
+
+    fn marked(&mut self, record: MarkedTextRecord) {
+        // Ein mehrfach platziertes Form-XObject wird mehrfach durchlaufen; sein
+        // Strom wird aber nur **einmal** neu geschrieben. Derselbe Spiegel darf
+        // deshalb nicht mehrfach in der Liste stehen.
+        if !self.seen_marked.insert((record.stream, record.op_index)) {
+            return;
+        }
+        self.marked.push(record);
     }
 
     fn form(&mut self, id: ObjectId) {
@@ -257,6 +311,9 @@ pub trait ContentSink {
     }
     /// Eine abgeschlossene Text-Ausgabe-Operation.
     fn show(&mut self, _record: ShowRecord) {}
+    /// Ein Marked-Content-Abschnitt mit Textspiegel (`/ActualText`, `/Alt`,
+    /// `/E`).
+    fn marked(&mut self, _record: MarkedTextRecord) {}
     /// Eine einzelne Glyphe (nur bei `wants_graphics`).
     fn glyph(&mut self, _cx: &SinkContext, _event: &GlyphEvent) {}
     /// Ein gemalter Pfad (nur bei `wants_graphics`).
@@ -952,6 +1009,177 @@ fn merge_resources(target: &mut Dictionary, source: &Dictionary) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Marked Content: Textspiegel
+// ---------------------------------------------------------------------------
+
+/// Sammelt die Textspiegel eines Stroms und ordnet jedem die Textoperationen
+/// zu, die er wiedergibt.
+///
+/// **Warum ein eigener kleiner Durchlauf und nicht die Zustandsschleife?**
+/// Welche Operation in welcher Marked-Content-Klammer steht, ist rein
+/// syntaktisch — es hängt weder an CTM noch an `Tm`, Font oder Farbe. In
+/// [`scan_operations`] müsste die Klammerstruktur trotzdem neben `q`/`Q`, der
+/// Form-Rekursion und dem Textzustand mitgeführt werden, obwohl sie mit alldem
+/// nichts zu tun hat. Hier steht sie an einer Stelle und ist Zeile für Zeile
+/// nachlesbar. Auseinanderlaufen können die beiden nicht: verglichen werden am
+/// Ende nur Operationsindizes, und die vergibt in beiden Fällen dieselbe
+/// Aufzählung über dasselbe `operations`.
+///
+/// **Geltungsbereich.**
+/// * `BDC … EMC` ist eine Klammer: der Bereich sind die Textoperationen
+///   dazwischen. Eine nicht geschlossene Klammer reicht bis zum Stromende — die
+///   sichere Richtung.
+/// * `DP` ist ein *Punkt* ohne Klammer und hat damit keine eigenen Glyphen.
+///   Genommen wird deshalb der nächstliegende Bereich, der einer ist: die
+///   umschließende Marked-Content-Klammer, sonst das umschließende Textobjekt
+///   (`BT … ET`), sonst der ganze Strom. Ein Punkt beschreibt die Stelle, an
+///   der er steht; wird dort etwas entfernt, ist auch seine Beschreibung
+///   falsch.
+fn scan_marked_text(
+    doc: &Document,
+    operations: &[Operation],
+    stream: StreamKey,
+    resources: Option<&Dictionary>,
+    sink: &mut dyn ContentSink,
+) {
+    let shows: Vec<usize> = operations
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
+        .map(|(index, _)| index)
+        .collect();
+
+    // Offene Klammern bzw. das offene Textobjekt, jeweils als Operationsindex.
+    let mut open: Vec<usize> = Vec::new();
+    let mut text_object: Option<usize> = None;
+    // Klammer/Textobjekt → Bereich der eingeschlossenen Operationen.
+    let mut ranges: BTreeMap<usize, std::ops::Range<usize>> = BTreeMap::new();
+    // Gefundene Spiegel an Klammern und an Punkten; ein Punkt merkt sich
+    // zusätzlich, worin er steht.
+    let mut brackets: Vec<(usize, Dictionary, Option<ObjectId>)> = Vec::new();
+    type PointMirror = (
+        usize,
+        Dictionary,
+        Option<ObjectId>,
+        Option<usize>,
+        Option<usize>,
+    );
+    let mut points: Vec<PointMirror> = Vec::new();
+
+    for (index, op) in operations.iter().enumerate() {
+        match op.operator.as_str() {
+            "BDC" | "BMC" => {
+                open.push(index);
+                if let Some((list, id)) = mirror_property_list(doc, resources, &op.operands) {
+                    brackets.push((index, list, id));
+                }
+            }
+            "EMC" => {
+                if let Some(start) = open.pop() {
+                    ranges.insert(start, start + 1..index);
+                }
+            }
+            "BT" => text_object = Some(index),
+            "ET" => {
+                if let Some(start) = text_object.take() {
+                    ranges.insert(start, start + 1..index);
+                }
+            }
+            "DP" => {
+                if let Some((list, id)) = mirror_property_list(doc, resources, &op.operands) {
+                    points.push((index, list, id, open.last().copied(), text_object));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Unabgeschlossen: bis zum Ende des Stroms.
+    for start in open.into_iter().chain(text_object) {
+        ranges.insert(start, start + 1..operations.len());
+    }
+
+    let in_range = |range: &std::ops::Range<usize>| -> Vec<usize> {
+        shows
+            .iter()
+            .copied()
+            .filter(|index| range.contains(index))
+            .collect()
+    };
+
+    // Eine Klammer bringt ihren Bereich selbst mit.
+    for (op_index, properties, property_id) in brackets {
+        let range = ranges
+            .get(&op_index)
+            .cloned()
+            .unwrap_or(op_index + 1..operations.len());
+        sink.marked(MarkedTextRecord {
+            stream,
+            op_index,
+            properties,
+            property_id,
+            shows: in_range(&range),
+        });
+    }
+    // Ein Punkt erbt den Bereich, in dem er steht.
+    for (op_index, properties, property_id, bracket, text_object) in points {
+        let range = bracket
+            .or(text_object)
+            .and_then(|start| ranges.get(&start).cloned())
+            .unwrap_or(0..operations.len());
+        sink.marked(MarkedTextRecord {
+            stream,
+            op_index,
+            properties,
+            property_id,
+            shows: in_range(&range),
+        });
+    }
+}
+
+/// Trägt die Eigenschaftsliste eines `BDC`/`DP` einen Textspiegel?
+///
+/// Liefert die aufgelöste Liste und — falls sie ein eigenes Objekt ist — deren
+/// Objekt-Id. `None`, wenn kein Textschlüssel darin steht: dann gibt es nichts
+/// zu tun, und ein `/MCID`- oder `/OC`-Eintrag bleibt unangetastet.
+fn mirror_property_list(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    operands: &[Object],
+) -> Option<(Dictionary, Option<ObjectId>)> {
+    match operands.get(1)? {
+        // `/Span <</ActualText (…)>> BDC`
+        Object::Dictionary(dict) => has_mirror_key(doc, dict).then(|| (dict.clone(), None)),
+        // `/Span /MC0 BDC` — die Liste steht in `/Resources /Properties`.
+        Object::Name(name) => {
+            let entry = resources
+                .and_then(|r| r.get(b"Properties").ok())
+                .and_then(|o| doc.dereference(o).ok())
+                .and_then(|(_, o)| o.as_dict().ok())
+                .and_then(|d| d.get(name.as_slice()).ok())?;
+            let (id, resolved) = doc.dereference(entry).ok()?;
+            let dict = resolved.as_dict().ok()?;
+            has_mirror_key(doc, dict).then(|| (dict.clone(), id))
+        }
+        _ => None,
+    }
+}
+
+/// Steht in dieser Liste überhaupt ein nicht leerer Textspiegel?
+///
+/// Aufgelöst wird auch ein indirekter Verweis: eine Eigenschaftsliste, die als
+/// eigenes Objekt in der Datei steht, darf ihren `/ActualText` seinerseits als
+/// Verweis führen. Wer hier nur auf `Object::String` prüfte, hielte genau diese
+/// Datei für unauffällig.
+fn has_mirror_key(doc: &Document, dict: &Dictionary) -> bool {
+    MIRROR_KEYS.iter().any(|key| {
+        matches!(
+            dict.get(key).ok().and_then(|o| doc.dereference(o).ok()),
+            Some((_, Object::String(bytes, _))) if bytes.iter().any(|b| !b.is_ascii_whitespace())
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scan_operations(
     doc: &Document,
@@ -965,6 +1193,7 @@ fn scan_operations(
     stats: &mut FontDecodeStats,
     sink: &mut dyn ContentSink,
 ) {
+    scan_marked_text(doc, operations, stream, resources, sink);
     let graphics = sink.wants_graphics();
     let mut state = GraphicsState::new(initial_ctm);
     let mut stack: Vec<GraphicsState> = Vec::new();
@@ -2146,5 +2375,77 @@ endcmap"
             "unerwartete Warnung: {:?}",
             scan.warnings
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Geltungsbereich der Textspiegel
+    // -----------------------------------------------------------------------
+
+    /// Scannt einen Rohstrom ohne Fonts und liefert die Spiegel mit ihrem
+    /// Geltungsbereich.
+    fn mirrors(src: &[u8]) -> Vec<(usize, Vec<usize>)> {
+        let doc = Document::with_version("1.5");
+        let mut result = ScanResult::default();
+        scan_marked_text(&doc, &ops(src), StreamKey::Page, None, &mut result);
+        result
+            .marked
+            .iter()
+            .map(|m| (m.op_index, m.shows.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_bracket_owns_exactly_the_glyphs_it_encloses() {
+        // 0:BT 1:Tj 2:BDC 3:Tj 4:EMC 5:Tj 6:ET
+        let found = mirrors(b"BT (a) Tj /Span <</ActualText (b)>> BDC (b) Tj EMC (c) Tj ET");
+        assert_eq!(found, vec![(2, vec![3])]);
+    }
+
+    #[test]
+    fn a_bracket_without_a_mirror_is_not_reported() {
+        let found = mirrors(b"BT /Span <</MCID 0>> BDC (b) Tj EMC ET");
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// Ein `/ActualText`, das nur aus Leerraum besteht, spiegelt nichts.
+    #[test]
+    fn an_empty_mirror_is_not_reported() {
+        let found = mirrors(b"BT /Span <</ActualText ( )>> BDC (b) Tj EMC ET");
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_point_inherits_the_enclosing_bracket() {
+        // 0:BT 1:BDC 2:Tj 3:DP 4:Tj 5:EMC 6:Tj 7:ET
+        let found = mirrors(
+            b"BT /Span <</MCID 0>> BDC (a) Tj /Span <</ActualText (x)>> DP (b) Tj EMC (c) Tj ET",
+        );
+        assert_eq!(found, vec![(3, vec![2, 4])]);
+    }
+
+    /// Ohne umschließende Klammer gilt das Textobjekt — und zwar ganz, auch
+    /// was **vor** dem Punkt gesetzt wurde: ein Punkt beschreibt die Stelle, an
+    /// der er steht, nicht einen Bereich dahinter.
+    #[test]
+    fn a_point_falls_back_to_the_text_object() {
+        // 0:BT 1:Tj 2:DP 3:Tj 4:ET 5:BT 6:Tj 7:ET
+        let found = mirrors(b"BT (a) Tj /Span <</ActualText (x)>> DP (b) Tj ET BT (c) Tj ET");
+        assert_eq!(found, vec![(2, vec![1, 3])]);
+    }
+
+    /// Außerhalb jedes Textobjekts bleibt nur der ganze Strom. Das ist die
+    /// sichere Richtung: lieber ein Spiegel zu viel entfernt als einer, der
+    /// weiterhin das Geheimnis nennt.
+    #[test]
+    fn a_point_outside_any_text_object_covers_the_whole_stream() {
+        let found = mirrors(b"/Span <</ActualText (x)>> DP BT (a) Tj ET BT (b) Tj ET");
+        assert_eq!(found, vec![(0, vec![2, 5])]);
+    }
+
+    /// Eine nicht geschlossene Klammer reicht bis zum Stromende.
+    #[test]
+    fn an_unclosed_bracket_reaches_to_the_end() {
+        let found = mirrors(b"BT /Span <</ActualText (x)>> BDC (a) Tj (b) Tj ET");
+        assert_eq!(found, vec![(1, vec![2, 3])]);
     }
 }

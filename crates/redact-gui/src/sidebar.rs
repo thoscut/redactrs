@@ -51,6 +51,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     ui.heading("Treffer");
     ui.label(RichText::new(summary.headline()).strong());
     legend(ui);
+    padding_note(ui, state.config.padding);
     ui.separator();
 
     // Erst der Detailbereich am unteren Rand, dann die Liste in den Rest —
@@ -68,6 +69,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
         .show(ui, |ui| {
             hits(ui, state, summary);
         });
+
+    // Sobald das Ersatzfeld den Fokus nicht (mehr) hat — oder gar nicht
+    // gezeichnet wurde —, ist die Tippsitzung vorbei: der nächste Anschlag
+    // gehört dann zu einem neuen Schritt im Verlauf. Eine Zeile an genau einer
+    // Stelle statt einer Fallunterscheidung an jedem Ausgang von `details`.
+    if !ui.memory(|m| m.has_focus(crate::focus::id(crate::focus::REPLACEMENT))) {
+        state.end_replacement_edit();
+    }
 }
 
 /// Vertikale Luft um den Detailbereich.
@@ -75,17 +84,27 @@ const BAR_PADDING: f32 = 4.0;
 
 /// Namenszusatz der Ausgabedatei samt Vorschau des Ergebnisses.
 fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
+    // Steht der Ausgabepfad durch `-o` fest, bewirkt der Zusatz nichts. Ein
+    // Eingabefeld, an dem sichtbar nichts hängt, ist schlimmer als ein
+    // abgeschaltetes: hier wird es abgeschaltet **und** gesagt, warum.
+    let fixed = state.output_name_is_fixed();
     ui.horizontal(|ui| {
         ui.label("Namenszusatz");
-        ui.add(
+        ui.add_enabled(
+            !fixed,
             egui::TextEdit::singleline(&mut state.config.output_suffix)
+                // Feste Kennung — siehe [`crate::focus`]: daran erkennt die
+                // Tastenauswertung ein Textfeld.
+                .id(crate::focus::id(crate::focus::OUTPUT_SUFFIX))
                 .desired_width(SUFFIX_FIELD_WIDTH)
                 .hint_text(redact_core::DEFAULT_OUTPUT_SUFFIX),
         )
-        .on_hover_text(
+        .on_hover_text(if fixed {
+            OUTPUT_FIXED_HINT
+        } else {
             "Wird an den Dateinamen der Ausgabe angehängt. \
-             Leer bedeutet: Standardzusatz, damit das Original nie überschrieben wird.",
-        );
+             Leer bedeutet: Standardzusatz, damit das Original nie überschrieben wird."
+        });
     });
 
     let suggestion = state
@@ -93,6 +112,43 @@ fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "— kein Dokument geladen —".to_string());
     ui.label(RichText::new(suggestion).small().weak());
+    if fixed {
+        ui.label(RichText::new(OUTPUT_FIXED_NOTE).small().weak());
+    }
+}
+
+/// Sprechblase am abgeschalteten Feld „Namenszusatz“.
+pub const OUTPUT_FIXED_HINT: &str = "Der Ausgabepfad wurde beim Aufruf genannt (-o/--output). \
+     Solange er gilt, hat der Namenszusatz keine Wirkung — im Speichern-Dialog \
+     lässt sich der Name ändern, und das nächste geöffnete Dokument hebt ihn auf.";
+
+/// Zeile unter dem Vorschlag, solange `-o` gilt.
+pub const OUTPUT_FIXED_NOTE: &str = "Name aus -o — der Zusatz gilt hier nicht.";
+
+/// Satz zur Polsterung — sie steht in Zahlen nirgends, wirkt aber auf jeden
+/// Balken.
+pub fn padding_text(padding: f64) -> String {
+    if padding == 0.0 {
+        return "Polsterung: keine — geschwärzt wird genau das Rechteck.".to_string();
+    }
+    format!(
+        "Polsterung: {padding:+.1} pt rundum — der schwarze Balken wird auf jeder \
+         Seite so viel größer als das Rechteck."
+    )
+}
+
+/// Die Polsterung als Zeile unter der Legende.
+///
+/// Im Seitenbild ist sie als gestrichelter Rahmen zu sehen
+/// ([`crate::viewer::paint_padding`]); hier steht die Zahl dazu. Vorher war
+/// beides unsichtbar: `--padding 6` ließ Nachbartext mitverschwinden, ohne dass
+/// die Oberfläche es andeutete.
+fn padding_note(ui: &mut egui::Ui, padding: f64) {
+    ui.label(RichText::new(padding_text(padding)).small().weak())
+        .on_hover_text(
+            "Kommt von --padding (Vorgabe 1,0). Der gestrichelte Rahmen im \
+             Seitenbild zeigt, was wirklich schwarz wird.",
+        );
 }
 
 fn legend(ui: &mut egui::Ui) {
@@ -228,13 +284,17 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     }
 
     let mut changed = false;
+    // Der Vorschlag für den Ersatztext kommt aus der Konfiguration
+    // (`--replace-with`), sonst aus [`crate::state::DEFAULT_REPLACEMENT`] —
+    // hier stand fest das englische „[REDACTED]“.
+    let default_replacement = state.default_replacement();
     egui::ComboBox::from_label("Aktion")
         .selected_text(action_label(&action))
         .show_ui(ui, |ui| {
             for candidate in [
                 Action::Blackout,
                 Action::Whiteout,
-                Action::Replace("[REDACTED]".to_string()),
+                Action::Replace(default_replacement.clone()),
             ] {
                 let text = action_label(&candidate);
                 let is_selected =
@@ -246,13 +306,28 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
             }
         });
 
+    // Der Ersatztext geht **nicht** über `set_action`: sonst legte jeder
+    // Tastendruck einen Verlaufsschritt an und ein Ersatztext von 50 Zeichen
+    // schöbe den ganzen Stapel hinaus. Siehe
+    // [`crate::state::AppState::edit_replacement`].
+    let mut typed: Option<String> = None;
     if let Action::Replace(text) = &mut action {
-        if ui.text_edit_singleline(text).changed() {
-            changed = true;
+        let mut buffer = text.clone();
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut buffer)
+                // Feste Kennung — daran erkennt die Tastenauswertung ein
+                // Textfeld, siehe [`crate::focus`].
+                .id(crate::focus::id(crate::focus::REPLACEMENT)),
+        );
+        if field.changed() {
+            typed = Some(buffer.clone());
         }
+        *text = buffer;
     }
     if changed {
         state.set_action(index, action);
+    } else if let Some(text) = typed {
+        state.edit_replacement(index, text);
     }
 
     if ui.button("Region löschen").clicked() {
@@ -298,6 +373,61 @@ mod tests {
         for outcome in outcomes.iter().filter(|o| !o.is_redacted()) {
             assert!(!outcome.note().is_empty(), "{outcome:?}");
         }
+    }
+
+    /// **Befund: mit `-o` war das Feld „Namenszusatz“ wirkungslos** — und sah
+    /// aus wie jedes andere Eingabefeld. Hier am echten Kontext geprüft: das
+    /// Feld ist abgeschaltet, und der Grund steht daneben.
+    #[test]
+    fn the_suffix_field_is_switched_off_while_an_output_path_is_given() {
+        use std::cell::RefCell;
+        use std::path::PathBuf;
+
+        let field = crate::focus::id(crate::focus::OUTPUT_SUFFIX);
+
+        let draw = |state: RefCell<AppState>| -> egui::Context {
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::SidePanel::left("sidebar").show(ctx, |ui| {
+                        let summary = state.borrow().hit_summary();
+                        show(ui, &mut state.borrow_mut(), &summary);
+                    });
+                });
+            }
+            ctx
+        };
+
+        // Ohne `-o`: das Feld ist benutzbar.
+        let mut plain = AppState::new();
+        plain
+            .load_bytes(&redact_pdf::testing::demo_statement(), None)
+            .unwrap();
+        let ctx = draw(RefCell::new(plain));
+        assert!(
+            ctx.read_response(field).expect("Feld gezeichnet").enabled(),
+            "ohne -o gehört das Feld bedienbar"
+        );
+
+        // Mit `-o`: abgeschaltet — es bewirkte nichts.
+        let mut fixed = AppState::with_config(redact_pipeline::Config {
+            output: Some(PathBuf::from("/ziel/fertig.pdf")),
+            ..redact_pipeline::Config::default()
+        });
+        fixed
+            .load_bytes(&redact_pdf::testing::demo_statement(), None)
+            .unwrap();
+        assert!(fixed.output_name_is_fixed());
+        let ctx = draw(RefCell::new(fixed));
+        assert!(
+            !ctx.read_response(field).expect("Feld gezeichnet").enabled(),
+            "ein Feld, das sichtbar nichts bewirkt, gehört abgeschaltet"
+        );
+        assert!(
+            OUTPUT_FIXED_HINT.contains("-o"),
+            "und der Grund gehört dazu"
+        );
+        assert!(OUTPUT_FIXED_NOTE.contains("-o"));
     }
 
     #[test]

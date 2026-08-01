@@ -14,6 +14,11 @@
 //! Alle vier Wege laufen jetzt über [`RedactApp::may_discard`]; beim Schließen
 //! wird zusätzlich [`egui::ViewportCommand::CancelClose`] geschickt, solange
 //! nicht bestätigt wurde.
+//!
+//! Es sind **fünf** Wege: „Analysieren“ (und damit auch „Buchungsliste laden“)
+//! wirft zwar keine gezogenen Rechtecke weg, aber jede Abwahl, jede je Treffer
+//! gewählte Schwärzungsart und ein geladenes Review — und fragte als einziger
+//! nicht. Siehe [`RedactApp::analyze`].
 
 use std::path::PathBuf;
 
@@ -349,6 +354,19 @@ pub fn discard_question(regions: usize, what: &str) -> String {
     )
 }
 
+/// Meldung nach einem geglückten Speichern der Review-Datei.
+///
+/// Die Datei enthält die gefundenen Geheimnisse im Klartext (dieselben, die im
+/// Audit-Log stehen können) — wer sie weitergibt, gibt sie mit weiter. Das
+/// gehört in dieselbe Zeile wie der Erfolg.
+pub fn review_saved_status(entries: usize, path: &std::path::Path) -> String {
+    format!(
+        "Review gespeichert: {entries} Eintrag/Einträge → {} \
+         (enthält die gefundenen Texte im Klartext)",
+        path.display()
+    )
+}
+
 /// Meldung nach einem geglückten Export.
 ///
 /// Zwei Dinge, die früher nur als Sprechblase oder gar nicht auftauchten,
@@ -404,6 +422,26 @@ fn empty_state(ui: &mut egui::Ui) {
     });
 }
 
+/// Wer die Rückfrage vor Datenverlust beantwortet.
+///
+/// Ein `rfd`-Dialog blockiert und braucht ein Fenster; im Test gibt es beides
+/// nicht. Früher stand hier ein `bool` „fragen ja/nein“ — damit ließ sich nur
+/// der Fall „Nutzerin sagt Ja“ prüfen, und ob ein Weg überhaupt fragt, blieb
+/// ungeprüft. Mit [`Ask::Answer`] steht die Antwort fest, **die Frage wird aber
+/// gestellt**: ein Weg, der `may_discard` gar nicht erst aufruft, fällt damit
+/// auf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    /// Im Betrieb: ein Fenster fragt nach.
+    User,
+    /// Nur im Test: diese Antwort gilt, ohne Fenster.
+    ///
+    /// Ausdrücklich `#[cfg(test)]`: im ausgelieferten Programm gibt es diesen
+    /// Weg nicht, eine Rückfrage lässt sich dort nicht wegkonfigurieren.
+    #[cfg(test)]
+    Answer(bool),
+}
+
 /// Zustand der Oberfläche.
 pub struct RedactApp {
     pub state: AppState,
@@ -426,11 +464,10 @@ pub struct RedactApp {
     shown_page: Option<usize>,
     /// Wurde das Schließen des Fensters bereits bestätigt?
     close_confirmed: bool,
-    /// Rückfragen unterdrücken (nur für Tests ohne Bildschirm).
-    ///
-    /// Ein `rfd`-Dialog blockiert und braucht ein Fenster; im Test gibt es
-    /// beides nicht.
-    ask_before_discarding: bool,
+    /// Wer die Rückfrage vor Datenverlust beantwortet.
+    ask: Ask,
+    /// Fokusstand über die Bildgrenze hinweg — siehe [`crate::focus`].
+    text_focus: crate::focus::TextFieldFocus,
     /// Eingabefeld der Passwortabfrage.
     ///
     /// Steht hier und nicht im [`AppState`]: es ist der halb getippte Text
@@ -467,16 +504,29 @@ impl RedactApp {
             applied_theme: None,
             shown_page: None,
             close_confirmed: false,
-            ask_before_discarding: true,
+            ask: Ask::User,
+            text_focus: crate::focus::TextFieldFocus::default(),
             password_input: String::new(),
         }
     }
 
-    /// Ohne Rückfragen — für Tests ohne Bildschirm.
+    /// Rückfragen ohne Fenster, Antwort „Ja“ — für Tests ohne Bildschirm.
     #[cfg(test)]
     fn silent(config: Config) -> Self {
         Self {
-            ask_before_discarding: false,
+            ask: Ask::Answer(true),
+            ..Self::new(config)
+        }
+    }
+
+    /// Rückfragen ohne Fenster, Antwort „Nein“ — für Tests ohne Bildschirm.
+    ///
+    /// Damit lässt sich prüfen, ob ein Weg vor dem Wegwerfen überhaupt fragt:
+    /// wer `may_discard` nicht aufruft, ändert hier trotzdem etwas.
+    #[cfg(test)]
+    fn refusing(config: Config) -> Self {
+        Self {
+            ask: Ask::Answer(false),
             ..Self::new(config)
         }
     }
@@ -495,8 +545,9 @@ impl RedactApp {
         if !self.state.has_manual_work() {
             return true;
         }
-        if !self.ask_before_discarding {
-            return true;
+        #[cfg(test)]
+        if let Ask::Answer(answer) = self.ask {
+            return answer;
         }
         let count = self.state.hand_made_count();
         rfd::MessageDialog::new()
@@ -569,13 +620,34 @@ impl RedactApp {
     }
 
     /// Führt nur die Analyse aus (z.B. nach dem Laden einer Buchungsliste).
-    pub fn analyze(&mut self) {
+    ///
+    /// **Fragt vorher.** Eine erneute Analyse ersetzt alle automatisch
+    /// gefundenen Einträge: jede Abwahl und jede je Treffer gewählte
+    /// Schwärzungsart ist danach weg, und ein geladenes Review ebenso — den Weg
+    /// hierher nimmt auch „Buchungsliste laden“. Von Hand gezogene Rechtecke
+    /// bleiben zwar erhalten ([`AppState::analyze`]), die *Entscheidungen* an
+    /// den übrigen Treffern nicht. Die vier anderen Wege zum selben Verlust
+    /// (Öffnen, Ablegen, Review laden, Schließen) fragen über
+    /// [`RedactApp::may_discard`] — dieser hier tat es nicht und meldete
+    /// hinterher zufrieden die Zahl der Treffer.
+    ///
+    /// Der Verlaufseintrag aus [`AppState::analyze`] bleibt: er ist die
+    /// Entschärfung (Strg+Z holt den Stand zurück), nicht der Ersatz für die
+    /// Frage.
+    /// Gibt zurück, ob die Analyse wirklich gelaufen ist.
+    pub fn analyze(&mut self) -> bool {
         if !self.state.is_loaded() {
             self.state.status = "Erst ein PDF öffnen".to_string();
-            return;
+            return false;
+        }
+        if !self.may_discard("Neu zu analysieren") {
+            self.state.status = "Analyse abgebrochen — nichts verändert".to_string();
+            return false;
         }
         let result = self.state.analyze().map(|_| ());
+        let ran = result.is_ok();
         self.report(result);
+        ran
     }
 
     /// Öffnet ein aus dem Speicher abgelegtes PDF (Web-Build ohne Pfad).
@@ -759,7 +831,9 @@ impl RedactApp {
     fn apply_tool_action(&mut self, action: ToolAction, ctx: &egui::Context) {
         match action {
             ToolAction::Open => self.open_dialog(),
-            ToolAction::Analyze => self.analyze(),
+            ToolAction::Analyze => {
+                self.analyze();
+            }
             ToolAction::Booking => self.booking_dialog(),
             ToolAction::Export => self.export_dialog(),
             ToolAction::ReviewSave => self.review_save_dialog(),
@@ -806,8 +880,13 @@ impl RedactApp {
             dialog = dialog.set_directory(dir);
         }
         if let Some(path) = dialog.pick_file() {
-            self.state.config.booking_list = Some(path);
-            self.analyze();
+            // Die Liste gilt nur, wenn die Analyse auch läuft: wird die
+            // Rückfrage abgelehnt, stünde sonst eine Buchungsliste in der
+            // Konfiguration, von der im Bild nichts zu sehen ist.
+            let previous = self.state.config.booking_list.replace(path);
+            if !self.analyze() {
+                self.state.config.booking_list = previous;
+            }
         }
     }
 
@@ -840,8 +919,23 @@ impl RedactApp {
             "review.json",
         );
         if let Some(path) = dialog.save_file() {
-            let result = self.state.save_review_file(&path);
-            self.report(result);
+            self.save_review_to(&path);
+        }
+    }
+
+    /// Schreibt die Review-Datei und **sagt es**.
+    ///
+    /// [`RedactApp::report`] setzt bei `Ok(())` nur `error = None` und lässt die
+    /// Statuszeile stehen: der Knopf arbeitete und schwieg. Ausgerechnet hier —
+    /// die Review-Datei ist der Rettungsanker, auf den die Rückfrage vor
+    /// Datenverlust ausdrücklich verweist ([`discard_question`]).
+    pub fn save_review_to(&mut self, path: &std::path::Path) {
+        match self.state.save_review_file(path) {
+            Ok(()) => {
+                self.error = None;
+                self.state.status = review_saved_status(self.state.regions.len(), path);
+            }
+            Err(e) => self.report(Err(e)),
         }
     }
 
@@ -875,7 +969,7 @@ impl RedactApp {
             .and_then(|review| self.state.apply_review_file(review));
         if let Err(error) = &result {
             let message = error.to_string();
-            if self.ask_before_discarding {
+            if self.ask == Ask::User {
                 rfd::MessageDialog::new()
                     .set_level(rfd::MessageLevel::Error)
                     .set_title("Review-Datei passt nicht zum Dokument")
@@ -923,6 +1017,9 @@ impl RedactApp {
 
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut input)
+                        // Feste Kennung: nur so weiß [`RedactApp::read_keys`],
+                        // dass der Fokus in einem **Textfeld** liegt.
+                        .id(crate::focus::id(crate::focus::PASSWORD))
                         .password(true)
                         .hint_text("Passwort"),
                 );
@@ -1049,9 +1146,17 @@ impl RedactApp {
                 }
 
                 // --- Regionen ---
+                // Wie weit die Schwärzung wirklich reicht: `--padding`
+                // vergrößert jeden Balken auf jeder Seite. Das war im Bild
+                // nicht zu sehen — der Nachbartext, der mitverschwindet, auch
+                // nicht.
+                let padding = viewer::padding_screen(self.state.config.padding, zoom);
                 for index in self.state.regions_on_page(page) {
                     let entry = &self.state.regions[index];
                     let screen = viewer::pdf_to_screen(&entry.region.rect, &view, zoom, origin);
+                    if summary.outcome(index).is_redacted() {
+                        viewer::paint_padding(&painter, screen, entry.color.rgb(), padding);
+                    }
                     viewer::paint_region(
                         &painter,
                         screen,
@@ -1181,7 +1286,10 @@ impl RedactApp {
             if frame.button_is_up() {
                 // Losgelassen oder abgebrochen — der Zug ist vorbei.
                 self.resize = None;
-                if drag.moved {
+                // Die Erfolgsmeldung darf die Warnung nicht überschreiben, dass
+                // dieser Zug eine geschützte Stelle zur Schwärzung gemacht hat
+                // — sie ist die wichtigere der beiden Nachrichten.
+                if drag.moved && self.state.status != crate::state::PROTECTION_OVERRIDDEN {
                     self.state.status = "Rechteck angepasst".to_string();
                 }
             }
@@ -1366,11 +1474,18 @@ impl RedactApp {
 
     /// Liest die Tasten aus dem Kontext.
     ///
-    /// `focused()` beantwortet die entscheidende Frage: liegt der Eingabefokus
-    /// in einem Widget (typischerweise dem Textfeld „Ersetzen“ oder dem
-    /// Namenszusatz)? Dann gehören alle Tasten dorthin.
-    fn read_keys(ctx: &egui::Context) -> KeyState {
-        let text_focus = ctx.memory(|m| m.focused().is_some());
+    /// Die entscheidende Frage ist **nicht** „hat irgendein Widget den Fokus“,
+    /// sondern „liegt er in einem Textfeld“. Vorher stand hier
+    /// `focused().is_some()`: ein einziger Druck auf Tabulator setzte den Fokus
+    /// auf einen Knopf der Symbolleiste (`Sense::click()` ist fokussierbar),
+    /// und von da an waren Entf, die Pfeiltasten und Strg+O/S/Z/Y tot. Welche
+    /// Kennungen zu Textfeldern gehören, sagt [`crate::focus`].
+    ///
+    /// Für Escape zählt zusätzlich der Fokus des **vorigen** Bildendes: egui
+    /// nimmt dem Feld den Fokus beim Escape schon in `Focus::begin_pass`, also
+    /// bevor diese Zeile ihn abfragt.
+    fn read_keys(&self, ctx: &egui::Context) -> KeyState {
+        let in_field = crate::focus::in_text_field(ctx);
         ctx.input(|i| KeyState {
             delete: i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
             escape: i.key_pressed(Key::Escape),
@@ -1390,14 +1505,19 @@ impl RedactApp {
             key_s: i.key_pressed(Key::S),
             key_z: i.key_pressed(Key::Z),
             key_y: i.key_pressed(Key::Y),
-            text_focus,
+            text_focus: self
+                .text_focus
+                .owns_keys(in_field, i.key_pressed(Key::Escape)),
         })
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        let keys = Self::read_keys(ctx);
+        let keys = self.read_keys(ctx);
         let commands = key_commands(keys, self.state.selected_region.is_some());
         self.apply_key_commands(&commands);
+        // Am Bildende merken, wo der Fokus liegt: das nächste Bild beginnt mit
+        // diesem Stand, und ein Escape räumt ihn ab, bevor er hier ankäme.
+        self.text_focus.remember(crate::focus::in_text_field(ctx));
     }
 
     fn apply_key_commands(&mut self, commands: &[KeyCommand]) {
@@ -1413,6 +1533,11 @@ impl RedactApp {
                     self.state.selected_region = None;
                 }
                 KeyCommand::DeleteSelected => {
+                    // Auch das gerade aufgezogene Rechteck endet hier. Vorher
+                    // wurde nur `resize` geräumt: Entf mitten im Aufziehen
+                    // löschte die ausgewählte Region **und** legte beim
+                    // Loslassen trotzdem noch das neue Rechteck an.
+                    self.selector.cancel();
                     // Wie bei `Deselect`: gelöscht wird die Region, an der
                     // womöglich gerade gezogen wird. Die Kennung im
                     // [`HandleDrag`] verhinderte zwar schon, dass der Zug auf
@@ -1540,6 +1665,15 @@ mod tests {
     /// A1: Steht der Fokus in einem Textfeld, darf **keine** Taste bis in den
     /// Zustand durchschlagen. Vorher löschte die Rücktaste im Feld „Ersetzen“
     /// die ausgewählte Region — ohne Rückfrage und ohne Rückgängig.
+    ///
+    /// **Dieser Test prüft nur die reine Funktion.** `text_focus` steht hier
+    /// von Hand auf `true`; wie dieses Feld zustande kommt, sieht er nicht —
+    /// und genau dort saßen zwei Fehler (ein Knopf mit Fokus galt als Textfeld,
+    /// und Escape kam nie mit `text_focus == true` an). Den echten Ablauf
+    /// prüfen `a_tab_press_does_not_kill_every_shortcut`,
+    /// `escape_in_the_replacement_field_only_leaves_the_field` und
+    /// `a_really_focused_text_field_swallows_the_backspace` an einem laufenden
+    /// [`egui::Context`].
     #[test]
     fn a_focused_text_field_swallows_every_key() {
         // Wirklich jede Taste, auch die neuen Kürzel: Strg+Z im Textfeld
@@ -1578,6 +1712,345 @@ mod tests {
             ..unfocused
         };
         assert!(!key_commands(without_ctrl, true).is_empty());
+    }
+
+    // ------------------------------- Tastatur am echten Kontext (Befund 4/5)
+    //
+    // Der Test oben setzt `text_focus` von Hand — genau daran ist die
+    // bestehende Prüfung vorbeigelaufen: sie sieht nicht, **wie** dieses Feld
+    // zustande kommt. Die folgenden Tests fahren deshalb echte Bilder eines
+    // `egui::Context` ab, mit echten Ereignissen.
+
+    /// Ein ganzes Bild ohne Fenster — dieselben Panels in derselben Reihenfolge
+    /// wie in [`eframe::App::update`], samt Tastenauswertung am Ende.
+    fn run_frame(
+        ctx: &egui::Context,
+        app: &std::cell::RefCell<RedactApp>,
+        input: egui::RawInput,
+    ) -> egui::FullOutput {
+        ctx.run(input, |ctx| {
+            let summary = app.borrow().state.hit_summary();
+            egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+                app.borrow_mut().top_bar(ui);
+            });
+            egui::SidePanel::left("sidebar").show(ctx, |ui| {
+                let mut app = app.borrow_mut();
+                crate::sidebar::show(ui, &mut app.state, &summary);
+            });
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if app.borrow().state.is_loaded() {
+                    app.borrow_mut().paint_page(ui, &summary);
+                } else {
+                    empty_state(ui);
+                }
+            });
+            app.borrow_mut().handle_keys(ctx);
+        })
+    }
+
+    /// Ein Fenster in der Größe, die die Anwendung wirklich öffnet — sonst
+    /// steht der Standardbereich von egui auf 10000 pt, und die untere Leiste
+    /// der Seitenleiste (mit dem Feld „Ersetzen“) läge außerhalb des Bildes,
+    /// also auch außerhalb jedes Klicks.
+    fn base_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(crate::WINDOW_SIZE[0], crate::WINDOW_SIZE[1]),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// Eingabe mit gedrückten Tasten.
+    fn keys_input(keys: &[Key]) -> egui::RawInput {
+        egui::RawInput {
+            events: keys
+                .iter()
+                .map(|key| egui::Event::Key {
+                    key: *key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .collect(),
+            ..base_input()
+        }
+    }
+
+    /// Eingabe mit gedrückter bzw. losgelassener Maustaste an einer Stelle.
+    fn click_input(pos: Pos2, pressed: bool) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..base_input()
+        }
+    }
+
+    /// Eine Anwendung mit geladenem Demo-Auszug.
+    fn loaded_app() -> std::cell::RefCell<RedactApp> {
+        let app = std::cell::RefCell::new(RedactApp::silent(iban_only()));
+        app.borrow_mut()
+            .open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        assert!(app.borrow().state.is_loaded());
+        app
+    }
+
+    /// Zeichnet so lange, bis die Leisten ihre endgültige Größe haben, und
+    /// gibt die Mitte des Feldes „Ersetzen“ zurück.
+    ///
+    /// Die ersten Bilder eines `egui::Context` sind Näherungen: Panelbreite und
+    /// -höhe stehen erst fest, wenn der Inhalt einmal gemessen wurde. Wer zu
+    /// früh klickt, klickt neben das Feld.
+    fn settle_and_find_the_replacement_field(
+        ctx: &egui::Context,
+        app: &std::cell::RefCell<RedactApp>,
+    ) -> Pos2 {
+        let id = crate::focus::id(crate::focus::REPLACEMENT);
+        // Feste Zahl statt „bis sich nichts mehr ändert“: die ersten beiden
+        // Bilder liefern **zweimal dieselbe** Näherung, ein Abbruch bei
+        // Gleichheit stiege also zu früh aus.
+        for _ in 0..10 {
+            run_frame(ctx, app, base_input());
+        }
+        ctx.read_response(id)
+            .expect("das Feld „Ersetzen“ muss gezeichnet sein")
+            .rect
+            .center()
+    }
+
+    /// **Befund: die Polsterung war im Bild nicht zu sehen** — hier durch das
+    /// ganze Bild geprüft: mit `--padding 6` malt die Seite mehr als ohne, und
+    /// die Seitenleiste nennt die Zahl.
+    #[test]
+    fn the_padding_reaches_the_page_image_and_the_sidebar() {
+        let shapes_with = |padding: f64| -> usize {
+            let ctx = egui::Context::default();
+            let app = std::cell::RefCell::new(RedactApp::silent(Config {
+                padding,
+                ..iban_only()
+            }));
+            app.borrow_mut()
+                .open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+            assert!(
+                app.borrow().state.hit_summary().redacted > 0,
+                "ohne Schwärzung gäbe es nichts zu polstern"
+            );
+            let mut last = 0;
+            for _ in 0..3 {
+                last = run_frame(&ctx, &app, base_input()).shapes.len();
+            }
+            last
+        };
+        let without = shapes_with(0.0);
+        assert!(
+            shapes_with(6.0) > without,
+            "--padding 6 vergrößert jeden Balken — das gehört ins Bild"
+        );
+        assert!(
+            shapes_with(1.0) > without,
+            "auch die Vorgabe 1,0 wirkt und war unsichtbar"
+        );
+
+        // Und die Zahl steht daneben, nicht nur in der Kommandozeile.
+        assert!(crate::sidebar::padding_text(6.0).contains("6.0"));
+        assert!(crate::sidebar::padding_text(0.0).contains("keine"));
+    }
+
+    /// **Befund: ein Druck auf Tabulator legte sämtliche Tastenkürzel lahm.**
+    /// `read_keys` fragte `m.focused().is_some()` — und nach einem Tab sitzt
+    /// der Fokus auf einem Knopf der Symbolleiste (`Sense::click()` ist
+    /// fokussierbar). Von da an galten Entf, Pfeile und Strg+O/S/Z/Y als „gehört
+    /// dem Textfeld“, ohne dass eines im Spiel war.
+    #[test]
+    fn a_tab_press_does_not_kill_every_shortcut() {
+        let ctx = egui::Context::default();
+        let app = loaded_app();
+        app.borrow_mut()
+            .state
+            .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
+        let before = app.borrow().state.regions.len();
+        let selected = app.borrow().state.selected_region;
+        assert!(selected.is_some());
+
+        run_frame(&ctx, &app, base_input());
+        run_frame(&ctx, &app, keys_input(&[Key::Tab]));
+
+        // Ohne diese beiden Zusicherungen prüfte der Test nichts: der Fokus
+        // muss wirklich irgendwo sitzen, und zwar in keinem Textfeld.
+        assert!(
+            ctx.memory(|m| m.focused()).is_some(),
+            "Tab muss den Fokus auf ein Widget setzen"
+        );
+        assert!(
+            !crate::focus::in_text_field(&ctx),
+            "und dieses Widget ist kein Textfeld"
+        );
+
+        run_frame(&ctx, &app, keys_input(&[Key::Delete]));
+        assert_eq!(
+            app.borrow().state.regions.len(),
+            before - 1,
+            "nach einem Tab war Entf tot — und mit ihm die ganze Tastaturbedienung"
+        );
+
+        // Und die Kürzel mit Steuerungstaste ebenso: Strg+Z holt sie zurück.
+        let mut undo = keys_input(&[Key::Z]);
+        for event in &mut undo.events {
+            if let egui::Event::Key { modifiers, .. } = event {
+                *modifiers = egui::Modifiers::COMMAND;
+            }
+        }
+        undo.modifiers = egui::Modifiers::COMMAND;
+        run_frame(&ctx, &app, undo);
+        assert_eq!(
+            app.borrow().state.regions.len(),
+            before,
+            "Strg+Z muss nach einem Tab genauso wirken"
+        );
+    }
+
+    /// **Befund: die Fokus-Sperre griff bei Escape nicht.** egui räumt den
+    /// Fokus bei Escape in `Focus::begin_pass` ab — also bevor `read_keys` am
+    /// Bildende fragt. Escape im Feld „Ersetzen“ verließ deshalb nicht nur das
+    /// Feld, sondern hob zusätzlich die Auswahl auf.
+    #[test]
+    fn escape_in_the_replacement_field_only_leaves_the_field() {
+        use redact_core::Action;
+
+        let ctx = egui::Context::default();
+        let app = loaded_app();
+        app.borrow_mut().state.selected_region = Some(0);
+        app.borrow_mut()
+            .state
+            .set_action(0, Action::Replace("[GEHALT]".into()));
+
+        let pos = settle_and_find_the_replacement_field(&ctx, &app);
+
+        // Ein echter Klick hinein — kein von Hand gesetzter Fokus.
+        run_frame(&ctx, &app, click_input(pos, true));
+        run_frame(&ctx, &app, click_input(pos, false));
+        assert!(
+            crate::focus::in_text_field(&ctx),
+            "der Klick muss den Fokus ins Textfeld setzen"
+        );
+        assert_eq!(app.borrow().state.selected_region, Some(0));
+
+        // Escape: es verlässt das Feld — und sonst nichts.
+        run_frame(&ctx, &app, keys_input(&[Key::Escape]));
+        assert!(
+            !crate::focus::in_text_field(&ctx),
+            "egui nimmt dem Feld den Fokus"
+        );
+        assert_eq!(
+            app.borrow().state.selected_region,
+            Some(0),
+            "dieses Escape gehörte dem Feld, nicht der Auswahl"
+        );
+
+        // Gegenprobe: das **nächste** Escape gilt wieder der Fläche.
+        run_frame(&ctx, &app, keys_input(&[Key::Escape]));
+        assert_eq!(
+            app.borrow().state.selected_region,
+            None,
+            "sonst käme man aus der Auswahl nie wieder heraus"
+        );
+    }
+
+    /// Und die eigentliche Zusage, am echten Kontext: liegt der Fokus im
+    /// Textfeld, gehört **jede** Taste dorthin — die Rücktaste löscht dann kein
+    /// Rechteck.
+    #[test]
+    fn a_really_focused_text_field_swallows_the_backspace() {
+        use redact_core::Action;
+
+        let ctx = egui::Context::default();
+        let app = loaded_app();
+        app.borrow_mut().state.selected_region = Some(0);
+        app.borrow_mut()
+            .state
+            .set_action(0, Action::Replace("[GEHALT]".into()));
+        let before = app.borrow().state.regions.len();
+
+        let pos = settle_and_find_the_replacement_field(&ctx, &app);
+        run_frame(&ctx, &app, click_input(pos, true));
+        run_frame(&ctx, &app, click_input(pos, false));
+        assert!(crate::focus::in_text_field(&ctx));
+
+        run_frame(&ctx, &app, keys_input(&[Key::Backspace]));
+        assert_eq!(
+            app.borrow().state.regions.len(),
+            before,
+            "die Rücktaste im Textfeld darf keine Region löschen"
+        );
+        assert_eq!(app.borrow().state.selected_region, Some(0));
+    }
+
+    /// Eingabe mit getipptem Text.
+    fn text_input(text: &str) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::Text(text.to_string())],
+            ..base_input()
+        }
+    }
+
+    /// **Befund: Tippen im Feld „Ersetzen“ flutete den Rückgängig-Stapel** —
+    /// hier über die Oberfläche selbst, mit echten Tastenereignissen: die
+    /// Seitenleiste muss den Text über
+    /// [`crate::state::AppState::edit_replacement`] führen und nicht über
+    /// `set_action`.
+    #[test]
+    fn typing_in_the_replacement_field_costs_exactly_one_undo_step() {
+        use redact_core::Action;
+
+        let ctx = egui::Context::default();
+        let app = loaded_app();
+        app.borrow_mut().state.selected_region = Some(0);
+        app.borrow_mut()
+            .state
+            .set_action(0, Action::Replace("[X]".into()));
+
+        let pos = settle_and_find_the_replacement_field(&ctx, &app);
+        run_frame(&ctx, &app, click_input(pos, true));
+        run_frame(&ctx, &app, click_input(pos, false));
+        assert!(crate::focus::in_text_field(&ctx), "Fokus im Feld");
+
+        let depth = app.borrow().state.history.undo_depth();
+        let typed = "Kontoinhaber";
+        for ch in typed.chars() {
+            run_frame(&ctx, &app, text_input(&ch.to_string()));
+        }
+
+        let action = app.borrow().state.regions[0].action.clone();
+        let Action::Replace(text) = action else {
+            panic!("die Art muss „Ersetzen“ bleiben");
+        };
+        assert!(
+            text.contains(typed),
+            "der getippte Text muss ankommen: {text:?}"
+        );
+        assert_eq!(
+            app.borrow().state.history.undo_depth(),
+            depth + 1,
+            "{} Anschläge dürfen einen Schritt kosten, nicht {}",
+            typed.chars().count(),
+            typed.chars().count()
+        );
+
+        // Ein Rückgängig führt zum Stand vor dem Tippen.
+        app.borrow_mut().state.undo();
+        assert_eq!(
+            app.borrow().state.regions[0].action,
+            Action::Replace("[X]".into())
+        );
     }
 
     /// Und derselbe Fall einmal ganz konkret, mit echtem Zustand.
@@ -2477,6 +2950,183 @@ mod tests {
         assert!(app.selector.preview().is_none(), "und die Vorschau ist weg");
     }
 
+    /// Die Ansage aus [`crate::state::PROTECTION_OVERRIDDEN`] muss den ganzen
+    /// Zug überleben: „Rechteck angepasst“ beim Loslassen darf sie nicht
+    /// überschreiben — sie ist die wichtigere der beiden Nachrichten.
+    #[test]
+    fn the_protection_warning_survives_the_end_of_the_drag() {
+        let view = viewer::PageView::upright(offset_box());
+        let mut app = RedactApp::silent(Config::default());
+        let protector = Rect::new(100.0, 300.0, 400.0, 400.0);
+        let covered = Rect::new(150.0, 320.0, 250.0, 360.0);
+        app.state.regions.push(crate::state::AnnotatedRegion::new(
+            redact_core::Region::new(
+                0,
+                protector,
+                Some("Max Mustermann".into()),
+                redact_core::Source::Booking {
+                    booking_id: "b003".into(),
+                    match_type: redact_core::MatchType::Negative,
+                },
+            ),
+        ));
+        app.state.regions.push(crate::state::AnnotatedRegion::new(
+            redact_core::Region::new(
+                0,
+                covered,
+                Some("DE89 3704 0044 0532 0130 00".into()),
+                redact_core::Source::Pattern {
+                    pattern_id: "iban_de".into(),
+                    confidence: 0.99,
+                },
+            ),
+        ));
+        app.state.selected_region = Some(1);
+        assert_eq!(app.state.hit_summary().redacted, 0, "gedeckt vom Schutz");
+
+        let screen = viewer::pdf_to_screen(&covered, &view, ZOOM, ORIGIN);
+        let press = screen.right_bottom();
+        drag(
+            &mut app,
+            &view,
+            press,
+            &[press + Vec2::new(4.0, 4.0), press + Vec2::new(9.0, 9.0)],
+        );
+
+        assert_eq!(
+            app.state.hit_summary().redacted,
+            1,
+            "der angefasste Treffer überstimmt den Schutz"
+        );
+        assert_eq!(
+            app.state.status,
+            crate::state::PROTECTION_OVERRIDDEN,
+            "und das muss am Ende des Zuges noch dastehen"
+        );
+    }
+
+    // ------------------------------------ Abbruch mitten im Zug (Escape/Entf)
+
+    /// **Die Kehrseite von „Rechteck ab dem Druck sichtbar“.** Escape
+    /// unterhalb der Klickschwelle räumte nur auf; egui reichte den
+    /// `drag_started` desselben Tastendrucks danach nach, der Selektor begann
+    /// einen **zweiten** Zug, und beim Loslassen lag eine zusätzliche manuelle
+    /// Region da. Gemessene Folge: Druck auf den Eckgriff → Escape → jetzt
+    /// erst `drag_started` → ziehen → loslassen.
+    #[test]
+    fn escape_below_the_click_threshold_holds_until_the_button_is_up() {
+        let view = viewer::PageView::upright(offset_box());
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+        let (mut app, screen) = app_with_selected_region(&view, rect);
+
+        let press = screen.right_bottom();
+        app.apply_pointer(press_frame(press), false, &view, ORIGIN, 0, ZOOM);
+        assert!(app.resize.is_some(), "der Griff ist angefasst");
+
+        // Escape — derselbe Weg wie die Taste im Fenster.
+        app.apply_key_commands(&[KeyCommand::Deselect]);
+        assert!(app.resize.is_none() && !app.selector.is_active());
+
+        // Und **jetzt** erst meldet egui den Zug, mit derselben Taste unten.
+        app.apply_pointer(
+            dragging_frame(press, press + Vec2::new(40.0, 30.0), true),
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        assert!(
+            !app.selector.is_active(),
+            "ein Abbruch darf keinen zweiten Zug beginnen"
+        );
+        app.apply_pointer(
+            PointerFrame {
+                drag_stopped: true,
+                pos: Some(press + Vec2::new(40.0, 30.0)),
+                ..PointerFrame::default()
+            },
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+
+        assert_eq!(
+            app.state.regions.len(),
+            1,
+            "beim Loslassen darf kein zusätzliches Rechteck entstehen"
+        );
+        assert_eq!(app.state.regions[0].region.rect, rect, "und keins wandern");
+
+        // Gegenprobe: der **nächste** Tastendruck zeichnet wieder ganz normal —
+        // sonst wäre die Sperre eine neue Sackgasse.
+        let start = ORIGIN + Vec2::new(300.0, 400.0);
+        app.apply_pointer(press_frame(start), false, &view, ORIGIN, 0, ZOOM);
+        assert!(
+            app.selector.is_active(),
+            "die Sperre gilt nur bis zum Loslassen"
+        );
+        app.apply_pointer(
+            PointerFrame {
+                drag_stopped: true,
+                pos: Some(start + Vec2::new(60.0, 40.0)),
+                ..PointerFrame::default()
+            },
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        assert_eq!(app.state.regions.len(), 2, "das nächste Rechteck entsteht");
+    }
+
+    /// Dasselbe für Entf: mitten im Aufziehen gedrückt, löschte es die
+    /// ausgewählte Region **und** legte beim Loslassen trotzdem noch das
+    /// aufgezogene Rechteck an — [`RedactApp::apply_key_commands`] räumte nur
+    /// `resize`, nicht den Selektor.
+    #[test]
+    fn delete_while_drawing_does_not_still_produce_the_rectangle() {
+        let view = viewer::PageView::upright(offset_box());
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+        let (mut app, _screen) = app_with_selected_region(&view, rect);
+
+        // Auf leerer Fläche aufziehen — die vorhandene Region bleibt ausgewählt.
+        let press = ORIGIN + Vec2::new(320.0, 420.0);
+        app.apply_pointer(press_frame(press), false, &view, ORIGIN, 0, ZOOM);
+        app.apply_pointer(
+            dragging_frame(press, press + Vec2::new(50.0, 40.0), true),
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        assert!(app.selector.is_active());
+
+        app.apply_key_commands(&[KeyCommand::DeleteSelected]);
+        assert!(app.state.regions.is_empty(), "die Auswahl ist gelöscht");
+
+        app.apply_pointer(
+            PointerFrame {
+                drag_stopped: true,
+                pos: Some(press + Vec2::new(50.0, 40.0)),
+                ..PointerFrame::default()
+            },
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        assert!(
+            app.state.regions.is_empty(),
+            "ein abgebrochenes Aufziehen darf beim Loslassen nichts anlegen"
+        );
+    }
+
     // ------------------------------------------------------- Symbolleiste
 
     /// Die Knöpfe der Leiste wirken auf den Zustand — hier ohne Fenster, über
@@ -2631,6 +3281,133 @@ mod tests {
         app.state
             .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
         assert!(app.state.has_manual_work());
+    }
+
+    /// **Befund: „Analysieren“ warf jede Auswahlentscheidung weg, ohne zu
+    /// fragen.** Gemessen: Treffer 0 abgewählt, Treffer 1 auf „Weiß“ →
+    /// `hand_made_count() == 2`; nach einem Druck auf „Analysieren“ war beides
+    /// zurückgesetzt, und die Statuszeile meldete zufrieden die Trefferzahl.
+    /// Die vier anderen Wege zum selben Verlust fragen nach — dieser eine
+    /// nicht.
+    #[test]
+    fn analysing_again_asks_before_it_throws_the_decisions_away() {
+        use redact_core::Action;
+
+        // Die Nutzerin antwortet „Nein“ — gefragt werden muss sie trotzdem.
+        let mut app = RedactApp::refusing(iban_only());
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        assert!(
+            app.state.regions.len() >= 2,
+            "der Demo-Auszug muss mehrere Treffer haben"
+        );
+
+        assert!(app.state.set_enabled(0, false), "Treffer 0 abwählen");
+        assert!(
+            app.state.set_action(1, Action::Whiteout),
+            "Treffer 1 auf Weiß"
+        );
+        assert_eq!(app.state.hand_made_count(), 2);
+        let before = app.state.regions.clone();
+
+        assert!(!app.analyze(), "abgelehnt heißt: nicht gelaufen");
+        assert_eq!(
+            app.state.regions, before,
+            "eine abgelehnte Rückfrage darf nichts wegwerfen"
+        );
+        assert_eq!(app.state.hand_made_count(), 2);
+        assert!(
+            app.state.status.contains("abgebrochen"),
+            "und sie muss es sagen: {}",
+            app.state.status
+        );
+
+        // Gegenprobe: mit „Ja“ läuft die Analyse und setzt beides zurück —
+        // sonst prüfte der Test nur, dass nie analysiert wird.
+        app.ask = Ask::Answer(true);
+        assert!(app.analyze());
+        assert_eq!(app.state.hand_made_count(), 0);
+        assert!(app.state.status.starts_with("Analyse:"));
+    }
+
+    /// Auch ein geladenes Review geht diesen Weg — „Buchungsliste laden“ ruft
+    /// dieselbe Analyse. Und wird sie abgelehnt, darf auch die Buchungsliste
+    /// nicht heimlich in der Konfiguration stehen bleiben.
+    #[test]
+    fn a_refused_analysis_keeps_a_loaded_review_and_forgets_the_booking_list() {
+        let dir = temp_dir("refused-analysis");
+        let mut author = RedactApp::silent(iban_only());
+        author.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        author
+            .state
+            .add_manual_region(0, Rect::new(11.0, 12.0, 33.0, 44.0), "aus der Durchsicht");
+        author.state.set_enabled(0, false);
+        let review = dir.join("durchsicht.json");
+        std::fs::write(&review, author.state.to_review_file().to_json().unwrap()).unwrap();
+
+        let mut app = RedactApp::refusing(iban_only());
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        app.load_review_file(&review);
+        assert!(app.error.is_none(), "{:?}", app.error);
+        let loaded = app.state.regions.clone();
+        assert!(app.state.has_manual_work(), "das Review trägt Handarbeit");
+
+        // Der Weg über „Buchungsliste laden“ landet in derselben Analyse. Die
+        // Liste ist ausdrücklich brauchbar: eine kaputte Datei ließe die
+        // Analyse ohnehin scheitern, und der Test prüfte dann nichts.
+        let list = dir.join("liste.csv");
+        std::fs::write(
+            &list,
+            "id,list_type,pattern\nb001,positive,Musterfirma GmbH\n",
+        )
+        .unwrap();
+        let previous = app.state.config.booking_list.replace(list);
+        if !app.analyze() {
+            app.state.config.booking_list = previous;
+        }
+        assert_eq!(app.state.regions, loaded, "das Review bleibt stehen");
+        assert_eq!(
+            app.state.config.booking_list, None,
+            "eine Liste ohne Analyse wäre eine Einstellung ohne Wirkung"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **Befund: „Review speichern“ meldete keinen Erfolg.** `report(Ok(()))`
+    /// setzt nur `error = None` und lässt die Statuszeile stehen — gemessen:
+    /// Status vorher und nachher identisch, die Datei lag aber da.
+    #[test]
+    fn saving_a_review_says_that_it_worked() {
+        let dir = temp_dir("review-status");
+        let mut app = RedactApp::silent(iban_only());
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        let before = app.state.status.clone();
+
+        let path = dir.join("durchsicht.json");
+        app.save_review_to(&path);
+        assert!(path.exists(), "die Datei muss da sein");
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_ne!(
+            app.state.status, before,
+            "ein Knopf, der arbeitet, darf nicht schweigen"
+        );
+        assert!(
+            app.state.status.contains("gespeichert") && app.state.status.contains("durchsicht"),
+            "{}",
+            app.state.status
+        );
+        assert!(
+            app.state.status.contains("Klartext"),
+            "die Datei trägt die gefundenen Texte offen: {}",
+            app.state.status
+        );
+
+        // Gegenprobe: ein Fehlschlag steht weiterhin rot in der Zeile — hier
+        // ein Ziel, das schon ein Verzeichnis ist.
+        app.save_review_to(&dir);
+        assert!(app.error.is_some(), "{}", app.state.status);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Ein Fehlgriff beim Ziehen und Ablegen darf keine Arbeit kosten.

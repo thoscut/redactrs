@@ -236,6 +236,186 @@ pub fn annotation_appearance(secret: &str, intersecting: bool) -> Vec<u8> {
     d.finish()
 }
 
+// ---------------------------------------------------------------------------
+// Marked Content mit Textspiegel (`/ActualText`, `/Alt`)
+// ---------------------------------------------------------------------------
+
+/// Wo und wie der Textspiegel im Strom steht.
+///
+/// `/ActualText` und `/Alt` sind der kanonische Textspiegel eines
+/// Marked-Content-Abschnitts: sie sollen dasselbe sagen wie die Glyphen
+/// darunter. Word („Als PDF speichern“), InDesign und jeder PDF/UA-Erzeuger
+/// schreiben sie routinemäßig — für Ligaturen, Tabellen, Sonderzeichen.
+#[derive(Debug, Clone, Copy)]
+pub struct Mirror {
+    /// Marked-Content-Tag, z.B. `Span` oder `Figure`.
+    pub tag: &'static str,
+    /// Schlüssel in der Eigenschaftsliste: `ActualText` oder `Alt`.
+    pub key: &'static str,
+    /// `BDC` (Klammer mit `EMC`) oder `DP` (Punkt ohne Klammer).
+    pub operator: &'static str,
+    /// Den Wert als Hex-String `<44 45 …>` statt als Literal `(…)` schreiben.
+    pub hex: bool,
+    /// Eigenschaftsliste als eigenes Objekt unter `/Resources /Properties`
+    /// statt inline im Strom.
+    pub via_properties: bool,
+    /// Den Abschnitt in ein Form-XObject legen statt in den Seitenstrom.
+    pub in_form: bool,
+    /// Den Wert der Eigenschaftsliste als **indirekten Verweis** führen
+    /// (`/ActualText 12 0 R`). Nur zusammen mit [`Mirror::via_properties`]
+    /// sinnvoll: inline im Strom sind Verweise nicht zulässig.
+    pub indirect_value: bool,
+}
+
+impl Default for Mirror {
+    fn default() -> Self {
+        Self {
+            tag: "Span",
+            key: "ActualText",
+            operator: "BDC",
+            hex: false,
+            via_properties: false,
+            in_form: false,
+            indirect_value: false,
+        }
+    }
+}
+
+impl Mirror {
+    /// Der Wert des Textschlüssels, so wie er im Strom steht.
+    fn value(&self, secret: &str) -> String {
+        if self.hex {
+            let hex: String = secret.bytes().map(|b| format!("{b:02X}")).collect();
+            format!("<{hex}>")
+        } else {
+            format!("({})", escape(secret))
+        }
+    }
+
+    /// Die Eigenschaftsliste als Operand des `BDC`/`DP`.
+    fn property_operand(&self, secret: &str) -> String {
+        if self.via_properties {
+            "/MC0".to_string()
+        } else {
+            format!("<< /{} {} >>", self.key, self.value(secret))
+        }
+    }
+}
+
+/// Eine Seite, deren IBAN-Zeile zusätzlich in einem Marked-Content-Textspiegel
+/// steht.
+///
+/// Die Glyphen stehen ganz normal im `Tj`; der Spiegel wiederholt sie in der
+/// Eigenschaftsliste. Wer nur die Glyphen entfernt, lässt den Klartext stehen —
+/// `pdftotext` gibt in der Voreinstellung den Spiegel aus.
+pub fn marked_content_mirror(secret: &str, mirror: Mirror) -> Vec<u8> {
+    let mut d = page(&[]);
+
+    let open = format!(
+        "/{} {} {}\n",
+        mirror.tag,
+        mirror.property_operand(secret),
+        mirror.operator
+    );
+    let close = if mirror.operator == "BDC" {
+        "EMC\n"
+    } else {
+        ""
+    };
+
+    let secret_line = format!("(IBAN: {}) Tj\n", escape(secret));
+
+    if mirror.in_form {
+        let font_id = d.font_id;
+        let form_content = format!("BT\n/F1 10 Tf\n72 640 Td\n{open}{secret_line}{close}ET\n");
+        let mut form_dict = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        };
+        let mut form_resources = dictionary! { "Font" => dictionary! { "F1" => font_id } };
+        if mirror.via_properties {
+            let value = mirror_value_object(&mut d, secret, mirror);
+            let props_id = d.add(Object::Dictionary(dictionary! { mirror.key => value }));
+            form_resources.set("Properties", dictionary! { "MC0" => props_id });
+        }
+        form_dict.set("Resources", Object::Dictionary(form_resources));
+        let form_id = d.add(Object::Stream(
+            Stream::new(form_dict, form_content.into_bytes()).with_compression(false),
+        ));
+        d.doc
+            .get_dictionary_mut(d.resources_id)
+            .expect("Resources")
+            .set("XObject", dictionary! { "Fm0" => form_id });
+
+        let mut raw = text_ops(&["Kontoinhaber: Max Mustermann"]);
+        raw.extend_from_slice(b"q /Fm0 Do Q\n");
+        d.set_content(&raw);
+        return d.finish();
+    }
+
+    if mirror.via_properties {
+        let value = mirror_value_object(&mut d, secret, mirror);
+        let props_id = d.add(Object::Dictionary(dictionary! { mirror.key => value }));
+        d.doc
+            .get_dictionary_mut(d.resources_id)
+            .expect("Resources")
+            .set("Properties", dictionary! { "MC0" => props_id });
+    }
+
+    let raw = format!(
+        "BT\n/F1 10 Tf\n72 700 Td\n(Kontoinhaber: Max Mustermann) Tj\n0 -15 Td\n\
+         {open}{secret_line}{close}ET\n"
+    );
+    d.set_content(raw.as_bytes());
+    d.finish()
+}
+
+/// Der Wert des Textschlüssels als PDF-Objekt (für die Fassung im
+/// `/Properties`-Objekt).
+fn mirror_value_object(d: &mut Doc, secret: &str, mirror: Mirror) -> Object {
+    let value = if mirror.hex {
+        Object::String(secret.as_bytes().to_vec(), StringFormat::Hexadecimal)
+    } else {
+        Object::string_literal(secret)
+    };
+    if mirror.indirect_value {
+        Object::Reference(d.add(value))
+    } else {
+        value
+    }
+}
+
+/// Zwei Marked-Content-Abschnitte mit je eigenem Textspiegel: der erste trägt
+/// das Geheimnis, der zweite (`harmless`) steht in einer eigenen Zeile weit
+/// darunter und wird von keiner Schwärzung berührt.
+///
+/// Gegenprobe zu [`marked_content_mirror`]: der unbeteiligte Spiegel muss
+/// erhalten bleiben.
+pub fn marked_content_two_sections(secret: &str, harmless: &str) -> Vec<u8> {
+    let mut d = page(&[]);
+    let raw = format!(
+        "BT\n/F1 10 Tf\n72 700 Td\n\
+         /Span << /ActualText ({secret_escaped}) >> BDC\n\
+         (IBAN: {secret_escaped}) Tj\n\
+         EMC\n\
+         ET\n\
+         BT\n/F1 10 Tf\n72 200 Td\n\
+         /Span << /ActualText ({harmless_escaped}) >> BDC\n\
+         (Bank: {harmless_escaped}) Tj\n\
+         EMC\n\
+         ET\n\
+         BT\n/F1 10 Tf\n72 180 Td\n\
+         /Span << /ActualText ({harmless_escaped}) >> DP\n\
+         (Filiale: {harmless_escaped}) Tj\n\
+         ET\n",
+        secret_escaped = escape(secret),
+        harmless_escaped = escape(harmless),
+    );
+    d.set_content(raw.as_bytes());
+    d.finish()
+}
+
 /// `/StructElem` mit `/ActualText`, das den geschwärzten Text spiegelt.
 pub fn struct_elem_actual_text(secret: &str) -> Vec<u8> {
     let mut d = page(&["Kontoinhaber: Max Mustermann", &format!("IBAN: {secret}")]);

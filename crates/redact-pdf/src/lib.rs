@@ -41,8 +41,8 @@ pub mod testing;
 
 pub use audit_bytes::leaks;
 pub use content::{
-    interpret, scan_page, ContentSink, GlyphEvent, GlyphItem, ImageEvent, PathEvent, ScanResult,
-    ShowItem, ShowRecord, SinkContext, StreamKey,
+    interpret, scan_page, ContentSink, GlyphEvent, GlyphItem, ImageEvent, MarkedTextRecord,
+    PathEvent, ScanResult, ShowItem, ShowRecord, SinkContext, StreamKey, MIRROR_KEYS,
 };
 pub use document::{
     load, load_from_bytes, page_box, page_boxes, page_count, save_to_bytes, validate, PdfRenderer,

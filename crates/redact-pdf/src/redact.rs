@@ -12,6 +12,9 @@
 //!    überschrieben und neu kodiert ([`crate::image`]).
 //! 4. Anschließend wird ein deckendes Rechteck gezeichnet.
 //! 5. Überlappende Annotationen werden gelöscht (auch dort steht Text).
+//! 6. Der **Textspiegel** eines Marked-Content-Abschnitts (`/ActualText`,
+//!    `/Alt`, `/E`) wird geleert, sobald von den Glyphen darunter etwas
+//!    entfernt wurde ([`mirrors_to_clear`]).
 //!
 //! Zeichen in Form-XObjects werden ebenfalls entfernt. Wird dasselbe XObject
 //! mehrfach platziert, wirkt die Entfernung notwendigerweise auf alle
@@ -24,7 +27,7 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 use redact_core::{Rect, RedactError, Redaction, Result};
 
-use crate::content::{ShowItem, ShowRecord, StreamKey};
+use crate::content::{MarkedTextRecord, ShowItem, ShowRecord, StreamKey, MIRROR_KEYS};
 use crate::image::InlineTarget;
 use crate::matrix::Matrix;
 
@@ -257,8 +260,15 @@ impl PdfRedactor {
 
         let pages: Vec<ObjectId> = doc.get_pages().values().copied().collect();
         let mut form_plans: BTreeMap<ObjectId, BTreeMap<usize, Plan>> = BTreeMap::new();
+        // Textspiegel in Form-XObjects: gefunden beim Scan der Seite, geleert
+        // erst beim einmaligen Neuschreiben des Formulars.
+        let mut form_marked: BTreeMap<ObjectId, Vec<MarkedTextRecord>> = BTreeMap::new();
+        // Eigenschaftslisten, die als eigenes Objekt in der Datei stehen und
+        // deshalb nicht im Strom, sondern im Objekt bereinigt werden.
+        let mut property_objects: BTreeSet<ObjectId> = BTreeSet::new();
         let no_inline: BTreeMap<usize, Operation> = BTreeMap::new();
         let no_plans: BTreeMap<usize, Plan> = BTreeMap::new();
+        let no_marked: Vec<MarkedTextRecord> = Vec::new();
 
         // Einmal statt je Seite: welche Seite benutzt welchen Content-Stream.
         // Siehe [`ContentUsers`] — die wiederholte Suche war der quadratische
@@ -335,6 +345,22 @@ impl PdfRedactor {
             report.removed_glyphs += page_plans.values().map(Plan::hidden_count).sum::<usize>();
             add_per_redaction(&mut report, page_plans.values());
 
+            // Textspiegel in Formularen werden erst später fällig — dort sind
+            // die Pläne erst nach der letzten Seite vollständig.
+            for record in &scan.marked {
+                if let StreamKey::Form(id) = record.stream {
+                    let known = form_marked.entry(id).or_default();
+                    if !known.iter().any(|k| k.op_index == record.op_index) {
+                        known.push(record.clone());
+                    }
+                }
+            }
+            let mut mirrors = mirrors_to_clear(&scan.marked, StreamKey::Page, &page_plans);
+            property_objects.append(&mut mirrors.objects);
+            for warning in std::mem::take(&mut mirrors.warnings) {
+                push_warning(&mut report, warning);
+            }
+
             let inline = inline_images
                 .get(&InlineTarget::Page(*page_id))
                 .unwrap_or(&no_inline);
@@ -343,6 +369,7 @@ impl PdfRedactor {
                 *page_id,
                 &page_plans,
                 inline,
+                &mirrors.inline,
                 &page_redactions,
                 &mut report,
                 &mut content_users,
@@ -367,7 +394,19 @@ impl PdfRedactor {
                 .unwrap_or(&no_inline);
             report.removed_glyphs += plans.values().map(Plan::hidden_count).sum::<usize>();
             add_per_redaction(&mut report, plans.values());
-            rewrite_form(doc, form_id, plans, inline)?;
+            let marked = form_marked.get(&form_id).unwrap_or(&no_marked);
+            let mut mirrors = mirrors_to_clear(marked, StreamKey::Form(form_id), plans);
+            property_objects.append(&mut mirrors.objects);
+            for warning in std::mem::take(&mut mirrors.warnings) {
+                push_warning(&mut report, warning);
+            }
+            rewrite_form(doc, form_id, plans, inline, &mirrors.inline)?;
+        }
+
+        // Zum Schluss die Eigenschaftslisten, die als eigene Objekte in der
+        // Datei stehen — sie gehören keinem Strom, sondern dem Dokument.
+        for id in property_objects {
+            clear_mirror_object(doc, id);
         }
 
         Ok(report)
@@ -380,6 +419,7 @@ impl PdfRedactor {
         page_id: ObjectId,
         plans: &BTreeMap<usize, Plan>,
         inline_images: &BTreeMap<usize, Operation>,
+        mirrors: &BTreeMap<usize, Dictionary>,
         redactions: &[&Redaction],
         report: &mut RedactionReport,
         content_users: &mut ContentUsers,
@@ -389,7 +429,7 @@ impl PdfRedactor {
             .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
         let decoded = crate::ops::decode_content(&data);
 
-        let mut operations = rewrite_operations(&decoded, plans, inline_images);
+        let mut operations = rewrite_operations(&decoded, plans, inline_images, mirrors);
 
         // Grafikzustand auf den Ausgangszustand zurückfahren, damit die
         // Rechtecke im unveränderten User-Space liegen.
@@ -649,22 +689,162 @@ fn merge_plan(target: &mut BTreeMap<usize, Plan>, record: &ShowRecord, selection
     }
 }
 
-/// Ersetzt die betroffenen Text-Operationen durch bereinigte Fassungen und
-/// geschwärzte Inline-Bilder durch ihre neu kodierte Fassung.
+/// Ersetzt die betroffenen Text-Operationen durch bereinigte Fassungen,
+/// geschwärzte Inline-Bilder durch ihre neu kodierte Fassung und die
+/// Eigenschaftsliste betroffener `BDC`/`DP` durch ihre entspiegelte Fassung.
 fn rewrite_operations(
     operations: &[Operation],
     plans: &BTreeMap<usize, Plan>,
     inline_images: &BTreeMap<usize, Operation>,
+    mirrors: &BTreeMap<usize, Dictionary>,
 ) -> Vec<Operation> {
     let mut out = Vec::with_capacity(operations.len() + plans.len() * 2);
     for (index, op) in operations.iter().enumerate() {
         match (plans.get(&index), inline_images.get(&index)) {
             (Some(plan), _) => out.extend(rebuild_show(plan)),
             (None, Some(image)) => out.push(image.clone()),
-            (None, None) => out.push(op.clone()),
+            (None, None) => match mirrors.get(&index) {
+                Some(cleaned) => out.push(rebuild_marked(op, cleaned)),
+                None => out.push(op.clone()),
+            },
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Textspiegel in Marked Content
+// ---------------------------------------------------------------------------
+
+/// Was an den Textspiegeln **eines** Stroms zu tun ist.
+#[derive(Debug, Default)]
+struct MirrorFixes {
+    /// Operationsindex → bereinigte Eigenschaftsliste, die inline in den Strom
+    /// geschrieben wird.
+    inline: BTreeMap<usize, Dictionary>,
+    /// Eigenschaftslisten, die als eigenes Objekt in der Datei stehen; sie
+    /// werden im Dokument bereinigt, nicht im Strom.
+    objects: BTreeSet<ObjectId>,
+    warnings: Vec<String>,
+}
+
+/// Entscheidet je Marked-Content-Abschnitt, ob sein Textspiegel weg muss.
+///
+/// **Warum über den vorhandenen `Plan`-Mechanismus und nicht über einen eigenen
+/// Suchlauf?** Der Spiegel ist keine eigene Fundstelle, sondern die Aussage
+/// „hier steht dasselbe wie in den Glyphen darunter“. Ob er zu entfernen ist,
+/// hängt deshalb an genau einer Frage — *ist von diesen Glyphen etwas
+/// verschwunden?* —, und die beantwortet nur der `Plan`. Ein eigener Durchgang
+/// müsste dieselbe Frage ein zweites Mal beantworten und könnte dabei zu einem
+/// anderen Ergebnis kommen als der Strom, den er beschreiben soll.
+///
+/// **Ganz oder gar nicht.** Eine einzige entfernte Glyphe genügt. Ein Spiegel
+/// ist der Text des ganzen Abschnitts; sobald daraus etwas fehlt, ist er als
+/// Ganzes falsch — und er stünde als Klartext genau dort, wo eben noch das
+/// Geheimnis stand. Ihn anteilig zu kürzen ginge nicht: welcher Teil des
+/// Spiegels zu welcher Glyphe gehört, sagt kein PDF (gerade darum gibt es ihn:
+/// eine `ffi`-Ligatur ist ein Code für drei Zeichen).
+///
+/// **Und wenn die Schwärzung den Abschnitt nicht berührt**, bleibt der Spiegel
+/// unangetastet. Alle `/ActualText` vorsorglich zu löschen würde getaggte PDFs
+/// für Screenreader unbrauchbar machen, ohne irgendetwas zu schützen.
+fn mirrors_to_clear(
+    marked: &[MarkedTextRecord],
+    stream: StreamKey,
+    plans: &BTreeMap<usize, Plan>,
+) -> MirrorFixes {
+    let mut fixes = MirrorFixes::default();
+    for record in marked {
+        if record.stream != stream {
+            continue;
+        }
+        let touched = record
+            .shows
+            .iter()
+            .any(|index| plans.get(index).is_some_and(|plan| plan.hidden_count() > 0));
+        if !touched {
+            continue;
+        }
+        match record.property_id {
+            // Eigenes Objekt: dort bereinigen. Wird dieselbe Liste von einem
+            // zweiten, unberührten Abschnitt benutzt, verliert auch der seinen
+            // Spiegel — eine geteilte Liste ist ein geteilter Spiegel, und zu
+            // viel entfernt ist hier die sichere Richtung.
+            Some(id) => {
+                fixes.objects.insert(id);
+            }
+            None => {
+                let (cleaned, dropped) = clean_property_list(&record.properties);
+                if !dropped.is_empty() {
+                    fixes.warnings.push(format!(
+                        "Die Eigenschaftsliste einer Marked-Content-Auszeichnung enthielt \
+                         neben dem Textspiegel indirekte Verweise ({}). Eine Liste, die \
+                         inline im Strom steht, darf keine enthalten (PDF 32000-1, 14.6.2); \
+                         sie sind deshalb mit entfallen. Bitte prüfen, ob die Datei dadurch \
+                         anders aussieht.",
+                        dropped.join(", ")
+                    ));
+                }
+                fixes.inline.insert(record.op_index, cleaned);
+            }
+        }
+    }
+    fixes
+}
+
+/// Entfernt die Textschlüssel aus einer Eigenschaftsliste.
+///
+/// Zurück kommt zusätzlich, welche Einträge als indirekter Verweis wegfallen
+/// mussten: die bereinigte Liste wird inline in den Strom geschrieben, und dort
+/// sind Verweise nicht zulässig (PDF 32000-1, 14.6.2). Bei einer ohnehin schon
+/// inline stehenden Liste kann das nicht vorkommen — nur bei einer, die über
+/// `/Resources /Properties` erreichbar war, ohne ein eigenes Objekt zu sein.
+fn clean_property_list(dict: &Dictionary) -> (Dictionary, Vec<String>) {
+    let mut cleaned = Dictionary::new();
+    let mut dropped = Vec::new();
+    for (key, value) in dict.iter() {
+        if MIRROR_KEYS.contains(&key.as_slice()) {
+            continue;
+        }
+        if matches!(value, Object::Reference(_)) {
+            dropped.push(format!("/{}", String::from_utf8_lossy(key)));
+            continue;
+        }
+        cleaned.set(key.to_vec(), value.clone());
+    }
+    (cleaned, dropped)
+}
+
+/// Schreibt ein `BDC`/`DP` mit bereinigter Eigenschaftsliste neu.
+///
+/// Der Tag (erster Operand) bleibt stehen: er trägt keinen Text, sondern die
+/// Rolle des Abschnitts. Stand die Liste bisher als Name in
+/// `/Resources /Properties`, tritt jetzt die bereinigte Liste inline an seine
+/// Stelle — beides ist als Operand zulässig, und so bleibt der Eintrag in den
+/// Ressourcen unangetastet, den andere Abschnitte vielleicht noch brauchen.
+fn rebuild_marked(op: &Operation, cleaned: &Dictionary) -> Operation {
+    let tag = op
+        .operands
+        .first()
+        .cloned()
+        .unwrap_or_else(|| Object::Name(b"Span".to_vec()));
+    Operation::new(
+        op.operator.as_str(),
+        vec![tag, Object::Dictionary(cleaned.clone())],
+    )
+}
+
+/// Leert den Textspiegel einer Eigenschaftsliste, die als eigenes Objekt in der
+/// Datei steht.
+fn clear_mirror_object(doc: &mut Document, id: ObjectId) {
+    let dict = match doc.objects.get_mut(&id) {
+        Some(Object::Dictionary(dict)) => dict,
+        Some(Object::Stream(stream)) => &mut stream.dict,
+        _ => return,
+    };
+    for key in MIRROR_KEYS {
+        dict.remove(key);
+    }
 }
 
 /// Baut eine Text-Operation ohne die verdeckten Zeichen neu auf.
@@ -929,8 +1109,9 @@ fn rewrite_form(
     form_id: ObjectId,
     plans: &BTreeMap<usize, Plan>,
     inline_images: &BTreeMap<usize, Operation>,
+    mirrors: &BTreeMap<usize, Dictionary>,
 ) -> Result<()> {
-    if plans.is_empty() && inline_images.is_empty() {
+    if plans.is_empty() && inline_images.is_empty() && mirrors.is_empty() {
         return Ok(());
     }
     let data = {
@@ -944,7 +1125,7 @@ fn rewrite_form(
             .map_err(|e| RedactError::Pdf(e.to_string()))?
     };
     let decoded = crate::ops::decode_content(&data);
-    let operations = rewrite_operations(&decoded, plans, inline_images);
+    let operations = rewrite_operations(&decoded, plans, inline_images, mirrors);
     let encoded = encode_operations(&operations)?;
 
     if let Ok(Object::Stream(stream)) = doc.get_object_mut(form_id) {

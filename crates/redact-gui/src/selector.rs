@@ -223,6 +223,17 @@ pub struct HandleDrag {
 pub struct RectangleSelector {
     start: Option<Pos2>,
     current: Option<Pos2>,
+    /// Abgebrochen — bis die Taste oben ist, beginnt hier kein neuer Zug.
+    ///
+    /// **Die Kehrseite von „das Rechteck steht ab dem Druck“.** Seitdem
+    /// beginnt ein Zug bei `pressed` *oder* `drag_started` — und
+    /// `drag_started` meldet egui erst nach der Klickschwelle (6 pt), also
+    /// womöglich **nach** einem Escape. Ohne diese Sperre räumte der Abbruch
+    /// nur auf, und der nächste Bildzustand desselben Tastendrucks begann
+    /// einen zweiten Zug: beim Loslassen lag eine zusätzliche manuelle Region
+    /// da, die niemand gezogen hatte. Ein Abbruch muss bis zum Loslassen
+    /// wirken.
+    blocked: bool,
 }
 
 impl RectangleSelector {
@@ -254,9 +265,20 @@ impl RectangleSelector {
         }
     }
 
+    /// Bricht den Zug ab — und sperrt, bis die Taste oben ist.
+    ///
+    /// Siehe [`RectangleSelector::blocked`]: Aufräumen allein genügt nicht,
+    /// solange derselbe Tastendruck noch läuft und egui seinen `drag_started`
+    /// erst später nachreicht.
     pub fn cancel(&mut self) {
         self.start = None;
         self.current = None;
+        self.blocked = true;
+    }
+
+    /// Ist gerade gesperrt (nur für Tests und Erklärungen)?
+    pub fn is_blocked(&self) -> bool {
+        self.blocked
     }
 
     /// Beendet den Ziehvorgang und liefert die beiden Eckpunkte — aber nur,
@@ -290,7 +312,20 @@ impl RectangleSelector {
     /// ([`PointerFrame::button_is_up`]). Ein bloßer Klick läuft damit denselben
     /// Weg wie ein Zug und endet in [`RectangleSelector::finish`], das alles
     /// unterhalb von [`MIN_DRAG_SIZE`] verwirft.
+    ///
+    /// **Ein Abbruch wirkt bis zum Loslassen.** Nach
+    /// [`RectangleSelector::cancel`] bleibt der Selektor stumm, bis die Taste
+    /// oben ist — sonst begänne der nachgereichte `drag_started` desselben
+    /// Tastendrucks einen zweiten Zug.
     pub fn step(&mut self, frame: PointerFrame) -> Option<(Pos2, Pos2)> {
+        if self.blocked {
+            // Erst das Loslassen hebt die Sperre auf. `button_is_up` deckt
+            // dabei auch den Fall ab, in dem egui gar keinen Zug erkannt hatte.
+            if frame.button_is_up() {
+                self.blocked = false;
+            }
+            return None;
+        }
         if !self.is_active() {
             if !(frame.pressed || frame.drag_started) {
                 return None;
@@ -633,6 +668,78 @@ mod tests {
                 ((b - a).x * (c - a).y - (b - a).y * (c - a).x).abs() / 2.0
             })
             .sum()
+    }
+
+    /// **Ein Abbruch wirkt bis zum Loslassen.** `cancel()` räumte nur auf —
+    /// und weil ein Zug seit der Korrektur „Rechteck ab dem Druck“ bei
+    /// `pressed` **oder** `drag_started` beginnt, begann der von egui erst
+    /// jetzt nachgereichte `drag_started` desselben Tastendrucks sofort einen
+    /// zweiten Zug.
+    #[test]
+    fn a_cancelled_drag_cannot_be_restarted_by_the_same_button_press() {
+        let press = Pos2::new(100.0, 100.0);
+        let mut sel = RectangleSelector::new();
+
+        sel.step(press_frame(press));
+        assert!(sel.is_active());
+
+        sel.cancel();
+        assert!(!sel.is_active() && sel.is_blocked());
+
+        // egui meldet den Zug erst jetzt — die Taste ist immer noch unten.
+        let moved = press + egui::Vec2::splat(20.0);
+        assert_eq!(
+            sel.step(PointerFrame {
+                drag_started: true,
+                dragged: true,
+                down: true,
+                pos: Some(moved),
+                press_origin: Some(press),
+                ..PointerFrame::default()
+            }),
+            None
+        );
+        assert!(!sel.is_active(), "der Abbruch gilt weiter");
+        assert!(sel.preview().is_none());
+
+        // Auch das Loslassen liefert kein Rechteck …
+        assert_eq!(
+            sel.step(PointerFrame {
+                drag_stopped: true,
+                pos: Some(moved),
+                ..PointerFrame::default()
+            }),
+            None,
+            "beim Loslassen darf kein Rechteck herausfallen"
+        );
+        // … hebt die Sperre aber auf.
+        assert!(!sel.is_blocked());
+
+        // Gegenprobe: der nächste Druck zeichnet wieder.
+        sel.step(press_frame(press));
+        assert!(sel.is_active(), "sonst wäre die Sperre eine Sackgasse");
+        let (a, b) = sel
+            .step(PointerFrame {
+                drag_stopped: true,
+                pos: Some(moved),
+                ..PointerFrame::default()
+            })
+            .expect("der nächste Zug liefert wieder ein Rechteck");
+        assert_eq!((a, b), (press, moved));
+    }
+
+    /// Auch ein Abbruch **ohne** gedrückte Taste (Escape bei ruhender Maus)
+    /// darf die Oberfläche nicht lahmlegen: das nächste ruhige Bild hebt die
+    /// Sperre auf.
+    #[test]
+    fn cancelling_with_the_button_up_clears_itself_on_the_next_idle_frame() {
+        let mut sel = RectangleSelector::new();
+        sel.cancel();
+        assert!(sel.is_blocked());
+        assert_eq!(sel.step(PointerFrame::default()), None);
+        assert!(!sel.is_blocked());
+        sel.step(press_frame(Pos2::new(5.0, 5.0)));
+        assert!(sel.is_active());
     }
 
     /// Kennt egui den Druckpunkt nicht (Touch, verlorener Zeiger), bleibt es

@@ -373,6 +373,73 @@ impl RegionStyle {
     }
 }
 
+/// Strichstärke des Polsterungsrahmens.
+pub const PADDING_STROKE: f32 = 1.0;
+/// Strichlänge des Polsterungsrahmens.
+pub const PADDING_DASH: f32 = 3.0;
+/// Lückenlänge des Polsterungsrahmens.
+pub const PADDING_GAP: f32 = 3.0;
+
+/// Das Rechteck, das beim Export wirklich schwarz wird.
+///
+/// `--padding` vergrößert **jede** Schwärzung auf jeder Seite um diesen Betrag
+/// (`redact_core::Rect::expanded`, angewandt in `redact_pipeline::run`). Auf
+/// dem Bildschirm sind das `padding * zoom` Punkte.
+///
+/// `None`, wenn nichts zu zeigen ist: ohne Polsterung, oder wenn eine negative
+/// Polsterung vom Rechteck nichts übrig lässt.
+pub fn padded_rect(rect: egui::Rect, padding_screen: f32) -> Option<egui::Rect> {
+    if padding_screen == 0.0 {
+        return None;
+    }
+    let padded = rect.expand(padding_screen);
+    (padded.width() > 0.0 && padded.height() > 0.0).then_some(padded)
+}
+
+/// Die Polsterung in Bildschirmpunkten.
+pub fn padding_screen(padding: f64, zoom: f32) -> f32 {
+    padding as f32 * zoom
+}
+
+/// Zeichnet, wie weit die Schwärzung über das Rechteck hinausgeht.
+///
+/// **Warum es das gibt**: `--padding 6` heißt, dass der schwarze Balken auf
+/// jeder Seite 6 pt größer wird als das gezeichnete Rechteck. Nachbartext
+/// darin verschwindet mit — und im Bild war davon nichts zu sehen. Auch bei der
+/// Vorgabe 1,0 stimmten Anzeige und Wirkung nie ganz überein.
+///
+/// Gezeichnet wird ein gestrichelter Rahmen um die wirkliche Fläche plus eine
+/// sehr schwache Füllung; beides in der Farbe der Region, damit die Zuordnung
+/// eindeutig bleibt.
+pub fn paint_padding(painter: &egui::Painter, rect: egui::Rect, rgb: (u8, u8, u8), padding: f32) {
+    let Some(padded) = padded_rect(rect, padding) else {
+        return;
+    };
+    let (r, g, b) = rgb;
+    painter.rect_filled(
+        padded,
+        NO_ROUNDING,
+        Color32::from_rgba_unmultiplied(r, g, b, 30),
+    );
+    let stroke = Stroke::new(
+        PADDING_STROKE,
+        Color32::from_rgba_unmultiplied(r, g, b, 160),
+    );
+    for edge in [
+        [padded.left_top(), padded.right_top()],
+        [padded.right_top(), padded.right_bottom()],
+        [padded.right_bottom(), padded.left_bottom()],
+        [padded.left_bottom(), padded.left_top()],
+    ] {
+        painter.extend(egui::Shape::dashed_line(
+            &edge,
+            stroke,
+            PADDING_DASH,
+            PADDING_GAP,
+        ));
+    }
+}
+
 /// Zeichnet ein Schwärzungsrechteck.
 ///
 /// Gefüllt wird **nur**, was am Ende wirklich geschwärzt wird. Ein bloß
@@ -617,6 +684,57 @@ mod tests {
             RegionStyle::from_outcome(HitOutcome::Protecting),
             RegionStyle::Outlined
         );
+    }
+
+    /// **Befund: die Polsterung war im Bild nicht zu sehen.** `--padding 6`
+    /// macht den schwarzen Balken auf jeder Seite 6 pt größer als das
+    /// gezeichnete Rechteck; Nachbartext darin verschwindet mit.
+    #[test]
+    fn the_padded_rectangle_is_the_one_that_really_turns_black() {
+        let rect = egui::Rect::from_min_max(Pos2::new(100.0, 200.0), Pos2::new(300.0, 260.0));
+
+        // Auf jeder Seite `padding * zoom`.
+        assert_eq!(padding_screen(6.0, 1.0), 6.0);
+        assert_eq!(padding_screen(6.0, 1.5), 9.0);
+        let padded = padded_rect(rect, padding_screen(6.0, 1.5)).expect("gepolstert");
+        assert_eq!(padded.min, Pos2::new(91.0, 191.0));
+        assert_eq!(padded.max, Pos2::new(309.0, 269.0));
+        assert!(padded.contains_rect(rect));
+
+        // Auch die Vorgabe 1,0 ist ein Unterschied — sie war es vorher auch,
+        // nur sah man ihn nicht.
+        let default = padded_rect(rect, padding_screen(1.0, 1.0)).expect("Vorgabe");
+        assert_ne!(default, rect);
+
+        // Ohne Polsterung gibt es nichts zu zeigen …
+        assert_eq!(padded_rect(rect, 0.0), None);
+        // … und eine negative, die nichts übrig lässt, ebenso wenig
+        // (`--padding=-100`).
+        assert_eq!(padded_rect(rect, -100.0), None);
+        // Eine kleine negative schrumpft dagegen sichtbar.
+        let shrunk = padded_rect(rect, -5.0).expect("geschrumpft");
+        assert!(rect.contains_rect(shrunk));
+    }
+
+    /// Und sie wird auch wirklich gemalt.
+    #[test]
+    fn the_padding_paints_something_and_nothing_without_it() {
+        let rect = egui::Rect::from_min_max(Pos2::new(100.0, 200.0), Pos2::new(300.0, 260.0));
+        let shapes = |padding: f32| -> usize {
+            let ctx = egui::Context::default();
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    paint_padding(ui.painter(), rect, (176, 88, 0), padding);
+                });
+            });
+            output.shapes.len()
+        };
+        let none = shapes(0.0);
+        assert!(
+            shapes(6.0) > none,
+            "eine Polsterung von 6 pt muss zu sehen sein"
+        );
+        assert!(shapes(1.0) > none, "und die Vorgabe von 1,0 ebenso");
     }
 
     #[test]

@@ -36,6 +36,26 @@ pub const DEFAULT_PAGE_BOX: Rect = Rect {
     },
 };
 
+/// Statuszeile, wenn ein von der Schutzliste gedeckter Treffer durch eine
+/// Handanpassung zur Schwärzung wird.
+///
+/// Siehe [`AppState::set_region_rect`]: die Wirkung kehrt sich um, und zwar
+/// schon bei einem Punkt Verbreiterung. Farbe, Beschriftung und Zahl ändern
+/// sich sichtbar mit — der *Grund* stand nirgends.
+pub const PROTECTION_OVERRIDDEN: &str =
+    "Achtung: Dieser Treffer war durch Ihre Schutzliste gedeckt. Von Hand angepasst \
+     überstimmt er sie und wird jetzt geschwärzt — Strg+Z nimmt es zurück.";
+
+/// Vorgabe für den Ersatztext bei [`Action::Replace`].
+///
+/// **Dieselbe Zeichenkette wie auf der Kommandozeile** (`--replace-with`,
+/// Vorgabe in `crates/redact-cli/src/cli.rs`). In der Oberfläche stand hier
+/// fest `"[REDACTED]"` — englisch in einer deutschen Oberfläche und anders als
+/// das, was ein Lauf ohne `--gui` schreibt. Eine gemeinsame Konstante in
+/// `redact-core` wäre der bessere Ort; solange es sie nicht gibt, sichert der
+/// Test `the_replacement_default_matches_the_command_line` die Gleichheit.
+pub const DEFAULT_REPLACEMENT: &str = "[GESCHWÄRZT]";
+
 /// Kleinster und größter erlaubter Zoomfaktor.
 pub const MIN_ZOOM: f32 = 0.25;
 /// Siehe [`MIN_ZOOM`].
@@ -225,8 +245,15 @@ impl HitOutcome {
 pub struct HitSummary {
     /// Je Eintrag in [`AppState::regions`] — gleiche Reihenfolge, gleiche Länge.
     pub outcomes: Vec<HitOutcome>,
-    /// Anzahl der Treffer insgesamt.
-    pub total: usize,
+    /// Anzahl der **Funde**: alles, was geschwärzt werden könnte.
+    ///
+    /// Schutzeinträge der Negativliste zählen hier **nicht** mit. Sie sind
+    /// keine Funde, sondern das Gegenteil — und sie standen trotzdem in der
+    /// Zahl vor dem Wort „Treffer“: „2 Treffer · 1 werden geschwärzt“, wobei
+    /// der erste gar kein Fund war.
+    pub found: usize,
+    /// Anzahl der Schutzeinträge (Negativliste).
+    pub protecting: usize,
     /// Anzahl derer, die wirklich geschwärzt werden.
     pub redacted: usize,
 }
@@ -239,12 +266,24 @@ impl HitSummary {
             .unwrap_or(HitOutcome::Duplicate)
     }
 
-    /// Die eine Zahl, auf die es ankommt — als Satz.
+    /// Alle Zeilen der Liste — Funde **und** Schutzeinträge.
+    pub fn rows(&self) -> usize {
+        self.outcomes.len()
+    }
+
+    /// Die Zahlen, auf die es ankommt — als Satz.
+    ///
+    /// Schutzeinträge bekommen einen eigenen Platz, statt die Trefferzahl zu
+    /// erhöhen: sie verhindern Schwärzungen, sie sind keine.
     pub fn headline(&self) -> String {
-        format!(
+        let mut text = format!(
             "{} Treffer · {} werden geschwärzt",
-            self.total, self.redacted
-        )
+            self.found, self.redacted
+        );
+        if self.protecting > 0 {
+            text.push_str(&format!(" · {} geschützt", self.protecting));
+        }
+        text
     }
 }
 
@@ -459,6 +498,11 @@ pub struct AppState {
     ///
     /// Solange das gesetzt ist, zeigt [`crate::app`] die Passwortabfrage.
     pending: Option<PendingDocument>,
+    /// Region, deren Ersatztext gerade getippt wird.
+    ///
+    /// Siehe [`AppState::edit_replacement`]: eine Tippsitzung ist **ein**
+    /// Schritt im Verlauf, nicht einer je Anschlag.
+    replacing: Option<RegionId>,
 }
 
 impl Default for AppState {
@@ -480,6 +524,7 @@ impl Default for AppState {
             warnings: Vec::new(),
             history: History::new(),
             pending: None,
+            replacing: None,
         }
     }
 }
@@ -547,11 +592,22 @@ impl AppState {
         // Über die Bytes, nicht über das geparste Dokument: die Review-Datei
         // soll die Datei benennen, die die Nutzerin geöffnet hat.
         self.input_sha256 = sha256_hex(bytes);
+        // `-o` galt **einem** Dokument. Wird ein anderes geöffnet, ist der Pfad
+        // von dort der falsche Vorschlag: die Oberfläche schlug nach dem
+        // zweiten PDF weiter den Ausgabenamen des ersten vor, und der
+        // Namenszusatz blieb dabei wirkungslos. Für das erste geöffnete
+        // Dokument — das aus der Kommandozeile oder das erste aus dem Dialog —
+        // gilt er weiter, ebenso beim erneuten Öffnen derselben Datei.
+        let switching = self.pdf_path.is_some() && self.pdf_path.as_deref() != path.as_deref();
+        if switching {
+            self.config.output = None;
+        }
         self.config.input = path.clone().unwrap_or_default();
         self.pdf_path = path;
         self.current_page = 0;
         self.selected_region = None;
         self.regions.clear();
+        self.replacing = None;
         self.extract_warnings = warnings.clone();
         self.warnings = warnings;
         // Der Verlauf gehörte zum vorigen Dokument.
@@ -791,27 +847,76 @@ impl AppState {
             .collect();
 
         let annotated: Vec<AnnotatedRegion> = found.into_iter().map(|r| self.annotate(r)).collect();
+        // Die Trefferliste wird ausgetauscht — eine laufende Tippsitzung im
+        // Ersatzfeld gehört zum alten Stand.
+        self.replacing = None;
         self.history.record(&self.regions);
         self.regions = annotated;
         self.regions.extend(manual);
         self.selected_region = None;
 
         let summary = self.hit_summary();
-        let total = summary.total;
+        let found = summary.found;
         self.status = format!("Analyse: {}", summary.headline());
-        Ok(total)
+        Ok(found)
     }
 
     // ------------------------------------------------------- Regionen ändern
 
+    /// Das Blatt dieser Seite, sofern ein Dokument geladen ist.
+    ///
+    /// Anders als [`AppState::current_page_box`] **ohne** Rückfall auf A4: wo
+    /// es keine Seite gibt, gibt es auch nichts zu beschneiden.
+    pub fn page_box(&self, page: usize) -> Option<Rect> {
+        self.page_boxes.get(page).copied()
+    }
+
+    /// Beschneidet ein Rechteck auf das Blatt.
+    ///
+    /// `None`, wenn davon nichts übrig bleibt. Ohne geladenes Dokument bleibt
+    /// das Rechteck, wie es ist.
+    ///
+    /// **Warum das nötig ist**: die Interaktionsfläche im Hauptbereich ist
+    /// [`crate::app`]s Blattrand breiter als das Blatt selbst, bei kleinem Zoom
+    /// entspricht das etlichen Punkten im User-Space. Ein dort gezogenes
+    /// Rechteck lag *neben* der Seite, wurde in der Kopfzeile aber als „wird
+    /// geschwärzt“ mitgezählt — gemessen: Rechteck bei x 700…760 auf einer
+    /// 595 pt breiten Seite, Kopfzeile „1 werden geschwärzt“, nach dem Export
+    /// `removed_glyphs = 0`. Die Wahrheit kam erst hinterher als Warnung.
+    pub fn clamp_to_page(&self, page: usize, rect: Rect) -> Option<Rect> {
+        let Some(sheet) = self.page_box(page) else {
+            return Some(rect);
+        };
+        let rect = rect.normalized();
+        let sheet = sheet.normalized();
+        // Erst rechnen, dann bauen: `Rect::new` dreht verkehrte Ecken um, ein
+        // leerer Schnitt sähe danach wie ein gültiges Rechteck aus.
+        let (x0, x1) = (rect.ll.x.max(sheet.ll.x), rect.ur.x.min(sheet.ur.x));
+        let (y0, y1) = (rect.ll.y.max(sheet.ll.y), rect.ur.y.min(sheet.ur.y));
+        (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1, y1))
+    }
+
     /// Legt eine manuelle Region an, aktiviert sie und wählt sie aus.
-    /// Gibt den Index der neuen Region zurück.
+    ///
+    /// Das Rechteck wird auf das Blatt beschnitten
+    /// ([`AppState::clamp_to_page`]); liegt es ganz daneben, entsteht **keine**
+    /// Region — eine, die nichts überdecken kann, hätte in der Trefferliste nur
+    /// eine Zahl aufgebläht, die etwas anderes verspricht.
+    ///
+    /// Gibt den Index der neuen Region zurück, `None`, wenn keine entstand.
     pub fn add_manual_region(
         &mut self,
         page: usize,
         rect: Rect,
         reason: impl Into<String>,
-    ) -> usize {
+    ) -> Option<usize> {
+        let Some(rect) = self.clamp_to_page(page, rect) else {
+            self.status = format!(
+                "Rechteck liegt außerhalb von Seite {} — nichts angelegt",
+                page + 1
+            );
+            return None;
+        };
         let region = Region::new(
             page,
             rect,
@@ -826,7 +931,7 @@ impl AppState {
         let index = self.regions.len() - 1;
         self.selected_region = Some(index);
         self.status = format!("Manuelle Region auf Seite {} angelegt", page + 1);
-        index
+        Some(index)
     }
 
     /// Löscht die ausgewählte Region. `false`, wenn nichts ausgewählt war.
@@ -838,6 +943,7 @@ impl AppState {
             self.selected_region = None;
             return false;
         }
+        self.replacing = None;
         self.history.record(&self.regions);
         self.regions.remove(index);
         self.selected_region = None;
@@ -894,18 +1000,54 @@ impl AppState {
     /// also als unbearbeitet. Ein eigenes Merkmal dafür wäre mehr Zustand, als
     /// dieser Fall wert ist; rückgängig machen lässt sich die Änderung
     /// trotzdem.
+    ///
+    /// **Ein *blockierter* Treffer verliert dabei seinen Schutz** — und das
+    /// bleibt so, mit Begründung. Die Ausnahme oben gilt den *schützenden*
+    /// Einträgen, nicht den geschützten. Wird ein Treffer, den die Schutzliste
+    /// deckt, von Hand angefasst, wird er zur manuellen Region, und manuelle
+    /// Regionen überstimmen die Schutzliste (das entscheidet
+    /// `resolve_conflicts`, siehe [`AppState::enabled_redactions`]). Aus
+    /// `[Protecting, Blocked]` wird also `[Protecting, Redacted]` — schon bei
+    /// einem Punkt Verbreiterung.
+    ///
+    /// Das ist kein Datenverlust (es wird *mehr* geschwärzt, nicht weniger),
+    /// und es ist die einzige Lesart, die zum Rest passt: ein von Hand
+    /// gezogenes Rechteck an derselben Stelle überstimmt die Schutzliste
+    /// genauso. Den Schutz zu erhalten hieße, dass dasselbe Rechteck je nach
+    /// Entstehungsweg verschieden wirkt. Was fehlte, war die **Ansage**: Farbe,
+    /// Beschriftung und Zahl änderten sich zwar mit, die Umkehrung der Wirkung
+    /// stand aber nirgends. Deshalb setzt dieser Fall [`PROTECTION_OVERRIDDEN`]
+    /// in die Statuszeile; Strg+Z nimmt die Anpassung zurück.
     pub fn set_region_rect(&mut self, index: usize, rect: Rect) -> bool {
-        let Some(entry) = self.regions.get_mut(index) else {
+        let Some(page) = self.regions.get(index).map(|a| a.region.page) else {
             return false;
         };
-        entry.region.rect = rect;
+        // Dieselbe Grenze wie beim Anlegen: über den Blattrand hinaus lässt
+        // sich eine Ecke zwar ziehen, das Rechteck endet aber am Blatt. Sonst
+        // stünde eine Region in der Liste, deren Fläche gar nicht auf der Seite
+        // liegt — gezählt als „wird geschwärzt“, ohne ein Zeichen zu treffen.
+        let Some(rect) = self.clamp_to_page(page, rect) else {
+            return false;
+        };
+        let entry = &self.regions[index];
         let stays =
             entry.region.is_blocking() || matches!(entry.region.source, Source::Manual { .. });
+        // **Vor** der Änderung fragen: hinterher ist der Eintrag manuell und
+        // damit ohnehin nicht mehr blockiert. Die Konfliktauflösung läuft dabei
+        // höchstens einmal je Ziehvorgang — ab dem zweiten Bild ist `stays`
+        // wahr.
+        let was_protected = !stays && self.hit_summary().outcome(index) == HitOutcome::Blocked;
+
+        let entry = &mut self.regions[index];
+        entry.region.rect = rect;
         if !stays {
             entry.region.source = Source::Manual {
                 reason: "Treffer von Hand angepasst".to_string(),
             };
             entry.color = RegionColor::from_source(&entry.region.source);
+        }
+        if was_protected {
+            self.status = PROTECTION_OVERRIDDEN.to_string();
         }
         true
     }
@@ -946,10 +1088,70 @@ impl AppState {
             return false;
         };
         if entry.action != action {
+            // Eine neue Art beendet eine laufende Tippsitzung: der nächste
+            // Anschlag im Ersatzfeld gehört dann zu einem neuen Schritt.
+            self.replacing = None;
             self.history.record(&self.regions);
             self.regions[index].action = action;
         }
         true
+    }
+
+    /// Vorschlag für den Ersatztext.
+    ///
+    /// Der aus `--replace-with` (er steckt in [`Config::action`], sobald
+    /// `--action replace` gilt), sonst [`DEFAULT_REPLACEMENT`]. Die Oberfläche
+    /// hatte hier fest `"[REDACTED]"` stehen: englisch in einer deutschen
+    /// Oberfläche, anders als die Vorgabe der Kommandozeile, und
+    /// `--replace-with` blieb wirkungslos.
+    pub fn default_replacement(&self) -> String {
+        match &self.config.action {
+            Action::Replace(text) => text.clone(),
+            _ => DEFAULT_REPLACEMENT.to_string(),
+        }
+    }
+
+    /// Ändert den Ersatztext einer Region — **ein** Verlaufseintrag je
+    /// Tippsitzung.
+    ///
+    /// Jede Textänderung legte bisher einen Schnappschuss ab: gemessen 19
+    /// Tastendrücke → 20 Schritte. Ein Ersatztext von rund 50 Zeichen schob
+    /// damit bei einer Grenze von [`crate::HISTORY_LIMIT`] **jeden** älteren
+    /// Stand hinaus — auch den vor einem versehentlichen Löschen. Dasselbe
+    /// Problem hatte der Zug am Eckgriff, und es wird hier genauso gelöst wie
+    /// dort ([`AppState::begin_manual_edit`]): der Schnappschuss entsteht
+    /// einmal, beim ersten Anschlag.
+    ///
+    /// Die Sitzung endet mit [`AppState::end_replacement_edit`] — die
+    /// Seitenleiste ruft das, sobald das Feld den Fokus nicht mehr hat.
+    pub fn edit_replacement(&mut self, index: usize, text: impl Into<String>) -> bool {
+        let text = text.into();
+        let Some(entry) = self.regions.get(index) else {
+            return false;
+        };
+        let Action::Replace(current) = &entry.action else {
+            return false;
+        };
+        if *current == text {
+            return true;
+        }
+        let id = entry.id;
+        if self.replacing != Some(id) {
+            self.history.record(&self.regions);
+            self.replacing = Some(id);
+        }
+        self.regions[index].action = Action::Replace(text);
+        true
+    }
+
+    /// Beendet eine Tippsitzung im Ersatzfeld.
+    pub fn end_replacement_edit(&mut self) {
+        self.replacing = None;
+    }
+
+    /// Läuft gerade eine Tippsitzung (nur für Tests und Erklärungen)?
+    pub fn is_editing_replacement(&self) -> bool {
+        self.replacing.is_some()
     }
 
     // ------------------------------------------- Rückgängig / Wiederholen
@@ -967,6 +1169,7 @@ impl AppState {
     /// Die Auswahl wird dabei aufgehoben: nach einem Schritt zurück kann der
     /// Eintrag, auf den der Index zeigte, verschwunden oder ein anderer sein.
     pub fn undo(&mut self) -> bool {
+        self.replacing = None;
         match self.history.undo(&self.regions) {
             Some(previous) => {
                 self.regions = previous;
@@ -983,6 +1186,7 @@ impl AppState {
 
     /// Nimmt ein Rückgängig zurück.
     pub fn redo(&mut self) -> bool {
+        self.replacing = None;
         match self.history.redo(&self.regions) {
             Some(next) => {
                 self.regions = next;
@@ -1058,8 +1262,13 @@ impl AppState {
             })
             .collect();
 
+        let protecting = outcomes
+            .iter()
+            .filter(|o| **o == HitOutcome::Protecting)
+            .count();
         HitSummary {
-            total: outcomes.len(),
+            found: outcomes.len() - protecting,
+            protecting,
             redacted: resolution.redact.len(),
             outcomes,
         }
@@ -1136,8 +1345,27 @@ impl AppState {
             .map(|input| output_path_with_suffix(input, &self.config.output_suffix))
     }
 
-    /// Vorschlag für die Review-Datei: neben dem Original, `…_review.json`.
+    /// Steht der Ausgabename fest, weil `-o` ihn genannt hat?
+    ///
+    /// Dann hat der Namenszusatz keine Wirkung — und die Seitenleiste schaltet
+    /// das Feld ab und sagt warum, statt ein Eingabefeld anzubieten, an dem
+    /// sichtbar nichts hängt.
+    pub fn output_name_is_fixed(&self) -> bool {
+        self.config.output.is_some()
+    }
+
+    /// Vorschlag für die Review-Datei: der Pfad aus `--review-out`, sonst neben
+    /// dem Original, `…_review.json`.
+    ///
+    /// `--review-out` kam in der Oberfläche vorher überhaupt nicht vor — genau
+    /// der Fehlertyp, der bei `--action`, `--apply-review` und `--audit-log`
+    /// schon behoben wurde: ein Schalter, den die Kommandozeile annimmt und der
+    /// hinter `--gui` still verschwindet. Die Regel ist dieselbe wie in
+    /// `redact_pipeline::run` (dort `review_target`).
     pub fn suggested_review_path(&self) -> Option<PathBuf> {
+        if let Some(out) = &self.config.review_out {
+            return Some(out.clone());
+        }
         self.pdf_path
             .as_ref()
             .map(|input| sibling_path(input, REVIEW_SUFFIX, "json"))
@@ -1345,6 +1573,7 @@ impl AppState {
             self.config.allow_unverified_review,
         )?;
 
+        self.replacing = None;
         self.history.record(&self.regions);
         self.regions = review
             .items
@@ -1610,7 +1839,7 @@ mod tests {
     fn add_move_and_delete_manual_region() {
         let mut state = AppState::new();
         let index = state.add_manual_region(1, Rect::new(10.0, 20.0, 50.0, 40.0), "Gehalt");
-        assert_eq!(index, 0);
+        assert_eq!(index, Some(0));
         assert_eq!(state.selected_region, Some(0));
         assert!(state.regions[0].enabled);
         assert_eq!(state.regions[0].color, RegionColor::Manual);
@@ -1666,6 +1895,68 @@ mod tests {
 
         // Ohne Region passiert nichts.
         assert!(!state.set_region_rect(7, bigger));
+    }
+
+    /// **Befund: ein geschützter Treffer verliert seinen Schutz, sobald man
+    /// sein Rechteck anfasst.** Gemessen: Verbreiterung um **einen** Punkt
+    /// macht aus `[Protecting, Blocked]` ein `[Protecting, Redacted]`.
+    ///
+    /// Die Entscheidung ist, das **so zu lassen** (Begründung an
+    /// [`AppState::set_region_rect`]: ein von Hand gezogenes Rechteck an
+    /// derselben Stelle überstimmt die Schutzliste ebenso, und geschwärzt wird
+    /// mehr statt weniger) — aber es **anzusagen**. Dieser Test hält beides
+    /// fest: die Wirkung und die Ansage.
+    #[test]
+    fn touching_a_protected_hit_says_that_it_now_overrides_the_protection() {
+        let mut state = AppState::new();
+        // Der Schutzeintrag …
+        state.regions.push(AnnotatedRegion::new(negative_region(
+            0,
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+        )));
+        // … und ein Fund, den er deckt.
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(10.0, 10.0, 50.0, 20.0),
+        )));
+        assert_eq!(
+            state.hit_summary().outcomes,
+            vec![HitOutcome::Protecting, HitOutcome::Blocked]
+        );
+        assert_eq!(state.hit_summary().redacted, 0);
+        let status_before = state.status.clone();
+
+        // Ein Punkt breiter.
+        assert!(state.set_region_rect(1, Rect::new(10.0, 10.0, 51.0, 20.0)));
+
+        assert_eq!(
+            state.hit_summary().outcomes,
+            vec![HitOutcome::Protecting, HitOutcome::Redacted],
+            "so ist es, und so bleibt es"
+        );
+        assert_eq!(state.hit_summary().redacted, 1);
+        // Sichtbar ist es auch: Farbe und Herkunft ändern sich mit.
+        assert_eq!(state.regions[1].color, RegionColor::Manual);
+        // Und gesagt wird es jetzt ebenfalls.
+        assert_ne!(state.status, status_before);
+        assert_eq!(state.status, PROTECTION_OVERRIDDEN);
+        assert!(state.status.contains("Schutzliste"));
+        assert!(state.status.contains("Strg+Z"));
+
+        // Nur einmal je Zug: das nächste Bild desselben Ziehvorgangs meldet
+        // nichts mehr, denn der Eintrag ist längst manuell.
+        state.status = "läuft".to_string();
+        assert!(state.set_region_rect(1, Rect::new(10.0, 10.0, 52.0, 20.0)));
+        assert_eq!(state.status, "läuft");
+
+        // Ein Treffer, den nichts schützt, löst die Warnung nicht aus.
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(300.0, 300.0, 360.0, 310.0),
+        )));
+        state.status = "unberührt".to_string();
+        assert!(state.set_region_rect(2, Rect::new(300.0, 300.0, 361.0, 310.0)));
+        assert_eq!(state.status, "unberührt");
     }
 
     /// Der Schnappschuss gehört an den Anfang eines Ziehvorgangs, nicht in
@@ -2345,6 +2636,134 @@ mod tests {
         );
     }
 
+    /// **Befund: `-o` klebte am Dokumentwechsel.** `config.output` wurde beim
+    /// Laden nie zurückgesetzt — nach dem Öffnen eines zweiten PDF schlug der
+    /// Dialog weiter den Ausgabenamen des **ersten** vor. Und solange er galt,
+    /// war das Feld „Namenszusatz“ ohne jede Wirkung.
+    #[test]
+    fn a_given_output_path_does_not_follow_the_next_document() {
+        let mut state = AppState::with_config(Config {
+            input: PathBuf::from("/daten/erstes.pdf"),
+            output: Some(PathBuf::from("/ziel/fertig.pdf")),
+            ..Config::default()
+        });
+        let demo = redact_pdf::testing::demo_statement();
+
+        // Das Dokument der Kommandozeile: `-o` gilt.
+        state
+            .load_bytes(&demo, Some(PathBuf::from("/daten/erstes.pdf")))
+            .unwrap();
+        assert!(state.output_name_is_fixed());
+        assert_eq!(
+            state.suggested_output_path().unwrap(),
+            PathBuf::from("/ziel/fertig.pdf")
+        );
+        // Solange er gilt, bewirkt der Zusatz nichts — deshalb ist das Feld
+        // abgeschaltet.
+        state.config.output_suffix = "_test".to_string();
+        assert_eq!(
+            state.suggested_output_path().unwrap(),
+            PathBuf::from("/ziel/fertig.pdf")
+        );
+
+        // Dasselbe Dokument noch einmal: `-o` bleibt.
+        state
+            .load_bytes(&demo, Some(PathBuf::from("/daten/erstes.pdf")))
+            .unwrap();
+        assert!(state.output_name_is_fixed());
+
+        // Ein **anderes** Dokument: der Vorschlag folgt jetzt ihm.
+        state
+            .load_bytes(&demo, Some(PathBuf::from("/daten/zweites.pdf")))
+            .unwrap();
+        assert!(!state.output_name_is_fixed(), "-o gehörte zum ersten PDF");
+        assert_eq!(
+            state.suggested_output_path().unwrap(),
+            PathBuf::from("/daten/zweites_test.pdf"),
+            "und der Namenszusatz wirkt wieder"
+        );
+    }
+
+    /// **Befund: Rechtecke neben der Seite wurden als „wird geschwärzt“
+    /// gezählt.** Die Interaktionsfläche ist breiter als das Blatt; gemessen:
+    /// Rechteck bei x 700…760 auf einer 595 pt breiten Seite, Kopfzeile „1
+    /// werden geschwärzt“, nach dem Export `removed_glyphs = 0`, `covered = 1`.
+    #[test]
+    fn a_rectangle_beside_the_sheet_is_not_counted_as_a_redaction() {
+        let mut state = loaded_state();
+        let sheet = state.page_box(0).expect("Seite 0");
+        assert!(sheet.ur.x < 600.0, "Demo-Auszug ist A4: {sheet:?}");
+
+        // Ganz daneben: es entsteht nichts, und die Zeile sagt es.
+        let outside = Rect::new(700.0, 400.0, 760.0, 420.0);
+        assert_eq!(state.add_manual_region(0, outside, "daneben"), None);
+        assert!(state.regions.is_empty(), "{:?}", state.regions);
+        assert!(
+            state.status.contains("außerhalb"),
+            "und die Zeile sagt es sofort, nicht erst nach dem Export: {}",
+            state.status
+        );
+        assert_eq!(state.hit_summary().redacted, 0);
+
+        // Halb daneben: was auf dem Blatt liegt, bleibt — der Rest wird
+        // abgeschnitten.
+        let half = Rect::new(sheet.ur.x - 40.0, 400.0, sheet.ur.x + 100.0, 420.0);
+        let index = state.add_manual_region(0, half, "halb daneben").unwrap();
+        let kept = state.regions[index].region.rect;
+        assert_eq!(kept.ur.x, sheet.ur.x, "am Blattrand ist Schluss");
+        assert_eq!(kept.ll.x, sheet.ur.x - 40.0);
+        assert_eq!(state.hit_summary().redacted, 1);
+
+        // Und auch ein Zug am Eckgriff kommt nicht über das Blatt hinaus.
+        assert!(state.set_region_rect(index, Rect::new(500.0, 400.0, 900.0, 420.0)));
+        assert_eq!(state.regions[index].region.rect.ur.x, sheet.ur.x);
+        // Ganz hinausgezogen ändert gar nichts.
+        let before = state.regions[index].region.rect;
+        assert!(!state.set_region_rect(index, Rect::new(800.0, 400.0, 900.0, 420.0)));
+        assert_eq!(state.regions[index].region.rect, before);
+    }
+
+    /// Ohne geladenes Dokument gibt es kein Blatt — dann wird auch nichts
+    /// beschnitten (sonst hinge das Verhalten an einem geratenen A4).
+    #[test]
+    fn without_a_document_nothing_is_clipped() {
+        let mut state = AppState::new();
+        assert_eq!(state.page_box(0), None);
+        let far_out = Rect::new(5000.0, 5000.0, 5100.0, 5100.0);
+        assert_eq!(state.clamp_to_page(0, far_out), Some(far_out));
+        assert_eq!(state.add_manual_region(0, far_out, "ohne Blatt"), Some(0));
+    }
+
+    /// **Befund: `--review-out` galt in der Oberfläche nicht.** Kein einziges
+    /// Vorkommen in `redact-gui` — derselbe Fehlertyp wie die drei Schalter,
+    /// die schon still wegfielen. Die Regel ist die von
+    /// `redact_pipeline::run`: genannter Pfad, sonst neben dem Original.
+    #[test]
+    fn review_out_from_the_command_line_is_what_the_dialog_proposes() {
+        let mut state = AppState::with_config(Config {
+            review_out: Some(PathBuf::from("/ziel/durchsicht.json")),
+            ..Config::default()
+        });
+        state
+            .load_bytes(
+                &redact_pdf::testing::demo_statement(),
+                Some(PathBuf::from("/daten/kontoauszug.pdf")),
+            )
+            .unwrap();
+        assert_eq!(
+            state.suggested_review_path().unwrap(),
+            PathBuf::from("/ziel/durchsicht.json")
+        );
+
+        // Ohne den Schalter bleibt es beim Namen neben dem Original — genau
+        // wie `sibling_path` ihn auch auf der Kommandozeile bildet.
+        state.config.review_out = None;
+        assert_eq!(
+            state.suggested_review_path().unwrap(),
+            PathBuf::from("/daten/kontoauszug_review.json")
+        );
+    }
+
     #[test]
     fn suggested_output_path_handles_a_missing_extension() {
         let mut state = AppState::new();
@@ -2566,6 +2985,111 @@ mod tests {
         assert!(!state.can_redo());
     }
 
+    /// **Befund: Tippen im Feld „Ersetzen“ flutete den Rückgängig-Stapel.**
+    /// Jede Textänderung legte einen Schnappschuss ab — gemessen: 19
+    /// Tastendrücke → 20 Schritte. Ein Ersatztext von rund 50 Zeichen schob
+    /// damit bei einer Grenze von 50 **jeden** älteren Stand hinaus, auch den
+    /// vor einem versehentlichen Löschen.
+    #[test]
+    fn typing_a_replacement_is_one_step_in_the_history_not_one_per_key() {
+        let mut state = loaded_state();
+        state.analyze().unwrap();
+        state.set_action(0, Action::Replace("[X]".into()));
+        let depth = state.history.undo_depth();
+
+        // 19 Anschläge, wie gemessen.
+        let text = "Musterfirma GmbH XY";
+        assert_eq!(text.chars().count(), 19);
+        let mut typed = String::new();
+        for ch in text.chars() {
+            typed.push(ch);
+            assert!(state.edit_replacement(0, typed.clone()));
+        }
+        assert_eq!(state.regions[0].action, Action::Replace(text.to_string()));
+        assert_eq!(
+            state.history.undo_depth(),
+            depth + 1,
+            "eine Tippsitzung ist ein Schritt — vorher waren es 20"
+        );
+
+        // Und Rückgängig führt zum Stand **vor** dem Tippen, nicht einen
+        // Buchstaben zurück.
+        state.undo();
+        assert_eq!(state.regions[0].action, Action::Replace("[X]".into()));
+
+        // Nach dem Verlassen des Feldes beginnt eine neue Sitzung.
+        state.redo();
+        assert!(!state.is_editing_replacement());
+        state.edit_replacement(0, "abc");
+        assert!(state.is_editing_replacement());
+        let depth = state.history.undo_depth();
+        state.end_replacement_edit();
+        state.edit_replacement(0, "abcd");
+        assert_eq!(
+            state.history.undo_depth(),
+            depth + 1,
+            "eine neue Sitzung ist ein neuer Schritt"
+        );
+    }
+
+    /// Und die eigentliche Folge des Befundes: der ältere Stand überlebt das
+    /// Tippen eines langen Ersatztextes.
+    #[test]
+    fn a_long_replacement_no_longer_pushes_the_whole_history_out() {
+        let mut state = loaded_state();
+        state.analyze().unwrap();
+        let before_the_mistake = state.regions.clone();
+
+        // Das versehentliche Löschen, das man gleich zurückholen möchte.
+        state.selected_region = Some(0);
+        state.delete_selected();
+        state.set_action(0, Action::Replace(String::new()));
+
+        // Ein Ersatztext mit mehr Zeichen als der Stapel Plätze hat.
+        let long: String = std::iter::repeat_n('x', crate::HISTORY_LIMIT + 5).collect();
+        let mut typed = String::new();
+        for ch in long.chars() {
+            typed.push(ch);
+            state.edit_replacement(0, typed.clone());
+        }
+
+        // Zurück: Ersatztext, dann die Art, dann das Löschen.
+        while state.can_undo() {
+            state.undo();
+            if state.regions == before_the_mistake {
+                return;
+            }
+        }
+        panic!("der Stand vor dem Löschen ist aus dem Verlauf gefallen");
+    }
+
+    /// **Befund: Oberfläche und Kommandozeile schlugen verschiedene Ersatztexte
+    /// vor.** In der Seitenleiste stand fest `"[REDACTED]"` — englisch in einer
+    /// deutschen Oberfläche und ein anderer Text als der Vorgabewert von
+    /// `--replace-with`; der Schalter selbst blieb wirkungslos.
+    #[test]
+    fn the_replacement_default_matches_the_command_line() {
+        // Ohne Angabe: dieselbe Zeichenkette wie die clap-Vorgabe von
+        // `--replace-with` (crates/redact-cli/src/cli.rs, `default_value`).
+        assert_eq!(DEFAULT_REPLACEMENT, "[GESCHWÄRZT]");
+        assert!(!DEFAULT_REPLACEMENT.contains("REDACTED"));
+        assert_eq!(AppState::new().default_replacement(), DEFAULT_REPLACEMENT);
+
+        // Mit `--action replace --replace-with "[IBAN]"` gilt genau das.
+        let state = AppState::with_config(Config {
+            action: Action::Replace("[IBAN]".into()),
+            ..Config::default()
+        });
+        assert_eq!(state.default_replacement(), "[IBAN]");
+
+        // Auch `--action whiteout` lässt den Vorschlag deutsch bleiben.
+        let state = AppState::with_config(Config {
+            action: Action::Whiteout,
+            ..Config::default()
+        });
+        assert_eq!(state.default_replacement(), DEFAULT_REPLACEMENT);
+    }
+
     /// Was nichts ändert, gehört nicht in den Verlauf: sonst klickt man
     /// dreimal Rückgängig, bevor überhaupt etwas passiert.
     #[test]
@@ -2754,7 +3278,9 @@ mod tests {
         )));
 
         let summary = state.hit_summary();
-        assert_eq!(summary.total, 5);
+        assert_eq!(summary.rows(), 5, "fünf Zeilen stehen in der Liste");
+        assert_eq!(summary.found, 4, "der Schutzeintrag ist kein Fund");
+        assert_eq!(summary.protecting, 1);
         assert_eq!(summary.redacted, 1);
         assert_eq!(summary.redacted, state.enabled_redactions().len());
         assert_eq!(
@@ -2767,7 +3293,10 @@ mod tests {
                 HitOutcome::Duplicate,
             ]
         );
-        assert_eq!(summary.headline(), "5 Treffer · 1 werden geschwärzt");
+        assert_eq!(
+            summary.headline(),
+            "4 Treffer · 1 werden geschwärzt · 1 geschützt"
+        );
         // Genau ein Eintrag wird gefüllt gezeichnet.
         assert_eq!(
             summary.outcomes.iter().filter(|o| o.is_redacted()).count(),
@@ -2777,10 +3306,45 @@ mod tests {
         assert_eq!(HitOutcome::Protecting.note(), "geschützt");
     }
 
+    /// **Befund: die Kopfzeile zählte Schutzeinträge als „Treffer“.** Gemessen:
+    /// „2 Treffer · 1 werden geschwärzt“ bei einem Musterfund und einem Eintrag
+    /// der Negativliste — der erste war gar kein Fund.
+    #[test]
+    fn the_headline_does_not_count_protection_as_a_hit() {
+        let mut state = AppState::new();
+        // Der Schutzeintrag steht zuerst — genau die gemessene Reihenfolge.
+        state.regions.push(AnnotatedRegion::new(negative_region(
+            0,
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+        )));
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(200.0, 200.0, 260.0, 210.0),
+        )));
+
+        let summary = state.hit_summary();
+        assert_eq!(summary.rows(), 2, "beide Zeilen stehen in der Liste");
+        assert_eq!(summary.found, 1, "aber nur einer ist ein Fund");
+        assert_eq!(summary.protecting, 1);
+        assert_eq!(
+            summary.headline(),
+            "1 Treffer · 1 werden geschwärzt · 1 geschützt"
+        );
+
+        // Ohne Schutzeintrag bleibt die Zeile so kurz wie bisher.
+        state.regions.remove(0);
+        assert_eq!(
+            state.hit_summary().headline(),
+            "1 Treffer · 1 werden geschwärzt"
+        );
+    }
+
     #[test]
     fn hit_summary_is_empty_without_regions() {
         let summary = AppState::new().hit_summary();
-        assert_eq!(summary.total, 0);
+        assert_eq!(summary.found, 0);
+        assert_eq!(summary.protecting, 0);
+        assert_eq!(summary.rows(), 0);
         assert_eq!(summary.redacted, 0);
         assert_eq!(summary.headline(), "0 Treffer · 0 werden geschwärzt");
     }
