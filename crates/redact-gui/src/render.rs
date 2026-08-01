@@ -560,8 +560,6 @@ mod tests {
     /// Seiten daneben, schwärzte der Export die falsche Stelle.
     #[test]
     fn every_pixel_of_ink_lands_inside_the_mapped_text_runs() {
-        use redact_core::Extractor;
-
         for rotate in [0_i64, 90, 180, 270] {
             let doc = rotated_demo(rotate);
             let runs = redact_pdf::PdfExtractor::new().extract(&doc).unwrap();

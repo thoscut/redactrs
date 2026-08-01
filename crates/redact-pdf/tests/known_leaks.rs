@@ -16,7 +16,7 @@
 mod common;
 
 use common::SECRET;
-use redact_core::{Action, Extractor, Rect, Redaction, Region, Source, TextRun};
+use redact_core::{Action, Rect, Redaction, Region, Source, TextRun};
 use redact_pdf::{
     leaks, load_from_bytes, save_to_bytes, strip_metadata, PdfExtractor, PdfRedactor,
 };

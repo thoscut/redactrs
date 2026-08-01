@@ -437,7 +437,7 @@ Warnung, sondern nur schwarze Balken an den falschen Stellen.
   "output": { "path": "geschwaerzt.pdf", "sha256": "c2c54724…" },
   "redactions": [
     {
-      "page": 1,
+      "page": 0,
       "rect":           { "ll": { "x": 100.9, "y": 732.8 }, "ur": { "x": 239.9, "y": 742.5 } },
       "effective_rect": { "ll": { "x":  99.9, "y": 731.8 }, "ur": { "x": 240.9, "y": 743.5 } },
       "effect": "applied",
@@ -447,7 +447,7 @@ Warnung, sondern nur schwarze Balken an den falschen Stellen.
     }
   ],
   "blocked_by_negative_list": [
-    { "page": 2, "pattern": "Max Mustermann", "booking_id": "b003" }
+    { "page": 1, "pattern": "Max Mustermann", "booking_id": "b003" }
   ],
   "metadata_stripped": true,
   "metadata": {
@@ -470,24 +470,17 @@ entfernt wurde (nicht, was vorgesehen war); `effect` fasst den Lauf in Zahlen
 zusammen — `redacted_images` und `copied_images` beziffern die
 [Bildschwärzung](#bilder).
 
-### Achtung: `page` bedeutet in den beiden Dateien nicht dasselbe
+### `page` zählt überall gleich
 
-Wer `review.json` und `audit.json` nebeneinander legt — und genau dazu lädt der
-Workflow ein —, liest zwei verschiedene Zählweisen desselben Feldes:
+**In jeder JSON-Datei ist die erste Seite `0`** — in `review.json`, im
+Audit-Log und in der `--manual-regions`-Eingabe. Nur im Fließtext, also in der
+Konsolenausgabe und in der Oberfläche, heißt dieselbe Seite „Seite 1“.
 
-| Datei | Feld | erste Seite ist |
-|---|---|---|
-| `review.json` → `items[].region.page` | `page` | `0` |
-| `review.json` → `blocked_by_negative_list[].page` | `page` | `0` |
-| `audit.json` → `redactions[].page` | `page` | `1` |
-| `audit.json` → `blocked_by_negative_list[].page` | `page` | `1` |
-| Konsolenausgabe („Seite 1: …“) | — | `1` |
-| `--manual-regions`-JSON (Eingabe) | `page` | `0` |
-
-Derselbe blockierte Treffer erscheint also als `"page": 0` in der Review-Datei
-und als `"page": 1` im Audit-Log. Das ist Absicht (Log menschenlesbar,
-Austauschformate maschinennah), aber es ist eine Stolperfalle: eine Seitenzahl
-aus dem Audit-Log darf man **nicht** in eine Regionsdatei übernehmen.
+Das war bis v0.2.0 nicht so: das Audit-Log zählte als einziges ab 1. Wer
+`review.json` und `audit.json` nebeneinander legte — und genau dazu lädt der
+Workflow ein —, sah denselben Treffer einmal als `"page": 0` und einmal als
+`"page": 1`. Eine Seitenzahl aus dem Log in eine Regionsdatei zu übernehmen
+ging damit still daneben. Diese Stolperfalle gibt es nicht mehr.
 
 ### Was im Audit-Log im Klartext steht
 

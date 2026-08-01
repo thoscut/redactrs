@@ -15,7 +15,7 @@
 //! auch wirklich greift.
 
 use lopdf::{dictionary, Document, Object, Stream};
-use redact_core::{Action, Extractor, Rect, Redaction, Region, Source};
+use redact_core::{Action, Rect, Redaction, Region, Source};
 use redact_pdf::{leaks, save_to_bytes, PdfExtractor, PdfRedactor};
 
 const SECRET: &str = "DE89 3704 0044 0532 0130 00";

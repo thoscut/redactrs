@@ -194,8 +194,6 @@ fn tight_line_spacing_does_not_pull_in_the_neighbouring_lines() {
 /// übereinstimmen.
 #[test]
 fn a_hand_drawn_region_and_a_pattern_hit_remove_the_same_characters() {
-    use redact_core::Extractor;
-
     let text = format!("{BEFORE}{SECRET}{AFTER}");
     let (doc, ..) = doc_with(&line(&text, 72.0, 700.0));
 

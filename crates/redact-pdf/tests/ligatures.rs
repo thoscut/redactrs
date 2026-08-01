@@ -18,7 +18,7 @@
 
 use lopdf::content::Operation;
 use lopdf::{dictionary, Document, Object, ObjectId, Stream};
-use redact_core::{Action, Extractor, Rect, Redaction, Region, Source};
+use redact_core::{Action, Rect, Redaction, Region, Source};
 use redact_pdf::{PdfExtractor, PdfRedactor};
 
 /// Code der Ligatur „fi“ im Testdokument.

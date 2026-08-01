@@ -15,7 +15,6 @@ pub mod geometry;
 pub mod model;
 pub mod naming;
 pub mod review;
-pub mod traits;
 
 pub use conflict::{resolve_conflicts, BlockedRegion, Resolution};
 pub use error::{RedactError, Result};
@@ -25,7 +24,6 @@ pub use naming::{
     output_path_with_suffix, sibling_path, AUDIT_SUFFIX, DEFAULT_OUTPUT_SUFFIX, REVIEW_SUFFIX,
 };
 pub use review::{ReviewFile, ReviewInput, ReviewItem, REVIEW_FORMAT_VERSION};
-pub use traits::Extractor;
 
 /// Re-Export, damit abhängige Crates dieselbe lopdf-Version verwenden.
 pub use lopdf;

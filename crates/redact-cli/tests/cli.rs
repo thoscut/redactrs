@@ -11,8 +11,6 @@
 //! * „Der Text ist noch da“ wird mit dem Extraktor geprüft — denn hier soll
 //!   nicht irgendein Byte-Rest überleben, sondern der Text tatsächlich noch
 //!   lesbar auf der Seite stehen.
-
-use redact_core::Extractor;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

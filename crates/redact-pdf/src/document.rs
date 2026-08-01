@@ -1324,7 +1324,6 @@ mod tests {
     }
 
     fn extracted_text(bytes: &[u8]) -> Vec<String> {
-        use redact_core::Extractor;
         let doc = load_from_bytes(bytes).expect("ladbar");
         crate::PdfExtractor::new()
             .extract(&doc)

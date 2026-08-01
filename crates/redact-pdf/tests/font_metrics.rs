@@ -126,7 +126,6 @@ fn deviating_widths_pdf() -> Vec<u8> {
 
 #[test]
 fn deviating_widths_keep_the_glyph_order() {
-    use redact_core::Extractor;
     let bytes = deviating_widths_pdf();
     let doc = redact_pdf::load_from_bytes(&bytes).expect("ladbar");
     let runs = redact_pdf::PdfExtractor::new().extract(&doc).expect("Text");
@@ -335,7 +334,6 @@ const SUBSET_LINE: &str = "Kontonummer 532013000";
 
 #[test]
 fn identity_subset_is_decoded_from_the_embedded_cmap() {
-    use redact_core::Extractor;
     let bytes = identity_subset_pdf(SUBSET_LINE, true);
     let doc = redact_pdf::load_from_bytes(&bytes).expect("ladbar");
     let (runs, warnings) = redact_pdf::PdfExtractor::new()

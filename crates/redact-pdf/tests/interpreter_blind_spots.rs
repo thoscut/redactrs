@@ -20,7 +20,7 @@ mod common;
 
 use common::SECRET;
 use lopdf::{dictionary, Document, Object, Stream};
-use redact_core::{Action, Extractor, Redaction, Region, Source, TextRun};
+use redact_core::{Action, Redaction, Region, Source, TextRun};
 use redact_pdf::{
     content::scan_page, leaks, load_from_bytes, save_to_bytes, strip_metadata, PdfExtractor,
     PdfRedactor, ScanResult,

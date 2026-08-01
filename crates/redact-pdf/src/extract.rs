@@ -8,7 +8,7 @@
 //! nach Grundlinie gruppiert und zu Zeilen zusammengesetzt.
 
 use lopdf::Document;
-use redact_core::{Extractor, Glyph, Rect, Result, TextRun};
+use redact_core::{Glyph, Rect, Result, TextRun};
 
 use crate::content::{scan_page, GlyphItem};
 
@@ -56,7 +56,7 @@ impl PdfExtractor {
         Ok(self.build_lines(page_index, glyphs))
     }
 
-    /// Wie [`Extractor::extract`], liefert aber zusätzlich die Warnungen des
+    /// Wie [`PdfExtractor::extract`], liefert aber zusätzlich die Warnungen des
     /// Interpreters.
     ///
     /// Wichtig ist vor allem der Fall „Font ohne `/ToUnicode`“: dort steht
@@ -241,8 +241,13 @@ impl PdfExtractor {
     }
 }
 
-impl Extractor for PdfExtractor {
-    fn extract(&self, doc: &Document) -> Result<Vec<TextRun>> {
+impl PdfExtractor {
+    /// Extrahiert die Textzeilen des ganzen Dokuments.
+    ///
+    /// Verwirft die Warnungen des Interpreters. Wer wissen will, ob eine
+    /// Seite stillschweigend uebergangen wurde — und das will die Kette —,
+    /// nimmt [`PdfExtractor::extract_with_warnings`].
+    pub fn extract(&self, doc: &Document) -> Result<Vec<TextRun>> {
         Ok(self.extract_with_warnings(doc)?.0)
     }
 }

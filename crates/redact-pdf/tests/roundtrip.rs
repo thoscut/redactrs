@@ -14,7 +14,7 @@
 //!   sensitiven Text“ — denn „Copy-Paste“ heißt in der Praxis: irgendein
 //!   fremdes Werkzeug, nicht unser eigenes.
 
-use redact_core::{Action, Extractor, Redaction, Region, Source, TextRun};
+use redact_core::{Action, Redaction, Region, Source, TextRun};
 use redact_pdf::testing::{build_pdf, demo_statement, TextItem};
 use redact_pdf::{
     leaks, load_from_bytes, save_to_bytes, strip_metadata, PdfExtractor, PdfRedactor,
