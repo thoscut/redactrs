@@ -231,6 +231,53 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
   sie gar nicht auspackt. Ihre entpackte Größe zählt aber gegen das große
   Budget.
 
+### Die Zusicherungen oben gelten für die Kommandozeile, nicht für die Oberfläche
+
+Nachtrag zur Dokumentationsprüfung (Stand: dieser Commit). Zwei der Punkte unter
+„Was zugesichert wird“ beschreiben den Weg durch `redact-cli`. Die grafische
+Oberfläche ist ein eigenständiger Ablauf — `redact-gui` hat keine Abhängigkeit
+auf `redact-cli` — und weicht davon ab:
+
+* **Der eine Schreibpfad ist nicht der einzige.** Das geschwärzte PDF geht auch
+  in der Oberfläche durch `write_file`. Audit-Log und Review-Datei nicht: sie
+  entstehen über `std::fs::write` (`crates/redact-gui/src/state.rs:1023` bzw.
+  `crates/redact-gui/src/app.rs:781`). Damit fehlen für diese beiden Dateien
+  der Modus `0600`, die Symlink-Prüfung, die Kanonisierung des Zielpfads und
+  die `create_new`+`rename`-Sequenz. Sie entstehen mit den Vorgaberechten des
+  Kontos — und in beiden steht Klartext (siehe unten).
+* **Die Grenzen für Eingabedateien sind dort nicht einstellbar.** `--max-…`
+  sind Argumente der Kommandozeile. Die Oberfläche lädt über
+  `redact_pdf::load_from_bytes`, also mit `Limits::default()`: die Vorprüfung
+  läuft, aber mit den fest eingebauten Werten aus der Tabelle oben.
+
+### Was in den beiden „privaten“ Dateien wirklich steht
+
+Der Punkt „in beiden stehen die *gefundenen* Geheimnisse im Klartext“ trifft
+für die Review-Datei uneingeschränkt zu, für das Audit-Log nur teilweise —
+nachgemessen an einem Lauf über den Demo-Kontoauszug:
+
+| | `review.json` | `audit.json` |
+|---|---|---|
+| gefundener Text (`"text": "DE89 …"`) | **ja**, je Treffer | nein |
+| Seite und Rechteck je Treffer | ja | ja |
+| Herkunft (`pattern: iban_de`, `booking: b002`) | ja | ja |
+| Text der **Negativlisten**-Einträge | **ja** | **ja** (`blocked_by_negative_list[].pattern`) |
+| Begründung manueller Regionen | ja | ja |
+
+Das Audit-Log verrät den geschwärzten Wert also nicht direkt — zusammen mit dem
+Original lokalisiert es aber jede Schwärzung punktgenau, und die Einträge der
+Negativliste stehen wörtlich darin. Beide Dateien gehören dorthin, wo auch das
+ungeschwärzte Original liegen darf, und sonst nirgendwohin.
+
+### Die Prüfsummen-Sperre der Review-Datei greift nur bei gesetzter Prüfsumme
+
+`--apply-review` vergleicht den SHA-256 der Eingabe mit `input.sha256` der
+Review-Datei und bricht bei Abweichung ab. Ist das Feld jedoch **leer**, kehrt
+die Prüfung ohne Befund zurück (`crates/redact-cli/src/pipeline.rs:250`) — die
+Datei wird dann auf jedes beliebige Dokument angewendet, und die Rechtecke
+landen an falscher Stelle. Eine von Hand erstellte oder zusammenkopierte
+Review-Datei muss die Prüfsumme also mitführen.
+
 ### Die Restlücke bei der Symlink-Prüfung
 
 Unter Unix wäre `O_NOFOLLOW` (über `OpenOptionsExt::custom_flags`) der saubere
@@ -314,6 +361,13 @@ Besonders willkommen sind zwei Sorten Fund: **eine Datei, die den Prozess
 abstürzen lässt oder den Rechner belegt**, und **eine geschwärzte Ausgabe, in
 der der geschwärzte Text noch zu finden ist**. Für die zweite Sorte reicht oft
 schon `redact_pdf::leaks` bzw. `strings`.
+
+Nachtrag: `strings` ist dafür nur die schnelle Vorstufe und darf nicht als
+Entwarnung gelesen werden — ein Flate-komprimierter Objektstrom (`/ObjStm`) ist
+für eine reine Rohbyte-Suche unsichtbar, ebenso eine Zeichenkette in UTF-16BE
+oder als Hex-String. `pdftotext` taugt erst recht nicht als Nachweis; die
+Messung dazu steht im README unter „Prüfen, ob die Schwärzung gewirkt hat“.
+Verbindlich ist `redact_pdf::leaks`.
 
 Es gibt keine Prämie und keine zugesicherte Frist — dies ist ein kleines
 Projekt. Eingehende Meldungen werden aber beantwortet.
