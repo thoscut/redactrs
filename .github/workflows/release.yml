@@ -450,10 +450,27 @@ jobs:
       # Repository, diesen Workflow und diesen Commit. Damit laesst sich von
       # aussen pruefen, dass eine Datei wirklich aus diesem Build stammt -
       # unabhaengig davon, wer Schreibrechte auf Releases hat.
+      #
+      # NUR FUER OEFFENTLICHE REPOSITORIES. GitHub lehnt das Speichern der
+      # Aussage in einem privaten Repository unter einem Benutzerkonto ab:
+      # "Failed to persist attestation: Feature not available for user-owned
+      # private repositories." Der Schritt ist deshalb an `private == false`
+      # gebunden. Bewusst NICHT `continue-on-error`: ein Fehlschlag beim
+      # Signieren eines oeffentlichen Releases soll den Lauf stoppen, nicht
+      # stillschweigend eine Zusage streichen.
       - name: Provenienz erzeugen
+        if: ${{ github.event.repository.private == false }}
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: 'dist/redact-rs-*'
+
+      - name: Fehlende Provenienz vermerken
+        if: ${{ github.event.repository.private }}
+        shell: bash
+        run: |
+          echo "::warning::Dieses Repository ist privat - GitHub erzeugt dafuer" \
+               "keine Herkunftsaussage. Die Release-Notizen weisen darauf hin;" \
+               "die SHA-256-Summen bleiben die Pruefgrundlage."
 
       - name: Release-Notizen erzeugen
         shell: bash
@@ -461,6 +478,10 @@ jobs:
           VERSION: ${{ needs.verify.outputs.version }}
           TAG: ${{ needs.verify.outputs.tag }}
           PRERELEASE: ${{ inputs.prerelease }}
+          # Entscheidet, ob die Notizen eine Herkunftsaussage versprechen
+          # duerfen - GitHub erzeugt sie fuer private Repositories unter
+          # einem Benutzerkonto nicht.
+          IS_PRIVATE: ${{ github.event.repository.private }}
         run: |
           set -euo pipefail
           GLIBC_MIN="unbekannt"
@@ -522,14 +543,26 @@ jobs:
             echo
             echo "### Herkunft pruefen"
             echo
-            echo "Zu jedem Archiv gibt es eine signierte SLSA-Herkunftsaussage."
-            echo "Damit laesst sich nachweisen, dass die Datei aus diesem"
-            echo "Repository und diesem Workflow stammt:"
-            echo
-            echo '```bash'
-            echo "gh attestation verify redact-rs-${VERSION}-x86_64-linux.tar.gz \\"
-            echo "  --repo ${GITHUB_REPOSITORY}"
-            echo '```'
+            if [ "${IS_PRIVATE}" = "true" ]; then
+              # Nichts versprechen, was nicht da ist: GitHub erzeugt fuer
+              # private Repositories unter einem Benutzerkonto keine
+              # Herkunftsaussage.
+              echo "**Zu diesem Release gibt es keine Herkunftsaussage.**"
+              echo "GitHub bietet die Signatur fuer private Repositories unter"
+              echo "einem Benutzerkonto nicht an. Pruefgrundlage sind hier"
+              echo "allein die SHA-256-Summen oben. Wird das Repository"
+              echo "oeffentlich, erzeugt derselbe Workflow die Aussage"
+              echo "automatisch mit."
+            else
+              echo "Zu jedem Archiv gibt es eine signierte SLSA-Herkunftsaussage."
+              echo "Damit laesst sich nachweisen, dass die Datei aus diesem"
+              echo "Repository und diesem Workflow stammt:"
+              echo
+              echo '```bash'
+              echo "gh attestation verify redact-rs-${VERSION}-x86_64-linux.tar.gz \\"
+              echo "  --repo ${GITHUB_REPOSITORY}"
+              echo '```'
+            fi
           } > release-notes.md
           cat release-notes.md
 
