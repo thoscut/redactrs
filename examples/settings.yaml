@@ -1,0 +1,44 @@
+# Einstellungsdatei für redact-rs.
+#
+# Ablageort (der erste gefundene gewinnt):
+#   REDACT_RS_CONFIG=<pfad>          — überstimmt alles Übrige
+#   $XDG_CONFIG_HOME/redact-rs/settings.yaml
+#   ~/.config/redact-rs/settings.yaml            (Linux, macOS)
+#   %APPDATA%\redact-rs\settings.yaml            (Windows)
+#
+# Fehlt die Datei, ist das kein Fehler — dann gelten die Vorgaben unten.
+#
+# Rangfolge: Kommandozeile schlägt diese Datei schlägt Vorgabe. Was hier
+# steht, wirkt also nur, solange der entsprechende Schalter fehlt.
+#
+# ACHTUNG, zwei Dinge, die überraschen können:
+#
+#  * Ein unbekannter Schlüssel oder ein unbekanntes Thema beendet den Lauf
+#    mit Exit 2. Das ist Absicht: eine stillschweigend wirkungslose
+#    Einstellung ist schlimmer als eine Fehlermeldung — man verlässt sich
+#    sonst auf eine Schwelle, die gar nicht gilt.
+#  * Steht hier ein `output_suffix`, ändert sich der Name der Ausgabedatei
+#    auch dann, wenn man gar nicht mehr an diese Datei denkt.
+
+# Namenszusatz der Ausgabedatei (--output-suffix).
+# Aus `kontoauszug.pdf` wird `kontoauszug_geschwaerzt.pdf`.
+output_suffix: _geschwaerzt
+
+# Standardmäßig benutzte Muster (--patterns).
+# Leere Liste = die eingebaute Auswahl. `redact-rs --list-patterns` zeigt
+# alle verfügbaren mit ihrer Konfidenz.
+patterns: []
+
+# Mindestvertrauen eines Treffers (--min-confidence), 0.0 … 1.0.
+# Auskommentiert lassen heißt „nicht festgelegt" — nur dann behält eine
+# eigene Musterkonfiguration (--patterns-config) ihre eigene Schwelle.
+# Ein Wert hier überschreibt sie.
+# min_confidence: 0.5
+
+# Zusätzlicher Rand um jede Schwärzung, in Punkt (--padding).
+# Der schwarze Balken wird auf jeder Seite um diesen Wert größer als das
+# gefundene bzw. gezogene Rechteck.
+padding: 1.0
+
+# Thema der Oberfläche: hell oder dunkel.
+theme: hell

@@ -246,10 +246,10 @@ jobs:
       - name: cargo deny
         run: cargo deny check advisories licenses bans sources
 
-      # cargo-audit liest deny.toml nicht; die befristete Ausnahme muss
-      # deshalb hier ein zweites Mal stehen. Begruendung und Frist stehen
-      # bei genau einem Eintrag in deny.toml - beim lopdf-Update auf >= 0.42
-      # gehoeren beide Stellen weg.
+      # Die befristete Ausnahme fuer RUSTSEC-2026-0187 stand hier ein zweites
+      # Mal, weil cargo-audit deny.toml nicht liest. Mit dem Update auf
+      # lopdf 0.42 ist die Schwachstelle behoben - beide Stellen sind weg,
+      # wie es der Kommentar vorgesehen hatte.
       #
       # Bewusst ohne `--deny warnings`: `cargo audit` meldet aktuell zwei
       # transitiv eingeschleppte, nicht mehr gepflegte Crates
@@ -259,4 +259,4 @@ jobs:
       # dauerhaft rot. Die Meldungen erscheinen weiterhin im Protokoll.
       # Echte Schwachstellen lassen `cargo audit` ohnehin fehlschlagen.
       - name: cargo audit
-        run: cargo audit --ignore RUSTSEC-2026-0187
+        run: cargo audit

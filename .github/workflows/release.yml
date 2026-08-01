@@ -147,7 +147,14 @@ jobs:
           # Beide Angaben muessen dasselbe sagen, sonst haengt es davon ab,
           # welchen Weg jemand gerade genommen hat.
           if [ -f .release-version ]; then
-            FILE_VERSION="$(tr -d '[:space:]' < .release-version)"
+            # Dieselbe Filterung wie in publish-release.yml: die Datei traegt
+            # seit a2300bf einen Kommentarkopf, der erklaert, dass eine
+            # Aenderung an ihr ein Release veroeffentlicht. `tr -d` allein
+            # entfernt nur Leerraum und zog den ganzen Kommentar in die
+            # Versionsnummer — dadurch scheiterte *jeder* Weg zur
+            # Veroeffentlichung an diesem Schritt (belegt an Lauf
+            # 30696875815 auf main).
+            FILE_VERSION="$(grep -v '^[[:space:]]*#' .release-version | tr -d '[:space:]')"
             FILE_VERSION="${FILE_VERSION#v}"
             if [ "$FILE_VERSION" != "$CRATE_VERSION" ]; then
               echo "::error::.release-version ($FILE_VERSION) und redact-cli ($CRATE_VERSION) stimmen nicht ueberein"
@@ -312,7 +319,10 @@ jobs:
             fi
             cp "target/${TARGET}/release/${GUI_BIN}" staging/
           fi
-          for f in README.md LICENSE-MIT LICENSE-APACHE LICENSE; do
+          # SECURITY.md gehoert dazu: die README verweist neunmal darauf
+          # (Grenzen, Bedrohungsmodell, Schreibpfad). Wer nur das Archiv hat,
+          # lief bisher in tote Verweise.
+          for f in README.md SECURITY.md LICENSE-MIT LICENSE-APACHE LICENSE; do
             if [ -f "$f" ]; then cp "$f" staging/; fi
           done
           # SIL Open Font License 1.1. Die egui-Standardschriften
