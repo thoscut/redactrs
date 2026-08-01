@@ -413,7 +413,8 @@ Dieselben beiden Bomben wie oben, nur RC4-verschlüsselt (Standard-Handler,
 | dito | mit Passwort | **SIGKILL** durch den systemweiten OOM-Killer; unter `ulimit -v 4 GB` stattdessen **SIGABRT**, Exit 134, nach 10,6 s bei **3 876 MB** | Exit 1, **22,8 MB**, 0,0 s |
 | 1,3 kB, **200 000** offene `[` im Content-Stream | ohne Passwort | Exit 1 (Tiefengrenze) | unverändert |
 | dito | mit Passwort | **Exit 0**, Ausgabe geschrieben, IBAN unverändert darin, 8,0 MB | Exit 1, **7,9 MB**, 0,0 s |
-| 33 kB, harmloses verschlüsseltes PDF | mit Passwort | Exit 0, 7,9 MB | unverändert |
+| 902 Byte, harmloses verschlüsseltes PDF | mit Passwort | Exit 0, 7,9 MB | unverändert |
+| 31 kB, Content-Stream **15 MB** (knapp unter `--max-parsed-mb`) | ohne / mit Passwort | — | Exit 0, **1 013,7 MB** / **1 013,4 MB** |
 
 Die dritte Zeile ist der stillere und deshalb schlimmere Fall. Der Lauf endete
 mit „0 Schwärzungen“ und schrieb eine Ausgabedatei; `redact_pdf::leaks` fand die
@@ -422,10 +423,16 @@ Content-Stream nicht in Operationen zerlegt, die Analyse sieht also keinen
 Text — und „0 Schwärzungen“ liest sich wie „nichts zu schwärzen“. Ein Absturz
 fällt auf; das hier nicht.
 
-Der Verstärkungsfaktor ist derselbe wie bei einer unverschlüsselten Datei:
-gemessen an einer verschlüsselten 13-kB-Datei mit 4 MB Content-Stream **1 189 MB**
-(rund 300 Byte je Byte, mit dem Vielfachen aus der Konfliktauflösung obendrauf).
-Bei 64 MB wären das gut 19 GB — die Maschine hat 16.
+Die letzte Zeile ist die eigentliche Gegenprobe: eine Datei **knapp unterhalb**
+des Budgets kostet verschlüsselt auf 0,3 MB genau so viel wie unverschlüsselt.
+Beide Wege messen jetzt dasselbe und lassen dasselbe durch — vorher hing an
+einem Passwort, ob überhaupt gemessen wurde.
+
+Der Verstärkungsfaktor ist ebenfalls derselbe wie ohne Verschlüsselung:
+gemessen an einer verschlüsselten 13-kB-Datei mit 4 MB Content-Stream aus
+wiederholtem IBAN-Text **1 189 MB** — dort trägt die Trefferverwaltung den
+größeren Teil, weshalb dieser Wert deutlich über den 62 Byte je Byte des
+reinen Parsens liegt. Bei 64 MB wären das gut 19 GB; die Maschine hat 16.
 
 Die Fälle stehen als Prüfmaterial im Baum
 (`crates/redact-pipeline/src/testdata/bombe_verschluesselt.pdf` und
