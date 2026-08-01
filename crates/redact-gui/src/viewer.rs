@@ -63,7 +63,10 @@ pub const REGION_STROKE: f32 = 1.0;
 pub const SELECTED_STROKE: f32 = 2.5;
 /// Strichstärke des Rechtecks, das gerade aufgezogen wird.
 pub const DRAG_STROKE: f32 = 1.5;
-/// Kantenlänge der Griffpunkte an den Ecken der Auswahl.
+/// Kantenlänge der **gezeichneten** Griffpunkte an den Ecken der Auswahl.
+///
+/// Angefasst werden sie über die deutlich größere Zone
+/// [`crate::selector::HANDLE_HIT_SIZE`] — 5 pt trifft man mit der Maus nicht.
 pub const HANDLE_SIZE: f32 = 5.0;
 /// Versatz des Schlagschattens unter dem Blatt.
 pub const SHADOW_OFFSET: f32 = 4.0;
@@ -412,7 +415,10 @@ pub fn paint_region(
         }
     }
     if selected {
-        // Griffpunkte an den Ecken der Auswahl.
+        // Griffpunkte an den Ecken der Auswahl. Sie sind ein Versprechen: an
+        // ihnen lässt sich ziehen (siehe [`crate::selector::hit_handle`] und
+        // `RedactApp::apply_pointer`). Wer sie zeichnet, ohne sie abzugreifen,
+        // baut eine Zusage ein, welche die Oberfläche nicht einlöst.
         for corner in [
             rect.left_top(),
             rect.right_top(),

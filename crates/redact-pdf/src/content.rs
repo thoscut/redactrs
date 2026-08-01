@@ -32,7 +32,7 @@ use lopdf::content::Operation;
 use lopdf::{Dictionary, Document, Object, ObjectId};
 use redact_core::{Point, Rect, RedactError, Result};
 
-use crate::font::{fonts_from_resources, FontInfo};
+use crate::font::{as_f64, fonts_from_resources, FontInfo};
 use crate::matrix::Matrix;
 use crate::ops::{PathSeg, Rgb, Stroke};
 
@@ -204,6 +204,12 @@ pub struct SinkContext<'a> {
 pub struct GlyphEvent<'a> {
     /// Ressourcenname aus dem letzten `Tf` (Schlüssel in `/Resources /Font`).
     pub font_name: &'a [u8],
+    /// Die **bereits geparsten** Metriken dieses Fonts.
+    ///
+    /// Der Interpreter lädt zu Beginn jeder Ressourcenebene alle Fonts; wer
+    /// sie hier noch einmal aus dem Dictionary läse, parste jedes
+    /// `/ToUnicode`, jede `/W`-Liste und jede `cmap` ein zweites Mal.
+    pub font: &'a FontInfo,
     pub code: u32,
     pub text: &'a str,
     /// Text-Rendering-Matrix: bildet Text-Space (1 Einheit = Schriftgröße)
@@ -496,7 +502,7 @@ impl ColorSpace {
                     .get(1)
                     .and_then(|o| doc.dereference(o).ok())
                     .and_then(|(_, o)| o.as_stream().ok().map(|s| s.dict.clone()))
-                    .and_then(|d| d.get(b"N").ok().and_then(num))
+                    .and_then(|d| d.get(b"N").ok().and_then(as_f64))
                     .unwrap_or(3.0) as i64;
                 match n {
                     1 => ColorSpace::Gray,
@@ -922,7 +928,7 @@ fn appearance_matrix(matrix: &Matrix, bbox: Option<Rect>, rect: Option<Rect>) ->
 /// Rechteck aus einem PDF-Array `[x0 y0 x1 y1]`; die Ecken werden normalisiert.
 fn annot_rect(obj: &Object) -> Option<Rect> {
     let array = obj.as_array().ok()?;
-    let v: Vec<f64> = array.iter().take(4).filter_map(num).collect();
+    let v: Vec<f64> = array.iter().take(4).filter_map(as_f64).collect();
     if v.len() < 4 {
         return None;
     }
@@ -1002,26 +1008,28 @@ fn scan_operations(
                     state.text.font = fonts.get(name.as_slice()).cloned();
                     state.text.font_name = name.clone();
                 }
-                state.text.font_size = op.operands.get(1).and_then(num).unwrap_or(0.0);
+                state.text.font_size = op.operands.get(1).and_then(as_f64).unwrap_or(0.0);
             }
             "Tr" => {
                 state.text.render_mode =
-                    op.operands.first().and_then(num).unwrap_or(0.0).max(0.0) as u8
+                    op.operands.first().and_then(as_f64).unwrap_or(0.0).max(0.0) as u8
             }
-            "Tc" => state.text.char_spacing = op.operands.first().and_then(num).unwrap_or(0.0),
-            "Tw" => state.text.word_spacing = op.operands.first().and_then(num).unwrap_or(0.0),
-            "Tz" => state.text.h_scale = op.operands.first().and_then(num).unwrap_or(100.0) / 100.0,
-            "TL" => state.text.leading = op.operands.first().and_then(num).unwrap_or(0.0),
-            "Ts" => state.text.rise = op.operands.first().and_then(num).unwrap_or(0.0),
+            "Tc" => state.text.char_spacing = op.operands.first().and_then(as_f64).unwrap_or(0.0),
+            "Tw" => state.text.word_spacing = op.operands.first().and_then(as_f64).unwrap_or(0.0),
+            "Tz" => {
+                state.text.h_scale = op.operands.first().and_then(as_f64).unwrap_or(100.0) / 100.0
+            }
+            "TL" => state.text.leading = op.operands.first().and_then(as_f64).unwrap_or(0.0),
+            "Ts" => state.text.rise = op.operands.first().and_then(as_f64).unwrap_or(0.0),
             "Td" => {
-                let tx = op.operands.first().and_then(num).unwrap_or(0.0);
-                let ty = op.operands.get(1).and_then(num).unwrap_or(0.0);
+                let tx = op.operands.first().and_then(as_f64).unwrap_or(0.0);
+                let ty = op.operands.get(1).and_then(as_f64).unwrap_or(0.0);
                 tlm = Matrix::translate(tx, ty).mul(&tlm);
                 tm = tlm;
             }
             "TD" => {
-                let tx = op.operands.first().and_then(num).unwrap_or(0.0);
-                let ty = op.operands.get(1).and_then(num).unwrap_or(0.0);
+                let tx = op.operands.first().and_then(as_f64).unwrap_or(0.0);
+                let ty = op.operands.get(1).and_then(as_f64).unwrap_or(0.0);
                 state.text.leading = -ty;
                 tlm = Matrix::translate(tx, ty).mul(&tlm);
                 tm = tlm;
@@ -1043,12 +1051,12 @@ fn scan_operations(
                         state.text.word_spacing = op
                             .operands
                             .first()
-                            .and_then(num)
+                            .and_then(as_f64)
                             .unwrap_or(state.text.word_spacing);
                         state.text.char_spacing = op
                             .operands
                             .get(1)
-                            .and_then(num)
+                            .and_then(as_f64)
                             .unwrap_or(state.text.char_spacing);
                     }
                     tlm = Matrix::translate(0.0, -state.text.leading).mul(&tlm);
@@ -1161,23 +1169,23 @@ fn scan_operations(
             }
             // --- Farbe ------------------------------------------------------
             "g" | "G" if graphics => {
-                let v = op.operands.first().and_then(num).unwrap_or(0.0);
+                let v = op.operands.first().and_then(as_f64).unwrap_or(0.0);
                 set_color(&mut state, &op.operator, ColorSpace::Gray, Rgb::gray(v));
             }
             "rg" | "RG" if graphics => {
                 let rgb = Rgb::new(
-                    op.operands.first().and_then(num).unwrap_or(0.0),
-                    op.operands.get(1).and_then(num).unwrap_or(0.0),
-                    op.operands.get(2).and_then(num).unwrap_or(0.0),
+                    op.operands.first().and_then(as_f64).unwrap_or(0.0),
+                    op.operands.get(1).and_then(as_f64).unwrap_or(0.0),
+                    op.operands.get(2).and_then(as_f64).unwrap_or(0.0),
                 );
                 set_color(&mut state, &op.operator, ColorSpace::Rgb, rgb);
             }
             "k" | "K" if graphics => {
                 let rgb = cmyk_to_rgb(
-                    op.operands.first().and_then(num).unwrap_or(0.0),
-                    op.operands.get(1).and_then(num).unwrap_or(0.0),
-                    op.operands.get(2).and_then(num).unwrap_or(0.0),
-                    op.operands.get(3).and_then(num).unwrap_or(0.0),
+                    op.operands.first().and_then(as_f64).unwrap_or(0.0),
+                    op.operands.get(1).and_then(as_f64).unwrap_or(0.0),
+                    op.operands.get(2).and_then(as_f64).unwrap_or(0.0),
+                    op.operands.get(3).and_then(as_f64).unwrap_or(0.0),
                 );
                 set_color(&mut state, &op.operator, ColorSpace::Cmyk, rgb);
             }
@@ -1219,7 +1227,7 @@ fn scan_operations(
                 } else {
                     state.fill_space.clone()
                 };
-                let values: Vec<f64> = op.operands.iter().filter_map(num).collect();
+                let values: Vec<f64> = op.operands.iter().filter_map(as_f64).collect();
                 let color = if values.is_empty() {
                     // Nur ein Musternamen — Muster werden als mittleres Grau genähert.
                     Rgb::gray(0.5)
@@ -1234,13 +1242,13 @@ fn scan_operations(
             }
             // --- Linienzustand ----------------------------------------------
             "w" if graphics => {
-                state.line_width = op.operands.first().and_then(num).unwrap_or(1.0).max(0.0)
+                state.line_width = op.operands.first().and_then(as_f64).unwrap_or(1.0).max(0.0)
             }
             "J" if graphics => {
-                state.line_cap = op.operands.first().and_then(num).unwrap_or(0.0).max(0.0) as u8
+                state.line_cap = op.operands.first().and_then(as_f64).unwrap_or(0.0).max(0.0) as u8
             }
             "j" if graphics => {
-                state.line_join = op.operands.first().and_then(num).unwrap_or(0.0).max(0.0) as u8
+                state.line_join = op.operands.first().and_then(as_f64).unwrap_or(0.0).max(0.0) as u8
             }
             "M" if graphics => {}
             "d" if graphics => {
@@ -1248,13 +1256,13 @@ fn scan_operations(
                     .operands
                     .first()
                     .and_then(|o| o.as_array().ok())
-                    .map(|a| a.iter().filter_map(num).filter(|v| *v >= 0.0).collect())
+                    .map(|a| a.iter().filter_map(as_f64).filter(|v| *v >= 0.0).collect())
                     .unwrap_or_default();
                 // Eine Strichelung aus lauter Nullen bedeutet „durchgezogen“.
                 if state.dash.iter().all(|d| *d <= 0.0) {
                     state.dash.clear();
                 }
-                state.dash_phase = op.operands.get(1).and_then(num).unwrap_or(0.0);
+                state.dash_phase = op.operands.get(1).and_then(as_f64).unwrap_or(0.0);
             }
             "gs" if graphics => apply_ext_gstate(doc, resources, &op.operands, &mut state),
             // --- Inline-Bild ------------------------------------------------
@@ -1388,45 +1396,49 @@ fn apply_ext_gstate(
     else {
         return;
     };
-    if let Some(lw) = dict.get(b"LW").ok().and_then(num) {
+    if let Some(lw) = dict.get(b"LW").ok().and_then(as_f64) {
         state.line_width = lw.max(0.0);
     }
-    if let Some(ca) = dict.get(b"ca").ok().and_then(num) {
+    if let Some(ca) = dict.get(b"ca").ok().and_then(as_f64) {
         state.fill_alpha = ca.clamp(0.0, 1.0) as f32;
     }
-    if let Some(ca) = dict.get(b"CA").ok().and_then(num) {
+    if let Some(ca) = dict.get(b"CA").ok().and_then(as_f64) {
         state.stroke_alpha = ca.clamp(0.0, 1.0) as f32;
     }
-    if let Some(lc) = dict.get(b"LC").ok().and_then(num) {
+    if let Some(lc) = dict.get(b"LC").ok().and_then(as_f64) {
         state.line_cap = lc.max(0.0) as u8;
     }
-    if let Some(lj) = dict.get(b"LJ").ok().and_then(num) {
+    if let Some(lj) = dict.get(b"LJ").ok().and_then(as_f64) {
         state.line_join = lj.max(0.0) as u8;
     }
     if let Some(d) = dict.get(b"D").ok().and_then(|o| o.as_array().ok()) {
         if let Some(array) = d.first().and_then(|o| o.as_array().ok()) {
-            state.dash = array.iter().filter_map(num).filter(|v| *v >= 0.0).collect();
+            state.dash = array
+                .iter()
+                .filter_map(as_f64)
+                .filter(|v| *v >= 0.0)
+                .collect();
             if state.dash.iter().all(|v| *v <= 0.0) {
                 state.dash.clear();
             }
         }
-        state.dash_phase = d.get(1).and_then(num).unwrap_or(0.0);
+        state.dash_phase = d.get(1).and_then(as_f64).unwrap_or(0.0);
     }
 }
 
 /// Punkt aus zwei Operanden, direkt in den User-Space transformiert.
 fn point_at(operands: &[Object], index: usize, ctm: &Matrix) -> Option<Point> {
-    let x = operands.get(index).and_then(num)?;
-    let y = operands.get(index + 1).and_then(num)?;
+    let x = operands.get(index).and_then(as_f64)?;
+    let y = operands.get(index + 1).and_then(as_f64)?;
     Some(ctm.apply(x, y))
 }
 
 /// `re`: ein Rechteck als geschlossener Teilpfad im User-Space.
 fn rect_path(operands: &[Object], ctm: &Matrix) -> Option<Vec<PathSeg>> {
-    let x = operands.first().and_then(num)?;
-    let y = operands.get(1).and_then(num)?;
-    let w = operands.get(2).and_then(num)?;
-    let h = operands.get(3).and_then(num)?;
+    let x = operands.first().and_then(as_f64)?;
+    let y = operands.get(1).and_then(as_f64)?;
+    let w = operands.get(2).and_then(as_f64)?;
+    let h = operands.get(3).and_then(as_f64)?;
     Some(vec![
         PathSeg::MoveTo(ctm.apply(x, y)),
         PathSeg::LineTo(ctm.apply(x + w, y)),
@@ -1556,7 +1568,7 @@ fn scan_tiling_pattern(
     let Ok(stream) = resolved.as_stream() else {
         return;
     };
-    if stream.dict.get(b"PatternType").ok().and_then(num) == Some(2.0) {
+    if stream.dict.get(b"PatternType").ok().and_then(as_f64) == Some(2.0) {
         return;
     }
     let Ok(data) = stream
@@ -1712,6 +1724,7 @@ fn show_text(
                             cx,
                             &GlyphEvent {
                                 font_name: &ts.font_name,
+                                font: &font,
                                 code,
                                 text: &text,
                                 trm,
@@ -1769,7 +1782,7 @@ fn show_text(
                 }
             }
             Object::Integer(_) | Object::Real(_) => {
-                let adj = num(element).unwrap_or(0.0);
+                let adj = as_f64(element).unwrap_or(0.0);
                 let tx = -adj / 1000.0 * ts.font_size * ts.h_scale;
                 *tm = Matrix::translate(tx, 0.0).mul(tm);
                 items.push(ShowItem::Adjust(adj));
@@ -1850,21 +1863,13 @@ fn matrix_from(operands: &[Object]) -> Option<Matrix> {
         return None;
     }
     Some(Matrix::new(
-        num(&operands[0])?,
-        num(&operands[1])?,
-        num(&operands[2])?,
-        num(&operands[3])?,
-        num(&operands[4])?,
-        num(&operands[5])?,
+        as_f64(&operands[0])?,
+        as_f64(&operands[1])?,
+        as_f64(&operands[2])?,
+        as_f64(&operands[3])?,
+        as_f64(&operands[4])?,
+        as_f64(&operands[5])?,
     ))
-}
-
-fn num(obj: &Object) -> Option<f64> {
-    match obj {
-        Object::Integer(i) => Some(*i as f64),
-        Object::Real(r) => Some(*r as f64),
-        _ => None,
-    }
 }
 
 /// Ermittelt die CTM am Ende des Streams auf Stapel-Ebene 0 sowie die Zahl

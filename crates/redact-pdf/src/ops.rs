@@ -35,7 +35,7 @@ use redact_core::{Point, Rect, RedactError, Result};
 use crate::content::{
     interpret, ColorSpace, ContentSink, GlyphEvent, ImageEvent, PathEvent, SinkContext, StreamKey,
 };
-use crate::font::{font_from_dict, FontInfo};
+use crate::font::{as_f64, deref, FontInfo};
 use crate::matrix::Matrix;
 
 /// Obergrenze für dekodierte Bilder, **je Bild**.
@@ -384,7 +384,7 @@ impl OpsCollector {
     }
 
     /// Liefert (und lädt bei Bedarf) den Font zu einem Ressourcennamen.
-    fn font_slot(&mut self, cx: &SinkContext, name: &[u8]) -> usize {
+    fn font_slot(&mut self, cx: &SinkContext, name: &[u8], info: &FontInfo) -> usize {
         let entry = font_entry(cx.doc, cx.resources, name);
         let key = match &entry {
             Some((Some(id), _)) => FontKey::Object(*id),
@@ -394,7 +394,7 @@ impl OpsCollector {
             return *index;
         }
         let program = match &entry {
-            Some((_, dict)) => load_font_program(cx.doc, dict),
+            Some((_, dict)) => load_font_program(cx.doc, dict, info),
             None => FontProgram::fallback(name),
         };
         let index = self.out.fonts.len();
@@ -416,7 +416,7 @@ impl ContentSink for OpsCollector {
     }
 
     fn glyph(&mut self, cx: &SinkContext, event: &GlyphEvent) {
-        let font = self.font_slot(cx, event.font_name);
+        let font = self.font_slot(cx, event.font_name, event.font);
         let upem = self.out.fonts[font].units_per_em;
         let scale = if upem > 0.0 { 1.0 / upem } else { 0.001 };
         // Glyph-Space → Text-Space → User-Space, in einer Matrix.
@@ -522,8 +522,9 @@ fn font_entry(
     Some((id, resolved.as_dict().ok()?.clone()))
 }
 
-fn load_font_program(doc: &Document, dict: &Dictionary) -> FontProgram {
-    let info: FontInfo = font_from_dict(doc, dict);
+/// Baut das Renderer-Fontprogramm aus dem Dictionary und den **schon
+/// vorliegenden** Metriken (siehe [`crate::content::GlyphEvent::font`]).
+fn load_font_program(doc: &Document, dict: &Dictionary, info: &FontInfo) -> FontProgram {
     let subtype = deref(doc, dict.get(b"Subtype").ok())
         .and_then(|o| o.as_name().ok())
         .map(|n| n.to_vec())
@@ -1463,19 +1464,6 @@ fn is_delimiter(byte: u8) -> bool {
 // ---------------------------------------------------------------------------
 // Kleinkram
 // ---------------------------------------------------------------------------
-
-fn deref<'a>(doc: &'a Document, obj: Option<&'a Object>) -> Option<&'a Object> {
-    let obj = obj?;
-    doc.dereference(obj).map(|(_, o)| o).ok()
-}
-
-fn as_f64(obj: &Object) -> Option<f64> {
-    match obj {
-        Object::Integer(i) => Some(*i as f64),
-        Object::Real(r) => Some(*r as f64),
-        _ => None,
-    }
-}
 
 /// Ganzzahl aus einem Bild-Dictionary; Inline-Bilder benutzen Kurznamen.
 ///

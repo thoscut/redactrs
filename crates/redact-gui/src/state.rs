@@ -697,6 +697,55 @@ impl AppState {
         true
     }
 
+    /// Beginnt eine Änderung, die über mehrere Bilder läuft.
+    ///
+    /// Legt **einmal** den Stand davor im Verlauf ab. Ein Ziehvorgang am
+    /// Eckgriff ändert das Rechteck in jedem Bild; käme jedes davon in den
+    /// Stapel, stünden nach einer Sekunde Ziehen sechzig Schritte darin und
+    /// „Rückgängig“ führte nicht mehr zum Stand vor der Korrektur, sondern
+    /// einen Mauszuck weit zurück.
+    pub fn begin_manual_edit(&mut self) {
+        self.history.record(&self.regions);
+    }
+
+    /// Setzt das Rechteck einer Region — **ohne** Verlaufseintrag.
+    ///
+    /// Für den laufenden Ziehvorgang gedacht; den einen Schnappschuss legt
+    /// [`AppState::begin_manual_edit`] zu dessen Beginn an.
+    ///
+    /// **Ein von Hand geändertes Rechteck ist nicht mehr das, was das Muster
+    /// gefunden hat.** Der Treffer wird deshalb zu einer manuellen Region:
+    /// Farbe, Beschreibung und Audit-Log sagen dann „selbst gezeichnet“, die
+    /// Rückfrage vor Datenverlust zählt ihn mit, und eine erneute Analyse wirft
+    /// die Korrektur nicht weg (sie ersetzt nur die automatisch gefundenen
+    /// Regionen). Der ursprüngliche Fund taucht nach einer erneuten Analyse
+    /// wieder auf; liegt er ganz im korrigierten Rechteck, weist ihn
+    /// `resolve_conflicts` als „doppelt“ aus.
+    ///
+    /// **Ausnahme sind schützende Treffer der Negativliste**: aus ihnen darf
+    /// durch ein Ziehen niemals eine Schwärzung werden — das kehrte ihre
+    /// Bedeutung um. Sie behalten Herkunft und Wirkung, nur ihr Rechteck ändert
+    /// sich. Der Preis dieser Ausnahme: [`AnnotatedRegion::is_hand_made`] sieht
+    /// ihnen die Änderung nicht an, ein allein daran geändertes Dokument gilt
+    /// also als unbearbeitet. Ein eigenes Merkmal dafür wäre mehr Zustand, als
+    /// dieser Fall wert ist; rückgängig machen lässt sich die Änderung
+    /// trotzdem.
+    pub fn set_region_rect(&mut self, index: usize, rect: Rect) -> bool {
+        let Some(entry) = self.regions.get_mut(index) else {
+            return false;
+        };
+        entry.region.rect = rect;
+        let stays =
+            entry.region.is_blocking() || matches!(entry.region.source, Source::Manual { .. });
+        if !stays {
+            entry.region.source = Source::Manual {
+                reason: "Treffer von Hand angepasst".to_string(),
+            };
+            entry.color = RegionColor::from_source(&entry.region.source);
+        }
+        true
+    }
+
     /// Ändert den Aktivzustand einer Region.
     ///
     /// Eine blockierende (Negativlisten-)Region lässt sich **nicht**
@@ -1295,6 +1344,68 @@ mod tests {
         assert!(!state.move_selected(1.0, 1.0));
     }
 
+    /// Ein von Hand aufgezogener Muster-Treffer ist nicht mehr das, was das
+    /// Muster gefunden hat — er wird zur manuellen Region. Ein schützender
+    /// Treffer der Negativliste behält dagegen seine Herkunft: aus Schutz darf
+    /// durch ein Ziehen keine Schwärzung werden.
+    #[test]
+    fn resizing_turns_a_pattern_hit_into_a_manual_region_but_never_a_protecting_one() {
+        let mut state = AppState::new();
+        state.regions.push(AnnotatedRegion::new(pattern_region(
+            0,
+            Rect::new(10.0, 10.0, 50.0, 20.0),
+        )));
+        state.regions.push(AnnotatedRegion::new(negative_region(
+            0,
+            Rect::new(60.0, 10.0, 90.0, 20.0),
+        )));
+
+        let bigger = Rect::new(5.0, 5.0, 60.0, 30.0);
+        assert!(state.set_region_rect(0, bigger));
+        assert_eq!(state.regions[0].region.rect, bigger);
+        assert!(matches!(
+            state.regions[0].region.source,
+            Source::Manual { .. }
+        ));
+        assert_eq!(state.regions[0].color, RegionColor::Manual);
+        assert!(state.regions[0].enabled, "geschwärzt wird weiter");
+        assert!(state.regions[0].is_hand_made());
+
+        let wider = Rect::new(55.0, 5.0, 95.0, 30.0);
+        assert!(state.set_region_rect(1, wider));
+        assert_eq!(state.regions[1].region.rect, wider);
+        assert!(
+            state.regions[1].is_blocking(),
+            "der Schutz darf nicht verlorengehen"
+        );
+        assert_eq!(state.regions[1].color, RegionColor::AutoBookingNeg);
+        assert!(!state.regions[1].enabled);
+
+        // Ohne Region passiert nichts.
+        assert!(!state.set_region_rect(7, bigger));
+    }
+
+    /// Der Schnappschuss gehört an den Anfang eines Ziehvorgangs, nicht in
+    /// jedes Bild: `set_region_rect` legt selbst keinen an.
+    #[test]
+    fn only_begin_manual_edit_writes_to_the_history() {
+        let mut state = AppState::new();
+        state.add_manual_region(0, Rect::new(0.0, 0.0, 10.0, 10.0), "test");
+        let depth = state.history.undo_depth();
+
+        state.begin_manual_edit();
+        for step in 1..=30 {
+            state.set_region_rect(0, Rect::new(0.0, 0.0, 10.0 + step as f64, 10.0));
+        }
+        assert_eq!(state.history.undo_depth(), depth + 1);
+
+        assert!(state.undo());
+        assert_eq!(
+            state.regions[0].region.rect,
+            Rect::new(0.0, 0.0, 10.0, 10.0)
+        );
+    }
+
     #[test]
     fn negative_region_cannot_be_enabled() {
         let mut state = AppState::new();
@@ -1414,7 +1525,10 @@ mod tests {
         let log: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&audit).unwrap()).unwrap();
         assert!(!log["redactions"].as_array().unwrap().is_empty());
-        assert_eq!(log["redactions"][0]["page"], serde_json::json!(1));
+        // Das Audit-Log zählt Seiten 0-basiert wie jede andere Datei auch
+        // (`AuditEntry::page`); der erste Treffer des Demo-Auszugs steht auf
+        // der ersten Seite.
+        assert_eq!(log["redactions"][0]["page"], serde_json::json!(0));
         assert_eq!(
             log["input"]["sha256"].as_str().unwrap(),
             state.input_sha256,

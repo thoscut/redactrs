@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
-use redact_core::{Rect, RedactError, Redaction, Redactor, Result};
+use redact_core::{Rect, RedactError, Redaction, Result};
 
 use crate::content::{ShowItem, ShowRecord, StreamKey};
 use crate::image::InlineTarget;
@@ -208,7 +208,8 @@ impl PdfRedactor {
         self
     }
 
-    /// Wie [`Redactor::apply`], liefert aber zusätzlich einen Bericht.
+    /// Führt die Schwärzungen aus und liefert einen Bericht darüber, was
+    /// tatsächlich gewirkt hat.
     pub fn apply_with_report(
         &self,
         doc: &mut Document,
@@ -436,12 +437,6 @@ impl PdfRedactor {
             add_placeholder_font(doc, page_id)?;
         }
         replace_page_content(doc, page_id, encoded, content_users)
-    }
-}
-
-impl Redactor for PdfRedactor {
-    fn apply(&self, doc: &mut Document, redactions: &[Redaction]) -> Result<()> {
-        self.apply_with_report(doc, redactions).map(|_| ())
     }
 }
 
@@ -785,25 +780,13 @@ fn placeholder_ops(text: &str, rect: &Rect) -> Vec<Operation> {
         Operation::new("Td", vec![real(rect.ll.x + 1.0), real(baseline)]),
         Operation::new(
             "Tj",
-            vec![Object::String(to_win_ansi(text), StringFormat::Literal)],
+            vec![Object::String(
+                crate::encoding::to_win_ansi(text),
+                StringFormat::Literal,
+            )],
         ),
         Operation::new("ET", vec![]),
     ]
-}
-
-/// Kodiert den Ersatztext für die WinAnsi-Helvetica-Ressource.
-/// Nicht darstellbare Zeichen werden zu `?`.
-fn to_win_ansi(text: &str) -> Vec<u8> {
-    let table = crate::encoding::win_ansi_encoding();
-    text.chars()
-        .map(|ch| {
-            table
-                .iter()
-                .position(|entry| *entry == Some(ch))
-                .map(|i| i as u8)
-                .unwrap_or(b'?')
-        })
-        .collect()
 }
 
 fn add_placeholder_font(doc: &mut Document, page_id: ObjectId) -> Result<()> {

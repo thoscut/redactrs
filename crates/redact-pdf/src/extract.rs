@@ -7,7 +7,7 @@
 //! sie nicht. Deshalb werden hier alle Glyphen einer Seite eingesammelt,
 //! nach Grundlinie gruppiert und zu Zeilen zusammengesetzt.
 
-use lopdf::{Document, ObjectId};
+use lopdf::Document;
 use redact_core::{Extractor, Glyph, Rect, Result, TextRun};
 
 use crate::content::{scan_page, GlyphItem};
@@ -325,31 +325,6 @@ fn sort_key(g: &GlyphItem, tol: f64) -> (i64, f64, f64) {
         -(across_of(g) / tol).round(),
         along_of(g),
     )
-}
-
-// ---------------------------------------------------------------------------
-// Warnungen
-// ---------------------------------------------------------------------------
-
-/// Alle Font-Warnungen eines Dokuments, ohne Wiederholungen.
-///
-/// Gedacht für Aufrufer, die den Text nicht selbst brauchen — etwa die
-/// Schwärzung, die sie in ihren Bericht übernimmt.
-pub fn font_warnings(doc: &Document) -> Result<Vec<String>> {
-    let mut out: Vec<String> = Vec::new();
-    for (_, page_id) in doc.get_pages() {
-        collect_warnings(doc, page_id, &mut out)?;
-    }
-    Ok(out)
-}
-
-fn collect_warnings(doc: &Document, page_id: ObjectId, out: &mut Vec<String>) -> Result<()> {
-    for warning in scan_page(doc, page_id)?.warnings {
-        if !out.contains(&warning) {
-            out.push(warning);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use redact_booking::CsvBookingLoader;
-use redact_core::{BookingLoader, ListType, RedactError};
+use redact_core::{ListType, RedactError};
 
 /// Lädt CSV aus einem String und erwartet Erfolg.
 fn load(csv: &str) -> Vec<redact_core::BookingEntry> {

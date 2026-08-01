@@ -77,7 +77,15 @@ pub struct FileInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
-    /// 1-basierte Seitennummer (im Log menschenlesbar, intern 0-basiert).
+    /// Seitennummer, **0-basiert** — dieselbe Zählweise wie in der
+    /// Review-Datei, in `--manual-regions` und im ganzen Werkzeug.
+    ///
+    /// Früher zählte allein das Audit-Log ab 1. Damit bedeutete `page` in
+    /// `review.json` und in `audit.json` nicht dasselbe, obwohl der Workflow
+    /// dazu einlädt, beide Dateien nebeneinander zu legen: eine aus dem Log
+    /// abgeschriebene Seitenzahl landete in einer Regionsdatei eine Seite zu
+    /// weit hinten. Es gilt jetzt eine Regel: **JSON zählt ab 0, Fließtext
+    /// (Konsole, Oberfläche) sagt „Seite 1“.**
     pub page: usize,
     /// Das gefundene Rechteck, so wie die Analyse es geliefert hat.
     pub rect: Rect,
@@ -192,6 +200,7 @@ impl From<&MetadataReport> for MetadataRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockedEntry {
+    /// 0-basiert, siehe [`AuditEntry::page`].
     pub page: usize,
     pub pattern: String,
     pub booking_id: String,
@@ -230,7 +239,7 @@ impl AuditLog {
         let entries: Vec<AuditEntry> = redactions
             .iter()
             .map(|r| AuditEntry {
-                page: r.region.page + 1,
+                page: r.region.page,
                 rect: r.region.rect,
                 effective_rect: r.region.rect.expanded(applied.padding),
                 effect: EntryEffect::of(r.region.rect, applied.padding),
@@ -273,7 +282,7 @@ impl AuditLog {
             blocked_by_negative_list: blocked
                 .iter()
                 .map(|b| BlockedEntry {
-                    page: b.page + 1,
+                    page: b.page,
                     pattern: b.pattern.clone(),
                     booking_id: b.booking_id.clone(),
                     blocked_reason: b.blocked_reason.clone(),
@@ -438,14 +447,14 @@ mod tests {
     }
 
     #[test]
-    fn audit_entries_use_one_based_pages() {
+    fn audit_entries_use_zero_based_pages_like_every_other_file() {
         let report = RedactionReport {
             removed_glyphs: 4,
             drawn_rects: 1,
             ..Default::default()
         };
         let (log, dir) = build(&[iban_redaction()], 1.0, &report, &stripped_info());
-        assert_eq!(log.redactions[0].page, 1);
+        assert_eq!(log.redactions[0].page, 0);
         assert_eq!(log.redactions[0].source, "auto");
         assert!(log.redactions[0].reason.contains("iban_de"));
         assert!(log.metadata_stripped);

@@ -123,9 +123,6 @@ pub struct ImageOutcome {
     /// Davon: Bilder, die kopiert werden mussten, weil sie mehrfach benutzt
     /// werden.
     pub copied_images: usize,
-    /// Summe der gefüllten Pixel. Überlappen sich zwei Schwärzungsbereiche in
-    /// einem Bild, zählt der gemeinsame Teil je Bereich einmal.
-    pub filled_pixels: u64,
     /// Höchstzahl der **gleichzeitig** dekodiert gehaltenen Bilder.
     ///
     /// Der Speicherbedarf selbst lässt sich im Test kaum messen; diese Zahl
@@ -263,7 +260,6 @@ fn write_work(
     if work.filled == 0 {
         return Ok(());
     }
-    outcome.filled_pixels += work.filled;
     match key {
         Key::Inline(target, op_index) => {
             let (dict, data) = encode_inline(&work)?;

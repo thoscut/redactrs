@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 
-use redact_core::{BookingEntry, BookingLoader, ListType, RedactError, Result};
+use redact_core::{BookingEntry, ListType, RedactError, Result};
 use serde::Deserialize;
 
 /// Spalten, die in der Kopfzeile vorhanden sein müssen.
@@ -98,10 +98,9 @@ impl CsvBookingLoader {
 
         Ok(entries)
     }
-}
 
-impl BookingLoader for CsvBookingLoader {
-    fn load(&self, path: &Path) -> Result<Vec<BookingEntry>> {
+    /// Liest eine Buchungsliste aus einer Datei.
+    pub fn load(&self, path: &Path) -> Result<Vec<BookingEntry>> {
         let file = std::fs::File::open(path).map_err(|e| {
             RedactError::Booking(format!(
                 "Buchungsliste `{}` kann nicht geöffnet werden: {e}",

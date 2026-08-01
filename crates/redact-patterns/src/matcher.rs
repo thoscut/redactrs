@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use fancy_regex::Regex;
-use redact_core::{Analyzer, RedactError, Region, Result, Source, TextRun};
+use redact_core::{RedactError, Region, Result, Source, TextRun};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::builtin::{builtin_pattern_ids, builtin_patterns};
@@ -425,12 +425,6 @@ fn check(def: &PatternDef, text: &str, has_context: bool) -> Option<f32> {
         return None;
     }
     Some(confidence.max(VALIDATED_CONFIDENCE))
-}
-
-impl Analyzer for PatternMatcher {
-    fn analyze(&self, runs: &[TextRun]) -> Result<Vec<Region>> {
-        self.find_matches(runs)
-    }
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@
 //!   sensitiven Text“ — denn „Copy-Paste“ heißt in der Praxis: irgendein
 //!   fremdes Werkzeug, nicht unser eigenes.
 
-use redact_core::{Action, Extractor, Redaction, Redactor, Region, Source, TextRun};
+use redact_core::{Action, Extractor, Redaction, Region, Source, TextRun};
 use redact_pdf::testing::{build_pdf, demo_statement, TextItem};
 use redact_pdf::{
     leaks, load_from_bytes, save_to_bytes, strip_metadata, PdfExtractor, PdfRedactor,
@@ -75,7 +75,7 @@ fn redaction_for(runs: &[TextRun], needle: &str) -> Redaction {
 fn redact(bytes: &[u8], redactions: &[Redaction]) -> Vec<u8> {
     let mut doc = load_from_bytes(bytes).expect("PDF ladbar");
     PdfRedactor::new()
-        .apply(&mut doc, redactions)
+        .apply_with_report(&mut doc, redactions)
         .expect("Schwärzung");
     strip_metadata(&mut doc);
     save_to_bytes(&doc).expect("Speichern")

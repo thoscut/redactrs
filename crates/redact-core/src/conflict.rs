@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::Rect;
-use crate::model::{MatchType, Region, Source};
+use crate::model::{Region, Source};
 
 /// Ein durch die Negativliste blockierter Treffer (für das Audit-Log).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -154,28 +154,10 @@ fn dedup(regions: &mut Vec<Region>) {
     *regions = keep;
 }
 
-/// Alle Rechtecke einer Seite, die verhindern, dass Text entfernt wird.
-pub fn negative_rects(regions: &[Region], page: usize) -> Vec<Rect> {
-    regions
-        .iter()
-        .filter(|r| {
-            r.page == page
-                && matches!(
-                    r.source,
-                    Source::Booking {
-                        match_type: MatchType::Negative,
-                        ..
-                    }
-                )
-        })
-        .map(|r| r.rect)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Region;
+    use crate::model::{MatchType, Region};
 
     fn pattern_region(page: usize, rect: Rect) -> Region {
         Region::new(

@@ -38,9 +38,8 @@ use std::path::{Path, PathBuf};
 use lopdf::Document;
 use redact_booking::{BookingMatcher, CsvBookingLoader};
 use redact_core::{
-    output_path_with_suffix, resolve_conflicts, sibling_path, Action, BlockedRegion, BookingLoader,
-    RedactError, Redaction, Region, Renderer, Result, ReviewFile, ReviewInput, TextRun,
-    REVIEW_SUFFIX,
+    output_path_with_suffix, resolve_conflicts, sibling_path, Action, BlockedRegion, RedactError,
+    Redaction, Region, Result, ReviewFile, ReviewInput, TextRun, REVIEW_SUFFIX,
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::document::{
@@ -601,6 +600,9 @@ pub fn plan_outputs(config: &Config) -> Result<OutputPlan> {
 }
 
 /// Zusätzlich verfügbare Blocker-Informationen für die Ausgabe.
+///
+/// Das `+ 1` ist Absicht und die einzige erlaubte Umrechnung: Fließtext sagt
+/// „Seite 1“, JSON zählt ab 0 (siehe [`audit::AuditEntry::page`]).
 pub fn describe_blocked(blocked: &[BlockedRegion]) -> Vec<String> {
     blocked
         .iter()
@@ -700,20 +702,6 @@ mod tests {
             check_review_identity(&review_with(&document), &document, false).unwrap(),
             ReviewIdentity::Matches
         );
-    }
-
-    /// Die Vorgaben der Kommandozeile und die von [`Config::default`] müssen
-    /// dieselben sein — sonst arbeitet die Oberfläche mit anderen Werten.
-    #[test]
-    fn defaults_are_the_documented_ones() {
-        let config = Config::default();
-        assert_eq!(config.padding, DEFAULT_PADDING);
-        assert_eq!(config.max_candidates, DEFAULT_MAX_CANDIDATES);
-        assert_eq!(config.action, Action::Blackout);
-        assert!(!config.force);
-        assert!(!config.allow_undecodable_images);
-        assert!(!config.allow_unverified_review);
-        assert_eq!(config.output_suffix, redact_core::DEFAULT_OUTPUT_SUFFIX);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Integrationstests für das Pattern-Matching auf synthetischen Text-Runs.
 
-use redact_core::{Analyzer, Glyph, Rect, Region, Source, TextRun};
+use redact_core::{Glyph, Rect, Region, Source, TextRun};
 use redact_patterns::{builtin_pattern_ids, PatternMatcher};
 
 /// Baut einen Text-Run, in dem jedes Zeichen 5 pt breit und 10 pt hoch ist.
@@ -479,13 +479,4 @@ fn output_is_deterministic_and_ordered_by_run_then_pattern() {
     let mut sorted_order = order.clone();
     sorted_order.sort_unstable();
     assert_eq!(order, sorted_order);
-}
-
-#[test]
-fn analyzer_trait_delegates_to_find_matches() {
-    let m = matcher_for(&["date_de"]);
-    let runs = vec![run(3, "am 01.02.2023")];
-    let via_trait = Analyzer::analyze(&m, &runs).unwrap();
-    assert_eq!(via_trait, m.find_matches(&runs).unwrap());
-    assert_eq!(texts(&via_trait), vec!["01.02.2023"]);
 }

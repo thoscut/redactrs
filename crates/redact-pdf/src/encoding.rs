@@ -245,6 +245,23 @@ pub fn win_ansi_encoding() -> [Option<char>; 256] {
     t
 }
 
+/// Rückwärtssuche in [`win_ansi_encoding`]: Text → WinAnsi-Bytes.
+///
+/// Nicht darstellbare Zeichen werden zu `?`. Steht hier, weil die Tabelle hier
+/// steht — Schwärzung (Ersatztext) und Testfixtures brauchen dieselbe Umkehrung.
+pub fn to_win_ansi(text: &str) -> Vec<u8> {
+    let table = win_ansi_encoding();
+    text.chars()
+        .map(|ch| {
+            table
+                .iter()
+                .position(|entry| *entry == Some(ch))
+                .map(|i| i as u8)
+                .unwrap_or(b'?')
+        })
+        .collect()
+}
+
 /// MacRomanEncoding.
 pub fn mac_roman_encoding() -> [Option<char>; 256] {
     let mut t = [None; 256];

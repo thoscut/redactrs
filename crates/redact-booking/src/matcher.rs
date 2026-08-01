@@ -1,7 +1,7 @@
 //! Abgleich von Text gegen Positiv- und Negativliste.
 
 use redact_core::{
-    Analyzer, BookingEntry, ListType, MatchType, RedactError, Region, Result, Source, TextRun,
+    BookingEntry, ListType, MatchType, RedactError, Region, Result, Source, TextRun,
 };
 
 use crate::normalize::{normalize_needle, Normalized};
@@ -64,11 +64,6 @@ impl Compiled {
             .match_indices(self.needle.as_str())
             .map(|(start, m)| (start, start + m.len()))
             .filter(|&(start, end)| self.context_ok(&hay.text, start, end))
-    }
-
-    /// Erste kontext-geprüfte Fundstelle, falls vorhanden.
-    fn first_match(&self, hay: &Normalized) -> Option<(usize, usize)> {
-        self.occurrences(hay).next()
     }
 
     /// Prüft `context_before` gegen den Text vor und `context_after` gegen den
@@ -144,34 +139,7 @@ impl BookingMatcher {
         self.positive.is_empty() && self.negative.is_empty()
     }
 
-    /// Konzept-API: prüft eine ganze Region anhand ihres Textes.
-    ///
-    /// Die Negativliste hat Vorrang. Ohne Text (`region.text == None`) gibt es
-    /// keinen Treffer.
-    pub fn match_region(&self, region: &Region) -> Option<Source> {
-        let text = region.text.as_deref()?;
-        let hay = Normalized::new(text);
-
-        for compiled in &self.negative_compiled {
-            if compiled.first_match(&hay).is_some() {
-                return Some(Source::Booking {
-                    booking_id: compiled.id.clone(),
-                    match_type: MatchType::Negative,
-                });
-            }
-        }
-        for compiled in &self.positive_compiled {
-            if compiled.first_match(&hay).is_some() {
-                return Some(Source::Booking {
-                    booking_id: compiled.id.clone(),
-                    match_type: MatchType::Positive,
-                });
-            }
-        }
-        None
-    }
-
-    /// Präzise Variante: eine Region je Fundstelle mit exakter Bounding-Box.
+    /// Sucht alle Treffer: eine Region je Fundstelle mit exakter Bounding-Box.
     ///
     /// **Je Run, nicht über Runs hinweg.** Jeder `TextRun` ist eine extrahierte
     /// Zeile und wird für sich normalisiert und durchsucht; ein Muster, das im
@@ -248,11 +216,5 @@ impl BookingMatcher {
                 ));
             }
         }
-    }
-}
-
-impl Analyzer for BookingMatcher {
-    fn analyze(&self, runs: &[TextRun]) -> Result<Vec<Region>> {
-        self.find_matches(runs)
     }
 }

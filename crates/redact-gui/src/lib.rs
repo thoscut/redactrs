@@ -112,7 +112,7 @@ pub use app::{
 };
 pub use history::{History, HISTORY_LIMIT};
 pub use render::{PageCache, PageMeta};
-pub use selector::{hit_test, RectangleSelector};
+pub use selector::{hit_handle, hit_test, Handle, HandleDrag, PointerFrame, RectangleSelector};
 pub use state::{sha256_hex, AnnotatedRegion, AppState, HitOutcome, HitSummary, RegionColor};
 // Die Identitätsprüfung liegt jetzt in der gemeinsamen Kette; hier bleibt nur
 // der gewohnte Name.

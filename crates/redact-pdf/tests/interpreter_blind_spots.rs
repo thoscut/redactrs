@@ -20,7 +20,7 @@ mod common;
 
 use common::SECRET;
 use lopdf::{dictionary, Document, Object, Stream};
-use redact_core::{Action, Extractor, Redaction, Redactor, Region, Source, TextRun};
+use redact_core::{Action, Extractor, Redaction, Region, Source, TextRun};
 use redact_pdf::{
     content::scan_page, leaks, load_from_bytes, save_to_bytes, strip_metadata, PdfExtractor,
     PdfRedactor, ScanResult,
@@ -53,7 +53,7 @@ fn extracted_text(bytes: &[u8]) -> String {
 fn pipeline(bytes: &[u8], redactions: &[Redaction]) -> Vec<u8> {
     let mut doc = load_from_bytes(bytes).expect("PDF ladbar");
     PdfRedactor::new()
-        .apply(&mut doc, redactions)
+        .apply_with_report(&mut doc, redactions)
         .expect("Schwärzung");
     strip_metadata(&mut doc);
     save_to_bytes(&doc).expect("Speichern")
@@ -473,7 +473,9 @@ fn warnings_reach_the_extractor_api() {
     assert_warns(&warnings, "/Subtype");
 
     let doc = load_from_bytes(&nested_forms(SECRET, 12)).expect("PDF ladbar");
-    let warnings = redact_pdf::extract::font_warnings(&doc).expect("Warnungen");
+    let (_runs, warnings) = PdfExtractor::new()
+        .extract_with_warnings(&doc)
+        .expect("Extraktion");
     assert_warns(&warnings, "verschachtelt");
 }
 

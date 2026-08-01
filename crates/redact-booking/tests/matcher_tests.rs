@@ -2,7 +2,7 @@
 
 use redact_booking::BookingMatcher;
 use redact_core::{
-    Analyzer, BookingEntry, Glyph, ListType, MatchType, Rect, RedactError, Region, Source, TextRun,
+    BookingEntry, Glyph, ListType, MatchType, Rect, RedactError, Region, Source, TextRun,
 };
 
 /// Breite jedes synthetischen Glyphen in pt.
@@ -294,82 +294,6 @@ fn ordering_is_deterministic_negative_first_then_file_order() {
 }
 
 #[test]
-fn match_region_prefers_negative_list() {
-    let m = matcher(vec![
-        entry("b001", ListType::Positive, "Musterfirma GmbH"),
-        entry("b003", ListType::Negative, "Max Mustermann"),
-    ]);
-    let region = Region::new(
-        0,
-        Rect::new(0.0, 0.0, 100.0, 10.0),
-        Some("Max Mustermann, Musterfirma GmbH".into()),
-        Source::Manual {
-            reason: "test".into(),
-        },
-    );
-    assert_eq!(
-        m.match_region(&region),
-        Some(Source::Booking {
-            booking_id: "b003".into(),
-            match_type: MatchType::Negative,
-        })
-    );
-}
-
-#[test]
-fn match_region_returns_positive_and_none() {
-    let m = matcher(vec![entry("b001", ListType::Positive, "Musterfirma GmbH")]);
-    let with_hit = Region::new(
-        1,
-        Rect::new(0.0, 0.0, 10.0, 10.0),
-        Some("zahlung an musterfirma  gmbh".into()),
-        Source::Manual {
-            reason: "test".into(),
-        },
-    );
-    assert_eq!(
-        m.match_region(&with_hit),
-        Some(Source::Booking {
-            booking_id: "b001".into(),
-            match_type: MatchType::Positive,
-        })
-    );
-
-    let without_text = Region::new(
-        1,
-        Rect::new(0.0, 0.0, 10.0, 10.0),
-        None,
-        Source::Manual {
-            reason: "test".into(),
-        },
-    );
-    assert_eq!(m.match_region(&without_text), None);
-}
-
-#[test]
-fn match_region_respects_context() {
-    let mut e = entry("b001", ListType::Positive, "Musterfirma GmbH");
-    e.context_before = Some("Überweisung an".to_string());
-    let m = matcher(vec![e]);
-    let region = |text: &str| {
-        Region::new(
-            0,
-            Rect::new(0.0, 0.0, 10.0, 10.0),
-            Some(text.to_string()),
-            Source::Manual {
-                reason: "test".into(),
-            },
-        )
-    };
-    assert!(m
-        .match_region(&region("Überweisung an Musterfirma GmbH"))
-        .is_some());
-    assert!(m
-        .match_region(&region("Gutschrift von Musterfirma GmbH"))
-        .is_none());
-}
-
-#[test]
 fn regex_pattern_with_metacharacters_is_rejected() {
     let mut e = entry("b004", ListType::Positive, r"Rg\.\s*\d{4,}");
     e.is_regex = true;
@@ -401,17 +325,6 @@ fn blank_pattern_is_rejected_by_the_matcher() {
         Err(RedactError::Booking(msg)) => assert!(msg.contains("b099"), "{msg}"),
         other => panic!("Buchungslisten-Fehler erwartet, war: {other:?}"),
     }
-}
-
-#[test]
-fn analyzer_trait_delegates_to_find_matches() {
-    let m = matcher(vec![entry("b001", ListType::Positive, "Musterfirma GmbH")]);
-    let runs = vec![run(0, "Musterfirma GmbH")];
-    let analyzer: &dyn Analyzer = &m;
-    assert_eq!(
-        analyzer.analyze(&runs).unwrap(),
-        m.find_matches(&runs).unwrap()
-    );
 }
 
 #[test]

@@ -77,10 +77,6 @@ impl FontInfo {
         self.default_width
     }
 
-    pub fn code_width(&self) -> CodeWidth {
-        self.charmap.width
-    }
-
     /// Alle bekannten Breiten (Code → Text-Space-Einheiten).
     ///
     /// Wird vom Zeichenoperationen-Strom gebraucht, damit der Renderer
@@ -120,8 +116,7 @@ pub fn fonts_from_resources(
 /// Lädt die Metriken eines einzelnen Font-Dictionaries.
 ///
 /// Gleicher Code wie in [`fonts_from_resources`], nur für einen einzelnen
-/// Font — der Zeichenoperationen-Strom löst Fonts einzeln (und zwischenge-
-/// speichert) auf.
+/// Font. Einstieg für Tests, die einen Font ohne Seite drumherum prüfen.
 pub fn font_from_dict(doc: &Document, font: &Dictionary) -> FontInfo {
     load_font(doc, font)
 }
@@ -132,7 +127,8 @@ fn resolve_dict<'a>(doc: &'a Document, obj: Option<&'a Object>) -> Result<&'a Di
     obj.as_dict().map_err(|_| ())
 }
 
-fn deref<'a>(doc: &'a Document, obj: Option<&'a Object>) -> Option<&'a Object> {
+/// Löst eine Referenz auf; die eine Fassung für das ganze Crate.
+pub(crate) fn deref<'a>(doc: &'a Document, obj: Option<&'a Object>) -> Option<&'a Object> {
     let obj = obj?;
     doc.dereference(obj).map(|(_, o)| o).ok()
 }
@@ -490,7 +486,8 @@ fn base_table(name: &[u8]) -> [Option<char>; 256] {
     }
 }
 
-fn as_f64(obj: &Object) -> Option<f64> {
+/// Zahl aus einem PDF-Objekt; die eine Fassung für das ganze Crate.
+pub(crate) fn as_f64(obj: &Object) -> Option<f64> {
     match obj {
         Object::Integer(i) => Some(*i as f64),
         Object::Real(r) => Some(*r as f64),

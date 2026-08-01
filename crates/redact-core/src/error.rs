@@ -6,8 +6,6 @@ use thiserror::Error;
 pub enum RedactError {
     #[error("PDF-Fehler: {0}")]
     Pdf(String),
-    #[error("OCR-Fehler: {0}")]
-    Ocr(String),
     #[error("Pattern-Fehler: {0}")]
     Pattern(String),
     #[error("Buchungslisten-Fehler: {0}")]

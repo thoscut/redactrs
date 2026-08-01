@@ -65,7 +65,10 @@ pub fn build_pdf(pages: &[Vec<TextItem>]) -> Vec<u8> {
             ));
             operations.push(Operation::new(
                 "Tj",
-                vec![Object::String(win_ansi(&item.text), StringFormat::Literal)],
+                vec![Object::String(
+                    crate::encoding::to_win_ansi(&item.text),
+                    StringFormat::Literal,
+                )],
             ));
         }
         operations.push(Operation::new("ET", vec![]));
@@ -161,17 +164,4 @@ pub fn demo_statement() -> Vec<u8> {
         TextItem::new(72.0, 705.0, 10.0, "Steuer-ID: 12345678901"),
     ];
     build_pdf(&[page1, page2])
-}
-
-fn win_ansi(text: &str) -> Vec<u8> {
-    let table = crate::encoding::win_ansi_encoding();
-    text.chars()
-        .map(|ch| {
-            table
-                .iter()
-                .position(|entry| *entry == Some(ch))
-                .map(|i| i as u8)
-                .unwrap_or(b'?')
-        })
-        .collect()
 }

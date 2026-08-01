@@ -21,7 +21,7 @@ use egui::{Color32, Key, Pos2, RichText, Stroke, Vec2};
 use redact_core::ReviewFile;
 
 use crate::render::PageCache;
-use crate::selector::{hit_test, RectangleSelector};
+use crate::selector::{hit_handle, hit_test, HandleDrag, PointerFrame, RectangleSelector};
 use crate::state::{AppState, HitSummary, RegionColor, MAX_ZOOM, MIN_ZOOM};
 use crate::theme::Theme;
 use crate::toolbar::{self, ToolAction, ToolContext, ToolItem};
@@ -408,6 +408,8 @@ fn empty_state(ui: &mut egui::Ui) {
 pub struct RedactApp {
     pub state: AppState,
     selector: RectangleSelector,
+    /// Läuft gerade eine Größenänderung an einem Eckgriff?
+    resize: Option<HandleDrag>,
     /// Letzte Fehlermeldung; wird als roter Text in der Statuszeile gezeigt.
     error: Option<String>,
     /// Fläche des Hauptbereichs im letzten Frame — Grundlage für den
@@ -448,6 +450,7 @@ impl RedactApp {
         Self {
             state: AppState::with_config(config),
             selector: RectangleSelector::new(),
+            resize: None,
             error: None,
             central_rect: None,
             pages: PageCache::new(),
@@ -954,18 +957,156 @@ impl RedactApp {
         page: usize,
         zoom: f32,
     ) {
-        // Klick wählt aus (oder hebt die Auswahl auf).
-        if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let point = viewer::screen_to_pdf_point(pos, view, zoom, origin);
-                self.state.selected_region = hit_test(&self.state.regions, page, point);
+        self.apply_pointer(
+            PointerFrame::from_response(response),
+            response.clicked(),
+            view,
+            origin,
+            page,
+            zoom,
+        );
+        self.show_handle_cursor(response, view, origin, page, zoom);
+    }
+
+    /// Das Bildschirmrechteck der ausgewählten Region, sofern sie auf dieser
+    /// Seite liegt.
+    fn selected_screen_rect(
+        &self,
+        view: &viewer::PageView,
+        origin: Pos2,
+        page: usize,
+        zoom: f32,
+    ) -> Option<(usize, egui::Rect)> {
+        let index = self.state.selected_region?;
+        let entry = self.state.regions.get(index)?;
+        (entry.region.page == page).then(|| {
+            (
+                index,
+                viewer::pdf_to_screen(&entry.region.rect, view, zoom, origin),
+            )
+        })
+    }
+
+    /// Alles, was die Maus im Seitenbild bewirkt — als reine Zustandsänderung
+    /// ohne `Response`, damit die **Reihenfolge der Fälle** ohne Bildschirm
+    /// prüfbar ist.
+    ///
+    /// Und die Reihenfolge ist hier die eigentliche Aussage: ein Zug, der auf
+    /// einem Eckgriff der ausgewählten Region beginnt, ändert diese Region.
+    /// Erst wenn kein Griff im Spiel ist, legt ein Zug ein neues Rechteck an.
+    /// Ohne diesen Vorrang entstünde bei jedem Korrekturversuch ein zweites
+    /// Rechteck über dem ersten.
+    fn apply_pointer(
+        &mut self,
+        frame: PointerFrame,
+        clicked: bool,
+        view: &viewer::PageView,
+        origin: Pos2,
+        page: usize,
+        zoom: f32,
+    ) {
+        // 1. Eine laufende Größenänderung hat Vorrang vor allem anderen.
+        if let Some(drag) = self.resize {
+            if let Some(pos) = frame.pos.filter(|_| frame.dragged || frame.drag_stopped) {
+                let corner = viewer::screen_to_pdf_point(pos, view, zoom, origin);
+                // `from_corners` normalisiert: zieht man über die Gegenecke
+                // hinaus, entsteht kein negatives Rechteck, sondern ein
+                // gespiegeltes.
+                self.state.set_region_rect(
+                    drag.region,
+                    redact_core::Rect::from_corners(drag.anchor, corner),
+                );
+            }
+            if !frame.dragged {
+                // Losgelassen oder abgebrochen — der Zug ist vorbei.
+                self.resize = None;
+                self.state.status = "Rechteck angepasst".to_string();
+            }
+            return;
+        }
+
+        // 2. Beginnt der Zug auf einem Eckgriff der ausgewählten Region?
+        if frame.drag_started {
+            if let Some(drag) = self.grab_handle(&frame, view, origin, page, zoom) {
+                // Der Zug gehört jetzt dem Griff; der Selektor darf ihn nicht
+                // zusätzlich als neues Rechteck sehen.
+                self.selector.cancel();
+                self.state.begin_manual_edit();
+                self.resize = Some(drag);
+                // Das erste Bild gleich mitnehmen, sonst hinkt die Anzeige.
+                self.apply_pointer(frame, false, view, origin, page, zoom);
+                return;
             }
         }
 
-        // Ziehen legt eine manuelle Region an.
-        if let Some((a, b)) = self.selector.interact(response) {
+        // 3. Klick wählt aus (oder hebt die Auswahl auf).
+        if clicked {
+            if let Some(pos) = frame.pos {
+                // Ein Klick auf einen Griff der ausgewählten Region behält die
+                // Auswahl: sonst verschwänden die Griffe genau dann, wenn man
+                // sie anfasst.
+                let on_handle = self
+                    .selected_screen_rect(view, origin, page, zoom)
+                    .and_then(|(_, rect)| hit_handle(rect, pos))
+                    .is_some();
+                if !on_handle {
+                    let point = viewer::screen_to_pdf_point(pos, view, zoom, origin);
+                    self.state.selected_region = hit_test(&self.state.regions, page, point);
+                }
+            }
+        }
+
+        // 4. Ziehen legt eine manuelle Region an.
+        if let Some((a, b)) = self.selector.step(frame) {
             let rect = viewer::screen_to_pdf(a, b, view, zoom, origin);
             self.state.add_manual_region(page, rect, "manuell markiert");
+        }
+    }
+
+    /// Liegt der **Druckpunkt** auf einem Eckgriff der ausgewählten Region?
+    ///
+    /// Der festgehaltene Punkt ist die gegenüberliegende **Bildschirmecke**,
+    /// in den User-Space zurückgerechnet. Damit stimmt die Zuordnung für jede
+    /// `/Rotate`-Stellung, ohne dass irgendwo eine Tabelle „welche
+    /// Bildschirmecke ist welche PDF-Ecke“ gepflegt werden müsste.
+    fn grab_handle(
+        &self,
+        frame: &PointerFrame,
+        view: &viewer::PageView,
+        origin: Pos2,
+        page: usize,
+        zoom: f32,
+    ) -> Option<HandleDrag> {
+        let press = frame.press_point()?;
+        let (index, screen) = self.selected_screen_rect(view, origin, page, zoom)?;
+        let handle = hit_handle(screen, press)?;
+        let anchor = viewer::screen_to_pdf_point(handle.opposite().pos(screen), view, zoom, origin);
+        Some(HandleDrag {
+            region: index,
+            anchor,
+        })
+    }
+
+    /// Zeigt am Mauszeiger, dass ein Griff angefasst werden kann.
+    fn show_handle_cursor(
+        &self,
+        response: &egui::Response,
+        view: &viewer::PageView,
+        origin: Pos2,
+        page: usize,
+        zoom: f32,
+    ) {
+        let Some(pos) = response
+            .hover_pos()
+            .or_else(|| response.interact_pointer_pos())
+        else {
+            return;
+        };
+        let Some((_, screen)) = self.selected_screen_rect(view, origin, page, zoom) else {
+            return;
+        };
+        if let Some(handle) = hit_handle(screen, pos) {
+            response.ctx.set_cursor_icon(handle.cursor_icon());
         }
     }
 
@@ -1097,6 +1238,11 @@ impl RedactApp {
             match *command {
                 KeyCommand::Deselect => {
                     self.selector.cancel();
+                    // Auch eine laufende Größenänderung endet hier — sonst
+                    // folgte das Rechteck weiter der Maus, obwohl seine Region
+                    // gar nicht mehr ausgewählt ist. Zurückgesetzt wird nichts:
+                    // dafür gibt es Rückgängig.
+                    self.resize = None;
                     self.state.selected_region = None;
                 }
                 KeyCommand::DeleteSelected => {
@@ -1421,6 +1567,256 @@ mod tests {
         };
         app.apply_key_commands(&key_commands(ctrl_y, false));
         assert_eq!(app.state.regions.len(), 1, "Strg+Y stellt wieder her");
+    }
+
+    // ------------------------------------------------------ Maus und Eckgriffe
+
+    /// MediaBox, deren linke untere Ecke **nicht** im Ursprung liegt.
+    fn offset_box() -> Rect {
+        Rect::new(10.0, 20.0, 605.0, 862.0)
+    }
+
+    /// Linke obere Ecke des Blatts auf dem Bildschirm.
+    const ORIGIN: Pos2 = Pos2::new(37.0, 91.0);
+    const ZOOM: f32 = 1.5;
+
+    /// Eine Anwendung mit genau einer — ausgewählten — Region und deren
+    /// Bildschirmrechteck.
+    fn app_with_selected_region(view: &viewer::PageView, rect: Rect) -> (RedactApp, egui::Rect) {
+        let mut app = RedactApp::silent(Config::default());
+        app.state.add_manual_region(0, rect, "test");
+        assert_eq!(app.state.selected_region, Some(0));
+        (app, viewer::pdf_to_screen(&rect, view, ZOOM, ORIGIN))
+    }
+
+    /// Fährt einen vollständigen Ziehvorgang ab: drücken bei `press`, über die
+    /// Punkte in `path` ziehen, am letzten loslassen.
+    ///
+    /// Bildet nach, was egui wirklich liefert: `drag_started` kommt **nach**
+    /// dem Druck (der Zeiger ist dann schon weiter), und beim Loslassen ist
+    /// `press_origin` bereits wieder `None`.
+    fn drag(app: &mut RedactApp, view: &viewer::PageView, press: Pos2, path: &[Pos2]) {
+        let (last, rest) = path.split_last().expect("mindestens ein Punkt");
+        assert!(!rest.is_empty(), "Ziehen braucht mindestens zwei Punkte");
+        for (i, pos) in rest.iter().enumerate() {
+            app.apply_pointer(
+                PointerFrame {
+                    drag_started: i == 0,
+                    dragged: true,
+                    pos: Some(*pos),
+                    press_origin: Some(press),
+                    ..PointerFrame::default()
+                },
+                false,
+                view,
+                ORIGIN,
+                0,
+                ZOOM,
+            );
+        }
+        app.apply_pointer(
+            PointerFrame {
+                drag_stopped: true,
+                pos: Some(*last),
+                ..PointerFrame::default()
+            },
+            false,
+            view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+    }
+
+    fn assert_rect_close(got: Rect, want: Rect, what: &str) {
+        let close = |a: f64, b: f64| (a - b).abs() < 0.01;
+        assert!(
+            close(got.ll.x, want.ll.x)
+                && close(got.ll.y, want.ll.y)
+                && close(got.ur.x, want.ur.x)
+                && close(got.ur.y, want.ur.y),
+            "{what}: {got:?} != {want:?}"
+        );
+    }
+
+    /// Ist `point` eine der vier Ecken von `rect`?
+    fn is_corner_of(rect: Rect, point: redact_core::Point) -> bool {
+        let close = |a: f64, b: f64| (a - b).abs() < 0.01;
+        (close(point.x, rect.ll.x) || close(point.x, rect.ur.x))
+            && (close(point.y, rect.ll.y) || close(point.y, rect.ur.y))
+    }
+
+    /// **Fehler 2.** An einem Eckgriff der ausgewählten Region zu ziehen ändert
+    /// diese Region, statt eine neue anzulegen — die gegenüberliegende
+    /// **Bildschirm**ecke bleibt dabei stehen. Geprüft für alle vier Griffe,
+    /// alle vier `/Rotate`-Werte und eine MediaBox mit Ursprung ≠ (0,0): auf
+    /// einer gedrehten Seite gehört zu „links oben auf dem Bildschirm“ jedes
+    /// Mal eine andere Ecke im User-Space.
+    #[test]
+    fn dragging_a_corner_handle_resizes_the_region_for_every_rotation() {
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+        for rotate in [0_i64, 90, 180, 270] {
+            let view = viewer::PageView::new(offset_box(), rotate);
+            for handle in crate::selector::HANDLES {
+                let (mut app, screen) = app_with_selected_region(&view, rect);
+                let corner = handle.pos(screen);
+                // Ein paar Punkte neben der Ecke gedrückt — die Trefferzone ist
+                // absichtlich größer als das gezeichnete Quadrat.
+                let press = corner + Vec2::new(3.0, -3.0);
+                let target = corner + Vec2::new(37.0, 23.0);
+                drag(
+                    &mut app,
+                    &view,
+                    press,
+                    &[press + Vec2::new(7.0, 7.0), target],
+                );
+
+                let what = format!("rot={rotate} {handle:?}");
+                assert!(app.resize.is_none(), "{what}: Zug muss beendet sein");
+                assert_eq!(
+                    app.state.regions.len(),
+                    1,
+                    "{what}: es darf kein zweites Rechteck entstehen"
+                );
+
+                let fixed =
+                    viewer::screen_to_pdf_point(handle.opposite().pos(screen), &view, ZOOM, ORIGIN);
+                let moved = viewer::screen_to_pdf_point(target, &view, ZOOM, ORIGIN);
+                assert!(
+                    is_corner_of(rect, fixed),
+                    "{what}: der festgehaltene Punkt {fixed:?} ist keine Ecke von {rect:?}"
+                );
+                assert_rect_close(
+                    app.state.regions[0].region.rect,
+                    Rect::from_corners(fixed, moved),
+                    &what,
+                );
+            }
+        }
+    }
+
+    /// Gegenprobe: **ohne** Auswahl gibt es keine Griffe, und genau derselbe
+    /// Zug legt wieder ein neues Rechteck an. Das ist die Aussage „Griff
+    /// schlägt Neuanlage“ — ohne diese Gegenprobe bewiese der Test oben nur,
+    /// dass irgendetwas nichts anlegt.
+    #[test]
+    fn the_same_drag_draws_a_new_rectangle_when_nothing_is_selected() {
+        let view = viewer::PageView::upright(offset_box());
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+        let (mut app, screen) = app_with_selected_region(&view, rect);
+        app.state.selected_region = None;
+
+        let press = screen.left_top() + Vec2::new(3.0, -3.0);
+        let target = press + Vec2::new(60.0, 40.0);
+        drag(
+            &mut app,
+            &view,
+            press,
+            &[press + Vec2::new(7.0, 7.0), target],
+        );
+
+        assert_eq!(app.state.regions.len(), 2, "hier entsteht ein Rechteck");
+        assert_eq!(
+            app.state.regions[0].region.rect, rect,
+            "die alte Region bleibt unverändert"
+        );
+    }
+
+    /// Zieht man über die Gegenecke hinaus, wird das Rechteck normalisiert —
+    /// negative Breiten oder Höhen darf es nicht geben.
+    #[test]
+    fn dragging_past_the_opposite_corner_normalizes_the_rectangle() {
+        let view = viewer::PageView::upright(offset_box());
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+        let (mut app, screen) = app_with_selected_region(&view, rect);
+
+        // Am Griff links oben weit über die Ecke rechts unten hinausziehen.
+        let press = screen.left_top();
+        let target = screen.right_bottom() + Vec2::new(60.0, 45.0);
+        drag(
+            &mut app,
+            &view,
+            press,
+            &[press + Vec2::new(7.0, 7.0), target],
+        );
+
+        let got = app.state.regions[0].region.rect;
+        assert!(got.width() > 0.0 && got.height() > 0.0, "{got:?}");
+        assert!(got.ll.x < got.ur.x && got.ll.y < got.ur.y, "{got:?}");
+        // Die feste Ecke (rechts unten auf dem Bildschirm) ist jetzt die linke
+        // obere des neuen Rechtecks.
+        let fixed = viewer::screen_to_pdf_point(screen.right_bottom(), &view, ZOOM, ORIGIN);
+        let moved = viewer::screen_to_pdf_point(target, &view, ZOOM, ORIGIN);
+        assert_rect_close(got, Rect::from_corners(fixed, moved), "gespiegelt");
+        assert!(
+            moved.x > fixed.x && moved.y < fixed.y,
+            "wirklich darüber hinaus"
+        );
+    }
+
+    /// Ein Ziehvorgang ist **ein** Schritt im Rückgängig-Stapel, nicht einer je
+    /// Bild — sonst führte „Rückgängig“ nach einer Sekunde Ziehen bloß einen
+    /// Mauszuck weit zurück.
+    #[test]
+    fn one_handle_drag_is_exactly_one_undo_step() {
+        let view = viewer::PageView::upright(offset_box());
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+        let (mut app, screen) = app_with_selected_region(&view, rect);
+        let before = app.state.history.undo_depth();
+
+        // Zwanzig Bilder Mausbewegung.
+        let press = screen.right_bottom();
+        let path: Vec<Pos2> = (1..=20)
+            .map(|i| press + Vec2::new(i as f32 * 3.0, i as f32 * 2.0))
+            .collect();
+        drag(&mut app, &view, press, &path);
+
+        assert_eq!(
+            app.state.history.undo_depth(),
+            before + 1,
+            "je Ziehvorgang genau ein Schnappschuss"
+        );
+        assert_ne!(
+            app.state.regions[0].region.rect, rect,
+            "das Rechteck muss sich geändert haben"
+        );
+        assert!(app.state.undo());
+        assert_rect_close(
+            app.state.regions[0].region.rect,
+            rect,
+            "ein Rückgängig führt zum Stand vor der Korrektur",
+        );
+    }
+
+    /// Ein Klick auf einen Griff behält die Auswahl — sonst verschwänden die
+    /// Griffe genau dann, wenn man sie anfasst.
+    #[test]
+    fn clicking_a_handle_keeps_the_selection() {
+        let view = viewer::PageView::upright(offset_box());
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+        let (mut app, screen) = app_with_selected_region(&view, rect);
+
+        let click = |app: &mut RedactApp, pos: Pos2| {
+            app.apply_pointer(
+                PointerFrame {
+                    pos: Some(pos),
+                    ..PointerFrame::default()
+                },
+                true,
+                &view,
+                ORIGIN,
+                0,
+                ZOOM,
+            );
+        };
+
+        // Knapp außerhalb der Region, aber auf dem Griff.
+        click(&mut app, screen.left_top() + Vec2::new(-4.0, -4.0));
+        assert_eq!(app.state.selected_region, Some(0));
+
+        // Weit daneben hebt die Auswahl dagegen auf.
+        click(&mut app, screen.left_top() + Vec2::new(-80.0, -80.0));
+        assert_eq!(app.state.selected_region, None);
     }
 
     // ------------------------------------------------------- Symbolleiste

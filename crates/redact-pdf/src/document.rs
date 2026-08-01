@@ -17,7 +17,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use lopdf::{Document, Object, ObjectId};
-use redact_core::{Rect, RedactError, Renderer, Result};
+use redact_core::{Rect, RedactError, Result};
 
 // ---------------------------------------------------------------------------
 // Grenzen für nicht vertrauenswürdige Eingaben
@@ -1033,10 +1033,8 @@ impl PdfRenderer {
     pub fn with_options(options: WriteOptions) -> Self {
         Self { options }
     }
-}
 
-impl Renderer for PdfRenderer {
-    fn render(&self, doc: &Document, path: &Path) -> Result<()> {
+    pub fn render(&self, doc: &Document, path: &Path) -> Result<()> {
         let bytes = save_to_bytes(doc)?;
         write_file(path, &bytes, &self.options)
     }

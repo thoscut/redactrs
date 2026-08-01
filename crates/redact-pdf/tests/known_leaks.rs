@@ -16,7 +16,7 @@
 mod common;
 
 use common::SECRET;
-use redact_core::{Action, Extractor, Rect, Redaction, Redactor, Region, Source, TextRun};
+use redact_core::{Action, Extractor, Rect, Redaction, Region, Source, TextRun};
 use redact_pdf::{
     leaks, load_from_bytes, save_to_bytes, strip_metadata, PdfExtractor, PdfRedactor,
 };
@@ -34,7 +34,7 @@ fn extract(bytes: &[u8]) -> Vec<TextRun> {
 fn pipeline(bytes: &[u8], redactions: &[Redaction]) -> Vec<u8> {
     let mut doc = load_from_bytes(bytes).expect("PDF ladbar");
     PdfRedactor::new()
-        .apply(&mut doc, redactions)
+        .apply_with_report(&mut doc, redactions)
         .expect("Schwärzung");
     strip_metadata(&mut doc);
     save_to_bytes(&doc).expect("Speichern")
