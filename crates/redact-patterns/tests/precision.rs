@@ -12,7 +12,12 @@
 //! | `konto_nr`   |  8      |  6 (75 %)    | 3, 0 falsch |
 //! | `blz`        |  4      |  2 (50 %)    | 2, 0 falsch |
 //! | `phone_de`   |  3      |  1 (33 %)    | 2, 0 falsch |
-//! | Rest         |  4      |  0           | 5, 0 falsch |
+//! | Rest         |  4      |  0           | 6, 0 falsch |
+//!
+//! Die letzte Zeile hat inzwischen einen Treffer mehr als bei der Messung:
+//! `glaeubiger_id` schwärzt die Gläubiger-ID der Lastschriftzeile, die vorher
+//! kein Muster erfasst hat. Die Fehltrefferquote ändert das nicht — der
+//! Treffer ist prüfsummengestützt und richtig.
 //!
 //! Alle vier achtstelligen Token trafen `konto_nr` **und** `blz` — dieselbe
 //! Stelle wurde doppelt geschwärzt, ohne dass eine der beiden Deutungen
@@ -147,10 +152,83 @@ fn iban_de_tabelle() {
                 zeile: "IBAN: DE88 3704 0044 0532 0130 00",
                 erwartet: &[],
             },
-            // Bekannte Lücke: die Gläubiger-ID einer Lastschrift ist keine
-            // IBAN und wird (noch) von keinem Pattern erfasst.
+            // Gegenprobe zu `glaeubiger_id_tabelle`: eine Gläubiger-ID darf
+            // nicht als IBAN durchgehen. Sie scheitert schon am Regex (die
+            // Geschäftsbereichskennung ist keine Ziffernfolge) und zusätzlich
+            // an der Prüfsumme — geschwärzt wird sie von `glaeubiger_id`.
             Fall {
                 zeile: "Glaeubiger-ID: DE98ZZZ09999999999",
+                erwartet: &[],
+            },
+            Fall {
+                zeile: "Musterbank AG - Kontoauszug Nr. 1/2026",
+                erwartet: &[],
+            },
+        ],
+    );
+}
+
+#[test]
+fn glaeubiger_id_tabelle() {
+    pruefe(
+        "glaeubiger_id",
+        &[
+            Fall {
+                zeile: "Glaeubiger-ID: DE98ZZZ09999999999",
+                erwartet: &["DE98ZZZ09999999999"],
+            },
+            Fall {
+                zeile:
+                    "18.01.2026  SEPA-Lastschrift Stadtwerke, Mandat M-4711, CI DE24ZZZ00000561652",
+                erwartet: &["DE24ZZZ00000561652"],
+            },
+            // Ausländischer Gläubiger auf einem deutschen Auszug — die
+            // nationale Kennung ist dort länger als die deutschen elf Stellen.
+            Fall {
+                zeile: "Lastschrift PAYPAL EUROPE Glaeubiger-ID LU96ZZZ0000000000000000058",
+                erwartet: &["LU96ZZZ0000000000000000058"],
+            },
+            // Die Geschäftsbereichskennung ist nicht immer „ZZZ"; für die
+            // Prüfsumme wird sie ohnehin entfernt.
+            Fall {
+                zeile: "Glaeubiger-ID: DE24ABC00000561652",
+                erwartet: &["DE24ABC00000561652"],
+            },
+            // Prüfziffer verdreht — die Prüfsumme fängt es ab.
+            Fall {
+                zeile: "Glaeubiger-ID: DE99ZZZ09999999999",
+                erwartet: &[],
+            },
+            // Gegenprobe: eine IBAN darf nicht als Gläubiger-ID durchgehen.
+            // Ungruppiert passt sie sogar auf den Regex — sie scheitert erst
+            // an der mod-97-Rechnung ohne die drei „Kennungs"-Stellen.
+            Fall {
+                zeile: "Ueberweisung auf DE89370400440532013000 ausgefuehrt",
+                erwartet: &[],
+            },
+            Fall {
+                zeile: "IBAN: DE89 3704 0044 0532 0130 00",
+                erwartet: &[],
+            },
+            Fall {
+                zeile: "Empfaenger-IBAN: DE02 1203 0000 0000 2020 51",
+                erwartet: &[],
+            },
+            Fall {
+                zeile: "IBAN GB82 WEST 1234 5698 7654 32",
+                erwartet: &[],
+            },
+            // Und auch sonst nichts, was auf einem Auszug herumsteht.
+            Fall {
+                zeile: "BIC: COBADEFFXXX",
+                erwartet: &[],
+            },
+            Fall {
+                zeile: "RECHNUNG ABSENDER MAHNUNGS",
+                erwartet: &[],
+            },
+            Fall {
+                zeile: "Kreditkarte 4539 1488 0343 6467 belastet",
                 erwartet: &[],
             },
             Fall {
@@ -453,6 +531,12 @@ fn iban_intl_tabelle() {
                 zeile: "IBAN: DE89 3704 0044 0532 0130 00",
                 erwartet: &["DE89 3704 0044 0532 0130 00"],
             },
+            // Die Gläubiger-ID passt auf den (bewusst weiten) Regex des
+            // internationalen IBAN-Musters — die Prüfsumme verwirft sie.
+            Fall {
+                zeile: "Glaeubiger-ID: DE98ZZZ09999999999",
+                erwartet: &[],
+            },
             Fall {
                 zeile: "Musterbank AG - Kontoauszug Nr. 1/2026",
                 erwartet: &[],
@@ -510,6 +594,7 @@ const SCHUTZGUT: &[(&str, &str)] = &[
     ("blz", "50010517"),
     ("konto_nr", "30012345"),
     ("iban_de", "DE02 1203 0000 0000 2020 51"),
+    ("glaeubiger_id", "DE98ZZZ09999999999"),
     ("email", "max.mustermann@example.org"),
     ("phone_de", "+49 30 123456789"),
     ("steuer_id", "12345678901"),

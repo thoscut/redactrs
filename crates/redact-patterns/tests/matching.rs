@@ -215,6 +215,63 @@ fn konto_nr_and_blz_are_told_apart_by_their_keyword() {
     );
 }
 
+/// IBAN und Gläubiger-ID benutzen dieselbe mod-97-Rechnung und sehen sich zum
+/// Verwechseln ähnlich — auseinandergehalten werden sie allein von der
+/// Prüfsumme: bei der Gläubiger-ID fallen vorher die drei Zeichen
+/// Geschäftsbereichskennung heraus, bei der IBAN nicht. Beide Muster
+/// gleichzeitig aktiv, jede Zeile darf genau ein Muster auslösen.
+#[test]
+fn iban_and_glaeubiger_id_do_not_claim_each_other() {
+    let m = matcher_for(&["iban_de", "iban_intl", "glaeubiger_id"]);
+    let runs = vec![
+        run(0, "Glaeubiger-ID: DE98ZZZ09999999999"),
+        run(1, "IBAN DE89370400440532013000"),
+        run(2, "IBAN: DE89 3704 0044 0532 0130 00"),
+    ];
+    let regions = m.find_matches(&runs).unwrap();
+    let found: Vec<(&str, &str)> = regions
+        .iter()
+        .map(|r| match &r.source {
+            Source::Pattern { pattern_id, .. } => {
+                (pattern_id.as_str(), r.text.as_deref().unwrap_or_default())
+            }
+            other => panic!("falsche Quelle: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("glaeubiger_id", "DE98ZZZ09999999999"),
+            ("iban_de", "DE89370400440532013000"),
+            ("iban_intl", "DE89370400440532013000"),
+            ("iban_de", "DE89 3704 0044 0532 0130 00"),
+            ("iban_intl", "DE89 3704 0044 0532 0130 00"),
+        ]
+    );
+}
+
+/// Die bestandene Prüfsumme hebt die Konfidenz auf 0.99 — dieselbe Stufe wie
+/// bei IBAN, BIC und Kreditkarte. Deshalb braucht das Muster kein
+/// Kontext-Schlüsselwort: es kommt auch nackt durch das Mindestvertrauen.
+#[test]
+fn glaeubiger_id_passes_the_default_threshold_without_a_keyword() {
+    let m = matcher_for(&["glaeubiger_id"]);
+    let hits = m
+        .find_matches(&[run(
+            0,
+            "Lastschrift Stadtwerke DE24ZZZ00000561652 Mandat 4711",
+        )])
+        .unwrap();
+    assert_eq!(texts(&hits), vec!["DE24ZZZ00000561652"]);
+    match &hits[0].source {
+        Source::Pattern { confidence, .. } => {
+            assert!((*confidence - 0.99).abs() < 1e-6, "{confidence}");
+            assert!(*confidence >= redact_patterns::DEFAULT_MIN_CONFIDENCE);
+        }
+        other => panic!("falsche Quelle: {other:?}"),
+    }
+}
+
 #[test]
 fn bic_validator_rejects_plain_uppercase_words() {
     let m = matcher_for(&["bic"]);

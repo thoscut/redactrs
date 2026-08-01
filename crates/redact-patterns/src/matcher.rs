@@ -8,7 +8,7 @@ use redact_core::{Analyzer, RedactError, Region, Result, Source, TextRun};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::builtin::{builtin_pattern_ids, builtin_patterns};
-use crate::validate::{validate_bic, validate_iban, validate_luhn};
+use crate::validate::{validate_bic, validate_creditor_id, validate_iban, validate_luhn};
 use crate::{PatternDef, Validator, CONTEXT_GROUP, TARGET_GROUP};
 
 /// Konfidenz, auf die ein erfolgreich geprüfter Treffer mindestens angehoben wird.
@@ -17,7 +17,7 @@ const VALIDATED_CONFIDENCE: f32 = 0.99;
 /// Vorgabe für das Mindestvertrauen eines Treffers.
 ///
 /// Der Wert trennt die beiden Sorten von Treffern, die es gibt: solche, die
-/// durch eine Prüfsumme (IBAN, BIC, Luhn ⇒ 0.99) oder durch ein Schlüsselwort
+/// durch eine Prüfsumme (IBAN, Gläubiger-ID, BIC, Luhn ⇒ 0.99) oder durch ein Schlüsselwort
 /// im Text (⇒ 0.8 … 0.9) gestützt sind, und solche, die nur auf der Form einer
 /// Ziffernkette beruhen (⇒ 0.25 … 0.35). Genau dazwischen liegt 0.5. Wer die
 /// Verdachtsfälle sehen will, senkt die Schwelle bewusst ab; die Vorgabe
@@ -417,6 +417,7 @@ fn check(def: &PatternDef, text: &str, has_context: bool) -> Option<f32> {
     let ok = match def.validator {
         None => return Some(confidence),
         Some(Validator::Iban) => validate_iban(text),
+        Some(Validator::CreditorId) => validate_creditor_id(text),
         Some(Validator::Bic) => validate_bic(text),
         Some(Validator::Luhn) => validate_luhn(text),
     };

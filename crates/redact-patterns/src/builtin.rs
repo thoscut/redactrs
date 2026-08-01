@@ -85,6 +85,11 @@ macro_rules! ziffern {
 /// Umgekehrt ist `steuer_id` jetzt an: die Steuer-ID *ist* Schutzgut, und seit
 /// sie an ihr Schlüsselwort gebunden ist, ist sie kein Rauschfänger mehr
 /// (vorher: jede elfstellige Ziffernkette).
+///
+/// Ebenso `glaeubiger_id`: die SEPA-Gläubiger-ID identifiziert den
+/// Zahlungsempfänger einer Lastschrift eindeutig; sie steht damit auf einer
+/// Stufe mit der Empfänger-IBAN, die der Standardlauf schon immer schwärzt.
+/// Die Begründung im Einzelnen steht an der Definition selbst.
 pub fn builtin_patterns() -> Vec<PatternDef> {
     vec![
         def(
@@ -102,6 +107,42 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
             0.9,
             false,
             Some(Validator::Iban),
+        ),
+        // **Warum an?** Die Gläubiger-ID identifiziert den Zahlungsempfänger
+        // einer Lastschrift eindeutig und dauerhaft — bei Einzelunternehmern
+        // ist sie damit unmittelbar personenbezogen. Sie ist damit dasselbe
+        // wie die Empfänger-IBAN eine Zeile weiter, und die schwärzt der
+        // Standardlauf längst. Der Einwand, die Lastschriftzeile solle lesbar
+        // bleiben, trifft das Muster nicht: geschwärzt wird nur die
+        // maschinenlesbare Kennung, während „Lastschrift Stadtwerke
+        // Musterstadt" und der Betrag stehen bleiben (Namen erkennt ohnehin
+        // kein Muster). Anders als bei `date_de`/`amount_eur` kostet die
+        // Schwärzung also keine Lesbarkeit.
+        //
+        // **Warum kein Kontext?** Die mod-97-Prüfung trägt das Muster allein;
+        // ein Schlüsselwort („Glaeubiger-ID") wäre nur eine zweite Hürde vor
+        // einer schon gesicherten Aussage. Ein `confidence_without_context`
+        // wäre hier sogar wirkungslos, weil eine bestandene Prüfsumme die
+        // Konfidenz ohnehin auf 0.99 anhebt.
+        //
+        // **Warum 0.95?** Derselbe Wert wie bei `iban_de`: dieselbe
+        // Prüfsummenstärke, gleiche Aussagekraft. Der Wert liegt deutlich über
+        // `DEFAULT_MIN_CONFIDENCE` (0.5) und ist damit das, was das Muster
+        // wert wäre, wenn jemand den Validator per Konfiguration entfernt —
+        // mit Validator kommen wie bei allen prüfsummengestützten Mustern
+        // 0.99 heraus.
+        def(
+            "glaeubiger_id",
+            // Ländercode, zwei Prüfziffern, drei Zeichen
+            // Geschäftsbereichskennung, dann die nationale Kennung. Die
+            // Untergrenze von sechs Zeichen für die nationale Kennung ist die
+            // kürzeste im SEPA-Raum vergebene (Frankreich); alles darunter
+            // wäre für eine reine Prüfsummen-Absicherung zu wenig Substanz.
+            r"(?<![0-9A-Za-z])[A-Z]{2}[0-9]{2}[0-9A-Z]{3}[0-9A-Z]{6,28}(?![0-9A-Za-z])",
+            "SEPA-Gläubiger-ID (Creditor Identifier, mod-97-geprüft)",
+            0.95,
+            true,
+            Some(Validator::CreditorId),
         ),
         def_ctx(
             "konto_nr",
@@ -213,6 +254,7 @@ pub fn builtin_pattern_ids() -> Vec<&'static str> {
     vec![
         "iban_de",
         "iban_intl",
+        "glaeubiger_id",
         "konto_nr",
         "blz",
         "bic",

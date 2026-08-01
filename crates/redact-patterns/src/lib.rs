@@ -12,7 +12,8 @@
 //! Treffers, nicht aus dem gesamten Text-Run.
 //!
 //! Zusätzlich zu den regulären Ausdrücken gibt es Prüfsummen-Validatoren
-//! ([`Validator`]): IBAN (mod 97), BIC (Struktur + Länderkennung) und Luhn.
+//! ([`Validator`]): IBAN (mod 97), SEPA-Gläubiger-ID (mod 97 ohne die
+//! Geschäftsbereichskennung), BIC (Struktur + Länderkennung) und Luhn.
 //! Ein Treffer, der seine Prüfung nicht besteht, wird verworfen; ein bestandener
 //! Treffer bekommt eine Konfidenz von mindestens 0.99.
 //!
@@ -54,7 +55,7 @@ mod validate;
 
 pub use builtin::{builtin_pattern_ids, builtin_patterns};
 pub use matcher::{PatternConfig, PatternEntry, PatternMatcher, DEFAULT_MIN_CONFIDENCE};
-pub use validate::{validate_bic, validate_iban, validate_luhn};
+pub use validate::{validate_bic, validate_creditor_id, validate_iban, validate_luhn};
 
 /// Name der Regex-Gruppe, die den tatsächlich zu schwärzenden Teil umfasst.
 pub const TARGET_GROUP: &str = "target";
@@ -101,6 +102,9 @@ pub struct PatternDef {
 pub enum Validator {
     /// IBAN-Prüfsumme nach ISO 7064 (mod 97 == 1).
     Iban,
+    /// SEPA-Gläubiger-ID: dieselbe mod-97-Rechnung wie bei der IBAN, aber ohne
+    /// die drei Zeichen Geschäftsbereichskennung, plus Prüfung des Ländercodes.
+    CreditorId,
     /// BIC-Struktur inklusive Länderkennung.
     Bic,
     /// Luhn-Prüfsumme (Kreditkarten).
