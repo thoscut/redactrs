@@ -1243,6 +1243,151 @@ fn the_switch_does_not_help_a_review_file_of_another_document() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("andere Eingabe"));
 }
 
+/// Die Review-Datei muss die Aktion des Laufs wiedergeben.
+///
+/// `ReviewFile::new` trägt in jeden Eintrag `Action::Blackout` ein — es kennt
+/// die Einstellungen des Laufs nicht. Wer sie nicht nachträgt, erzeugt mit
+/// `--action replace --replace-with "[IBAN]"` eine Datei, in der überall
+/// „schwarz“ steht; ein späteres `--apply-review` schwärzt dann schwarz, wo
+/// `[IBAN]` stehen sollte. Die Datei gäbe die Absicht des Laufs falsch wieder.
+#[test]
+fn review_file_records_the_action_of_the_run() {
+    let dir = workdir("review-aktion");
+    let input = demo(&dir);
+    let review = dir.join("review.json");
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        review.to_str().unwrap(),
+        "--patterns",
+        "iban_de",
+        "--action",
+        "replace",
+        "--replace-with",
+        "[IBAN]",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&review).unwrap()).unwrap();
+    let items = value["items"].as_array().expect("Einträge");
+    assert!(!items.is_empty(), "die Analyse fand nichts");
+    for item in items {
+        assert_eq!(
+            item["action"],
+            serde_json::json!({ "replace": "[IBAN]" }),
+            "die Review-Datei behauptet eine andere Aktion als der Lauf: {item}"
+        );
+    }
+
+    // Und angewendet steht der Ersatztext wirklich in der Ausgabe.
+    let output = dir.join("out.pdf");
+    let applied = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--apply-review",
+        review.to_str().unwrap(),
+    ]);
+    assert!(applied.status.success(), "{}", stderr(&applied));
+    assert_no_leak(&output, "DE02", "die Review-Datei wurde angewendet");
+    assert!(
+        !leaks_in(&output, "[IBAN]").is_empty(),
+        "der Ersatztext fehlt in der Ausgabe"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Aufgabe #66 — `--manual-regions` umging die Identitätsprüfung
+// ---------------------------------------------------------------------------
+
+/// Dieselbe Datei, ein anderer Schalter — und die Prüfung war weg.
+///
+/// `--apply-review` wies eine fremde Review-Datei mit „gehört zu einem anderen
+/// Dokument“ und Exit 2 zurück; `--manual-regions` nahm genau dieselbe Datei
+/// wortlos an und legte die Rechtecke an beliebige Stellen. Eine Prüfung, die
+/// ein anderer Schalter aushebelt, ist keine.
+#[test]
+fn a_foreign_review_file_behind_manual_regions_is_refused_too() {
+    let dir = workdir("manual-fremd");
+    let input = demo(&dir);
+    let other = dir.join("fremd.pdf");
+    std::fs::write(&other, redact_pdf::testing::minimal_pdf("nichts geheimes")).unwrap();
+    let review = dir.join("review.json");
+
+    run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        review.to_str().unwrap(),
+    ]);
+
+    let output = dir.join("out.pdf");
+    let refused = run(&[
+        other.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--manual-regions",
+        review.to_str().unwrap(),
+    ]);
+    assert!(
+        !refused.status.success(),
+        "die fremde Review-Datei kam durch: {}",
+        stdout(&refused)
+    );
+    // Derselbe Rückgabewert wie bei `--apply-review`: 2 heißt Konfiguration.
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("anderen Dokument"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(!output.exists(), "trotz Ablehnung wurde geschrieben");
+
+    // Und der Schalter für ungeprüfte Dateien hilft ihr auch hier nicht.
+    let still_refused = run(&[
+        other.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--manual-regions",
+        review.to_str().unwrap(),
+        "--allow-unverified-review",
+    ]);
+    assert!(!still_refused.status.success());
+    assert!(stderr(&still_refused).contains("andere Eingabe"));
+}
+
+/// Gegenprobe: zum eigenen Dokument gehört die Datei und wird angewendet —
+/// `--manual-regions` bleibt ein brauchbarer Weg, eine Review-Datei mit der
+/// laufenden Analyse zu **kombinieren**.
+#[test]
+fn the_matching_review_file_still_works_behind_manual_regions() {
+    let dir = workdir("manual-eigen");
+    let input = demo(&dir);
+    let review = dir.join("review.json");
+
+    run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        review.to_str().unwrap(),
+    ]);
+
+    let output = dir.join("out.pdf");
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--no-patterns",
+        "--manual-regions",
+        review.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_no_leak(&output, "DE02", "die eigene Review-Datei wurde angewendet");
+}
+
 // ---------------------------------------------------------------------------
 // Aufgabe #58 — die Obergrenze für dekodierte Bildbytes
 // ---------------------------------------------------------------------------

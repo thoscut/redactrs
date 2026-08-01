@@ -498,12 +498,7 @@ impl RedactApp {
         if !self.ask_before_discarding {
             return true;
         }
-        let count = self
-            .state
-            .regions
-            .iter()
-            .filter(|a| a.is_hand_made())
-            .count();
+        let count = self.state.hand_made_count();
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Warning)
             .set_title("Von Hand bearbeitete Schwärzungen verwerfen?")
@@ -531,6 +526,40 @@ impl RedactApp {
                 self.state.status = message;
             }
         }
+    }
+
+    /// Alles, was aus der Konfiguration **beim Start** folgt.
+    ///
+    /// Das ist die Stelle, an der `redact-rs --gui …` und `redact-rs …`
+    /// auseinanderlaufen können, deshalb steht sie hier als gewöhnliche Methode
+    /// und nicht in [`crate::run`] zwischen Fenster und Ereignisschleife: so ist
+    /// sie ohne Bildschirm prüfbar.
+    ///
+    /// Reihenfolge wie in `redact_pipeline::run`: Dokument laden, analysieren —
+    /// und wenn `--apply-review` gesetzt ist, tritt die Review-Datei an die
+    /// Stelle der Analyse. Ihre Zugehörigkeit zum Dokument prüft dabei dieselbe
+    /// Funktion wie auf der Kommandozeile
+    /// ([`redact_pipeline::check_review_identity`], über
+    /// [`crate::state::AppState::apply_review_file`]).
+    pub fn open_startup_document(&mut self) {
+        let input = self.state.config.input.clone();
+        if !input.as_os_str().is_empty() {
+            self.open_and_analyze(input);
+        }
+
+        let Some(review) = self.state.config.apply_review.clone() else {
+            return;
+        };
+        if !self.state.is_loaded() {
+            // Ohne Dokument gibt es nichts, worauf ein Review passen könnte —
+            // und stillschweigend übergehen darf die Oberfläche den Schalter
+            // nicht.
+            self.report(Err(redact_core::RedactError::Config(
+                "--apply-review braucht ein Dokument: bitte zuerst ein PDF öffnen.".into(),
+            )));
+            return;
+        }
+        self.load_review_file(&review);
     }
 
     /// Lädt ein PDF und analysiert es sofort.
@@ -629,7 +658,7 @@ impl RedactApp {
     }
 
     fn export_to(&mut self, out: PathBuf) {
-        let audit = AppState::audit_path_for(&out);
+        let audit = self.state.audit_target(&out);
         let blocked = self.state.blocked_regions().len();
         match self.state.export(&out, Some(&audit)) {
             Ok(outcome) => {
@@ -735,14 +764,11 @@ impl RedactApp {
             ToolAction::Export => self.export_dialog(),
             ToolAction::ReviewSave => self.review_save_dialog(),
             ToolAction::ReviewLoad => self.review_load_dialog(),
-            ToolAction::Undo => {
-                self.state.undo();
-                self.error = None;
-            }
-            ToolAction::Redo => {
-                self.state.redo();
-                self.error = None;
-            }
+            // Über dieselbe Stelle wie Strg+Z/Strg+Y — dort endet auch ein
+            // laufender Zug am Eckgriff, und das darf nicht davon abhängen, ob
+            // der Knopf oder das Kürzel benutzt wurde.
+            ToolAction::Undo => self.apply_key_commands(&[KeyCommand::Undo]),
+            ToolAction::Redo => self.apply_key_commands(&[KeyCommand::Redo]),
             ToolAction::ZoomOut => self.state.zoom_out(),
             ToolAction::ZoomIn => self.state.zoom_in(),
             ToolAction::ZoomFit => {
@@ -1107,15 +1133,25 @@ impl RedactApp {
     ) {
         // 1. Eine laufende Größenänderung hat Vorrang vor allem anderen.
         if let Some(drag) = self.resize {
+            // Die Region wird über ihre Kennung gesucht, nicht über einen
+            // gemerkten Platz in der Liste: zwischen zwei Bildern kann gelöscht,
+            // zurückgenommen oder ein Review geladen worden sein. Ist sie weg,
+            // endet der Zug — er darf auf keinen Fall auf die Region
+            // weiterlaufen, die jetzt an ihrer Stelle steht.
+            let Some(index) = self.state.index_of(drag.region) else {
+                self.resize = None;
+                self.selector.cancel();
+                self.state.status =
+                    "Zug beendet — die angefasste Region gibt es nicht mehr".to_string();
+                return;
+            };
             if let Some(pos) = frame.pos.filter(|_| frame.dragged || frame.drag_stopped) {
                 let corner = viewer::screen_to_pdf_point(pos, view, zoom, origin);
                 // `from_corners` normalisiert: zieht man über die Gegenecke
                 // hinaus, entsteht kein negatives Rechteck, sondern ein
                 // gespiegeltes.
-                self.state.set_region_rect(
-                    drag.region,
-                    redact_core::Rect::from_corners(drag.anchor, corner),
-                );
+                self.state
+                    .set_region_rect(index, redact_core::Rect::from_corners(drag.anchor, corner));
             }
             if !frame.dragged {
                 // Losgelassen oder abgebrochen — der Zug ist vorbei.
@@ -1182,7 +1218,7 @@ impl RedactApp {
         let handle = hit_handle(screen, press)?;
         let anchor = viewer::screen_to_pdf_point(handle.opposite().pos(screen), view, zoom, origin);
         Some(HandleDrag {
-            region: index,
+            region: self.state.id_at(index)?,
             anchor,
         })
     }
@@ -1346,6 +1382,13 @@ impl RedactApp {
                     self.state.selected_region = None;
                 }
                 KeyCommand::DeleteSelected => {
+                    // Wie bei `Deselect`: gelöscht wird die Region, an der
+                    // womöglich gerade gezogen wird. Die Kennung im
+                    // [`HandleDrag`] verhinderte zwar schon, dass der Zug auf
+                    // eine fremde Region überspringt — aber ein Zug ohne Ziel
+                    // hat nichts mehr zu suchen, und die Statuszeile soll nicht
+                    // beim nächsten Mausbild noch „Rechteck angepasst“ melden.
+                    self.resize = None;
                     self.state.delete_selected();
                 }
                 KeyCommand::Move { dx, dy } => {
@@ -1356,10 +1399,17 @@ impl RedactApp {
                 KeyCommand::FirstPage => self.state.first_page(),
                 KeyCommand::LastPage => self.state.last_page(),
                 KeyCommand::Undo => {
+                    // Rückgängig tauscht die **ganze** Trefferliste aus und hebt
+                    // die Auswahl auf. Ein Zug, der weiterliefe, schriebe den
+                    // gerade zurückgenommenen Stand sofort wieder — die Kennung
+                    // findet die Region ja wieder. Also endet er hier.
+                    self.resize = None;
                     self.state.undo();
                     self.error = None;
                 }
                 KeyCommand::Redo => {
+                    // Dasselbe in der anderen Richtung.
+                    self.resize = None;
                     self.state.redo();
                     self.error = None;
                 }
@@ -1441,6 +1491,8 @@ impl eframe::App for RedactApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::path::Path;
 
     use redact_core::Rect;
 
@@ -1893,6 +1945,207 @@ mod tests {
         );
     }
 
+    // ------------------------------ Eingriffe mitten im Zug (Befund #65)
+
+    /// Ein einzelnes Mausbild mitten im Zug.
+    fn dragging_frame(press: Pos2, pos: Pos2, started: bool) -> PointerFrame {
+        PointerFrame {
+            drag_started: started,
+            dragged: true,
+            pos: Some(pos),
+            press_origin: Some(press),
+            ..PointerFrame::default()
+        }
+    }
+
+    /// Zwei Regionen auf Seite 0: eine von Hand gezogene (ausgewählt, an ihrem
+    /// Griff wird gleich gezogen) und ein **unbeteiligter** Musterfund.
+    ///
+    /// Der Musterfund ist mit Absicht keine manuelle Region: `set_region_rect`
+    /// macht aus einem Treffer, den man anfasst, eine Handarbeit — an ihm ist
+    /// also auch zu sehen, ob der Zug ihn überhaupt berührt hat.
+    fn app_with_a_bystander(view: &viewer::PageView) -> (RedactApp, egui::Rect, Rect) {
+        let mine = Rect::new(100.0, 300.0, 260.0, 340.0);
+        let bystander = Rect::new(300.0, 500.0, 460.0, 540.0);
+        let mut app = RedactApp::silent(Config::default());
+        app.state.add_manual_region(0, mine, "meins");
+        app.state.regions.push(crate::state::AnnotatedRegion::new(
+            redact_core::Region::new(
+                0,
+                bystander,
+                Some("DE89 3704 0044 0532 0130 00".into()),
+                redact_core::Source::Pattern {
+                    pattern_id: "iban_de".into(),
+                    confidence: 0.99,
+                },
+            ),
+        ));
+        app.state.selected_region = Some(0);
+        (
+            app,
+            viewer::pdf_to_screen(&mine, view, ZOOM, ORIGIN),
+            bystander,
+        )
+    }
+
+    /// Der unbeteiligte Musterfund ist unangetastet: Rechteck, Herkunft und
+    /// Farbe wie angelegt.
+    #[track_caller]
+    fn assert_bystander_untouched(app: &RedactApp, index: usize, rect: Rect) {
+        let entry = &app.state.regions[index];
+        assert_eq!(
+            entry.region.rect, rect,
+            "die unbeteiligte Region ist auf das Ziehrechteck gesprungen — \
+             ihre Fläche würde nicht mehr geschwärzt"
+        );
+        assert!(
+            matches!(entry.region.source, redact_core::Source::Pattern { .. }),
+            "aus dem Musterfund wurde eine Handarbeit: {:?}",
+            entry.region.source
+        );
+        assert_eq!(entry.color, RegionColor::AutoPattern);
+    }
+
+    /// **Befund #65.** Entf mitten im Zug am Eckgriff traf die falsche Region:
+    /// gemerkt war ein *Index*, und nach dem Löschen zeigte der auf die
+    /// nachrückende Region. Sie sprang auf das Ziehrechteck, ihre eigentliche
+    /// Fläche blieb ungeschwärzt — ohne dass irgendetwas es gesagt hätte.
+    #[test]
+    fn deleting_during_a_handle_drag_leaves_every_other_region_alone() {
+        let view = viewer::PageView::upright(offset_box());
+        let (mut app, screen, bystander) = app_with_a_bystander(&view);
+
+        // Zug am Griff unten rechts der ausgewählten Region.
+        let press = screen.right_bottom();
+        app.apply_pointer(
+            dragging_frame(press, press + Vec2::new(7.0, 7.0), true),
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        assert!(app.resize.is_some(), "der Zug am Griff muss laufen");
+
+        // Entf, mitten im Zug.
+        let delete = KeyState {
+            delete: true,
+            ..KeyState::default()
+        };
+        app.apply_key_commands(&key_commands(delete, true));
+        assert_eq!(app.state.regions.len(), 1, "die Auswahl ist gelöscht");
+        assert!(app.resize.is_none(), "ein Zug ohne Ziel muss enden");
+
+        // Weiterziehen — genau hier sprang früher die fremde Region mit.
+        app.apply_pointer(
+            dragging_frame(press, press + Vec2::new(120.0, 80.0), false),
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        assert_bystander_untouched(&app, 0, bystander);
+        assert_eq!(app.state.regions.len(), 1, "es entsteht auch nichts Neues");
+    }
+
+    /// Der Zwillingsfall: Rückgängig mitten im Zug. Die Region gibt es danach
+    /// noch, der Zug fände sie also wieder — und schriebe den gerade
+    /// zurückgenommenen Stand sofort erneut. Deshalb endet er.
+    #[test]
+    fn undo_during_a_handle_drag_ends_it_instead_of_writing_the_drag_back() {
+        let view = viewer::PageView::upright(offset_box());
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+        let (mut app, screen) = app_with_selected_region(&view, rect);
+
+        let press = screen.right_bottom();
+        app.apply_pointer(
+            dragging_frame(press, press + Vec2::new(30.0, 20.0), true),
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        assert!(app.resize.is_some());
+        assert_ne!(
+            app.state.regions[0].region.rect, rect,
+            "der Zug hat das Rechteck geändert"
+        );
+
+        let ctrl_z = KeyState {
+            ctrl: true,
+            key_z: true,
+            ..KeyState::default()
+        };
+        app.apply_key_commands(&key_commands(ctrl_z, true));
+        assert!(app.resize.is_none(), "Rückgängig beendet den Zug");
+        assert_eq!(
+            app.state.regions[0].region.rect, rect,
+            "Rückgängig führt zum Stand vor der Korrektur"
+        );
+
+        // Und die Maus bewegt sich weiter.
+        app.apply_pointer(
+            dragging_frame(press, press + Vec2::new(90.0, 60.0), false),
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        assert_eq!(
+            app.state.regions[0].region.rect, rect,
+            "der Zug lief nach dem Rückgängig weiter und hob es wieder auf"
+        );
+    }
+
+    /// Die Absicherung, die **nicht** davon abhängt, dass jemand an den
+    /// laufenden Zug denkt.
+    ///
+    /// Der Knopf „Region löschen“ in der Seitenleiste ruft
+    /// [`AppState::delete_selected`] und kommt an `RedactApp::resize` gar nicht
+    /// heran (`sidebar.rs`) — genauso wenig wie eine erneute Analyse oder ein
+    /// geladenes Review, die die Liste austauschen. Dass der Zug trotzdem nicht
+    /// auf die nachrückende Region springt, liegt allein an der Kennung im
+    /// [`HandleDrag`]: sie zeigt entweder auf dieselbe Region oder auf keine.
+    #[test]
+    fn a_list_change_the_drag_never_heard_about_cannot_redirect_it() {
+        let view = viewer::PageView::upright(offset_box());
+        let (mut app, screen, bystander) = app_with_a_bystander(&view);
+
+        let press = screen.right_bottom();
+        app.apply_pointer(
+            dragging_frame(press, press + Vec2::new(7.0, 7.0), true),
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+
+        // Wie der Knopf in der Seitenleiste: die Liste wird kürzer, vom Zug
+        // weiß niemand etwas.
+        app.state.delete_selected();
+        assert!(app.resize.is_some(), "der Zug läuft ahnungslos weiter");
+
+        app.apply_pointer(
+            dragging_frame(press, press + Vec2::new(120.0, 80.0), false),
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        assert_bystander_untouched(&app, 0, bystander);
+        assert!(app.resize.is_none(), "der Zug beendet sich selbst");
+        assert!(
+            app.state.status.contains("gibt es nicht mehr"),
+            "und sagt es: {}",
+            app.state.status
+        );
+    }
+
     /// Ein Klick auf einen Griff behält die Auswahl — sonst verschwänden die
     /// Griffe genau dann, wenn man sie anfasst.
     #[test]
@@ -2154,6 +2407,142 @@ mod tests {
         a.load_review_file(&path);
         assert!(a.error.is_none(), "{:?}", a.error);
         assert!(!a.state.regions.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Ein Arbeitsverzeichnis je Test.
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "redact-gui-app-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Legt den Demo-Kontoauszug als Datei ab.
+    fn demo_file(dir: &Path) -> PathBuf {
+        let path = dir.join("kontoauszug.pdf");
+        std::fs::write(&path, redact_pdf::testing::demo_statement()).unwrap();
+        path
+    }
+
+    /// **Befund #67.** `--apply-review` galt in der Oberfläche nicht: sie lud
+    /// und analysierte, die genannte Datei blieb liegen. Auf der Kommandozeile
+    /// tritt sie an die Stelle der Analyse — hier jetzt auch.
+    #[test]
+    fn apply_review_from_the_command_line_is_applied_on_start() {
+        let dir = temp_dir("apply-review");
+        let input = demo_file(&dir);
+        let review = dir.join("durchsicht.json");
+
+        // Eine Review-Datei, die sich von der Analyse unterscheidet: ein
+        // zusätzliches, von Hand gezogenes Rechteck.
+        let marker = Rect::new(11.0, 12.0, 33.0, 44.0);
+        let mut author = RedactApp::silent(Config {
+            input: input.clone(),
+            ..iban_only()
+        });
+        author.open_startup_document();
+        let found = author.state.regions.len();
+        assert!(found > 0, "die Analyse muss etwas finden");
+        author
+            .state
+            .add_manual_region(0, marker, "aus der Durchsicht");
+        std::fs::write(&review, author.state.to_review_file().to_json().unwrap()).unwrap();
+
+        // Und jetzt derselbe Start mit `--apply-review`.
+        let mut app = RedactApp::silent(Config {
+            input: input.clone(),
+            apply_review: Some(review.clone()),
+            ..iban_only()
+        });
+        app.open_startup_document();
+
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(
+            app.state.regions.len(),
+            found + 1,
+            "die Review-Datei ist nicht angekommen — es steht nur die Analyse da"
+        );
+        assert!(
+            app.state.regions.iter().any(|a| a.region.rect == marker),
+            "das Rechteck aus der Review-Datei fehlt"
+        );
+        assert!(
+            app.state.status.contains("Review übernommen"),
+            "und es steht in der Statuszeile: {}",
+            app.state.status
+        );
+
+        // Gegenprobe: ohne den Schalter bleibt es bei der Analyse.
+        let mut without = RedactApp::silent(Config {
+            input: input.clone(),
+            ..iban_only()
+        });
+        without.open_startup_document();
+        assert_eq!(without.state.regions.len(), found);
+
+        // Und eine Review-Datei ohne Dokument wird nicht stillschweigend
+        // verschluckt.
+        let mut alone = RedactApp::silent(Config {
+            apply_review: Some(review),
+            ..iban_only()
+        });
+        alone.open_startup_document();
+        let error = alone.error.clone().expect("das muss auffallen");
+        assert!(error.contains("--apply-review"), "{error}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **Befund #67.** `--audit-log` galt in der Oberfläche nicht: der Pfad
+    /// wurde immer aus dem Namen der Ausgabedatei abgeleitet.
+    #[test]
+    fn the_audit_log_goes_where_the_command_line_said() {
+        let dir = temp_dir("audit-log");
+        let input = demo_file(&dir);
+        let wanted = dir.join("protokoll.json");
+        let out = dir.join("geschwaerzt.pdf");
+
+        let mut app = RedactApp::silent(Config {
+            input: input.clone(),
+            audit_log: Some(wanted.clone()),
+            ..iban_only()
+        });
+        app.open_startup_document();
+        app.export_to(out.clone());
+
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(
+            wanted.exists(),
+            "das Log steht nicht, wo --audit-log es hinhaben wollte"
+        );
+        let derived = AppState::audit_path_for(&out);
+        assert!(
+            !derived.exists(),
+            "stattdessen entstand der abgeleitete Name {}",
+            derived.display()
+        );
+        assert!(
+            app.state.status.contains("protokoll.json"),
+            "die Statuszeile nennt den falschen Pfad: {}",
+            app.state.status
+        );
+
+        // Gegenprobe: ohne den Schalter ist der abgeleitete Name richtig.
+        let second = dir.join("zweite.pdf");
+        let mut plain = RedactApp::silent(Config {
+            input,
+            ..iban_only()
+        });
+        plain.open_startup_document();
+        plain.export_to(second.clone());
+        assert!(plain.error.is_none(), "{:?}", plain.error);
+        assert!(AppState::audit_path_for(&second).exists());
 
         std::fs::remove_dir_all(&dir).ok();
     }

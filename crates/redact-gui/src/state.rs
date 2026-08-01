@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use redact_core::{
@@ -247,9 +248,39 @@ impl HitSummary {
     }
 }
 
+/// Unverwechselbare Kennung einer Trefferzeile.
+///
+/// **Warum es sie gibt**: ein Index in [`AppState::regions`] bezeichnet einen
+/// *Platz* in der Liste, keine Sache. Wird die Liste kürzer oder ausgetauscht
+/// (löschen, rückgängig, Review laden, neu analysieren), zeigt derselbe Index
+/// plötzlich auf eine **andere** Region. Was über mehrere Bilder hinweg gemerkt
+/// wird — der laufende Zug am Eckgriff, siehe [`crate::selector::HandleDrag`] —
+/// muss deshalb eine Kennung merken und keinen Index. Ein Index, der ins Leere
+/// zeigt, fällt auf; ein Index, der auf die falsche Region zeigt, nicht.
+///
+/// Die Kennung wird beim Anlegen vergeben und beim Kopieren mitgenommen: ein
+/// Schnappschuss des Verlaufs enthält dieselben Regionen, nicht bloß gleich
+/// aussehende.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RegionId(u64);
+
+impl RegionId {
+    /// Die nächste freie Kennung.
+    ///
+    /// Ein Zähler über das ganze Programm: er muss nur eindeutig sein, nicht
+    /// klein und nicht lückenlos. Bei einer Vergabe je Region reicht `u64` für
+    /// jede vorstellbare Sitzung.
+    fn next() -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// Eine Region mitsamt ihrem Zustand in der Oberfläche.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnnotatedRegion {
+    /// Kennung dieser Zeile — siehe [`RegionId`].
+    pub id: RegionId,
     pub region: Region,
     /// Wird diese Region beim Export geschwärzt?
     ///
@@ -267,15 +298,26 @@ pub struct AnnotatedRegion {
 }
 
 impl AnnotatedRegion {
-    /// Erzeugt einen Eintrag mit den Vorgabewerten (Negativtreffer aus).
+    /// Erzeugt einen Eintrag mit den Vorgabewerten (Negativtreffer aus,
+    /// Schwärzungsart [`Action::Blackout`]).
+    ///
+    /// In der Oberfläche wird stattdessen [`AnnotatedRegion::with_action`]
+    /// gerufen: dort gilt die Schwärzungsart aus der [`Config`], also das, was
+    /// `--action`/`--replace-with` gesetzt haben.
     pub fn new(region: Region) -> Self {
+        Self::with_action(region, Action::Blackout)
+    }
+
+    /// Wie [`AnnotatedRegion::new`], aber mit vorgegebener Schwärzungsart.
+    pub fn with_action(region: Region, action: Action) -> Self {
         let color = RegionColor::from_source(&region.source);
         let enabled = !region.is_blocking();
         Self {
+            id: RegionId::next(),
             region,
             enabled,
             color,
-            action: Action::Blackout,
+            action,
         }
     }
 
@@ -287,12 +329,18 @@ impl AnnotatedRegion {
     /// Hat die Nutzerin an diesem Eintrag etwas geändert?
     ///
     /// Grundlage für die Rückfrage, bevor Regionen weggeworfen werden.
-    pub fn is_hand_made(&self) -> bool {
+    ///
+    /// `default_action` ist die Schwärzungsart, mit der ein frischer Eintrag
+    /// angelegt worden **wäre** — also die aus der [`Config`]. Verglichen wird
+    /// gegen sie und nicht fest gegen [`Action::Blackout`]: mit
+    /// `--action replace` trüge sonst jeder unangetastete Treffer das Merkmal
+    /// „von Hand geändert“, und die Rückfrage käme bei jedem Öffnen.
+    pub fn is_hand_made(&self, default_action: &Action) -> bool {
         // `enabled == is_blocking()` heißt: der Schalter steht **anders**, als
-        // ihn `AnnotatedRegion::new` gesetzt hätte.
+        // ihn `AnnotatedRegion::with_action` gesetzt hätte.
         matches!(self.region.source, Source::Manual { .. })
             || self.enabled == self.region.is_blocking()
-            || self.action != Action::Blackout
+            || self.action != *default_action
     }
 
     /// Beschriftung für die Trefferliste.
@@ -680,6 +728,29 @@ impl AppState {
         self.selected_region.and_then(|i| self.regions.get(i))
     }
 
+    /// Wo steht die Region mit dieser Kennung gerade?
+    ///
+    /// `None`, wenn es sie nicht mehr gibt — genau die Auskunft, die ein über
+    /// mehrere Bilder laufender Ziehvorgang braucht (siehe [`RegionId`]).
+    pub fn index_of(&self, id: RegionId) -> Option<usize> {
+        self.regions.iter().position(|a| a.id == id)
+    }
+
+    /// Kennung der Region an diesem Platz.
+    pub fn id_at(&self, index: usize) -> Option<RegionId> {
+        self.regions.get(index).map(|a| a.id)
+    }
+
+    /// Ein Eintrag mit der Schwärzungsart dieses Laufs.
+    ///
+    /// **Der einzige Weg**, auf dem in der Oberfläche neue Einträge entstehen:
+    /// so gilt `--action`/`--replace-with` hier wie auf der Kommandozeile.
+    /// Vorher stand in [`AnnotatedRegion::new`] fest [`Action::Blackout`], und
+    /// `redact-rs --gui --action replace` schwärzte schwarz.
+    fn annotate(&self, region: Region) -> AnnotatedRegion {
+        AnnotatedRegion::with_action(region, self.config.action.clone())
+    }
+
     // -------------------------------------------------------------- Analyse
 
     /// Führt die Analyse über die extrahierten Text-Runs aus — **die** Analyse,
@@ -712,8 +783,9 @@ impl AppState {
             .cloned()
             .collect();
 
+        let annotated: Vec<AnnotatedRegion> = found.into_iter().map(|r| self.annotate(r)).collect();
         self.history.record(&self.regions);
-        self.regions = found.into_iter().map(AnnotatedRegion::new).collect();
+        self.regions = annotated;
         self.regions.extend(manual);
         self.selected_region = None;
 
@@ -741,8 +813,9 @@ impl AppState {
                 reason: reason.into(),
             },
         );
+        let entry = self.annotate(region);
         self.history.record(&self.regions);
-        self.regions.push(AnnotatedRegion::new(region));
+        self.regions.push(entry);
         let index = self.regions.len() - 1;
         self.selected_region = Some(index);
         self.status = format!("Manuelle Region auf Seite {} angelegt", page + 1);
@@ -991,7 +1064,17 @@ impl AppState {
     /// dessen Schwärzungsart geändert wurde. Eine frisch gelaufene Analyse
     /// allein zählt **nicht** — die ist mit einem Klick wiederhergestellt.
     pub fn has_manual_work(&self) -> bool {
-        self.regions.iter().any(AnnotatedRegion::is_hand_made)
+        self.regions
+            .iter()
+            .any(|a| a.is_hand_made(&self.config.action))
+    }
+
+    /// Einträge, an denen von Hand gearbeitet wurde (für die Rückfrage).
+    pub fn hand_made_count(&self) -> usize {
+        self.regions
+            .iter()
+            .filter(|a| a.is_hand_made(&self.config.action))
+            .count()
     }
 
     /// Durch die Negativliste verhinderte Treffer (fürs Audit-Log).
@@ -1014,7 +1097,9 @@ impl AppState {
                     .iter()
                     .find(|a| a.region == region)
                     .map(|a| a.action.clone())
-                    .unwrap_or_default();
+                    // Ohne Zeile in der Liste gilt die Schwärzungsart des
+                    // Laufs — dieselbe, die `redact_pipeline::run` benutzt.
+                    .unwrap_or_else(|| self.config.action.clone());
                 Redaction::new(region, action)
             })
             .collect()
@@ -1022,13 +1107,23 @@ impl AppState {
 
     // ------------------------------------------------------- Dateinamen
 
-    /// Vorschlag für die Ausgabedatei: **neben dem Original**, mit
-    /// [`AppState::output_suffix`] am Dateinamen-Stamm.
+    /// Vorschlag für die Ausgabedatei: der Pfad aus `-o`, sonst **neben dem
+    /// Original**, mit dem Namenszusatz aus [`Config::output_suffix`] am
+    /// Dateinamen-Stamm.
     ///
-    /// `None`, solange kein Dokument geladen ist. Der Vorschlag ist nie mit dem
-    /// Eingabepfad identisch — dafür sorgt [`output_path_with_suffix`], das bei
-    /// leerem Zusatz auf den Standard zurückfällt.
+    /// `None`, solange kein Dokument geladen ist. Der abgeleitete Vorschlag ist
+    /// nie mit dem Eingabepfad identisch — dafür sorgt
+    /// [`output_path_with_suffix`], das bei leerem Zusatz auf den Standard
+    /// zurückfällt. Ein von Hand genanntes `-o` darf dagegen alles sein; dass
+    /// dabei nicht das Original überschrieben wird, entscheidet
+    /// [`AppState::export`] und nicht dieser Vorschlag.
     pub fn suggested_output_path(&self) -> Option<PathBuf> {
+        // Wurde ein Ausgabepfad genannt (`-o`), ist er der Vorschlag — auch in
+        // der Oberfläche. Sie fragt trotzdem nach: geschrieben wird erst nach
+        // einem Klick, und der Dialog steht dann auf dem gewünschten Namen.
+        if let Some(out) = &self.config.output {
+            return Some(out.clone());
+        }
         self.pdf_path
             .as_ref()
             .map(|input| output_path_with_suffix(input, &self.config.output_suffix))
@@ -1048,6 +1143,21 @@ impl AppState {
     /// Ausgabe in ein anderes Verzeichnis, wandert das Log mit.
     pub fn audit_path_for(out: &Path) -> PathBuf {
         sibling_path(out, AUDIT_SUFFIX, "json")
+    }
+
+    /// Wohin das Audit-Log dieses Exports gehört.
+    ///
+    /// `--audit-log` hat Vorrang: wer den Pfad auf der Kommandozeile nennt,
+    /// bekommt ihn auch, wenn er die Oberfläche über `--gui` dazuschaltet.
+    /// Vorher wurde der Name hier **immer** aus dem der Ausgabedatei abgeleitet,
+    /// und `--audit-log` blieb in der Oberfläche wirkungslos (Befund #67).
+    /// Ohne den Schalter bleibt es bei [`AppState::audit_path_for`] — das Log
+    /// gehört dann neben die Datei, die es beschreibt.
+    pub fn audit_target(&self, out: &Path) -> PathBuf {
+        self.config
+            .audit_log
+            .clone()
+            .unwrap_or_else(|| Self::audit_path_for(out))
     }
 
     /// Vorschlag für das Audit-Log zur vorgeschlagenen Ausgabedatei.
@@ -1233,6 +1343,8 @@ impl AppState {
             .items
             .into_iter()
             .map(|item| {
+                // Die Schwärzungsart steht in der Datei; die Vorgabe aus der
+                // Konfiguration käme hier zu spät und würde sie überschreiben.
                 let mut entry = AnnotatedRegion::new(item.region);
                 // Ein Negativlisten-Treffer bleibt aus, egal was in der Datei steht.
                 entry.enabled = item.enabled && !entry.is_blocking();
@@ -1533,7 +1645,7 @@ mod tests {
         ));
         assert_eq!(state.regions[0].color, RegionColor::Manual);
         assert!(state.regions[0].enabled, "geschwärzt wird weiter");
-        assert!(state.regions[0].is_hand_made());
+        assert!(state.regions[0].is_hand_made(&state.config.action));
 
         let wider = Rect::new(55.0, 5.0, 95.0, 30.0);
         assert!(state.set_region_rect(1, wider));
@@ -1648,6 +1760,103 @@ mod tests {
         assert!(state.set_action(0, Action::Replace("[IBAN]".into())));
         let redactions = state.enabled_redactions();
         assert_eq!(redactions[0].action, Action::Replace("[IBAN]".into()));
+    }
+
+    /// **Befund #67.** `--action`/`--replace-with` galt in der Oberfläche
+    /// nicht: `AnnotatedRegion::new` trug fest `Action::Blackout` ein, und
+    /// `redact-rs --gui --action replace --replace-with "[IBAN]"` schwärzte
+    /// schwarz.
+    #[test]
+    fn the_action_from_the_configuration_reaches_every_new_region() {
+        let replace = Action::Replace("[IBAN]".to_string());
+        let mut state = AppState::with_config(Config {
+            action: replace.clone(),
+            ..iban_only()
+        });
+        state
+            .load_bytes(
+                &redact_pdf::testing::demo_statement(),
+                Some(PathBuf::from("demo.pdf")),
+            )
+            .unwrap();
+        state.analyze().unwrap();
+        assert!(!state.regions.is_empty(), "die Analyse fand nichts");
+
+        // Jeder Fund trägt die Art aus der Konfiguration — sichtbar in der
+        // Trefferliste, nicht bloß im Export.
+        assert!(
+            state.regions.iter().all(|a| a.action == replace),
+            "die Treffer stehen auf {:?}",
+            state.regions.iter().map(|a| &a.action).collect::<Vec<_>>()
+        );
+        // Ein von Hand gezogenes Rechteck ebenso.
+        state.add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
+        assert_eq!(state.regions.last().unwrap().action, replace);
+
+        // Und sie kommt bis in die Schwärzungen.
+        let redactions = state.enabled_redactions();
+        assert!(!redactions.is_empty());
+        assert!(
+            redactions.iter().all(|r| r.action == replace),
+            "in den Schwärzungen steht etwas anderes"
+        );
+    }
+
+    /// Ein unangetasteter Treffer ist **keine** Handarbeit, auch wenn der Lauf
+    /// auf `--action replace` steht — sonst käme die Rückfrage „von Hand
+    /// bearbeitete Schwärzungen verwerfen?“ bei jedem Öffnen.
+    #[test]
+    fn the_configured_action_alone_is_not_hand_work() {
+        let mut state = AppState::with_config(Config {
+            action: Action::Whiteout,
+            ..iban_only()
+        });
+        state
+            .load_bytes(
+                &redact_pdf::testing::demo_statement(),
+                Some(PathBuf::from("demo.pdf")),
+            )
+            .unwrap();
+        state.analyze().unwrap();
+        assert!(!state.has_manual_work(), "die Analyse allein zählt nicht");
+        assert_eq!(state.hand_made_count(), 0);
+
+        // Wer die Art *ändert*, hat dagegen Hand angelegt.
+        assert!(state.set_action(0, Action::Blackout));
+        assert!(state.has_manual_work());
+        assert_eq!(state.hand_made_count(), 1);
+    }
+
+    /// Die Schwärzungsart steht am Ende auch in der Datei — gemessen an den
+    /// Bytes, nicht am Feld.
+    #[test]
+    fn the_configured_action_changes_the_written_file() {
+        let dir = temp_dir("action");
+        let export_with = |action: Action, name: &str| {
+            let mut state = AppState::with_config(Config {
+                action,
+                ..iban_only()
+            });
+            state
+                .load_bytes(
+                    &redact_pdf::testing::demo_statement(),
+                    Some(PathBuf::from("demo.pdf")),
+                )
+                .unwrap();
+            state.analyze().unwrap();
+            let out = dir.join(name);
+            state.export(&out, None).unwrap();
+            std::fs::read(&out).unwrap()
+        };
+
+        let black = export_with(Action::Blackout, "schwarz.pdf");
+        let replaced = export_with(Action::Replace("[IBAN]".to_string()), "ersetzt.pdf");
+        assert_ne!(
+            black, replaced,
+            "--action muss in der geschriebenen Datei ankommen"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -2096,6 +2305,33 @@ mod tests {
         // Leerer Zusatz fällt auf den Standard zurück, damit das Original
         // niemals überschrieben wird.
         state.config.output_suffix = String::new();
+        assert_eq!(
+            state.suggested_output_path().unwrap(),
+            PathBuf::from("/daten/kontoauszug_geschwaerzt.pdf")
+        );
+    }
+
+    /// Wurde `-o` genannt, steht der Speichern-Dialog auf diesem Namen — der
+    /// Schalter endet nicht an der Fenstergrenze, er wird nur (sichtbar)
+    /// bestätigt statt stillschweigend ausgeführt.
+    #[test]
+    fn a_given_output_path_is_what_the_dialog_proposes() {
+        let mut state = AppState::with_config(Config {
+            output: Some(PathBuf::from("/ziel/fertig.pdf")),
+            ..Config::default()
+        });
+        state
+            .load_bytes(
+                &redact_pdf::testing::demo_statement(),
+                Some(PathBuf::from("/daten/kontoauszug.pdf")),
+            )
+            .unwrap();
+        assert_eq!(
+            state.suggested_output_path().unwrap(),
+            PathBuf::from("/ziel/fertig.pdf")
+        );
+        // Ohne `-o` bleibt es beim Namen neben dem Original.
+        state.config.output = None;
         assert_eq!(
             state.suggested_output_path().unwrap(),
             PathBuf::from("/daten/kontoauszug_geschwaerzt.pdf")

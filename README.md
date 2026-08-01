@@ -417,10 +417,17 @@ manuellen Region darüber:
 $ redact-rs scan.pdf -o scan_geschwaerzt.pdf --manual-regions regionen.json
 Seiten:             1
 Schwärzungen:       1
+  davon wirksam:      0 (Zeichen entfernt)
+  davon ohne Textfund: 1 (Deck-Rechteck gezeichnet, kein Zeichen entfernt …)
 Entfernte Zeichen:  0
 Deck-Rechtecke:     1
 Überschriebene Bilder: 1 (neu kodiert, verlustbehaftet)
 ```
+
+Die Zeile „ohne Textfund“ ist hier der Normalfall und kein Mangel: in einem
+Rasterbild steht für die Analyse kein Text, zu entfernen gibt es also nichts —
+überschrieben werden die Bildpunkte. Der Befund heißt im Audit-Log `covered`,
+siehe [`effect` je Region](#befund).
 
 Das Bild aus der Ausgabedatei erneut dekodiert und Pixel für Pixel mit dem
 Original verglichen: **4784 von 20 000 Pixeln geändert, alle 4784 auf Schwarz;
@@ -530,11 +537,17 @@ Die Review-Datei trägt den SHA-256 der Eingabe. Wird sie auf ein anderes
 Dokument angewendet, bricht der Lauf mit einer Fehlermeldung ab — Koordinaten
 aus einer fremden Datei würden sonst an falscher Stelle schwärzen.
 
-Diese Sperre hängt aber daran, dass das Feld **gefüllt** ist: ist
-`input.sha256` leer, wird die Prüfung übersprungen und die Datei auf jedes
-beliebige Dokument angewendet. Wer eine Review-Datei von Hand baut oder
-zusammenkopiert, muss die Prüfsumme also mitschreiben — sonst gibt es keine
-Warnung, sondern nur schwarze Balken an den falschen Stellen.
+Eine **leere** Prüfsumme wurde früher stillschweigend durchgewinkt — wer
+`"sha256": ""` von Hand eintrug, umging die Sperre damit vollständig. Sie wird
+jetzt abgelehnt; `--allow-unverified-review` ist der ausdrückliche Weg daran
+vorbei. Eine *falsche* Prüfsumme bleibt auch mit diesem Schalter abgelehnt:
+„ungeprüft“ ist etwas anderes als „nachweislich fremd“.
+
+Dieselbe Prüfung gilt für eine Review-Datei hinter `--manual-regions`. Der
+Schalter nimmt beide Formate an, und bis v0.2.0 war er damit der Weg an der
+Sperre vorbei: dieselbe Datei, die `--apply-review` mit Exit 2 zurückwies, ging
+hier wortlos durch. Ein nacktes Regions-Array (siehe unten) bleibt ungeprüft —
+es nennt keine Herkunft und behauptet auch keine.
 
 ## Audit-Log
 
@@ -550,6 +563,7 @@ Warnung, sondern nur schwarze Balken an den falschen Stellen.
       "rect":           { "ll": { "x": 100.9, "y": 732.8 }, "ur": { "x": 239.9, "y": 742.5 } },
       "effective_rect": { "ll": { "x":  99.9, "y": 731.8 }, "ur": { "x": 240.9, "y": 743.5 } },
       "effect": "applied",
+      "removed_glyphs": 22,
       "action": "blackout",
       "reason": "booking: b002 (positive)",
       "source": "booking_list"
@@ -566,7 +580,8 @@ Warnung, sondern nur schwarze Balken an den falschen Stellen.
     "summary": ["/Info-Dictionary", "Formulardefinition (/AcroForm)", "…"]
   },
   "effect": {
-    "padding": 1.0, "requested": 4, "applied": 4, "degenerate": 0,
+    "padding": 1.0, "pages": 2, "requested": 4,
+    "applied": 4, "covered": 0, "degenerate": 0, "missing_page": 0,
     "removed_glyphs": 66, "drawn_rects": 4, "removed_annotations": 0,
     "redacted_images": 0, "copied_images": 0
   }
@@ -579,6 +594,43 @@ entfernt wurde (nicht, was vorgesehen war); `effect` fasst den Lauf in Zahlen
 zusammen — `redacted_images` und `copied_images` beziffern die
 [Bildschwärzung](#bilder).
 
+<a id="befund"></a>
+
+### `effect` je Region: was wirklich passiert ist
+
+`"effect"` an einem Eintrag ist **gemessen**, nicht aus dem Rechteck
+geschlossen. `removed_glyphs` daneben nennt die Zeichen, die genau diese Region
+aus dem Content-Stream entfernt hat. Vier Befunde sind möglich:
+
+| Befund | Was geschah | Ist das in Ordnung? |
+|---|---|---|
+| `applied` | Mindestens ein Zeichen entfernt. | Ja — und nur das bezeugt eine Schwärzung. |
+| `covered` | Deck-Rechteck gezeichnet, aber kein Zeichen getroffen. | **Kommt darauf an.** Über einer Grafik oder einem Rasterbild steht kein Text; die Bildpunkte werden trotzdem überschrieben. Liegen die Koordinaten dagegen daneben, bleibt der Text darunter lesbar. |
+| `degenerate` | Rechteck ist nach `--padding` leer, die Region wurde übersprungen. | Nein. Ein negatives `--padding` verkleinert jeden Bereich. |
+| `missing_page` | Die genannte Seite gibt es im Dokument nicht. Es geschah **gar nichts**. | Nein. Fast immer die verwechselte Zählweise — siehe unten. |
+
+Die Summen dazu stehen unter `effect`: `requested` ist die Zahl der geplanten
+Regionen, und `applied + covered + degenerate + missing_page` ergibt sie
+wieder. `pages` nennt die Seitenzahl des Dokuments, damit sich `missing_page`
+nachprüfen lässt; `missing_pages` listet die angesprochenen Seiten (0-basiert).
+
+Jeder Befund außer `applied` steht auch in der Zusammenfassung auf der Konsole
+und als Warnung auf stderr — ein Lauf, der nichts entfernt hat, endet nicht
+mehr wortlos mit „Schwärzungen: 3“.
+
+```console
+$ redact-rs auszug.pdf -o out.pdf --no-patterns --manual-regions regionen.json
+Seiten:             3
+Schwärzungen:       3
+  davon wirksam:      2 (Zeichen entfernt)
+  davon wirkungslos:  1 (Seite gibt es in diesem Dokument nicht)
+Entfernte Zeichen:  44
+Deck-Rechtecke:     2
+…
+Warnung: 1 von 3 Schwärzung(en) liegen auf einer Seite, die es in diesem
+Dokument nicht gibt (Seite 4; das Dokument hat 3 Seite(n)). …
+```
+
 ### `page` zählt überall gleich
 
 **In jeder JSON-Datei ist die erste Seite `0`** — in `review.json`, im
@@ -590,6 +642,12 @@ Das war bis v0.2.0 nicht so: das Audit-Log zählte als einziges ab 1. Wer
 Workflow ein —, sah denselben Treffer einmal als `"page": 0` und einmal als
 `"page": 1`. Eine Seitenzahl aus dem Log in eine Regionsdatei zu übernehmen
 ging damit still daneben. Diese Stolperfalle gibt es nicht mehr.
+
+Wer trotzdem ab 1 zählt, erfährt es: eine Region auf einer Seite, die es nicht
+gibt, wird nicht angefasst und im Log als `missing_page` geführt — mit einer
+Warnung, die die gemeinte Seite im Klartext nennt. Vorher meldete derselbe Lauf
+„Schwärzungen: 3“ und `"effect": "applied"` für alle drei, obwohl eine davon
+nirgendwo lag und die erste Seite unangetastet blieb.
 
 ### Was im Audit-Log im Klartext steht
 
@@ -1089,10 +1147,12 @@ Alle Abweichungen sind bewusst:
 | Audit-Log mit SHA-256 beider Dateien | erfüllt | `review_then_apply_roundtrip` |
 | Aussagekräftige Fehler bei kaputten PDFs | erfüllt | `rejects_broken_pdf_with_clear_message` |
 | Manuelle Regionen (JSON) werden angewendet | erfüllt | `manual_regions_are_applied` |
+| Das Audit-Log bescheinigt nur Gemessenes | erfüllt | `a_region_on_a_page_that_does_not_exist_is_not_logged_as_applied`, `a_region_without_text_under_it_is_covered_not_missing`, `a_degenerate_padding_is_not_logged_as_a_redaction` — jeweils mit Gegenprobe |
+| Review-Datei wirkt nur auf ihr eigenes Dokument | erfüllt, auch hinter `--manual-regions` | `review_file_from_another_document_is_rejected`, `a_foreign_review_file_behind_manual_regions_is_refused_too` |
 | Metadaten im Ausgabe-PDF entfernt | erfüllt | `metadata_is_stripped`, `names_tree_is_removed_as_the_module_documentation_promises` |
 | GUI: Rechtecke ziehen, Treffer abwählen, Export | umgesetzt | Logik als reine Funktionen getestet; das Fensterverhalten selbst ist nicht automatisiert prüfbar |
 | GUI-Binary unter 30 MB | erfüllt (für die gemessene Datei) | Windows 7,4 MB nachgemessen (`dist/redact-rs.exe`, 7 395 328 Byte) — das ist die **Konsolenfassung**. `redact-rs-gui.exe` ist seitdem als zweite Datei dazugekommen und hier **nicht** nachgemessen; der Linux-Wert (13 MB) stammt ebenfalls aus einer früheren Messung. |
-| Export der GUI identisch zur CLI | **nicht end-to-end nachgewiesen** | Beide Programme gehen inzwischen durch dasselbe Crate `redact-pipeline`, und die früher dokumentierten Abweichungen sind geschlossen ([siehe oben](#grafische-oberfläche)). Es gibt aber weiterhin keinen Test, der beide *Programme* startet und die Ausgabedateien byteweise vergleicht. |
+| Export der GUI identisch zur CLI | erfüllt | `cli_and_gui_agree.rs` startet das gebaute Binary als eigenen Prozess und daneben `AppState` (laden → analysieren → exportieren) und vergleicht Ausgabedatei **byteweise** sowie das Audit-Log Feld für Feld — mit Vorgabe-Aktion und mit `--action replace`. Die Gegenprobe `a_deviating_window_would_be_caught` stellt die früher bestandene Abweichung nach und muss anschlagen. |
 
 Von dem, was das Konzept in §11 außerhalb des MVP führt, sind das
 [Entschlüsseln passwortgeschützter PDFs](#verschluesselte-pdfs) und die

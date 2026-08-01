@@ -16,7 +16,7 @@
 use egui::{CursorIcon, Pos2, Response};
 use redact_core::Point;
 
-use crate::state::AnnotatedRegion;
+use crate::state::{AnnotatedRegion, RegionId};
 
 /// Ab welcher Kantenlänge (in Bildschirmpunkten) ein Ziehen als Rechteck zählt.
 /// Alles darunter ist ein Klick mit zittriger Hand.
@@ -151,10 +151,20 @@ pub fn hit_handle(rect: egui::Rect, pointer: Pos2) -> Option<Handle> {
 /// bleibt stehen. Der festgehaltene Punkt wird im **PDF-User-Space** gemerkt
 /// und nicht auf dem Bildschirm — dann übersteht der Ziehvorgang auch Rollen
 /// und Zoomen mitten in der Bewegung.
+///
+/// **Die Region wird über ihre Kennung gemerkt, nicht über ihren Platz in der
+/// Liste.** Ein Zug läuft über viele Bilder, und dazwischen kann die
+/// Trefferliste sich ändern: Entf löscht einen Eintrag, Strg+Z tauscht die
+/// ganze Liste, ein geladenes Review ersetzt sie. Ein gemerkter Index zeigte
+/// danach auf eine **andere** Region — und die sprang lautlos auf das
+/// Ziehrechteck, während ihre eigentliche Fläche ungeschwärzt blieb (Befund
+/// #65). Eine Kennung kann das nicht: sie zeigt entweder auf dieselbe Region
+/// oder auf gar keine, und „auf gar keine“ beendet den Zug
+/// ([`crate::app::RedactApp`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HandleDrag {
-    /// Index in [`crate::state::AppState::regions`].
-    pub region: usize,
+    /// Kennung der Region — siehe [`crate::state::RegionId`].
+    pub region: RegionId,
     /// Der gegenüberliegende Eckpunkt, der festbleibt.
     pub anchor: Point,
 }

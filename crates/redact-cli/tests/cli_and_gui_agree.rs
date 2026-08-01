@@ -78,6 +78,14 @@ fn config(input: &Path, padding: f64) -> Config {
     }
 }
 
+/// Dieselben Einstellungen, aber mit Ersatztext statt schwarzem Balken.
+fn replacing_config(input: &Path, padding: f64) -> Config {
+    Config {
+        action: redact_core::Action::Replace("[IBAN]".to_string()),
+        ..config(input, padding)
+    }
+}
+
 /// Der Weg durch die Oberfläche: laden, analysieren, exportieren.
 fn export_through_the_window(config: Config, out: &Path, audit: Option<&Path>) -> Vec<u8> {
     let mut state = AppState::with_config(config);
@@ -156,6 +164,110 @@ fn the_binary_and_the_window_produce_the_same_file_and_the_same_log() {
     assert_eq!(cli_log["input"]["sha256"].as_str().unwrap().len(), 64);
     assert_eq!(cli_log["output"]["sha256"].as_str().unwrap().len(), 64);
     assert_eq!(cli_log["effect"]["padding"], serde_json::json!(3.0));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Dieselbe Gleichheit mit `--action replace --replace-with "[IBAN]"`.
+///
+/// Der Vergleich oben lief nur mit der Vorgabe-Aktion und hätte einen
+/// Unterschied in der Behandlung von `--action` nicht bemerkt: beide Wege
+/// hätten schwarz geschwärzt und wären sich darin einig gewesen. Ein Ersatztext
+/// fasst mehr an — Deck-Rechteck **und** eine neue Font-Ressource auf der Seite
+/// —, ist also der schärfere Vergleich.
+#[test]
+fn the_binary_and_the_window_agree_on_a_replacement_too() {
+    let dir = workdir("replace");
+    let input = demo(&dir);
+
+    let cli_out = dir.join("cli.pdf");
+    let cli_audit = dir.join("cli_audit.json");
+    succeeds(&run(&[
+        input.to_str().unwrap(),
+        "-o",
+        cli_out.to_str().unwrap(),
+        "--patterns",
+        "iban_de",
+        "--padding",
+        "3",
+        "--action",
+        "replace",
+        "--replace-with",
+        "[IBAN]",
+        "--audit-log",
+        cli_audit.to_str().unwrap(),
+    ]));
+    let cli_bytes = std::fs::read(&cli_out).unwrap();
+
+    let gui_out = dir.join("gui.pdf");
+    let gui_audit = dir.join("gui_audit.json");
+    let gui_bytes =
+        export_through_the_window(replacing_config(&input, 3.0), &gui_out, Some(&gui_audit));
+
+    assert_eq!(
+        cli_bytes,
+        gui_bytes,
+        "mit --action replace schreiben Kommandozeile und Oberfläche \
+         verschiedene Dateien ({} vs. {} Byte)",
+        cli_bytes.len(),
+        gui_bytes.len()
+    );
+    let cli_log = comparable_log(&cli_audit);
+    assert_eq!(cli_log, comparable_log(&gui_audit));
+    // Und der Ersatztext ist wirklich angekommen — sonst verglichen wir zwei
+    // schwarze Balken miteinander.
+    assert_eq!(
+        cli_log["redactions"][0]["action"],
+        serde_json::json!({ "replace": "[IBAN]" }),
+        "{cli_log}"
+    );
+    assert!(
+        !redact_pdf::leaks(&cli_bytes, "[IBAN]").is_empty(),
+        "der Ersatztext steht nicht in der Ausgabe"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Auch die Review-Datei ist mit `--action replace` zwischen beiden Wegen
+/// austauschbar.
+///
+/// `both_ways_write_the_same_review_file` lief nur mit der Vorgabe-Aktion und
+/// blieb deshalb selbst dann grün, als die Kommandozeile in jeden Eintrag
+/// „blackout“ schrieb (siehe `review_file_records_the_action_of_the_run` in
+/// `cli.rs`).
+#[test]
+fn both_ways_write_the_same_review_file_with_a_replacement() {
+    let dir = workdir("review-action");
+    let input = demo(&dir);
+
+    let cli_review = dir.join("cli_review.json");
+    succeeds(&run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        cli_review.to_str().unwrap(),
+        "--patterns",
+        "iban_de",
+        "--action",
+        "replace",
+        "--replace-with",
+        "[IBAN]",
+    ]));
+
+    let review: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cli_review).unwrap()).unwrap();
+    assert!(!review["items"].as_array().unwrap().is_empty());
+
+    // Und die Oberfläche schreibt dieselbe Datei.
+    let mut state = AppState::with_config(replacing_config(&input, 1.0));
+    state.load_document(&input).unwrap();
+    state.analyze().unwrap();
+    let gui_review = dir.join("gui_review.json");
+    state.save_review_file(&gui_review).unwrap();
+    let gui: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&gui_review).unwrap()).unwrap();
+    assert_eq!(review["items"], gui["items"]);
 
     std::fs::remove_dir_all(&dir).ok();
 }

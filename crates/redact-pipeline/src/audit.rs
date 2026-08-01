@@ -17,14 +17,26 @@
 //!
 //! * [`AuditEntry::effective_rect`] — das Rechteck **nach** `--padding`, also
 //!   das, was tatsächlich gewirkt hat, plus [`AuditEntry::effect`] mit dem
-//!   Befund je Region,
+//!   Befund je Region und [`AuditEntry::removed_glyphs`] mit der Zahl der
+//!   Zeichen, die **diese** Region entfernt hat,
 //! * [`EffectRecord`] — wie viele Zeichen, Deck-Rechtecke, Annotationen und
 //!   Bilder die Schwärzung wirklich angefasst hat,
 //! * [`MetadataRecord`] — was der Metadatenlauf wirklich entfernt hat.
 //!
-//! Was sich nicht messen lässt, steht auch nicht drin: eine Zuordnung
-//! „Region → entfernte Zeichen“ liefert [`redact_pdf::RedactionReport`] nicht,
-//! deshalb nennt das Log Zeichenzahlen nur als Gesamtsumme.
+//! ## Der Befund je Region kommt aus der Messung
+//!
+//! Er wurde lange **allein am Rechteck** gefällt: „nach `--padding` nicht
+//! leer“ hieß `applied`. Die Seite kam in der Bewertung gar nicht vor. Eine
+//! Region auf `"page": 3` in einem dreiseitigen Dokument — die naheliegende
+//! Verwechslung eines Menschen, der ab 1 zählt — wurde von der Schwärzung nie
+//! angefasst, es gibt diese Seite nicht, und das Log bescheinigte trotzdem
+//! `applied`. Ebenso eine Region, deren Koordinaten danebenliegen: gültiges
+//! Rechteck, kein getroffenes Zeichen, `applied`.
+//!
+//! Die Wahrheit liefert [`redact_pdf::RedactionReport::per_redaction`] — die
+//! Zahl der Zeichen, die jede einzelne Region entfernt hat. [`Effects`] wertet
+//! sie zusammen mit der Seitenzahl des Dokuments aus und ist die **eine**
+//! Quelle für Log, Zusammenfassung und Warnungen.
 //!
 //! ## Eine Fassung für beide Programme
 //!
@@ -93,6 +105,12 @@ pub struct AuditEntry {
     pub effective_rect: Rect,
     /// Befund für diese Region.
     pub effect: EntryEffect,
+    /// Zeichen, die **diese** Region aus dem Content-Stream entfernt hat.
+    ///
+    /// Aus [`redact_pdf::RedactionReport::per_redaction`], also gemessen.
+    /// Überlappende Regionen werden jede für sich gezählt; die Summe über alle
+    /// Einträge kann deshalb größer sein als [`EffectRecord::removed_glyphs`].
+    pub removed_glyphs: usize,
     pub action: redact_core::Action,
     pub reason: String,
     pub source: String,
@@ -102,25 +120,228 @@ pub struct AuditEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryEffect {
-    /// Das Rechteck war nach `--padding` noch gültig; die Schwärzung lief.
+    /// Die Region hat mindestens ein Zeichen aus dem Content-Stream entfernt.
+    /// Das ist der einzige Befund, der eine ausgeführte Schwärzung bezeugt.
     Applied,
+    /// Gültiges Rechteck auf einer vorhandenen Seite, Deck-Rechteck gezeichnet
+    /// — aber kein einziges Zeichen getroffen.
+    ///
+    /// **Nicht dasselbe wie [`EntryEffect::MissingPage`], und mit Absicht kein
+    /// Fehler:** über einer Grafik oder einem Rasterbild steht kein Text, der
+    /// zu entfernen wäre; die Bildpunkte darunter werden von
+    /// [`redact_pdf::PdfRedactor`] trotzdem überschrieben, die Schwärzung
+    /// wirkt also. Dieselbe Null entsteht aber auch, wenn die Koordinaten
+    /// danebenliegen — und dann steht der Text lesbar in der Ausgabe. Was von
+    /// beidem zutrifft, kann das Programm nicht entscheiden: es kennt nur die
+    /// Zeichen, die es *gefunden* hat. Deshalb ein eigener Befund, der gesagt
+    /// und nicht als `applied` verbucht wird.
+    Covered,
     /// Das Rechteck ist nach `--padding` leer. Eine solche Region wird von
     /// [`redact_pdf::PdfRedactor`] übersprungen: kein Zeichen entfernt, kein
     /// Rechteck gezeichnet. Sie darf nicht als Erfolg gelten.
     Degenerate,
+    /// Die Region nennt eine Seite, die es im Dokument nicht gibt.
+    ///
+    /// Hier ist überhaupt nichts geschehen — kein Zeichen entfernt, kein
+    /// Rechteck gezeichnet, keine Annotation entfernt. Der häufigste Weg
+    /// dorthin ist die verwechselte Zählweise: in jeder JSON-Datei ist die
+    /// erste Seite `0`, nur der Fließtext sagt „Seite 1“.
+    MissingPage,
 }
 
 impl EntryEffect {
-    /// Bewertet eine Region gegen das Padding, mit dem gerechnet wurde.
+    /// Bewertet eine Region gegen das, was gemessen wurde.
     ///
-    /// Der Test ist derselbe, den [`redact_pdf::PdfRedactor`] anlegt:
-    /// `rect.expanded(padding)` und dann `is_empty()`.
-    pub fn of(rect: Rect, padding: f64) -> Self {
-        if rect.expanded(padding).is_empty() {
-            Self::Degenerate
-        } else {
-            Self::Applied
+    /// `pages` ist die Seitenzahl des verarbeiteten Dokuments, `removed_glyphs`
+    /// der Eintrag dieser Region in
+    /// [`redact_pdf::RedactionReport::per_redaction`].
+    ///
+    /// Die Reihenfolge der Prüfungen ist Absicht: eine Seite, die es nicht
+    /// gibt, macht jede weitere Frage gegenstandslos — dort ist kein Rechteck
+    /// zu klein und keines daneben, dort geschieht gar nichts.
+    pub fn of(redaction: &Redaction, padding: f64, pages: usize, removed_glyphs: usize) -> Self {
+        if redaction.region.page >= pages {
+            return Self::MissingPage;
         }
+        if redaction.region.rect.expanded(padding).is_empty() {
+            return Self::Degenerate;
+        }
+        if removed_glyphs > 0 {
+            Self::Applied
+        } else {
+            Self::Covered
+        }
+    }
+
+}
+
+/// Der Befund je Region samt Summen — die eine Quelle für Log, Zusammenfassung
+/// und Warnungen.
+///
+/// Einmal gerechnet und dann herumgereicht, damit Nachweis (`audit.json`),
+/// Konsolenausgabe und Warnungen nicht auseinanderlaufen können: vorher
+/// bewertete jede der drei Stellen für sich, und alle drei bewerteten falsch.
+#[derive(Debug, Clone, Default)]
+pub struct Effects {
+    /// Befund je übergebener Schwärzung, in derselben Reihenfolge.
+    pub per_entry: Vec<EntryEffect>,
+    /// Entfernte Zeichen je übergebener Schwärzung (gemessen).
+    pub removed_glyphs: Vec<usize>,
+    /// Rand, mit dem gerechnet wurde.
+    pub padding: f64,
+    /// Seitenzahl des Dokuments.
+    pub pages: usize,
+    /// Zahl der Regionen mit [`EntryEffect::Applied`].
+    pub applied: usize,
+    /// Zahl der Regionen mit [`EntryEffect::Covered`].
+    pub covered: usize,
+    /// Zahl der Regionen mit [`EntryEffect::Degenerate`].
+    pub degenerate: usize,
+    /// Zahl der Regionen mit [`EntryEffect::MissingPage`].
+    pub missing_page: usize,
+    /// Die angesprochenen, aber nicht vorhandenen Seiten — 0-basiert,
+    /// aufsteigend, ohne Dubletten.
+    pub missing_pages: Vec<usize>,
+}
+
+impl Effects {
+    /// Bewertet jede Schwärzung gegen den Bericht der Schwärzung.
+    ///
+    /// `report.per_redaction` ist index-gleich mit `redactions`; fehlt ein
+    /// Eintrag (das kann nur ein Programmfehler sein), wird `0` angenommen —
+    /// die vorsichtige Richtung, denn `0` heißt „nichts nachgewiesen“.
+    pub fn measure(
+        redactions: &[Redaction],
+        padding: f64,
+        pages: usize,
+        report: &RedactionReport,
+    ) -> Self {
+        let removed_glyphs: Vec<usize> = (0..redactions.len())
+            .map(|i| report.per_redaction.get(i).copied().unwrap_or(0))
+            .collect();
+        let per_entry: Vec<EntryEffect> = redactions
+            .iter()
+            .zip(&removed_glyphs)
+            .map(|(r, removed)| EntryEffect::of(r, padding, pages, *removed))
+            .collect();
+
+        let mut effects = Self {
+            padding,
+            pages,
+            ..Self::default()
+        };
+        for (redaction, effect) in redactions.iter().zip(&per_entry) {
+            match effect {
+                EntryEffect::Applied => effects.applied += 1,
+                EntryEffect::Covered => effects.covered += 1,
+                EntryEffect::Degenerate => effects.degenerate += 1,
+                EntryEffect::MissingPage => {
+                    effects.missing_page += 1;
+                    let page = redaction.region.page;
+                    if let Err(at) = effects.missing_pages.binary_search(&page) {
+                        effects.missing_pages.insert(at, page);
+                    }
+                }
+            }
+        }
+        effects.per_entry = per_entry;
+        effects.removed_glyphs = removed_glyphs;
+        effects
+    }
+
+    /// Geplante Schwärzungen.
+    pub fn requested(&self) -> usize {
+        self.per_entry.len()
+    }
+
+    /// Regionen, bei denen nachweislich gar nichts geschehen ist.
+    pub fn ineffective(&self) -> usize {
+        self.degenerate + self.missing_page
+    }
+
+    /// Warnungen, die sich aus dem *Ergebnis* eines Laufs ergeben.
+    ///
+    /// Vier Fälle, die stillschweigend als Erfolg durchgingen:
+    ///
+    /// 1. Eine Region auf einer Seite, die es nicht gibt. Sie wird nie
+    ///    angefasst; die Zusammenfassung meldete trotzdem „Schwärzungen: 1“.
+    /// 2. Eine Region, die nach `--padding` leer ist. Sie wird übersprungen.
+    /// 3. Eine Region, die kein Zeichen entfernt hat. Das kann richtig sein
+    ///    (Grafik, Rasterbild), ist es aber nicht zwingend — und der
+    ///    Unterschied entscheidet, ob das Geheimnis noch dasteht.
+    /// 4. Überschriebene Bilder. Sie werden neu kodiert — pixelgenau
+    ///    verlustfrei, aber nicht mehr in der ursprünglichen Kodierung. Wer
+    ///    eine deutlich größere Ausgabedatei vorfindet, soll wissen, woher sie
+    ///    kommt.
+    pub fn warnings(&self, report: &RedactionReport) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let total = self.requested();
+
+        if self.missing_page > 0 {
+            // Das `+ 1` ist die einzige erlaubte Umrechnung: Fließtext sagt
+            // „Seite 1“, JSON zählt ab 0 (siehe [`AuditEntry::page`]).
+            let list = self
+                .missing_pages
+                .iter()
+                .map(|p| (p + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            warnings.push(format!(
+                "{} von {total} Schwärzung(en) liegen auf einer Seite, die es in diesem \
+                 Dokument nicht gibt (Seite {list}; das Dokument hat {} Seite(n)). Dort \
+                 wurde nichts entfernt und nichts überdeckt — der Text steht unverändert \
+                 in der Ausgabe. Häufigste Ursache ist die Zählweise: in JSON ist die \
+                 erste Seite „page“: 0, die letzte also {}.",
+                self.missing_page,
+                self.pages,
+                self.pages.saturating_sub(1)
+            ));
+        }
+        if self.degenerate > 0 {
+            warnings.push(format!(
+                "{} von {total} Schwärzungen haben nach --padding={} ein leeres \
+                 Rechteck und konnten nichts entfernen. Der Text steht unverändert in der \
+                 Ausgabe. Ein negatives Padding verkleinert jeden Bereich.",
+                self.degenerate, self.padding
+            ));
+        }
+        if self.covered > 0 {
+            let mut text = format!(
+                "{} von {total} Schwärzung(en) haben ein Deck-Rechteck gezeichnet, aber \
+                 kein einziges Zeichen aus dem Content-Stream entfernt. Wo gar kein Text \
+                 steht (Grafik, Rasterbild), ist das richtig; treffen die Koordinaten \
+                 dagegen daneben, bleibt der Text darunter lesbar und per Copy-&-Paste \
+                 zu holen.",
+                self.covered
+            );
+            if report.redacted_images > 0 {
+                text.push_str(&format!(
+                    " In diesem Lauf wurden {} Bild(er) in ihren Bildpunkten \
+                     überschrieben — über einem Rasterbild ist dieser Befund der \
+                     Normalfall.",
+                    report.redacted_images
+                ));
+            }
+            warnings.push(text);
+        }
+        if report.redacted_images > 0 {
+            let mut text = format!(
+                "{} Bild(er) überschrieben: die Bildpunkte im Schwärzungsbereich sind \
+                 wirklich weg. Das Bild wird dafür neu kodiert — außerhalb des Bereichs \
+                 bleibt jeder Bildpunkt unverändert (verlustfrei), die Datei ist danach \
+                 aber nicht mehr bitgleich und wird meist deutlich größer (aus JPEG wird \
+                 ein Flate-Bild).",
+                report.redacted_images
+            );
+            if report.copied_images > 0 {
+                text.push_str(&format!(
+                    " {} Kopie(n) angelegt, weil dasselbe Bild mehrfach benutzt wird.",
+                    report.copied_images
+                ));
+            }
+            warnings.push(text);
+        }
+        warnings
     }
 }
 
@@ -129,12 +350,25 @@ impl EntryEffect {
 pub struct EffectRecord {
     /// Rand, der auf jedes Rechteck gerechnet wurde (`--padding`).
     pub padding: f64,
+    /// Seitenzahl des verarbeiteten Dokuments.
+    ///
+    /// Steht hier, weil `missing_page` sonst nicht nachprüfbar wäre: erst
+    /// zusammen mit dieser Zahl lässt sich sehen, dass eine genannte Seite
+    /// wirklich außerhalb liegt.
+    pub pages: usize,
     /// Geplante Schwärzungen.
     pub requested: usize,
-    /// Davon mit gültigem Rechteck.
+    /// Davon mit nachgewiesener Wirkung: mindestens ein Zeichen entfernt.
     pub applied: usize,
+    /// Davon nur überdeckt: gültiges Rechteck, aber kein Zeichen getroffen.
+    pub covered: usize,
     /// Davon entartet (leeres Rechteck) — wirkungslos.
     pub degenerate: usize,
+    /// Davon auf einer Seite, die es nicht gibt — wirkungslos.
+    pub missing_page: usize,
+    /// Welche Seiten das waren (0-basiert).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_pages: Vec<usize>,
     /// Tatsächlich aus den Content-Streams entfernte Zeichen.
     pub removed_glyphs: usize,
     /// Tatsächlich gezeichnete Deck-Rechtecke.
@@ -211,8 +445,9 @@ pub struct BlockedEntry {
 /// Die gemessenen Ergebnisse eines Laufs, so wie sie ins Log gehören.
 #[derive(Debug, Clone, Copy)]
 pub struct Applied<'a> {
-    /// Rand, mit dem geschwärzt wurde.
-    pub padding: f64,
+    /// Der Befund je Region — bereits gemessen, hier nicht noch einmal
+    /// bewertet. Trägt auch `padding` und die Seitenzahl.
+    pub effects: &'a Effects,
     /// Bericht der Schwärzung.
     pub redaction: &'a RedactionReport,
     /// Bericht des Metadatenlaufs.
@@ -236,22 +471,27 @@ impl AuditLog {
         applied: Applied<'_>,
         warnings: &[String],
     ) -> Result<Self> {
+        let effects = applied.effects;
         let entries: Vec<AuditEntry> = redactions
             .iter()
-            .map(|r| AuditEntry {
+            .enumerate()
+            .map(|(index, r)| AuditEntry {
                 page: r.region.page,
                 rect: r.region.rect,
-                effective_rect: r.region.rect.expanded(applied.padding),
-                effect: EntryEffect::of(r.region.rect, applied.padding),
+                effective_rect: r.region.rect.expanded(effects.padding),
+                // Übernommen, nicht neu bewertet: beides kommt aus [`Effects`],
+                // und das ist die einzige Stelle, die misst.
+                effect: effects
+                    .per_entry
+                    .get(index)
+                    .copied()
+                    .unwrap_or(EntryEffect::Covered),
+                removed_glyphs: effects.removed_glyphs.get(index).copied().unwrap_or(0),
                 action: r.action.clone(),
                 reason: r.reason.clone(),
                 source: r.region.source_kind().to_string(),
             })
             .collect();
-        let degenerate = entries
-            .iter()
-            .filter(|e| e.effect == EntryEffect::Degenerate)
-            .count();
 
         Ok(Self {
             timestamp: timestamp(),
@@ -268,10 +508,14 @@ impl AuditLog {
                 sha256: sha256_file(output)?,
             },
             effect: EffectRecord {
-                padding: applied.padding,
+                padding: effects.padding,
+                pages: effects.pages,
                 requested: entries.len(),
-                applied: entries.len() - degenerate,
-                degenerate,
+                applied: effects.applied,
+                covered: effects.covered,
+                degenerate: effects.degenerate,
+                missing_page: effects.missing_page,
+                missing_pages: effects.missing_pages.clone(),
                 removed_glyphs: applied.redaction.removed_glyphs,
                 drawn_rects: applied.redaction.drawn_rects,
                 removed_annotations: applied.redaction.removed_annotations,
@@ -303,66 +547,6 @@ impl AuditLog {
         let json = serde_json::to_string_pretty(self)?;
         write_file(path, json.as_bytes(), options)
     }
-}
-
-/// Warnungen, die sich aus dem *Ergebnis* eines Laufs ergeben.
-///
-/// Drei Fälle, die stillschweigend als Erfolg durchgingen:
-///
-/// 1. Eine Region, die nach `--padding` leer ist. Sie wird übersprungen — die
-///    Zusammenfassung meldete trotzdem „Schwärzungen: 1“.
-/// 2. Ein Lauf, in dem keine einzige Region ein Zeichen entfernt hat. Das ist
-///    nicht zwingend falsch (ein Bild lässt sich nur überdecken), aber es
-///    gehört gesagt.
-/// 3. Überschriebene Bilder. Sie werden neu kodiert — pixelgenau verlustfrei,
-///    aber nicht mehr in der ursprünglichen Kodierung. Wer eine deutlich
-///    größere Ausgabedatei vorfindet, soll wissen, woher sie kommt.
-pub fn effect_warnings(
-    redactions: &[Redaction],
-    padding: f64,
-    report: &RedactionReport,
-) -> Vec<String> {
-    let mut warnings = Vec::new();
-    let degenerate = redactions
-        .iter()
-        .filter(|r| EntryEffect::of(r.region.rect, padding) == EntryEffect::Degenerate)
-        .count();
-
-    if degenerate > 0 {
-        warnings.push(format!(
-            "{degenerate} von {} Schwärzungen haben nach --padding={padding} ein leeres \
-             Rechteck und konnten nichts entfernen. Der Text steht unverändert in der \
-             Ausgabe. Ein negatives Padding verkleinert jeden Bereich.",
-            redactions.len()
-        ));
-    }
-    let effective = redactions.len() - degenerate;
-    if effective > 0 && report.removed_glyphs == 0 && report.redacted_images == 0 {
-        warnings.push(format!(
-            "Kein einziges Zeichen wurde aus dem Content-Stream entfernt, obwohl \
-             {effective} Schwärzung(en) ein gültiges Rechteck hatten. Entweder steht \
-             an diesen Stellen kein Text (etwa ein Rasterbild), oder die Bereiche \
-             treffen daneben."
-        ));
-    }
-    if report.redacted_images > 0 {
-        let mut text = format!(
-            "{} Bild(er) überschrieben: die Bildpunkte im Schwärzungsbereich sind \
-             wirklich weg. Das Bild wird dafür neu kodiert — außerhalb des Bereichs \
-             bleibt jeder Bildpunkt unverändert (verlustfrei), die Datei ist danach \
-             aber nicht mehr bitgleich und wird meist deutlich größer (aus JPEG wird \
-             ein Flate-Bild).",
-            report.redacted_images
-        );
-        if report.copied_images > 0 {
-            text.push_str(&format!(
-                " {} Kopie(n) angelegt, weil dasselbe Bild mehrfach benutzt wird.",
-                report.copied_images
-            ));
-        }
-        warnings.push(text);
-    }
-    warnings
 }
 
 /// SHA-256 einer Datei als Hex-String.
@@ -409,9 +593,24 @@ mod tests {
         }
     }
 
+    /// Ein Bericht, in dem die Wirkung je Region wirklich drinsteht.
+    ///
+    /// `RedactionReport::default()` von Hand aufzufüllen war der bequeme Weg —
+    /// und genau der, auf dem die Wahrheit verlorenging: `per_redaction` blieb
+    /// leer, und niemandem fiel auf, dass es niemand las.
+    fn report_with(per_redaction: &[usize]) -> RedactionReport {
+        RedactionReport {
+            removed_glyphs: per_redaction.iter().sum(),
+            drawn_rects: per_redaction.len(),
+            per_redaction: per_redaction.to_vec(),
+            ..Default::default()
+        }
+    }
+
     fn build(
         redactions: &[Redaction],
         padding: f64,
+        pages: usize,
         report: &RedactionReport,
         metadata: &MetadataReport,
     ) -> (AuditLog, std::path::PathBuf) {
@@ -420,7 +619,8 @@ mod tests {
         let output = dir.join("out.pdf");
         std::fs::write(&input, b"a").unwrap();
         std::fs::write(&output, b"b").unwrap();
-        let warnings = effect_warnings(redactions, padding, report);
+        let effects = Effects::measure(redactions, padding, pages, report);
+        let warnings = effects.warnings(report);
         let log = AuditLog::build(
             &input,
             &sha256_bytes(b"a"),
@@ -428,7 +628,7 @@ mod tests {
             redactions,
             &[],
             Applied {
-                padding,
+                effects: &effects,
                 redaction: report,
                 metadata,
             },
@@ -448,12 +648,13 @@ mod tests {
 
     #[test]
     fn audit_entries_use_zero_based_pages_like_every_other_file() {
-        let report = RedactionReport {
-            removed_glyphs: 4,
-            drawn_rects: 1,
-            ..Default::default()
-        };
-        let (log, dir) = build(&[iban_redaction()], 1.0, &report, &stripped_info());
+        let (log, dir) = build(
+            &[iban_redaction()],
+            1.0,
+            1,
+            &report_with(&[4]),
+            &stripped_info(),
+        );
         assert_eq!(log.redactions[0].page, 0);
         assert_eq!(log.redactions[0].source, "auto");
         assert!(log.redactions[0].reason.contains("iban_de"));
@@ -471,7 +672,8 @@ mod tests {
         let (log, dir) = build(
             &[iban_redaction()],
             1.0,
-            &RedactionReport::default(),
+            1,
+            &report_with(&[4]),
             &stripped_info(),
         );
         assert_eq!(log.input.sha256, sha256_bytes(b"a"));
@@ -485,7 +687,8 @@ mod tests {
         let (log, dir) = build(
             &[iban_redaction()],
             1.0,
-            &RedactionReport::default(),
+            1,
+            &report_with(&[4]),
             &MetadataReport::default(),
         );
         assert!(!log.metadata_stripped);
@@ -500,7 +703,11 @@ mod tests {
         let (log, dir) = build(
             &[iban_redaction()],
             -100.0,
-            &RedactionReport::default(),
+            1,
+            &RedactionReport {
+                per_redaction: vec![0],
+                ..Default::default()
+            },
             &stripped_info(),
         );
         assert_eq!(log.effect.requested, 1);
@@ -518,24 +725,129 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    // ----------------------------------------------------------- Aufgabe #64
+
+    /// Der Kern des Befunds: die Seite kam in der Bewertung gar nicht vor.
+    ///
+    /// Eine Region auf Seite 3 eines dreiseitigen Dokuments (0, 1, 2) wird von
+    /// der Schwärzung nie angefasst. Das Log bescheinigte trotzdem `applied`.
     #[test]
-    fn a_run_without_a_single_removed_glyph_is_flagged() {
-        let warnings = effect_warnings(&[iban_redaction()], 1.0, &RedactionReport::default());
-        assert_eq!(warnings.len(), 1);
-        assert!(
-            warnings[0].contains("Kein einziges Zeichen"),
-            "{warnings:?}"
+    fn a_region_on_a_page_that_does_not_exist_is_not_applied() {
+        let mut region = iban_redaction();
+        region.region.page = 3;
+        let (log, dir) = build(
+            &[region],
+            1.0,
+            3,
+            &RedactionReport {
+                per_redaction: vec![0],
+                ..Default::default()
+            },
+            &stripped_info(),
         );
+        assert_eq!(log.effect.requested, 1);
+        assert_eq!(log.effect.applied, 0);
+        assert_eq!(log.effect.missing_page, 1);
+        assert_eq!(log.effect.missing_pages, vec![3]);
+        assert_eq!(log.effect.pages, 3);
+        assert_eq!(log.redactions[0].effect, EntryEffect::MissingPage);
+        assert_eq!(log.redactions[0].removed_glyphs, 0);
+
+        // Und der Lauf sagt es — mit der Seitenzahl im Fließtext, also ab 1.
+        let warning = log
+            .warnings
+            .iter()
+            .find(|w| w.contains("nicht gibt"))
+            .unwrap_or_else(|| panic!("keine Warnung: {:?}", log.warnings));
+        assert!(warning.contains("Seite 4"), "{warning}");
+        assert!(warning.contains("3 Seite(n)"), "{warning}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Gültiges Rechteck, vorhandene Seite, kein getroffenes Zeichen: das ist
+    /// **nicht** `applied` und **nicht** dasselbe wie eine fehlende Seite.
+    #[test]
+    fn a_region_that_removed_nothing_is_covered_not_applied() {
+        let (log, dir) = build(
+            &[iban_redaction()],
+            1.0,
+            1,
+            &RedactionReport {
+                drawn_rects: 1,
+                per_redaction: vec![0],
+                ..Default::default()
+            },
+            &stripped_info(),
+        );
+        assert_eq!(log.effect.applied, 0);
+        assert_eq!(log.effect.covered, 1);
+        assert_eq!(log.effect.missing_page, 0);
+        assert_eq!(log.effect.degenerate, 0);
+        assert_eq!(log.redactions[0].effect, EntryEffect::Covered);
+        assert!(
+            log.warnings
+                .iter()
+                .any(|w| w.contains("kein einziges Zeichen")),
+            "{:?}",
+            log.warnings
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Die vier Befunde sind vier verschiedene, und die Summe stimmt.
+    #[test]
+    fn every_region_is_judged_on_its_own_measurement() {
+        let applied = iban_redaction();
+        let covered = iban_redaction();
+        let mut missing = iban_redaction();
+        missing.region.page = 7;
+        let redactions = [applied, covered, missing];
+
+        let effects = Effects::measure(
+            &redactions,
+            1.0,
+            2,
+            &RedactionReport {
+                removed_glyphs: 22,
+                drawn_rects: 2,
+                per_redaction: vec![22, 0, 0],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            effects.per_entry,
+            vec![
+                EntryEffect::Applied,
+                EntryEffect::Covered,
+                EntryEffect::MissingPage
+            ]
+        );
+        assert_eq!(effects.applied, 1);
+        assert_eq!(effects.covered, 1);
+        assert_eq!(effects.missing_page, 1);
+        assert_eq!(effects.ineffective(), 1);
+        assert_eq!(
+            effects.applied + effects.covered + effects.degenerate + effects.missing_page,
+            effects.requested()
+        );
+        assert_eq!(effects.removed_glyphs, vec![22, 0, 0]);
+    }
+
+    /// Eine Seite, die es nicht gibt, schlägt jede weitere Bewertung: dort ist
+    /// kein Rechteck zu klein, dort geschieht überhaupt nichts.
+    #[test]
+    fn a_missing_page_wins_over_a_degenerate_rect() {
+        let mut region = iban_redaction();
+        region.region.page = 9;
+        let effects = Effects::measure(&[region], -100.0, 1, &RedactionReport::default());
+        assert_eq!(effects.per_entry, vec![EntryEffect::MissingPage]);
+        assert_eq!(effects.degenerate, 0);
     }
 
     #[test]
     fn an_effective_run_produces_no_warning() {
-        let report = RedactionReport {
-            removed_glyphs: 26,
-            drawn_rects: 1,
-            ..Default::default()
-        };
-        assert!(effect_warnings(&[iban_redaction()], 1.0, &report).is_empty());
+        let effects = Effects::measure(&[iban_redaction()], 1.0, 1, &report_with(&[26]));
+        assert!(effects.warnings(&report_with(&[26])).is_empty());
     }
 
     /// Ein überschriebenes Bild ist kein Randdetail: das Bild wird neu
@@ -546,21 +858,27 @@ mod tests {
             drawn_rects: 1,
             redacted_images: 2,
             copied_images: 1,
+            per_redaction: vec![0],
             ..Default::default()
         };
-        let warnings = effect_warnings(&[iban_redaction()], 1.0, &report);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let effects = Effects::measure(&[iban_redaction()], 1.0, 1, &report);
+        let warnings = effects.warnings(&report);
+        // Zwei Befunde: die Region hat kein Zeichen entfernt (über einem Bild
+        // der Normalfall — und genau das steht auch dabei), und das Bild wurde
+        // neu kodiert.
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("Normalfall"), "{warnings:?}");
         assert!(
-            warnings[0].contains("2 Bild(er) überschrieben"),
+            warnings[1].contains("2 Bild(er) überschrieben"),
             "{warnings:?}"
         );
-        assert!(warnings[0].contains("verlustfrei"), "{warnings:?}");
+        assert!(warnings[1].contains("verlustfrei"), "{warnings:?}");
         // Und keine Behauptung, die nicht stimmt: außerhalb der Schwärzung
         // bleibt jeder Bildpunkt gleich.
-        assert!(!warnings[0].contains("verlustbehaftet"), "{warnings:?}");
-        assert!(warnings[0].contains("1 Kopie(n)"), "{warnings:?}");
+        assert!(!warnings[1].contains("verlustbehaftet"), "{warnings:?}");
+        assert!(warnings[1].contains("1 Kopie(n)"), "{warnings:?}");
 
-        let (log, dir) = build(&[iban_redaction()], 1.0, &report, &stripped_info());
+        let (log, dir) = build(&[iban_redaction()], 1.0, 1, &report, &stripped_info());
         assert_eq!(log.effect.redacted_images, 2);
         assert_eq!(log.effect.copied_images, 1);
         std::fs::remove_dir_all(dir).ok();

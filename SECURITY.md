@@ -482,14 +482,29 @@ Original lokalisiert es aber jede Schwärzung punktgenau, und die Einträge der
 Negativliste stehen wörtlich darin. Beide Dateien gehören dorthin, wo auch das
 ungeschwärzte Original liegen darf, und sonst nirgendwohin.
 
-### Die Prüfsummen-Sperre der Review-Datei greift nur bei gesetzter Prüfsumme
+### Die Prüfsummen-Sperre der Review-Datei gilt an jedem Schalter
 
-`--apply-review` vergleicht den SHA-256 der Eingabe mit `input.sha256` der
-Review-Datei und bricht bei Abweichung ab. Ist das Feld jedoch **leer**, kehrt
-die Prüfung ohne Befund zurück (`crates/redact-cli/src/pipeline.rs:250`) — die
-Datei wird dann auf jedes beliebige Dokument angewendet, und die Rechtecke
-landen an falscher Stelle. Eine von Hand erstellte oder zusammenkopierte
-Review-Datei muss die Prüfsumme also mitführen.
+`--apply-review` vergleicht den SHA-256 der verarbeiteten Bytes mit
+`input.sha256` der Review-Datei und bricht bei Abweichung ab
+(`crates/redact-pipeline/src/lib.rs`, `check_review_identity`). Zwei Löcher
+darin sind geschlossen:
+
+* Eine **leere** Prüfsumme kehrte ohne Befund zurück; wer `"sha256": ""` von
+  Hand eintrug, hebelte die Prüfung vollständig aus. Sie wird jetzt abgelehnt.
+  `--allow-unverified-review` ist der ausdrückliche Weg daran vorbei — eine
+  *falsche* Prüfsumme bleibt auch damit abgelehnt.
+* `--manual-regions` nimmt beide Dateiformate an und prüfte **gar nicht**.
+  Dieselbe Datei, die `--apply-review` mit Exit 2 zurückwies, ging hinter dem
+  anderen Schalter wortlos durch — die Rechtecke landeten an beliebigen Stellen,
+  und das Audit-Log meldete „applied“. Wird dort eine Review-Datei erkannt,
+  gilt jetzt dieselbe Prüfung.
+
+Ein **nacktes Regions-Array** hinter `--manual-regions` bleibt ungeprüft: es
+nennt keine Herkunft und behauptet auch keine. Es ist das Format für von Hand
+geschriebene Koordinaten; wer es benutzt, wählt die Seitenzahlen selbst. Was
+jede einzelne Region bewirkt hat, steht danach im Audit-Log (`effect` je
+Eintrag) — eine Region auf einer nicht vorhandenen Seite wird als
+`missing_page` geführt und nicht als Schwärzung verbucht.
 
 ### Die Restlücke bei der Symlink-Prüfung
 

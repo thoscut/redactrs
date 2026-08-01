@@ -100,14 +100,40 @@ fn report(outcome: &Outcome) {
             println!("  redact-rs {} --apply-review {path}", outcome.input);
         }
         None => {
-            // Absicht und Ergebnis werden getrennt ausgewiesen: eine Region,
-            // von der `--padding` nichts übrig lässt, wird übersprungen und
-            // darf nicht als Schwärzung durchgehen.
+            // Absicht und Ergebnis werden getrennt ausgewiesen. „Schwärzungen“
+            // ist die Zahl der *geplanten* Regionen; was davon nachweislich
+            // gewirkt hat, steht darunter. Eine Region auf einer nicht
+            // vorhandenen Seite, eine, von der `--padding` nichts übrig lässt,
+            // und eine, die kein Zeichen getroffen hat, sind drei verschiedene
+            // Befunde — und keiner davon ist eine ausgeführte Schwärzung.
             println!("Schwärzungen:       {}", outcome.redactions);
+            let unproven = outcome.covered_redactions
+                + outcome.degenerate_redactions
+                + outcome.missing_page_redactions;
+            if unproven > 0 {
+                println!(
+                    "  davon wirksam:      {} (Zeichen entfernt)",
+                    outcome.effective_redactions
+                );
+            }
+            if outcome.covered_redactions > 0 {
+                println!(
+                    "  davon ohne Textfund: {} (Deck-Rechteck gezeichnet, kein Zeichen \
+                     entfernt — richtig über Grafik, falsch bei danebenliegenden \
+                     Koordinaten)",
+                    outcome.covered_redactions
+                );
+            }
             if outcome.degenerate_redactions > 0 {
                 println!(
                     "  davon wirkungslos:  {} (leeres Rechteck nach --padding)",
                     outcome.degenerate_redactions
+                );
+            }
+            if outcome.missing_page_redactions > 0 {
+                println!(
+                    "  davon wirkungslos:  {} (Seite gibt es in diesem Dokument nicht)",
+                    outcome.missing_page_redactions
                 );
             }
             println!("Entfernte Zeichen:  {}", outcome.removed_glyphs);

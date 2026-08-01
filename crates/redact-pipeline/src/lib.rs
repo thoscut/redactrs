@@ -49,9 +49,7 @@ use redact_pdf::document::{
 };
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
-pub use crate::audit::{
-    effect_warnings, sha256_bytes, sha256_file, Applied, AuditLog, EntryEffect,
-};
+pub use crate::audit::{sha256_bytes, sha256_file, Applied, AuditLog, Effects, EntryEffect};
 pub use crate::settings::Settings;
 
 /// Vorgabe für `--padding`, in Punkt.
@@ -194,10 +192,22 @@ pub struct Outcome {
     pub text_runs: usize,
     pub candidates: usize,
     pub redactions: usize,
-    /// Davon wirksam — Regionen, die nach `--padding` noch ein Rechteck haben.
+    /// Davon wirksam — Regionen, die nachweislich mindestens ein Zeichen aus
+    /// dem Content-Stream entfernt haben.
+    ///
+    /// Gemessen an [`redact_pdf::RedactionReport::per_redaction`], nicht am
+    /// Rechteck geschätzt: „gültiges Rechteck“ ist kein Nachweis.
     pub effective_redactions: usize,
+    /// Davon nur überdeckt: gültiges Rechteck auf einer vorhandenen Seite,
+    /// Deck-Rechteck gezeichnet, aber kein Zeichen getroffen. Siehe
+    /// [`audit::EntryEffect::Covered`] — richtig über einer Grafik, falsch bei
+    /// danebenliegenden Koordinaten.
+    pub covered_redactions: usize,
     /// Davon entartet: leeres Rechteck, also ohne jede Wirkung.
     pub degenerate_redactions: usize,
+    /// Davon auf einer Seite, die es im Dokument nicht gibt — dort ist
+    /// überhaupt nichts geschehen.
+    pub missing_page_redactions: usize,
     pub blocked: usize,
     pub removed_glyphs: usize,
     pub drawn_rects: usize,
@@ -327,7 +337,9 @@ pub fn run(config: &Config) -> Result<Outcome> {
             push_warnings(&mut outcome.warnings, extract_warnings);
             outcome.text_runs = runs.len();
 
-            let candidates = collect_regions(config, &runs)?;
+            // Mit Prüfsumme: eine Review-Datei hinter `--manual-regions` muss
+            // zum Dokument gehören, genau wie hinter `--apply-review`.
+            let candidates = collect_regions_for(config, &runs, &outcome.input_sha256)?;
             outcome.candidates = candidates.len();
 
             let resolution = resolve_conflicts(candidates);
@@ -337,7 +349,7 @@ pub fn run(config: &Config) -> Result<Outcome> {
             // 7. Review-Modus: nur exportieren.
             if config.review {
                 let path = review_target(config);
-                let review = ReviewFile::new(
+                let mut review = ReviewFile::new(
                     ReviewInput {
                         path: config.input.display().to_string(),
                         sha256: outcome.input_sha256.clone(),
@@ -346,6 +358,17 @@ pub fn run(config: &Config) -> Result<Outcome> {
                     resolution.redact,
                     resolution.blocked,
                 );
+                // `ReviewFile::new` trägt in jeden Eintrag `Action::Blackout`
+                // ein — es kennt die Einstellungen des Laufs nicht. Ohne diese
+                // Zeile gäbe eine mit `--action replace --replace-with "[IBAN]"`
+                // erzeugte Review-Datei überall „schwarz“ an, und ein späteres
+                // `--apply-review` schwärzte statt zu ersetzen: die Datei würde
+                // die Absicht des Laufs falsch wiedergeben. Die Oberfläche
+                // macht es an derselben Stelle genauso
+                // (`AppState::to_review_file`).
+                for item in &mut review.items {
+                    item.action = config.action.clone();
+                }
                 write_review_file(&path, &review, config)?;
                 outcome.review_out = Some(path.display().to_string());
                 return Ok(outcome);
@@ -385,6 +408,11 @@ pub fn apply(
     outcome.redactions = redactions.len();
     outcome.blocked = outcome.blocked.max(blocked.len());
 
+    // Vor der Schwärzung gelesen: danach ist es dieselbe Zahl, aber die Frage
+    // „gibt es diese Seite?“ gehört zu dem Dokument, auf das die Regionen
+    // gerechnet wurden.
+    let pages = redact_pdf::page_count(doc);
+
     let output = plan_outputs(config)?.output.ok_or_else(|| {
         RedactError::Config("ohne --review muss das Ausgabeziel feststehen".into())
     })?;
@@ -404,15 +432,18 @@ pub fn apply(
     // lesen“ überhaupt sichtbar wird.
     push_warnings(&mut outcome.warnings, report.warnings.clone());
 
-    // Was die Schwärzung *nicht* bewirkt hat, gehört genauso gemeldet.
-    // `--padding=-100` etwa lässt von jedem Rechteck nichts übrig; solche
-    // Regionen werden übersprungen und dürfen nicht als Erfolg zählen.
-    outcome.degenerate_redactions = degenerate_count(redactions, config.padding);
-    outcome.effective_redactions = redactions.len() - outcome.degenerate_redactions;
-    push_warnings(
-        &mut outcome.warnings,
-        effect_warnings(redactions, config.padding, &report),
-    );
+    // Was die Schwärzung *nicht* bewirkt hat, gehört genauso gemeldet — und
+    // zwar gemessen: `Effects` wertet `report.per_redaction` je Region aus.
+    // `--padding=-100` lässt von jedem Rechteck nichts übrig, eine Region auf
+    // einer nicht vorhandenen Seite wird nie angefasst, und eine Region mit
+    // gültigem Rechteck kann trotzdem kein Zeichen treffen. Keiner dieser
+    // Fälle ist eine ausgeführte Schwärzung.
+    let effects = Effects::measure(redactions, config.padding, pages, &report);
+    outcome.effective_redactions = effects.applied;
+    outcome.covered_redactions = effects.covered;
+    outcome.degenerate_redactions = effects.degenerate;
+    outcome.missing_page_redactions = effects.missing_page;
+    push_warnings(&mut outcome.warnings, effects.warnings(&report));
 
     // 10. Metadaten strippen.
     let metadata = redact_pdf::strip_metadata(doc);
@@ -431,7 +462,7 @@ pub fn apply(
             redactions,
             blocked,
             Applied {
-                padding: config.padding,
+                effects: &effects,
                 redaction: &report,
                 metadata: &metadata,
             },
@@ -456,17 +487,6 @@ pub fn push_warnings(target: &mut Vec<String>, warnings: Vec<String>) {
             target.push(warning);
         }
     }
-}
-
-/// Zählt die Regionen, von denen `--padding` nichts übrig lässt.
-///
-/// Dieselbe Bewertung wie im Audit-Log — bewusst *eine* Quelle, damit
-/// Zusammenfassung und Nachweis nicht auseinanderlaufen können.
-fn degenerate_count(redactions: &[Redaction], padding: f64) -> usize {
-    redactions
-        .iter()
-        .filter(|r| EntryEffect::of(r.region.rect, padding) == EntryEffect::Degenerate)
-        .count()
 }
 
 /// Zeitbremse: die Konfliktauflösung wächst quadratisch mit der Trefferzahl.
@@ -495,12 +515,35 @@ fn check_candidate_budget(config: &Config, candidates: usize) -> Result<()> {
 /// Die zweite gemeinsame Hälfte: die Oberfläche ruft dieselbe Funktion, damit
 /// `--patterns-config`, `--no-patterns`, `--min-confidence` und
 /// `--manual-regions` auch dort gelten — vorher kannte sie nichts davon.
+///
+/// **Ohne bekannte Prüfsumme.** Eine Review-Datei hinter `--manual-regions`
+/// gilt damit als ungeprüft und wird abgelehnt, solange nicht
+/// `--allow-unverified-review` gesetzt ist. Wer die Prüfsumme des Dokuments
+/// kennt, ruft [`collect_regions_for`] und bekommt die volle Prüfung.
 pub fn collect_regions(config: &Config, runs: &[TextRun]) -> Result<Vec<Region>> {
+    collect_regions_for(config, runs, "")
+}
+
+/// Wie [`collect_regions`], aber mit der Prüfsumme des verarbeiteten Dokuments.
+///
+/// `document_sha` ist der SHA-256 der Bytes, die gerade verarbeitet werden (in
+/// [`Outcome::input_sha256`] derselbe Wert). Ein leerer String heißt „nicht
+/// bekannt“ und führt bei einer Review-Datei zur Ablehnung, siehe
+/// [`check_review_identity`].
+pub fn collect_regions_for(
+    config: &Config,
+    runs: &[TextRun],
+    document_sha: &str,
+) -> Result<Vec<Region>> {
     let mut regions = Vec::new();
 
     // 3. Manuelle Regionen (haben Vorrang und werden nie blockiert).
     if let Some(path) = &config.manual_regions {
-        regions.extend(load_manual_regions(path)?);
+        regions.extend(load_manual_regions(
+            path,
+            document_sha,
+            config.allow_unverified_review,
+        )?);
     }
 
     // 4. Buchungslisten-Matching (Negativ- und Positivtreffer).
@@ -532,18 +575,40 @@ pub fn collect_regions(config: &Config, runs: &[TextRun]) -> Result<Vec<Region>>
 ///
 /// Akzeptiert sowohl ein nacktes Array von Regionen (Format aus dem Konzept)
 /// als auch eine Review-Datei — so kann man beide Formate durchreichen.
-pub fn load_manual_regions(path: &Path) -> Result<Vec<Region>> {
+///
+/// ## Für die Review-Datei gilt dieselbe Identitätsprüfung wie bei `--apply-review`
+///
+/// Sie fehlte hier, und damit ließ sich die Prüfung schlicht umgehen: dieselbe
+/// Datei, die `--apply-review fremd.json` mit „gehört zu einem anderen
+/// Dokument“ und Exit 2 zurückwies, ging hinter `--manual-regions` wortlos
+/// durch. Die Rechtecke landeten an beliebigen Stellen, und das Audit-Log
+/// bescheinigte „applied“. Eine Prüfung, die ein anderer Schalter aushebelt,
+/// ist keine.
+///
+/// Das **nackte Array** bleibt ungeprüft: es nennt keine Herkunft und kann
+/// keine nennen — es ist das Format für von Hand geschriebene Koordinaten und
+/// behauptet nirgends, zu einem bestimmten Dokument zu gehören. Wer es benutzt,
+/// hat die Seitenzahlen selbst gewählt; die Wirkung jeder einzelnen Region
+/// steht danach im Audit-Log (siehe [`audit::EntryEffect`]).
+pub fn load_manual_regions(
+    path: &Path,
+    document_sha: &str,
+    allow_unverified: bool,
+) -> Result<Vec<Region>> {
     let data = std::fs::read_to_string(path)?;
     if let Ok(regions) = serde_json::from_str::<Vec<Region>>(&data) {
         return Ok(regions.into_iter().map(normalize_region).collect());
     }
     match ReviewFile::from_json(&data) {
-        Ok(review) => Ok(review
-            .items
-            .into_iter()
-            .filter(|i| i.enabled)
-            .map(|i| normalize_region(i.region))
-            .collect()),
+        Ok(review) => {
+            check_review_identity(&review, document_sha, allow_unverified)?;
+            Ok(review
+                .items
+                .into_iter()
+                .filter(|i| i.enabled)
+                .map(|i| normalize_region(i.region))
+                .collect())
+        }
         Err(e) => Err(RedactError::Parse(format!(
             "{}: weder eine Regionsliste noch eine Review-Datei ({e})",
             path.display()
@@ -806,6 +871,87 @@ mod tests {
             assert!(error.contains("andere Eingabe"), "{error}");
             assert!(error.contains("auszug.pdf"), "{error}");
         }
+    }
+
+    // ------------------------------------------------------------ Aufgabe #66
+
+    /// `--manual-regions` war der Weg an der Identitätsprüfung vorbei: dieselbe
+    /// Review-Datei, die `--apply-review` mit „gehört zu einem anderen
+    /// Dokument“ ablehnt, ging hier wortlos durch.
+    #[test]
+    fn a_review_file_behind_manual_regions_is_checked_like_any_other() {
+        let dir = std::env::temp_dir().join(format!("redact-manual-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("review.json");
+
+        let document = sha256_bytes(b"Dokument A");
+        let foreign = sha256_bytes(b"Dokument B");
+        let mut review = review_with(&foreign);
+        review.items = ReviewFile::new(
+            ReviewInput {
+                path: "auszug.pdf".into(),
+                sha256: foreign.clone(),
+                pages: 1,
+            },
+            vec![Region::new(
+                0,
+                Rect::new(10.0, 10.0, 20.0, 20.0),
+                None,
+                redact_core::Source::Manual {
+                    reason: "Hand".into(),
+                },
+            )],
+            Vec::new(),
+        )
+        .items;
+        std::fs::write(&path, review.to_json().unwrap()).unwrap();
+
+        let error = load_manual_regions(&path, &document, false)
+            .expect_err("fremde Review-Datei muss auch hier abgelehnt werden")
+            .to_string();
+        assert!(error.contains("anderen Dokument"), "{error}");
+
+        // Und der Schalter hilft ihr auch hier nicht — „ungeprüft“ ist etwas
+        // anderes als „nachweislich fremd“.
+        assert!(load_manual_regions(&path, &document, true).is_err());
+
+        // Zum eigenen Dokument gehört sie und wird angewendet.
+        std::fs::write(
+            &path,
+            serde_json::to_string(&{
+                let mut own = review.clone();
+                own.input.sha256 = document.clone();
+                own
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_manual_regions(&path, &document, false).unwrap().len(),
+            1
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Das nackte Regions-Array bleibt ungeprüft: es behauptet keine Herkunft.
+    #[test]
+    fn a_plain_region_array_needs_no_checksum() {
+        let dir = std::env::temp_dir().join(format!("redact-manual-plain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("regionen.json");
+        std::fs::write(
+            &path,
+            r#"[{"page":0,
+                 "rect":{"ll":{"x":1.0,"y":2.0},"ur":{"x":3.0,"y":4.0}},
+                 "text":null,
+                 "source":{"manual":{"reason":"Hand"}}}]"#,
+        )
+        .unwrap();
+        assert_eq!(load_manual_regions(&path, "", false).unwrap().len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

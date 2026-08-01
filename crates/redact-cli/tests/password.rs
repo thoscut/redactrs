@@ -257,3 +257,83 @@ fn the_security_notes_name_both_ways() {
         "SECURITY.md schweigt zur Prozessliste"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Aufgabe #63 — liegt das Prüfmaterial im ausgelieferten Binary?
+// ---------------------------------------------------------------------------
+
+/// Das verschlüsselte Prüf-PDF liegt unter `src/`, aber **nicht** im Programm.
+///
+/// Der Vorwurf lautete: `redact-pipeline/src/testing.rs` ist ein ungegatetes
+/// `pub mod`, und alles unter `src/` lande im ausgelieferten Binary. Der erste
+/// Halbsatz stimmt, der zweite nicht — und statt ihn zu glauben, misst dieser
+/// Test ihn: `include_bytes!` hinter einem `pub const` erzeugt nur dort Daten,
+/// wo die Konstante auch benutzt wird. Benutzt wird sie ausschließlich aus
+/// Testcode; das Programm rührt sie nie an, also emittiert der Übersetzer die
+/// Bytes gar nicht erst.
+///
+/// Deshalb bleibt die Datei, wo sie ist: `#[cfg(test)]` schiede aus, weil zwei
+/// **fremde** Crates sie brauchen (dieser Test hier und die Oberfläche in ihren
+/// eigenen Unit-Tests) und `cfg(test)` über Crate-Grenzen nicht sichtbar ist;
+/// ein Feature-Schalter bräuchte einen Eintrag in der `Cargo.toml` jedes
+/// Nutzers. Das wäre mehr Zeremonie als Gewinn — solange die Messung hält. Und
+/// genau die hält dieser Test fest: greift irgendwann Programmcode auf das
+/// Prüfmaterial zu, landet es im Binary und der Test schlägt an.
+#[test]
+fn the_encrypted_fixture_does_not_ship_in_the_binary() {
+    assert!(
+        !binary_contains(ENCRYPTED_PDF),
+        "das verschlüsselte Prüf-PDF liegt im ausgelieferten Binary — dann \
+         gehört es unter tests/ oder hinter einen Feature-Schalter"
+    );
+    assert!(
+        !binary_contains(ENCRYPTED_PDF_PASSWORD.as_bytes()),
+        "das Passwort des Prüf-PDFs liegt im ausgelieferten Binary"
+    );
+    // Gegenprobe: die Suche findet, was wirklich drinsteht — sonst prüfte sie
+    // nichts. `redact-rs` steht als Werkzeugname in jedem Audit-Log.
+    assert!(binary_contains(b"redact-rs"), "die Suche taugt nicht");
+}
+
+/// Sucht `needle` im gebauten Binary, ohne es ganz in den Speicher zu holen.
+fn binary_contains(needle: &[u8]) -> bool {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(bin()).expect("Binary lesbar");
+    let chunk = 1 << 20;
+    // Überlappung, damit ein Treffer an der Blockgrenze nicht durchrutscht.
+    let mut buffer = vec![0u8; chunk + needle.len()];
+    let mut filled = 0usize;
+    loop {
+        let read = file.read(&mut buffer[filled..]).expect("Binary lesbar");
+        if read == 0 {
+            return contains(&buffer[..filled], needle);
+        }
+        filled += read;
+        if filled < buffer.len() {
+            continue;
+        }
+        if contains(&buffer, needle) {
+            return true;
+        }
+        let keep = needle.len().saturating_sub(1);
+        buffer.copy_within(filled - keep.., 0);
+        filled = keep;
+    }
+}
+
+/// Teilfolgensuche über das erste Byte — `windows()` über ein paar hundert
+/// Megabyte ist im Debug-Build zu langsam für einen Test.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    let Some((first, rest)) = needle.split_first() else {
+        return true;
+    };
+    let mut at = 0usize;
+    while let Some(offset) = haystack[at..].iter().position(|b| b == first) {
+        at += offset + 1;
+        if haystack[at..].starts_with(rest) {
+            return true;
+        }
+    }
+    false
+}

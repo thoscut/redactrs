@@ -74,6 +74,37 @@
 //! bloß dieselbe Regel. Eine abweichende Prüfsumme wird abgelehnt, eine
 //! fehlende ebenfalls (nur `--allow-unverified-review` kommt daran vorbei).
 //!
+//! ## Was die Schalter der Kommandozeile hier tun
+//!
+//! Die Oberfläche bekommt **dieselbe** [`Config`] wie ein Lauf ohne `--gui`,
+//! und sie benutzt sie auch — Muster, Buchungsliste, Schwellwert, Polsterung,
+//! Ladegrenzen, Passwort. Drei Schalter fielen dabei still unter den Tisch;
+//! sie gelten jetzt (Befund #67):
+//!
+//! * `--action` / `--replace-with`: die Schwärzungsart eines frisch gefundenen
+//!   Treffers. [`AnnotatedRegion`] trug hier fest „schwarz“, `--gui --action
+//!   replace` schwärzte also schwarz. Jetzt legt
+//!   [`AppState`] neue Einträge mit der Art aus der
+//!   Konfiguration an — in der Trefferliste steht sie **sichtbar** und ist dort
+//!   je Treffer änderbar.
+//! * `--apply-review`: die Review-Datei wird beim Start angewendet
+//!   ([`RedactApp::open_startup_document`]) und tritt damit an die Stelle der
+//!   Analyse, genau wie in `redact_pipeline::run`. Die Prüfsumme entscheidet
+//!   dabei mit derselben Funktion wie dort.
+//! * `--audit-log`: der genannte Pfad gilt auch hier
+//!   ([`AppState::audit_target`]); ohne ihn
+//!   bleibt es beim Namen neben der Ausgabedatei.
+//!
+//! Zwei Schalter können in einem Fenster **nicht** wörtlich gelten, und das ist
+//! sichtbar, nicht stillschweigend:
+//!
+//! * `--output`/`-o` und `--force`: geschrieben wird erst auf Knopfdruck, und
+//!   der Speichern-Dialog fragt vor dem Überschreiben selbst. Der Pfad aus `-o`
+//!   ist der **Vorschlag** im Dialog, den man sieht und ändern kann.
+//! * `--review`: die Oberfläche *ist* die Durchsicht. Wer hier „Exportieren“
+//!   drückt, will eine geschwärzte Datei — siehe
+//!   [`AppState::export_config`].
+//!
 //! ## Die Verarbeitungskette liegt woanders
 //!
 //! Analyse und Export dieser Oberfläche sind Aufrufe von
@@ -113,7 +144,9 @@ pub use app::{
 pub use history::{History, HISTORY_LIMIT};
 pub use render::{PageCache, PageMeta};
 pub use selector::{hit_handle, hit_test, Handle, HandleDrag, PointerFrame, RectangleSelector};
-pub use state::{sha256_hex, AnnotatedRegion, AppState, HitOutcome, HitSummary, RegionColor};
+pub use state::{
+    sha256_hex, AnnotatedRegion, AppState, HitOutcome, HitSummary, RegionColor, RegionId,
+};
 // Die Identitätsprüfung liegt jetzt in der gemeinsamen Kette; hier bleibt nur
 // der gewohnte Name.
 pub use redact_pipeline::{review_identity, Config, ReviewIdentity};
@@ -140,13 +173,12 @@ pub const WINDOW_TITLE: &str = "redact-rs";
 ///
 /// Ist [`Config::input`] gesetzt, wird die Datei geladen und sofort
 /// analysiert; ein Fehler dabei beendet das Programm **nicht**, sondern
-/// erscheint in der Statuszeile.
+/// erscheint in der Statuszeile. Was beim Start sonst noch aus der
+/// Konfiguration folgt (`--apply-review`), macht
+/// [`RedactApp::open_startup_document`] — dort steht es ohne Fenster geprüft.
 pub fn run(config: Config) -> Result<()> {
-    let pdf = (!config.input.as_os_str().is_empty()).then(|| config.input.clone());
     let mut app = RedactApp::new(config);
-    if let Some(path) = pdf {
-        app.open_and_analyze(path);
-    }
+    app.open_startup_document();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
