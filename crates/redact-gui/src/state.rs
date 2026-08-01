@@ -754,7 +754,7 @@ impl AppState {
     // -------------------------------------------------------------- Analyse
 
     /// Führt die Analyse über die extrahierten Text-Runs aus — **die** Analyse,
-    /// [`redact_pipeline::collect_regions`].
+    /// [`redact_pipeline::collect_regions_for`].
     ///
     /// Damit gelten hier dieselben Regeln wie auf der Kommandozeile:
     /// `--manual-regions`, die Buchungsliste, `--patterns-config`,
@@ -770,7 +770,14 @@ impl AppState {
     pub fn analyze(&mut self) -> Result<usize> {
         // Erst rechnen, dann den Verlauf anfassen: scheitert die Analyse,
         // bleibt der Stapel unberührt.
-        let found = redact_pipeline::collect_regions(&self.config, &self.runs)?;
+        // Mit der Prüfsumme des geladenen Dokuments statt ohne: nur so kann die
+        // Kette eine Review-Datei hinter `--manual-regions` gegen *dieses*
+        // Dokument prüfen. Ohne sie gilt die Herkunft als unbekannt, und eine
+        // solche Datei würde ohne `--allow-unverified-review` pauschal
+        // abgelehnt — sicher, aber strenger als nötig und ohne erkennbaren
+        // Grund für den Nutzer.
+        let found =
+            redact_pipeline::collect_regions_for(&self.config, &self.runs, &self.input_sha256)?;
 
         // Was aus `--manual-regions` kommt, steht schon in `found`; ohne den
         // zweiten Test stünde es nach jeder Analyse ein weiteres Mal in der
