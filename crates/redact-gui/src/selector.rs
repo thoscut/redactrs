@@ -10,8 +10,12 @@
 //! Sache der Maus ist und nicht des Dokuments.
 //!
 //! Was egui je Bild über die Maus weiß, steht in [`PointerFrame`] — reine
-//! Daten. Nur so lässt sich prüfen, dass ein Rechteck **am Druckpunkt** und
-//! nicht dort beginnt, wo egui den Zug bemerkt hat.
+//! Daten. Nur so lässt sich Bild für Bild prüfen, dass ein Rechteck **am
+//! Druckpunkt** beginnt und nicht dort, wo egui den Zug bemerkt hat — und dass
+//! es **ab dem Bild des Drucks** zu sehen ist und nicht erst, wenn egui den Zug
+//! bemerkt hat. Das sind zwei Seiten desselben Fehlers: die Ecke saß richtig,
+//! aber sie erschien erst nach 6 pt Mausweg, und dann gleich als fertiges
+//! 6-pt-Rechteck.
 
 use egui::{CursorIcon, Pos2, Response};
 use redact_core::Point;
@@ -38,8 +42,21 @@ pub const HANDLE_HIT_SIZE: f32 = 16.0;
 /// weiter in Ziehrichtung — der Anfang des Rechtecks wanderte damit je nach
 /// Ziehrichtung mit. Der Druckpunkt kommt deshalb aus
 /// [`egui::PointerState::press_origin`].
+///
+/// `pressed` und `down` sind aus demselben Grund dazugekommen, betreffen aber
+/// nicht die Geometrie, sondern die **Rückmeldung**: zwischen dem Druck und
+/// `drag_started` liegen bis zu 6 pt Mausweg, in denen egui gar nichts meldet
+/// (`drag_started`, `dragged` und `drag_stopped` sind alle `false`). Wer erst
+/// auf `drag_started` wartet, zeigt in dieser Zeit nichts an und lässt das
+/// Rechteck dann schlagartig und schon 6 pt groß erscheinen — für den Nutzer
+/// sieht es aus, als begänne das Zeichnen erst nach einem Stück Bewegung.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PointerFrame {
+    /// Die Haupttaste wurde **in diesem Bild** auf dieser Fläche gedrückt.
+    pub pressed: bool,
+    /// Die Taste ist auf dieser Fläche unten — auch unterhalb der
+    /// Klickschwelle, wo `dragged` noch `false` ist.
+    pub down: bool,
     /// egui hat den Zug in diesem Bild erkannt.
     pub drag_started: bool,
     /// Es wird gezogen.
@@ -53,17 +70,30 @@ pub struct PointerFrame {
 }
 
 impl PointerFrame {
-    /// Liest die fünf Angaben aus egui.
+    /// Liest die Angaben aus egui.
     ///
     /// In egui 0.29 heißt die Methode [`Response::drag_stopped`];
     /// `drag_released` ist entfernt.
+    ///
+    /// `pressed` und `down` sind an **diese Fläche** gebunden:
+    /// [`Response::is_pointer_button_down_on`] ist genau dann wahr, wenn die
+    /// Taste auf diesem Widget heruntergegangen ist — ab dem Druckbild und bis
+    /// zum Loslassen. Ohne diese Bindung würde ein Druck in der Seitenleiste
+    /// hier ein Rechteck beginnen, denn [`egui::PointerState`] kennt nur *den*
+    /// Zeiger, nicht das getroffene Widget.
     pub fn from_response(response: &Response) -> Self {
+        let (primary_pressed, press_origin) = response
+            .ctx
+            .input(|i| (i.pointer.primary_pressed(), i.pointer.press_origin()));
+        let down = response.is_pointer_button_down_on();
         Self {
+            pressed: down && primary_pressed,
+            down,
             drag_started: response.drag_started(),
             dragged: response.dragged(),
             drag_stopped: response.drag_stopped(),
             pos: response.interact_pointer_pos(),
-            press_origin: response.ctx.input(|i| i.pointer.press_origin()),
+            press_origin,
         }
     }
 
@@ -71,6 +101,16 @@ impl PointerFrame {
     /// Position, wenn egui den Druckpunkt nicht (mehr) kennt.
     pub fn press_point(&self) -> Option<Pos2> {
         self.press_origin.or(self.pos)
+    }
+
+    /// Ist die Taste in diesem Bild **nicht** (mehr) unten?
+    ///
+    /// `drag_stopped` allein genügt dafür nicht: egui meldet es nur, wenn es
+    /// den Zug vorher als Zug erkannt hatte. Beim Loslassen nach einem bloßen
+    /// Klick ist jede der Angaben `false` — und ohne diesen Fall bliebe ein
+    /// beim Druck begonnener Zug für immer offen.
+    pub fn button_is_up(&self) -> bool {
+        self.drag_stopped || !(self.pressed || self.down || self.dragged || self.drag_started)
     }
 }
 
@@ -167,6 +207,15 @@ pub struct HandleDrag {
     pub region: RegionId,
     /// Der gegenüberliegende Eckpunkt, der festbleibt.
     pub anchor: Point,
+    /// Hat dieser Zug die Region schon verändert?
+    ///
+    /// Der Griff wird seit dem Druckbild angefasst — also auch dann, wenn
+    /// gleich darauf ohne jede Bewegung wieder losgelassen wird. Erst die
+    /// erste wirkliche Änderung legt den einen Schnappschuss im Verlauf an
+    /// ([`crate::state::AppState::begin_manual_edit`]); sonst hinterließe ein
+    /// bloßes Antippen eines Griffs einen Rückgängig-Schritt, der nichts
+    /// zurücknimmt.
+    pub moved: bool,
 }
 
 /// Verfolgt einen laufenden Ziehvorgang.
@@ -229,26 +278,32 @@ impl RectangleSelector {
     /// `drag_started()` — die liegt immer schon jenseits der Klickschwelle
     /// (6 pt) und wandert mit der Ziehrichtung mit. Ein Rechteck begann damit
     /// nie da, wo geklickt wurde.
+    ///
+    /// **Und der Zug beginnt im Bild des Drucks**, nicht erst bei
+    /// `drag_started`. Das war der zweite, sichtbare Teil desselben Fehlers:
+    /// die Geometrie stimmte, aber bis zur Klickschwelle war nichts zu sehen,
+    /// und dann sprang ein fertiges 6-pt-Rechteck ins Bild. `drag_started`
+    /// bleibt als zweiter Weg stehen — für Touch und für Fälle, in denen das
+    /// Druckbild nicht bei dieser Fläche ankam.
+    ///
+    /// Beendet wird der Zug, sobald die Taste oben ist
+    /// ([`PointerFrame::button_is_up`]). Ein bloßer Klick läuft damit denselben
+    /// Weg wie ein Zug und endet in [`RectangleSelector::finish`], das alles
+    /// unterhalb von [`MIN_DRAG_SIZE`] verwirft.
     pub fn step(&mut self, frame: PointerFrame) -> Option<(Pos2, Pos2)> {
-        if frame.drag_started {
-            if let Some(press) = frame.press_point() {
-                self.begin(press);
+        if !self.is_active() {
+            if !(frame.pressed || frame.drag_started) {
+                return None;
             }
-            // Die aktuelle Position ist schon bekannt — ohne sie wäre das
-            // Rechteck im ersten Bild ein Punkt.
-            if let Some(pos) = frame.pos {
-                self.update(pos);
-            }
-        } else if frame.dragged {
-            if let Some(pos) = frame.pos {
-                self.update(pos);
-            }
-        } else if frame.drag_stopped {
-            // Beim Loslassen ist `interact_pointer_pos` noch gültig; ohne
-            // diesen letzten Schritt endete das Rechteck ein Bild zu früh.
-            if let Some(pos) = frame.pos {
-                self.update(pos);
-            }
+            self.begin(frame.press_point()?);
+        }
+        // Die aktuelle Position ist schon im Druckbild bekannt; im Bild des
+        // Loslassens gilt `interact_pointer_pos` noch, ohne diesen letzten
+        // Schritt endete das Rechteck ein Bild zu früh.
+        if let Some(pos) = frame.pos {
+            self.update(pos);
+        }
+        if frame.button_is_up() {
             return self.finish();
         }
         None
@@ -408,6 +463,176 @@ mod tests {
                 "mit der alten Logik ist der Druckpunkt keine Ecke des Rechtecks"
             );
         }
+    }
+
+    /// Das Bild, in dem die Taste heruntergeht — vor jeder Bewegung.
+    fn press_frame(press: Pos2) -> PointerFrame {
+        PointerFrame {
+            pressed: true,
+            down: true,
+            pos: Some(press),
+            press_origin: Some(press),
+            ..PointerFrame::default()
+        }
+    }
+
+    /// Ein Bild mit gedrückter Taste **unterhalb** der Klickschwelle: egui
+    /// meldet hier weder `drag_started` noch `dragged` noch `drag_stopped`.
+    fn below_threshold(press: Pos2, pos: Pos2) -> PointerFrame {
+        PointerFrame {
+            down: true,
+            pos: Some(pos),
+            press_origin: Some(press),
+            ..PointerFrame::default()
+        }
+    }
+
+    /// **Fehler 1, zweiter Teil: die Rückmeldung.** Die Geometrie stimmte
+    /// bereits, aber gezeichnet wurde erst ab `drag_started` — und das meldet
+    /// egui erst nach `max_click_dist` (6 pt) Mausweg. Bis dahin war nichts zu
+    /// sehen, dann erschien das Rechteck schlagartig und schon 6 pt groß. Für
+    /// den Nutzer sah es aus, als begänne das Zeichnen erst nach einem Stück
+    /// Bewegung.
+    #[test]
+    fn the_rectangle_is_there_from_the_press_on_not_only_from_the_drag_threshold() {
+        let press = Pos2::new(100.0, 100.0);
+        let mut sel = RectangleSelector::new();
+
+        // 1. Nur gedrückt — keine Bewegung, kein `drag_started`.
+        assert!(sel.step(press_frame(press)).is_none());
+        assert!(sel.is_active(), "nach dem Druckbild läuft schon ein Zug");
+        let preview = sel.preview().expect("Vorschau schon im Druckbild");
+        assert_eq!(preview.min, press, "sie beginnt am Druckpunkt");
+        assert_eq!(preview.max, press, "und ist noch ohne Ausdehnung");
+
+        // 2. Zwei Punkte Bewegung — unter der Schwelle, egui meldet weiter
+        //    nichts. Zu sehen sein müssen trotzdem zwei Punkte.
+        let two = press + egui::Vec2::splat(2.0);
+        assert!(sel.step(below_threshold(press, two)).is_none());
+        let preview = sel.preview().expect("Vorschau unterhalb der Schwelle");
+        assert_eq!(preview.min, press);
+        assert_eq!(
+            (preview.width(), preview.height()),
+            (2.0, 2.0),
+            "zwei Punkte Bewegung zeigen zwei Punkte — nicht nichts und nicht sechs"
+        );
+
+        // 3. Jetzt erst bemerkt egui den Zug. Nichts darf springen.
+        let six = press + egui::Vec2::splat(6.0);
+        assert!(sel
+            .step(PointerFrame {
+                drag_started: true,
+                dragged: true,
+                down: true,
+                pos: Some(six),
+                press_origin: Some(press),
+                ..PointerFrame::default()
+            })
+            .is_none());
+        let preview = sel.preview().expect("Vorschau nach dem Erkennen");
+        assert_eq!(preview.min, press, "der Anfang bleibt der Druckpunkt");
+        assert_eq!(preview.max, six);
+    }
+
+    /// Ein bloßer Klick: drücken, ohne Bewegung loslassen. egui meldet dabei
+    /// **kein** `drag_stopped` — es hatte ja nie einen Zug erkannt. Trotzdem
+    /// muss der beim Druck begonnene Zug enden, und zwar ohne Rechteck.
+    #[test]
+    fn a_click_without_movement_ends_the_drag_and_yields_nothing() {
+        let press = Pos2::new(40.0, 60.0);
+        let mut sel = RectangleSelector::new();
+        sel.step(press_frame(press));
+        assert!(sel.is_active());
+
+        // Loslassen: `press_origin` ist weg, `down` ist unten, und weder
+        // `dragged` noch `drag_stopped` sind gesetzt.
+        let released = PointerFrame {
+            pos: Some(press),
+            ..PointerFrame::default()
+        };
+        assert_eq!(sel.step(released), None, "ein Klick legt nichts an");
+        assert!(!sel.is_active(), "und lässt keinen Zug offen stehen");
+        assert!(
+            sel.preview().is_none(),
+            "sonst bliebe für immer eine Vorschau stehen"
+        );
+    }
+
+    /// Auch ein Klick mit zittriger Hand (unter [`MIN_DRAG_SIZE`]) legt nichts
+    /// an — und der Zug endet trotzdem.
+    #[test]
+    fn a_shaky_click_stays_a_click() {
+        let press = Pos2::new(40.0, 60.0);
+        let mut sel = RectangleSelector::new();
+        sel.step(press_frame(press));
+        sel.step(below_threshold(press, press + egui::Vec2::new(2.0, 1.0)));
+        assert_eq!(
+            sel.step(PointerFrame {
+                pos: Some(press + egui::Vec2::new(2.0, 1.0)),
+                ..PointerFrame::default()
+            }),
+            None
+        );
+        assert!(!sel.is_active());
+    }
+
+    /// Die Vorschau eines bloßen Drucks ist ein Rechteck ohne Ausdehnung. Dass
+    /// so etwas **nichts** malt, wird hier nicht angenommen, sondern
+    /// nachgerechnet: `epaint` nähert ein Rechteck, das schmaler ist als die
+    /// Weichzeichnung, durch eine Strecke von der oberen zur unteren Mitte an —
+    /// und die ist hier gleichfalls null Punkte lang. Übrig bleiben Dreiecke
+    /// ohne Fläche, also kein einziges gefärbtes Pixel.
+    #[test]
+    fn the_preview_of_a_bare_press_paints_nothing() {
+        let press = Pos2::new(100.0, 100.0);
+        let mut sel = RectangleSelector::new();
+        sel.step(press_frame(press));
+        let preview = sel.preview().expect("Vorschau");
+        assert_eq!(preview.size(), egui::Vec2::ZERO);
+        assert_eq!(
+            painted_area(preview),
+            0.0,
+            "die Vorschau eines bloßen Drucks bedeckt keine Fläche"
+        );
+
+        // Gegenprobe: zwei Punkte Bewegung ergeben sehr wohl etwas Sichtbares —
+        // sonst prüfte die Rechnung oben bloß, dass sie immer null liefert.
+        sel.step(below_threshold(press, press + egui::Vec2::splat(2.0)));
+        let area = painted_area(sel.preview().unwrap());
+        assert!(area > 0.0, "2 pt müssen sichtbar sein, Fläche war {area}");
+    }
+
+    /// Wie viel Fläche malt die Vorschau dieses Rechtecks wirklich?
+    ///
+    /// Zerlegt die Zeichenanweisung mit denselben Maßen, die
+    /// [`crate::app`] benutzt, in Dreiecke und summiert deren Flächen.
+    fn painted_area(rect: egui::Rect) -> f32 {
+        use egui::epaint::{Mesh, Shape, TessellationOptions, Tessellator};
+
+        let mut tessellator =
+            Tessellator::new(1.0, TessellationOptions::default(), [16, 16], Vec::new());
+        let mut mesh = Mesh::default();
+        tessellator.tessellate_shape(
+            Shape::rect_stroke(
+                rect,
+                crate::viewer::NO_ROUNDING,
+                egui::Stroke::new(crate::viewer::DRAG_STROKE, egui::Color32::WHITE),
+            ),
+            &mut mesh,
+        );
+
+        mesh.indices
+            .chunks_exact(3)
+            .map(|triangle| {
+                let corner = |i: u32| mesh.vertices[i as usize].pos;
+                let (a, b, c) = (
+                    corner(triangle[0]),
+                    corner(triangle[1]),
+                    corner(triangle[2]),
+                );
+                ((b - a).x * (c - a).y - (b - a).y * (c - a).x).abs() / 2.0
+            })
+            .sum()
     }
 
     /// Kennt egui den Druckpunkt nicht (Touch, verlorener Zeiger), bleibt es

@@ -1062,7 +1062,16 @@ impl RedactApp {
                     );
                 }
 
+                self.handle_pointer(&response, &view, origin, page, zoom);
+
                 // --- Laufender Ziehvorgang ---
+                //
+                // **Nach** der Maus, nicht davor: sonst zeigte das Bild des
+                // Drucks noch den Stand des vorigen Bildes, und das Rechteck
+                // erschiene erst ein Bild später — genau die Verzögerung, die
+                // hier abgestellt werden soll. Anders als die Regionen hängt
+                // die Vorschau an nichts, was weiter oben in diesem Bild schon
+                // berechnet wurde (etwa `summary`), sie darf also nachrücken.
                 if let Some(preview) = self.selector.preview() {
                     painter.rect_stroke(
                         preview,
@@ -1070,8 +1079,6 @@ impl RedactApp {
                         Stroke::new(viewer::DRAG_STROKE, drop_accent()),
                     );
                 }
-
-                self.handle_pointer(&response, &view, origin, page, zoom);
             });
     }
 
@@ -1122,6 +1129,13 @@ impl RedactApp {
     /// Erst wenn kein Griff im Spiel ist, legt ein Zug ein neues Rechteck an.
     /// Ohne diesen Vorrang entstünde bei jedem Korrekturversuch ein zweites
     /// Rechteck über dem ersten.
+    ///
+    /// Diese Reihenfolge gilt seit dem Beheben der verspäteten Rückmeldung
+    /// bereits im **Druckbild** und nicht erst bei `drag_started`: der Selektor
+    /// beginnt jetzt beim Druck, also muss auch der Vorrang des Griffs dort
+    /// schon greifen. Ein Klick (drücken und ohne Weg wieder loslassen) läuft
+    /// weiterhin über Fall 3 und legt nichts an — Fall 4 verwirft alles
+    /// unterhalb von [`crate::selector::MIN_DRAG_SIZE`].
     fn apply_pointer(
         &mut self,
         frame: PointerFrame,
@@ -1132,7 +1146,7 @@ impl RedactApp {
         zoom: f32,
     ) {
         // 1. Eine laufende Größenänderung hat Vorrang vor allem anderen.
-        if let Some(drag) = self.resize {
+        if let Some(mut drag) = self.resize {
             // Die Region wird über ihre Kennung gesucht, nicht über einen
             // gemerkten Platz in der Liste: zwischen zwei Bildern kann gelöscht,
             // zurückgenommen oder ein Review geladen worden sein. Ist sie weg,
@@ -1145,29 +1159,45 @@ impl RedactApp {
                     "Zug beendet — die angefasste Region gibt es nicht mehr".to_string();
                 return;
             };
-            if let Some(pos) = frame.pos.filter(|_| frame.dragged || frame.drag_stopped) {
+            // Das Druckbild fasst den Griff nur an; verändert wird erst, wenn
+            // sich der Zeiger danach bewegt hat. `down` gehört dazu: unterhalb
+            // der Klickschwelle meldet egui weder `dragged` noch sonst etwas,
+            // die Ecke soll dem Zeiger dort aber schon folgen.
+            let moving = frame.dragged || frame.drag_stopped || (frame.down && !frame.pressed);
+            if let Some(pos) = frame.pos.filter(|_| moving) {
                 let corner = viewer::screen_to_pdf_point(pos, view, zoom, origin);
+                if !drag.moved {
+                    // Der eine Schnappschuss dieses Zuges.
+                    self.state.begin_manual_edit();
+                    drag.moved = true;
+                    self.resize = Some(drag);
+                }
                 // `from_corners` normalisiert: zieht man über die Gegenecke
                 // hinaus, entsteht kein negatives Rechteck, sondern ein
                 // gespiegeltes.
                 self.state
                     .set_region_rect(index, redact_core::Rect::from_corners(drag.anchor, corner));
             }
-            if !frame.dragged {
+            if frame.button_is_up() {
                 // Losgelassen oder abgebrochen — der Zug ist vorbei.
                 self.resize = None;
-                self.state.status = "Rechteck angepasst".to_string();
+                if drag.moved {
+                    self.state.status = "Rechteck angepasst".to_string();
+                }
             }
             return;
         }
 
         // 2. Beginnt der Zug auf einem Eckgriff der ausgewählten Region?
-        if frame.drag_started {
+        //
+        // Schon im **Druckbild**, nicht erst bei `drag_started`: sonst legte
+        // der Selektor über den ersten 6 pt eine Vorschau über den Griff, die
+        // beim Erkennen des Zuges wieder verschwände.
+        if frame.drag_started || frame.pressed {
             if let Some(drag) = self.grab_handle(&frame, view, origin, page, zoom) {
                 // Der Zug gehört jetzt dem Griff; der Selektor darf ihn nicht
                 // zusätzlich als neues Rechteck sehen.
                 self.selector.cancel();
-                self.state.begin_manual_edit();
                 self.resize = Some(drag);
                 // Das erste Bild gleich mitnehmen, sonst hinkt die Anzeige.
                 self.apply_pointer(frame, false, view, origin, page, zoom);
@@ -1220,6 +1250,7 @@ impl RedactApp {
         Some(HandleDrag {
             region: self.state.id_at(index)?,
             anchor,
+            moved: false,
         })
     }
 
@@ -2175,6 +2206,275 @@ mod tests {
         // Weit daneben hebt die Auswahl dagegen auf.
         click(&mut app, screen.left_top() + Vec2::new(-80.0, -80.0));
         assert_eq!(app.state.selected_region, None);
+    }
+
+    // -------------------------------- Rückmeldung ab dem Druck (Bild für Bild)
+
+    /// Das Bild, in dem die Taste auf der Seite heruntergeht — ohne jede
+    /// Bewegung und ohne `drag_started`.
+    fn press_frame(press: Pos2) -> PointerFrame {
+        PointerFrame {
+            pressed: true,
+            down: true,
+            pos: Some(press),
+            press_origin: Some(press),
+            ..PointerFrame::default()
+        }
+    }
+
+    /// Ein Bild mit gedrückter Taste unterhalb der Klickschwelle: egui meldet
+    /// hier weder `drag_started` noch `dragged` noch `drag_stopped`.
+    fn below_threshold_frame(press: Pos2, pos: Pos2) -> PointerFrame {
+        PointerFrame {
+            down: true,
+            pos: Some(pos),
+            press_origin: Some(press),
+            ..PointerFrame::default()
+        }
+    }
+
+    /// Das Bild des Loslassens nach einem bloßen Klick: die Taste ist oben,
+    /// `press_origin` ist weg, und `drag_stopped` kommt nicht — egui hatte nie
+    /// einen Zug erkannt.
+    fn click_release_frame(pos: Pos2) -> PointerFrame {
+        PointerFrame {
+            pos: Some(pos),
+            ..PointerFrame::default()
+        }
+    }
+
+    /// **Der zweite Teil des gemeldeten Fehlers.** Das Rechteck muss vom
+    /// Moment des Drückens an zu sehen sein und an der Druckstelle beginnen.
+    /// Vorher fing der Selektor erst bei `drag_started` an — also nach bis zu
+    /// 6 pt Mausweg, in denen nichts zu sehen war und danach ein fertiges
+    /// 6-pt-Rechteck auftauchte.
+    #[test]
+    fn a_press_on_the_page_shows_a_rectangle_at_once_and_at_the_press_point() {
+        let view = viewer::PageView::upright(offset_box());
+        let mut app = RedactApp::silent(Config::default());
+        let press = ORIGIN + Vec2::new(120.0, 90.0);
+
+        app.apply_pointer(press_frame(press), false, &view, ORIGIN, 0, ZOOM);
+        assert!(
+            app.selector.is_active(),
+            "nach dem Druckbild läuft schon ein Zug"
+        );
+        let preview = app.selector.preview().expect("Vorschau ab dem Druckbild");
+        assert_eq!(preview.min, press, "die Ecke liegt, wo geklickt wurde");
+        assert_eq!(preview.max, press);
+        assert!(app.resize.is_none(), "und es ist keine Größenänderung");
+        assert!(app.state.regions.is_empty(), "angelegt wird noch nichts");
+
+        // Zwei Punkte Bewegung — immer noch unter der Schwelle.
+        let two = press + Vec2::splat(2.0);
+        app.apply_pointer(
+            below_threshold_frame(press, two),
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        let preview = app.selector.preview().expect("Vorschau unter der Schwelle");
+        assert_eq!(preview.min, press);
+        assert_eq!(
+            (preview.width(), preview.height()),
+            (2.0, 2.0),
+            "zwei Punkte zeigen zwei Punkte — nicht nichts und nicht sechs"
+        );
+    }
+
+    /// Ein Klick ohne Bewegung legt **keine** Region an, sondern wählt aus.
+    #[test]
+    fn a_click_selects_and_never_draws_a_rectangle() {
+        let view = viewer::PageView::upright(offset_box());
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+        let (mut app, screen) = app_with_selected_region(&view, rect);
+        app.state.selected_region = None;
+
+        // Mitten in die vorhandene Region: drücken, loslassen, kein Weg dazwischen.
+        let press = screen.center();
+        app.apply_pointer(press_frame(press), false, &view, ORIGIN, 0, ZOOM);
+        app.apply_pointer(click_release_frame(press), true, &view, ORIGIN, 0, ZOOM);
+
+        assert_eq!(
+            app.state.regions.len(),
+            1,
+            "ein Klick darf keine Region anlegen"
+        );
+        assert_eq!(
+            app.state.selected_region,
+            Some(0),
+            "er wählt die vorhandene Region aus"
+        );
+        assert!(
+            !app.selector.is_active() && app.selector.preview().is_none(),
+            "und lässt keinen Zug offen stehen"
+        );
+
+        // Dasselbe auf leerer Fläche: keine Region, keine Auswahl, kein Zug.
+        let empty = screen.left_top() + Vec2::new(-90.0, -90.0);
+        app.apply_pointer(press_frame(empty), false, &view, ORIGIN, 0, ZOOM);
+        app.apply_pointer(click_release_frame(empty), true, &view, ORIGIN, 0, ZOOM);
+        assert_eq!(app.state.regions.len(), 1);
+        assert_eq!(app.state.selected_region, None);
+        assert!(app.selector.preview().is_none());
+    }
+
+    /// Ein **Druck auf einem Eckgriff** beginnt eine Größenänderung — keine
+    /// Neuanlage und auch keine Vorschau über dem Griff. Die Rangfolge aus
+    /// [`RedactApp::apply_pointer`] gilt also schon im Druckbild.
+    #[test]
+    fn pressing_a_corner_handle_starts_a_resize_instead_of_a_new_rectangle() {
+        let view = viewer::PageView::upright(offset_box());
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+
+        for handle in crate::selector::HANDLES {
+            let (mut app, screen) = app_with_selected_region(&view, rect);
+            let depth = app.state.history.undo_depth();
+            let press = handle.pos(screen) + Vec2::new(3.0, -3.0);
+
+            app.apply_pointer(press_frame(press), false, &view, ORIGIN, 0, ZOOM);
+
+            let what = format!("{handle:?}");
+            assert!(app.resize.is_some(), "{what}: der Griff ist angefasst");
+            assert!(
+                !app.selector.is_active() && app.selector.preview().is_none(),
+                "{what}: über dem Griff darf keine Vorschau liegen"
+            );
+            assert_eq!(app.state.regions.len(), 1, "{what}: nichts Neues");
+            assert_eq!(
+                app.state.regions[0].region.rect, rect,
+                "{what}: der bloße Druck verschiebt noch keine Ecke"
+            );
+
+            // Weiterziehen unterhalb der Klickschwelle: hier soll die Ecke
+            // bereits folgen, und zwar der Region, nicht einem neuen Rechteck.
+            let moved = press + Vec2::new(3.0, 3.0);
+            app.apply_pointer(
+                below_threshold_frame(press, moved),
+                false,
+                &view,
+                ORIGIN,
+                0,
+                ZOOM,
+            );
+            let anchor =
+                viewer::screen_to_pdf_point(handle.opposite().pos(screen), &view, ZOOM, ORIGIN);
+            assert_rect_close(
+                app.state.regions[0].region.rect,
+                Rect::from_corners(
+                    anchor,
+                    viewer::screen_to_pdf_point(moved, &view, ZOOM, ORIGIN),
+                ),
+                &what,
+            );
+            assert_eq!(
+                app.state.history.undo_depth(),
+                depth + 1,
+                "{what}: genau ein Schnappschuss"
+            );
+            assert_eq!(
+                app.state.regions.len(),
+                1,
+                "{what}: immer noch nichts Neues"
+            );
+        }
+    }
+
+    /// Ein Griff, der nur angetippt und ohne Bewegung wieder losgelassen wird,
+    /// ändert nichts — und hinterlässt auch keinen Rückgängig-Schritt, der
+    /// nichts zurücknähme.
+    #[test]
+    fn merely_tapping_a_handle_changes_nothing_at_all() {
+        let view = viewer::PageView::upright(offset_box());
+        let rect = Rect::new(100.0, 300.0, 260.0, 340.0);
+        let (mut app, screen) = app_with_selected_region(&view, rect);
+        let depth = app.state.history.undo_depth();
+
+        let press = screen.right_bottom();
+        app.apply_pointer(press_frame(press), false, &view, ORIGIN, 0, ZOOM);
+        assert!(app.resize.is_some());
+        app.apply_pointer(click_release_frame(press), true, &view, ORIGIN, 0, ZOOM);
+
+        assert!(app.resize.is_none(), "der Zug ist vorbei");
+        assert_eq!(app.state.regions[0].region.rect, rect, "nichts verschoben");
+        assert_eq!(
+            app.state.history.undo_depth(),
+            depth,
+            "und kein leerer Schritt im Verlauf"
+        );
+        assert_eq!(app.state.regions.len(), 1);
+    }
+
+    /// Ein vollständiger Zug **ab dem Druckbild**, wie egui ihn liefert:
+    /// Druck, ein paar Bilder unterhalb der Klickschwelle, dann `drag_started`,
+    /// weiterziehen, loslassen. Am Ende steht ein Rechteck, dessen Ecke am
+    /// Druckpunkt liegt.
+    #[test]
+    fn a_full_drag_starting_at_the_press_frame_ends_at_the_press_point() {
+        let view = viewer::PageView::upright(offset_box());
+        let mut app = RedactApp::silent(Config::default());
+        let press = ORIGIN + Vec2::new(150.0, 120.0);
+        let release = press + Vec2::new(80.0, 60.0);
+
+        app.apply_pointer(press_frame(press), false, &view, ORIGIN, 0, ZOOM);
+        assert_eq!(
+            app.selector.preview().map(|r| r.min),
+            Some(press),
+            "schon das Druckbild zeigt die Ecke"
+        );
+        for step in [2.0_f32, 4.0] {
+            app.apply_pointer(
+                below_threshold_frame(press, press + Vec2::splat(step)),
+                false,
+                &view,
+                ORIGIN,
+                0,
+                ZOOM,
+            );
+            let preview = app.selector.preview().expect("Vorschau unter der Schwelle");
+            assert_eq!(preview.min, press);
+            assert_eq!(preview.width(), step, "das Rechteck wächst mit der Maus");
+        }
+        app.apply_pointer(
+            PointerFrame {
+                drag_started: true,
+                dragged: true,
+                down: true,
+                pos: Some(press + Vec2::splat(7.0)),
+                press_origin: Some(press),
+                ..PointerFrame::default()
+            },
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+        app.apply_pointer(
+            PointerFrame {
+                drag_stopped: true,
+                pos: Some(release),
+                ..PointerFrame::default()
+            },
+            false,
+            &view,
+            ORIGIN,
+            0,
+            ZOOM,
+        );
+
+        assert_eq!(app.state.regions.len(), 1, "genau ein Rechteck");
+        assert_rect_close(
+            app.state.regions[0].region.rect,
+            Rect::from_corners(
+                viewer::screen_to_pdf_point(press, &view, ZOOM, ORIGIN),
+                viewer::screen_to_pdf_point(release, &view, ZOOM, ORIGIN),
+            ),
+            "Ecke am Druckpunkt",
+        );
+        assert!(app.selector.preview().is_none(), "und die Vorschau ist weg");
     }
 
     // ------------------------------------------------------- Symbolleiste
