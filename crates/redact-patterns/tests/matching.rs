@@ -121,15 +121,98 @@ fn konto_nr_does_not_fire_inside_longer_digit_runs() {
         .unwrap();
     assert!(regions.is_empty(), "{:?}", texts(&regions));
 
-    // Positivprobe: eine alleinstehende Kontonummer wird gefunden.
+    // Positivprobe: eine Kontonummer hinter ihrem Schlüsselwort wird gefunden …
     let hits = m
         .find_matches(&[run(0, "Kto. 1234567 bei der Bank")])
         .unwrap();
     assert_eq!(texts(&hits), vec!["1234567"]);
     match &hits[0].source {
-        Source::Pattern { confidence, .. } => assert!((*confidence - 0.4).abs() < 1e-6),
+        Source::Pattern { confidence, .. } => assert!((*confidence - 0.85).abs() < 1e-6),
         other => panic!("falsche Quelle: {other:?}"),
     }
+
+    // … das Schlüsselwort selbst bleibt lesbar: geschwärzt wird nur die
+    // Gruppe `target`, hier die sechs Zeichen ab Position 5.
+    assert_eq!(hits[0].rect, rect_for_chars(5, 12));
+}
+
+/// Dieselbe Ziffernkette ohne Schlüsselwort ist nur ein Verdacht: sie kommt
+/// erst durch, wenn die Schwelle bewusst gesenkt wird — und dann mit einer
+/// Konfidenz, die sie von einem echten Treffer unterscheidbar macht.
+#[test]
+fn konto_nr_without_a_keyword_needs_a_lowered_threshold() {
+    let m = matcher_for(&["konto_nr"]);
+    let runs = vec![run(0, "Rechnung 1234567 vom Vormonat")];
+    assert!(m.find_matches(&runs).unwrap().is_empty());
+
+    let lax = matcher_for(&["konto_nr"]).with_min_confidence(0.1).unwrap();
+    let hits = lax.find_matches(&runs).unwrap();
+    assert_eq!(texts(&hits), vec!["1234567"]);
+    match &hits[0].source {
+        Source::Pattern { confidence, .. } => assert!((*confidence - 0.3).abs() < 1e-6),
+        other => panic!("falsche Quelle: {other:?}"),
+    }
+}
+
+/// Der Kern des Befunds: jedes achtstellige Token traf früher `konto_nr` *und*
+/// `blz`. Jetzt entscheidet das Schlüsselwort, und wo keines steht, trennt die
+/// Konfidenz die beiden Deutungen.
+#[test]
+fn konto_nr_and_blz_are_told_apart_by_their_keyword() {
+    let m = matcher_for(&["konto_nr", "blz"]);
+    let runs = vec![
+        run(0, "Bankleitzahl: 37040044"),
+        run(1, "Kontonummer: 87654321"),
+    ];
+    let found: Vec<(String, String)> = m
+        .find_matches(&runs)
+        .unwrap()
+        .iter()
+        .map(|r| match &r.source {
+            Source::Pattern { pattern_id, .. } => (
+                pattern_id.clone(),
+                r.text.as_deref().unwrap_or_default().to_string(),
+            ),
+            other => panic!("falsche Quelle: {other:?}"),
+        })
+        .collect();
+    // Reihenfolge: Runs zuerst — Zeile 0 ist die BLZ, Zeile 1 die Kontonummer.
+    // Entscheidend ist, dass jede Zeile genau ein Pattern auslöst.
+    assert_eq!(
+        found,
+        vec![
+            ("blz".to_string(), "37040044".to_string()),
+            ("konto_nr".to_string(), "87654321".to_string()),
+        ]
+    );
+
+    // Ohne Schlüsselwort bleiben beide Deutungen möglich — aber nicht
+    // gleichrangig: `konto_nr` liegt vorn, und beide sind unterhalb der
+    // Vorgabeschwelle.
+    let lax = matcher_for(&["konto_nr", "blz"])
+        .with_min_confidence(0.0)
+        .unwrap();
+    let hits = lax
+        .find_matches(&[run(0, "Referenz 87654321 vom 1.2.")])
+        .unwrap();
+    let mut ranked: Vec<(String, f32)> = hits
+        .iter()
+        .map(|r| match &r.source {
+            Source::Pattern {
+                pattern_id,
+                confidence,
+            } => (pattern_id.clone(), *confidence),
+            _ => unreachable!(),
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    assert_eq!(ranked[0].0, "konto_nr");
+    assert_eq!(ranked[1].0, "blz");
+    assert!(ranked[0].1 > ranked[1].1, "{ranked:?}");
+    assert!(
+        ranked[0].1 < redact_patterns::DEFAULT_MIN_CONFIDENCE,
+        "{ranked:?}"
+    );
 }
 
 #[test]
@@ -181,8 +264,33 @@ fn amount_date_email_and_phone_patterns_work() {
 fn empty_id_list_selects_all_builtins() {
     let m = PatternMatcher::new(&[]).unwrap();
     assert_eq!(m.defs().len(), builtin_pattern_ids().len());
-    // Zwei Patterns sind standardmäßig deaktiviert und werden nicht kompiliert.
-    assert_eq!(m.active_count(), builtin_pattern_ids().len() - 2);
+    // Drei Patterns sind standardmäßig deaktiviert (`iban_intl`, `amount_eur`,
+    // `date_de`) und werden nicht kompiliert.
+    assert_eq!(m.active_count(), builtin_pattern_ids().len() - 3);
+}
+
+/// Datum und Betrag sind der Inhalt eines Kontoauszugs, nicht sein Schutzgut —
+/// standardmäßig bleiben sie stehen, per `--patterns` sind sie erreichbar.
+#[test]
+fn dates_and_amounts_are_off_by_default_but_still_reachable() {
+    let zeile = run(
+        0,
+        "05.01.2026  Ueberweisung an Musterfirma GmbH   1.234,56 EUR",
+    );
+
+    let voreinstellung = PatternMatcher::new(&[]).unwrap();
+    let regions = voreinstellung
+        .find_matches(std::slice::from_ref(&zeile))
+        .unwrap();
+    assert!(
+        regions.is_empty(),
+        "Standardlauf schwärzt Datum/Betrag: {:?}",
+        texts(&regions)
+    );
+
+    let gezielt = matcher_for(&["date_de", "amount_eur"]);
+    let regions = gezielt.find_matches(&[zeile]).unwrap();
+    assert_eq!(texts(&regions), vec!["05.01.2026", "1.234,56 EUR"]);
 }
 
 #[test]

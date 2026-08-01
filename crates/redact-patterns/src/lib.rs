@@ -1,8 +1,8 @@
 //! # redact-patterns
 //!
-//! Regex-basierte Erkennung sensibler Daten (IBAN, BIC, Kontonummer, Beträge,
-//! Datumsangaben, Kreditkarten, E-Mail, Telefonnummern …) auf den Text-Runs,
-//! die `redact-pdf` aus einem PDF extrahiert.
+//! Regex-basierte Erkennung sensibler Daten (IBAN, BIC, Kontonummer,
+//! Bankleitzahl, Steuer-ID, Kreditkarten, E-Mail, Telefonnummern …) auf den
+//! Text-Runs, die `redact-pdf` aus einem PDF extrahiert.
 //!
 //! Das Crate liefert eine Liste eingebauter Patterns ([`builtin_patterns`]),
 //! die per Konfigurationsdatei (YAML oder JSON) ergänzt, überschrieben oder
@@ -15,6 +15,25 @@
 //! ([`Validator`]): IBAN (mod 97), BIC (Struktur + Länderkennung) und Luhn.
 //! Ein Treffer, der seine Prüfung nicht besteht, wird verworfen; ein bestandener
 //! Treffer bekommt eine Konfidenz von mindestens 0.99.
+//!
+//! ## Kontext statt reiner Ziffernlänge
+//!
+//! Reine Ziffernmuster (Kontonummer, Bankleitzahl, Steuer-ID) sind an einer
+//! Ziffernkette allein nicht zu unterscheiden — jedes achtstellige Token ist
+//! zugleich eine mögliche BLZ und eine mögliche Kontonummer. Solche Patterns
+//! benennen deshalb zwei Gruppen:
+//!
+//! * `target` — der Teil, der tatsächlich geschwärzt wird. Fehlt die Gruppe,
+//!   gilt der gesamte Treffer.
+//! * `context` — ein *optionales* Schlüsselwort davor („BLZ", „Kto.", …).
+//!   Hat es gegriffen, gilt [`PatternDef::confidence`]; sonst der niedrigere
+//!   Wert aus [`PatternDef::confidence_without_context`].
+//!
+//! ## Mindestvertrauen
+//!
+//! Treffer unterhalb von [`PatternMatcher::min_confidence`] werden verworfen.
+//! Vorgabe ist [`DEFAULT_MIN_CONFIDENCE`]; damit überleben nur Treffer, die
+//! entweder durch eine Prüfsumme oder durch ein Schlüsselwort gestützt sind.
 //!
 //! ```
 //! use redact_patterns::PatternMatcher;
@@ -34,8 +53,14 @@ mod matcher;
 mod validate;
 
 pub use builtin::{builtin_pattern_ids, builtin_patterns};
-pub use matcher::{PatternConfig, PatternEntry, PatternMatcher};
+pub use matcher::{PatternConfig, PatternEntry, PatternMatcher, DEFAULT_MIN_CONFIDENCE};
 pub use validate::{validate_bic, validate_iban, validate_luhn};
+
+/// Name der Regex-Gruppe, die den tatsächlich zu schwärzenden Teil umfasst.
+pub const TARGET_GROUP: &str = "target";
+
+/// Name der optionalen Regex-Gruppe mit dem Kontext-Schlüsselwort.
+pub const CONTEXT_GROUP: &str = "context";
 
 /// Eine Pattern-Definition (eingebaut oder aus Konfiguration geladen).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,8 +73,19 @@ pub struct PatternDef {
     #[serde(default)]
     pub description: String,
     /// Konfidenz des Treffers (0.0 … 1.0).
+    ///
+    /// Hat der Regex eine Gruppe `context`, gilt dieser Wert nur, wenn die
+    /// Gruppe gegriffen hat.
     #[serde(default = "default_confidence")]
     pub confidence: f32,
+    /// Konfidenz, wenn die Gruppe `context` **nicht** gegriffen hat.
+    ///
+    /// Nur zulässig, wenn der Regex eine Gruppe `context` besitzt. Damit
+    /// bekommt derselbe Treffer je nach Kontext ein anderes Vertrauen: „BLZ
+    /// 37040044" ist eine Bankleitzahl, ein nacktes „37040044" irgendwo im
+    /// Text ist bestenfalls ein Verdacht.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_without_context: Option<f32>,
     /// Deaktivierte Patterns werden nie kompiliert.
     #[serde(default = "default_true")]
     pub enabled: bool,
