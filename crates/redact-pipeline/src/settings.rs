@@ -64,7 +64,7 @@ pub const THEMES: [&str; 2] = ["hell", "dunkel"];
 /// nennt, ändert auch nur den einen. Unbekannte Schlüssel werden **abgelehnt**
 /// statt überlesen: ein Tippfehler in `output_suffix` wäre sonst eine
 /// Einstellung, die stillschweigend nicht wirkt.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     /// Namenszusatz der Ausgabedatei (`--output-suffix`).

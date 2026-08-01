@@ -732,7 +732,12 @@ pub fn has_incremental_history(doc: &Document) -> bool {
 /// Deshalb wird der Marker aus den Rohbytes zurückgeholt. Er beschreibt einen
 /// Offset in der *Eingabedatei* und darf in keiner Ausgabe landen;
 /// [`save_to_bytes`] entfernt ihn vor dem Schreiben wieder.
-fn restore_revision_markers(bytes: &[u8], doc: &mut Document) {
+///
+/// [`load_from_bytes_with_limits`] ruft das selbst auf. Wer `lopdf` an dieser
+/// Funktion vorbei benutzt — etwa `Document::load_mem_with_options`, um ein
+/// verschlüsseltes Dokument mit Passwort zu öffnen —, muss es danach selbst
+/// aufrufen, sonst fehlt die Warnung über die Vorgeschichte.
+pub fn restore_revision_markers(bytes: &[u8], doc: &mut Document) {
     let Some(trailer) = newest_trailer_area(bytes) else {
         return;
     };

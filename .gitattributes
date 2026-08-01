@@ -1,0 +1,6 @@
+# Die verschlüsselte Test-PDF (crates/redact-pipeline/src/testdata/) ist
+# Binärdaten: RC4-Chiffrat, in dem CR und LF als gewöhnliche Bytes vorkommen.
+# Ohne diese Zeile würde git sie auf einem System mit `core.autocrlf=true`
+# beim Auschecken umschreiben — und damit unbrauchbar machen, weil sich das
+# Dokument dann nicht mehr entschlüsseln lässt.
+*.pdf binary
