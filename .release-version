@@ -1,1 +1,13 @@
+# Diese Datei veroeffentlicht ein Release.
+#
+# Jede Aenderung an ihr loest .github/workflows/publish-release.yml aus:
+# gebaut werden Windows, Linux (glibc) und Linux (musl), danach entsteht
+# ein GitHub-Release mit dem Tag `v<version>`. Es gibt keinen zweiten
+# Bestaetigungsschritt - der Commit ist die Bestaetigung.
+#
+# Die Version muss mit `version` in Cargo.toml uebereinstimmen; der Job
+# `verify` in release.yml prueft das ueber `cargo metadata` und bricht
+# sonst ab. Ein fuehrendes "v" wird toleriert.
+#
+# Kommentarzeilen und Leerzeilen werden ignoriert.
 0.2.0

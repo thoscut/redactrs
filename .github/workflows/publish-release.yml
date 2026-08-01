@@ -69,9 +69,14 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          VERSION="$(tr -d '[:space:]' < .release-version)"
+          # Kommentarzeilen (`#`) und Leerzeilen werden verworfen, damit in
+          # der Datei stehen darf, was sie auslöst - sie veroeffentlicht ein
+          # Release, und das sollte man ihr ansehen. Frueher wurde die ganze
+          # Datei zur Version verdichtet; ein erklaerender Satz darin haette
+          # eine unsinnige Version ergeben.
+          VERSION="$(grep -v '^[[:space:]]*#' .release-version | tr -d '[:space:]')"
           if [ -z "$VERSION" ]; then
-            echo "::error::.release-version ist leer"
+            echo "::error::.release-version enthaelt keine Version"
             exit 1
           fi
           # Fuehrendes "v" tolerieren, aber intern immer ohne fuehrendes v rechnen.
