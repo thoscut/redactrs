@@ -21,7 +21,9 @@ pub use conflict::{resolve_conflicts, BlockedRegion, Resolution};
 pub use display::{safe_path, safe_text};
 pub use error::{RedactError, Result};
 pub use geometry::{bounding_box, Glyph, Point, Rect, TextRun};
-pub use model::{Action, BookingEntry, ListType, MatchType, Redaction, Region, Source};
+pub use model::{
+    Action, BookingEntry, ListType, MatchType, Redaction, Region, Source, DEFAULT_REPLACEMENT,
+};
 pub use naming::{
     check_output_suffix, output_path_with_suffix, sibling_path, AUDIT_SUFFIX,
     DEFAULT_OUTPUT_SUFFIX, REVIEW_SUFFIX,

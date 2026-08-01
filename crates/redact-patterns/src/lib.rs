@@ -36,6 +36,23 @@
 //! Vorgabe ist [`DEFAULT_MIN_CONFIDENCE`]; damit überleben nur Treffer, die
 //! entweder durch eine Prüfsumme oder durch ein Schlüsselwort gestützt sind.
 //!
+//! ## Was eine einzelne Textzeile kosten darf
+//!
+//! Ein Regex mit Look-around wird zurückverfolgend ausgewertet; wie teuer eine
+//! Suche wird, hängt damit nicht nur vom Muster ab, sondern auch vom Text. Zwei
+//! Dinge halten das im Zaum, und sie sind **nicht** dasselbe:
+//!
+//! * **Die Muster selbst sind linear.** Kein eingebautes Muster hat einen
+//!   unbegrenzten Quantor an einer Stelle, an der die Suche von jeder Position
+//!   aus hineinlaufen könnte. Die Look-behinds (`(?<![0-9A-Za-z])`, …) sind
+//!   genau dafür da: sie schneiden die Startpositionen weg, die sonst dieselbe
+//!   Ziffern- oder Buchstabenkette ein zweites Mal durchliefen. Wo das nicht
+//!   ging, steht eine Obergrenze am Quantor (`{0,24}` statt `*`).
+//!   `tests/backtracking.rs` misst das nach.
+//! * **[`BACKTRACK_LIMIT`] ist kein Ersatz dafür**, sondern ein Fangnetz für
+//!   Muster aus einer [`PatternConfig`]: die kommen von außen und können
+//!   beliebig teuer sein.
+//!
 //! ```
 //! use redact_patterns::PatternMatcher;
 //!
@@ -53,8 +70,10 @@ mod builtin;
 mod matcher;
 mod validate;
 
-pub use builtin::{builtin_pattern_ids, builtin_patterns};
-pub use matcher::{PatternConfig, PatternEntry, PatternMatcher, DEFAULT_MIN_CONFIDENCE};
+pub use builtin::{builtin_pattern_ids, builtin_patterns, MAX_KEYWORD_PREFIX};
+pub use matcher::{
+    PatternConfig, PatternEntry, PatternMatcher, BACKTRACK_LIMIT, DEFAULT_MIN_CONFIDENCE,
+};
 pub use validate::{validate_bic, validate_creditor_id, validate_iban, validate_luhn};
 
 /// Name der Regex-Gruppe, die den tatsächlich zu schwärzenden Teil umfasst.

@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audit;
+pub mod coverage;
 pub mod settings;
 pub mod testing;
 
@@ -51,6 +52,7 @@ use redact_pdf::document::{
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
 pub use crate::audit::{sha256_bytes, sha256_file, Applied, AuditLog, Effects, EntryEffect};
+pub use crate::coverage::is_coverage_gap;
 pub use crate::settings::Settings;
 
 /// Vorgabe für `--padding`, in Punkt.
@@ -148,6 +150,26 @@ pub struct Config {
     pub allow_unverified_review: bool,
     pub audit_log: Option<PathBuf>,
     pub action: Action,
+    /// Der Ersatztext dieses Laufs (`--replace-with`) — **unabhängig von
+    /// [`Config::action`]**.
+    ///
+    /// ## Warum er nicht in `action` genügt
+    ///
+    /// [`Action::Replace`] trägt seinen Text selbst, und das ist richtig: die
+    /// Art gehört zu *einer* Region und steht so auch in der Review-Datei. Als
+    /// einziger Ort für `--replace-with` reicht das aber nicht, weil die Art
+    /// des Laufs und der Ersatztext des Laufs zwei verschiedene Angaben sind.
+    ///
+    /// `--action blackout --replace-with "[IBAN]"` verlor `[IBAN]` schon vor
+    /// dem ersten Fenster: `ActionArg::Blackout.to_action(…)` wirft das
+    /// Argument weg, weil `Action::Blackout` kein Textfeld hat. Wer in der
+    /// Trefferliste der Oberfläche dann auf „Ersetzen“ umstellte, bekam die
+    /// Vorgabe statt seines Textes — und nichts wies darauf hin, dass der
+    /// Schalter je da war.
+    ///
+    /// Deshalb steht der Text hier: [`Config::replacement`] ist die *eine*
+    /// Antwort auf „womit wird in diesem Lauf ersetzt?“, für beide Programme.
+    pub replace_with: String,
     pub padding: f64,
     /// Bilder, die sich nicht dekodieren lassen, durchgehen lassen statt
     /// abzubrechen — **unsicher**, siehe `--allow-undecodable-images`.
@@ -201,6 +223,7 @@ impl Default for Config {
             allow_unverified_review: false,
             audit_log: None,
             action: Action::Blackout,
+            replace_with: redact_core::DEFAULT_REPLACEMENT.to_string(),
             padding: DEFAULT_PADDING,
             allow_undecodable_images: false,
             max_decoded_image_bytes: redact_pdf::image::DEFAULT_MAX_DECODED_IMAGE_BYTES,
@@ -210,6 +233,24 @@ impl Default for Config {
             password: None,
             theme: settings::THEMES[0].to_string(),
         }
+    }
+}
+
+impl Config {
+    /// Der Ersatztext dieses Laufs — die **eine** Quelle für beide Programme.
+    ///
+    /// Steht in [`Config::action`] bereits ein Text (`--action replace`), gilt
+    /// der; sonst der mitgeführte [`Config::replace_with`]. Beide Wege enden
+    /// bei derselben Zeichenkette, wenn `--action replace --replace-with X`
+    /// gesetzt war — die Fallunterscheidung ist nur dafür da, dass eine von
+    /// Hand gebaute `Config` (die Oberfläche und ihre Tests bauen welche) nicht
+    /// zwei Felder gleichzeitig pflegen muss.
+    ///
+    /// Ohne beides ist es [`redact_core::DEFAULT_REPLACEMENT`].
+    pub fn replacement(&self) -> &str {
+        self.action
+            .replacement()
+            .unwrap_or(self.replace_with.as_str())
     }
 }
 
@@ -258,6 +299,32 @@ pub struct Outcome {
     /// Klartextbeschreibung der von der Negativliste blockierten Treffer.
     pub blocked_details: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+impl Outcome {
+    /// Die Warnungen, die heißen „für diesen Teil des Dokuments kann ich nicht
+    /// einstehen“ — siehe [`crate::coverage`].
+    ///
+    /// Eine Teilmenge von [`Outcome::warnings`]; sie wird nicht getrennt
+    /// gespeichert, damit es keine zweite Liste gibt, die von der ersten
+    /// abweichen könnte.
+    pub fn coverage_gaps(&self) -> Vec<&str> {
+        self.warnings
+            .iter()
+            .filter(|w| crate::coverage::is_coverage_gap(w))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Hat die Analyse das ganze Dokument gesehen?
+    ///
+    /// `false` heißt **nicht** „es ist etwas schiefgegangen“, sondern: der Lauf
+    /// ist durchgelaufen und hat geschrieben, kann aber für einen Teil der
+    /// Datei nicht sagen, ob dort etwas stehen geblieben ist. Genau das ist der
+    /// Unterschied zwischen Rückgabewert 0 und 3.
+    pub fn fully_inspected(&self) -> bool {
+        self.coverage_gaps().is_empty()
+    }
 }
 
 // -------------------------------------------------------- Verschlüsselung
@@ -1390,6 +1457,45 @@ mod tests {
         assert!(
             !Path::new("/daten").exists(),
             "ein Verzeichnis wurde angelegt"
+        );
+    }
+
+    // ------------------------------------------------- Befund #76: Ersatztext
+
+    /// Der Ersatztext hat **eine** Antwort, egal von welcher Seite gefragt
+    /// wird.
+    ///
+    /// Die drei Fälle sind genau die drei, die es gibt: der Lauf ersetzt
+    /// ohnehin (`action` trägt den Text), der Lauf schwärzt schwarz und hat
+    /// trotzdem einen Text mitbekommen (`--action blackout --replace-with X` —
+    /// der Fall, der verlorenging), und der Lauf hat gar nichts gesagt.
+    #[test]
+    fn the_replacement_has_one_answer_whichever_action_is_set() {
+        let mit_action = Config {
+            action: Action::Replace("[IBAN]".into()),
+            ..Config::default()
+        };
+        assert_eq!(mit_action.replacement(), "[IBAN]");
+
+        let nur_schalter = Config {
+            action: Action::Blackout,
+            replace_with: "[IBAN]".into(),
+            ..Config::default()
+        };
+        assert_eq!(
+            nur_schalter.replacement(),
+            "[IBAN]",
+            "--replace-with geht bei --action blackout verloren"
+        );
+
+        assert_eq!(
+            Config::default().replacement(),
+            redact_core::DEFAULT_REPLACEMENT
+        );
+        // Und die Vorgabe ist die aus `redact-core`, nicht eine zweite hier.
+        assert_eq!(
+            Config::default().replace_with,
+            redact_core::DEFAULT_REPLACEMENT
         );
     }
 

@@ -123,6 +123,32 @@ impl Redaction {
     }
 }
 
+/// Vorgabe für den Ersatztext von [`Action::Replace`].
+///
+/// ## Warum die Zeichenkette hier steht und nicht zweimal woanders
+///
+/// Sie war zweimal da: als clap-Literal in `crates/redact-cli/src/cli.rs`
+/// (`--replace-with`, `default_value`) und als eigene Konstante in
+/// `crates/redact-gui/src/state.rs`. Davor war sie zweimal *verschieden* — die
+/// Oberfläche schlug `"[REDACTED]"` vor: englischer Text in einer deutschen
+/// Oberfläche und ein anderer als der, den ein Lauf ohne `--gui` schreibt.
+/// Repariert wurde das mit einem Test, der die Gleichheit der beiden Literale
+/// festhielt. Ein Test, der zwei Wahrheiten vergleicht, ist aber ein Pflaster:
+/// er meldet das Auseinanderlaufen, nachdem es passiert ist, und nur solange
+/// jemand ihn mitpflegt.
+///
+/// `redact-core` ist der Ort, an dem beide Programme ohnehin dieselbe Sprache
+/// sprechen ([`Action`] steht schon hier). Eine Konstante an dieser Stelle
+/// *kann* nicht auseinanderlaufen.
+///
+/// ## Warum dieser Text
+///
+/// Deutsch, weil das Programm deutsch ist. In eckigen Klammern, weil der Leser
+/// des Dokuments sehen soll, dass hier etwas entfernt wurde — ein Ersatztext,
+/// der wie Inhalt aussieht, verschleiert die Schwärzung, statt sie
+/// auszuweisen.
+pub const DEFAULT_REPLACEMENT: &str = "[GESCHWÄRZT]";
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
@@ -132,6 +158,8 @@ pub enum Action {
     /// Weißes Rechteck + Text entfernen.
     Whiteout,
     /// Text entfernen und durch einen Platzhalter ersetzen (z.B. `[IBAN]`).
+    ///
+    /// Die Vorgabe für den Text ist [`DEFAULT_REPLACEMENT`].
     Replace(String),
 }
 

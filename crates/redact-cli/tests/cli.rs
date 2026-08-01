@@ -1153,12 +1153,22 @@ fn an_undecodable_image_can_be_waved_through_on_request() {
         "--no-patterns",
         "--allow-undecodable-images",
     ]);
-    assert!(allowed.status.success(), "{}", stderr(&allowed));
     assert!(out.exists());
     let warned = stderr(&allowed);
     assert!(
         warned.to_lowercase().contains("bild"),
         "der Lauf muss auf das ungeschwärzte Bild hinweisen: {warned}"
+    );
+    // **#79.** Der Schalter macht aus dem Abbruch eine Ausgabe, nicht aus dem
+    // Befund einen Erfolg: die Bildpunkte liegen unverändert in der Datei, und
+    // genau das heißt Rückgabewert 3 („verarbeitet, aber nicht vollständig
+    // geprüft“). Vorher endete gerade der ausdrücklich als unsicher
+    // gekennzeichnete Weg mit 0 — im Stapel nicht von einem sauberen Lauf zu
+    // unterscheiden.
+    assert_eq!(
+        allowed.status.code(),
+        Some(3),
+        "--allow-undecodable-images meldet „alles gut“: {warned}"
     );
 }
 

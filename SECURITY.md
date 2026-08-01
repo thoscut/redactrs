@@ -50,10 +50,25 @@ laufenden Prozess. Gegen den hilft kein Anwendungsprogramm.
 * **Kein PDF-JavaScript.** `/JavaScript`, `/AA`, `/OpenAction` und Ähnliches
   werden nicht ausgeführt — es gibt keinen Interpreter dafür. Gelesen wird nur
   Struktur, Text und Grafikzustand.
-* **`#![forbid(unsafe_code)]` in allen eigenen Crates** (`redact-core`,
-  `redact-pdf`, `redact-patterns`, `redact-booking`, `redact-render`,
-  `redact-gui`, `redact-cli`). Der Compiler setzt das durch; es ist keine
-  Absichtserklärung.
+* **`#![forbid(unsafe_code)]` in allen acht eigenen Crates** (`redact-core`,
+  `redact-pdf`, `redact-patterns`, `redact-booking`, `redact-pipeline`,
+  `redact-render`, `redact-gui`, `redact-cli`) — und in jedem der drei
+  Binärziele. Der Compiler setzt das durch; es ist keine Absichtserklärung.
+
+  ```bash
+  $ grep -rl 'forbid(unsafe_code)' crates/*/src/lib.rs crates/*/src/main.rs \
+        crates/*/src/bin/*.rs
+  crates/redact-booking/src/lib.rs
+  crates/redact-core/src/lib.rs
+  crates/redact-gui/src/lib.rs
+  crates/redact-patterns/src/lib.rs
+  crates/redact-pdf/src/lib.rs
+  crates/redact-pipeline/src/lib.rs
+  crates/redact-render/src/lib.rs
+  crates/redact-cli/src/main.rs          # redact-cli hat keine lib.rs
+  crates/redact-gui/src/main.rs
+  crates/redact-cli/src/bin/redact-rs-gui.rs
+  ```
 * **Kontrollierter Abbruch statt Speicherfehler.** Übersteigt eine Eingabe die
   unten genannten Grenzen, endet der Lauf mit einer Meldung und einem
   Rückgabewert — nicht mit SIGABRT und nicht mit einer gescheiterten
@@ -164,8 +179,9 @@ läuft und an einer verschlüsselten Datei nur die Hälfte sehen kann:
 
 Erst *nach* dem Laden zu prüfen ist nur deshalb vertretbar, weil das Laden
 selbst billig ist: `lopdf` legt Streams als Rohbytes ab und packt sie nicht aus.
-Der teure Teil — die Zerlegung des Seiteninhalts in Operationen, rund 62 Byte
-Arbeitsspeicher je Byte Stream — kommt erst danach.
+Der teure Teil — die Zerlegung des Seiteninhalts in Operationen, je nach Form
+des Stroms 62 bis rund 100 Byte Arbeitsspeicher je Byte Stream (siehe
+„Dekompressionsbomben“) — kommt erst danach.
 
 **Richtigstellung.** Bis einschließlich dieser Fassung stand hier: *„Wer ein
 verschlüsseltes PDF öffnet, gibt ihm ausdrücklich mehr Vertrauen als einem
@@ -212,10 +228,15 @@ anzeigende Software. Wer die Datei öffnen darf, kann sie hier schwärzen.
 | Rohgröße eines LZW-/ASCII85-Streams | 16 MB | fest |
 | Bildpunkte **je Bild** (Dekodieren) | 40 000 000 | fest |
 | gleichzeitig gehaltene **dekodierte** Bildbytes | 256 MB | `--max-image-mb` |
+| **Zeichen, die eine Seite setzen darf** | **1 000 000** | fest |
+| **Zeichenoperationen je Seiten-Scan** (Aufwandskonto) | **1 000 000 + 16× Inhalt** | fest |
 | Größe der Einstellungsdatei | 1 MB | fest |
 
 Alle Grenzen dieser Tabelle gelten für verschlüsselte Dateien genauso — siehe
 „Die Grenzen gelten auch hinter der Entschlüsselung“.
+
+Die letzten beiden Zeilen messen keine Bytes, und das ist ihr Zweck; sie stehen
+weiter unten unter „Wenn Bytes die falsche Größe sind“.
 
 Die Vorprüfung (`redact_pdf::document::prescan`) läuft über die **Rohbytes**,
 bevor `lopdf` die Datei zu sehen bekommt, und schließt die ausgepackten Streams
@@ -239,13 +260,100 @@ entfernt, was die Maschine umwirft. Wer wirklich mehr braucht, sagt es mit
 `--max-input-mb` — das ist dann eine bewusste Entscheidung und keine, die eine
 fremde Datei für den Nutzer trifft.
 
-Die beiden letzten Zeilen sind eine **eigene** Klasse und stehen bewusst
-getrennt: `--max-decompressed-mb` und `--max-parsed-mb` verbuchen die
-*Rohbytes* eines Streams. Ein Bild, das geschwärzt wird, muss aber nach RGBA8
-ausgepackt werden — 4 Byte je Bildpunkt. Bei einem gewöhnlichen
-Schwarzweiß-Scan (`/DeviceGray`, `/BitsPerComponent 1`) liegt zwischen beidem
-der **Faktor 32**; die Rohbyte-Grenzen greifen dort also nicht. Siehe
-„Speicherbedarf der Bildschwärzung“ unter „Messungen“.
+Die beiden Bildzeilen sind eine **eigene** Klasse und stehen bewusst getrennt:
+`--max-decompressed-mb` und `--max-parsed-mb` verbuchen die *Rohbytes* eines
+Streams. Ein Bild, das geschwärzt wird, muss aber nach RGBA8 ausgepackt werden —
+4 Byte je Bildpunkt. Bei einem gewöhnlichen Schwarzweiß-Scan (`/DeviceGray`,
+`/BitsPerComponent 1`) liegt zwischen beidem der **Faktor 32**; die
+Rohbyte-Grenzen greifen dort also nicht. Siehe „Speicherbedarf der
+Bildschwärzung“ unter „Messungen“.
+
+### Wenn Bytes die falsche Größe sind
+
+Jede Grenze oben misst Bytes. Was der Speicher wirklich kostet, sind aber
+*Interpretationen* — und die Zahl der Interpretationen hängt nicht an der
+Dateigröße. Zwei Wege nutzen genau diese Lücke; beide halten jede Byte-Grenze
+dieser Tabelle ein.
+
+**Fächerung durch Form-XObjects.** Ein Form-XObject darf ein anderes zeichnen,
+und zwar mehrfach. Sieben Ebenen, in denen jedes Formular dasselbe Unterobjekt
+achtmal zeichnet, ergeben 8⁷ ≈ **zwei Millionen Durchläufe** — aus einer Datei
+von **2 368 Byte**. Dagegen hilft keine Tiefengrenze (die Verschachtelung ist
+mit 8 Ebenen harmlos) und keine Größengrenze (die Datei ist winzig). Es hilft
+nur, den *Aufwand* zu zählen.
+
+Das **Aufwandskonto** (`Budget` in `crates/redact-pdf/src/content.rs`) tut das:
+
+* Grundausstattung **1 000 000 Zeichenoperationen** je Seiten-Scan. Reichlich
+  bemessen, weil dort echte Gestaltung hineinfällt — ein Tabellenraster, das
+  dieselbe Zelle hundertmal zeichnet, ein Formular mit vielen Bausteinen. Die
+  dichteste gemessene Seite eines 500-seitigen Kontoauszugs braucht rund 200:
+  Faktor 5 000.
+* Dazu **16× die Operationen jedes Stroms**, der zum ersten Mal dekodiert wird.
+  Das Konto wächst also mit dem Inhalt, den die Datei **mitbringt**, nicht mit
+  dem, was sie daraus macht. Ein zweiter Durchlauf durch denselben Strom bringt
+  nichts ein — sonst finanzierte die Fächerung sich selbst.
+
+Damit steht diese Grenze nicht quer zu `--max-parsed-mb`: wer das Parse-Budget
+anhebt, hebt das Aufwandskonto automatisch mit an, weil mehr Inhalt mehr
+Guthaben bedeutet. Eine Fächerung profitiert davon nicht, denn sie bringt ja
+gerade keinen zusätzlichen Inhalt mit.
+
+**Glyphen je Seite.** Anders als das Operationskonto eine **feste Decke**, und
+zwar mit Absicht: dies ist die eigentliche Speichergröße der Textextraktion.
+Jede Glyphe wird als `GlyphItem` gehalten (Originalbytes, Text, Kasten,
+Grundlinie) und beim Zusammensetzen der Zeilen noch einmal kopiert. Die Messung
+dazu steht bei der Konstanten selbst (`MAX_GLYPHS_PER_SCAN` in
+`crates/redact-pdf/src/content.rs`): Release, ein Seiteninhalt knapp unter dem
+Parse-Budget, **14,6 Mio. Glyphen auf einer Seite → 9 306 MB**, also rund
+**640 Byte je Glyphe**. Ein Budget, das mit der erlaubten Dateigröße mitwüchse,
+wüchse hier in den zweistelligen Gigabytebereich.
+
+Eine Million Zeichen auf einer Seite ist keine Seite mehr. Eine dichte
+A4-Textseite trägt 3 000–6 000 Zeichen; die dichteste gemessene Seite eines
+500-seitigen Kontoauszugs ebenfalls 6 000. Faktor 160 Luft.
+
+```console
+$ redact-rs viel_text.pdf -o out.pdf --no-patterns
+Fehler: PDF-Fehler: Eine Seite dieses Dokuments setzt mehr als 1000000 Zeichen.
+Eine dichte Textseite trägt einige tausend; diese Menge entsteht nur, wenn
+derselbe Text vielfach gezeichnet wird. Beim Vermessen der Zeichen würde daraus
+ein zweistelliges Gigabyte Arbeitsspeicher. Die Datei wird abgelehnt.
+$ echo $?
+1
+```
+
+Nachgemessen an einer 46-kB-Datei mit 15 MB Seiteninhalt aus wiederholten
+`Tj`-Operationen: Exit 1 nach 2,8 s bei **1 003 MB** — die Grenze greift
+innerhalb des Parse-Budgets, nicht erst danach.
+
+**Beide brechen ab, sie warnen nicht.** Eine Seite, deren Text nur zum Teil
+durchsucht wurde, darf nicht als Erfolg enden: der ungeprüfte Rest ist genau
+der, in dem das Geheimnis stehen kann. „0 Schwärzungen, Rückgabewert 0“ liest
+sich wie „nichts gefunden, also sauber“.
+
+### Eine Seite, die sich nicht zerlegen lässt, kostet die ganze Datei
+
+Aus demselben Grund wird die Datei abgelehnt, wenn `scan_page` den Seiteninhalt
+nicht vollständig in Operationen zerlegen kann — und zwar in zwei Abstufungen:
+
+* **Ein Teilstück** ließ sich nicht zerlegen. Das fiel früher lautlos unter den
+  Tisch: nicht der ganze Strom, nur ein Abschnitt daraus, und mit ihm jeder
+  Text darin. Beim Neuschreiben der Seite wäre er zusätzlich ersatzlos verloren
+  gegangen. Die Meldung nennt heute Byte-Zahl und Anzahl der Teilstücke.
+* **Der ganze Strom** ließ sich nicht zerlegen, obwohl er Token enthält. Das
+  war früher eine Warnung. Der Unterschied ist der Rückgabewert: eine Warnung
+  auf stderr macht aus einem Lauf, der den Text dieser Seite nachweislich nie
+  gesehen hat, trotzdem eine Datei, die im Stapelbetrieb als „verarbeitet“
+  zählt. Der Befund dazu steht bei der Prüfung selbst (`scan_page` in
+  `crates/redact-pdf/src/content.rs`): eine **1 122 Byte** große Datei, Ausgabe
+  „Schwärzungen: 0“, Rückgabewert 0 — und die Kontonummer unverändert in der
+  Ausgabedatei.
+
+Das ist zugleich die Antwort auf die dritte Zeile unter „Verschlüsselte
+Bomben“, den stillen Fall: eine Datei, deren Content-Stream so tief
+verschachtelt ist, dass `lopdf` ihn nicht in Operationen zerlegt, endet jetzt
+mit einer Ablehnung statt mit einer Ausgabedatei voller ungeschwärzter IBAN.
 
 ---
 
@@ -372,9 +480,19 @@ abgelehnt: als gewöhnliches Objekt, versteckt in einem Flate-komprimierten
 Objekt-Stream (971 Byte Datei) und im Flate-komprimierten Seiteninhalt
 (862 Byte Datei).
 
-Die Schwelle in `lopdf 0.34` liegt bei etwa 500–2 000 Ebenen (Debug-Build) bzw.
-5 000–10 000 (Release). Die Grenze 128 liegt weit darunter und weit über allem,
-was in echten Dokumenten vorkommt.
+Die Grenze liegt bei **100** (`Limits::default().max_nesting_depth` in
+`crates/redact-pdf/src/document.rs`) — dieselbe Zahl wie in der Tabelle unter
+„Grenzen für Eingabedateien“, und weit über allem, was in echten Dokumenten
+vorkommt.
+
+Sie ist nicht geraten, sondern **am Verhalten der Bibliothek nachgemessen**:
+`the_depth_limit_is_exactly_what_lopdf_still_parses`
+(`crates/redact-pdf/tests/nesting_bomb.rs`) baut eine Datei mit genau 100 Ebenen
+und eine mit 101. Bei 100 liest `lopdf` alle Objekte ein und die Vorprüfung
+lässt die Datei durch; bei 101 verliert `lopdf` das Objekt stillschweigend —
+und genau deshalb lehnt die Vorprüfung ab. Zieht ein `lopdf`-Update die
+Schwelle um, fällt dieser Test in beide Richtungen auf: er schlägt an, wenn 100
+zu hoch geworden ist, und ebenso, wenn es zu niedrig geworden ist.
 
 ### Dekompressionsbomben
 
@@ -399,7 +517,27 @@ Auspacken, sondern das Parsen: aus jedem Operator wird eine eigene
 `lopdf::content::Operation` mit eigenem Vektor. Deshalb gibt es zwei Budgets —
 ein großes für alle Streams (Bilder, Schriften, eingebettete Dateien werden nur
 gespeichert) und ein sehr viel engeres für die Streams, die tatsächlich geparst
-werden. 16 MB × 62 ≈ 1 GB ist die Obergrenze, die daraus folgt.
+werden.
+
+**Der Faktor hängt von der Form des Stroms ab, nicht nur von seiner Größe.**
+Nachgemessen an derselben Maschine (Release, `ru_maxrss` des Kindprozesses,
+`--no-patterns`), jeweils ein Seiteninhalt aus einem wiederholten Baustein:
+
+| Baustein | 15 MB Strom → Spitzenspeicher | Byte je Byte |
+|---|---|---|
+| `0 0 0 rg` (1 Operand) | 1 014 MB | 68 |
+| `10 20 30 40 re f` (4 Operanden) | 1 064 MB | 71 |
+| `q 1 0 0 1 100 700 cm Q` (6 Operanden) | 1 479 MB | 99 |
+| `[1 1 1 1 1 1 1 1 1 1] 0 d` (Array mit 10 Elementen) | 1 506 MB | **100** |
+
+Je mehr *Operanden* auf einen Operator kommen, desto teurer wird das Byte: die
+62 aus der Tabelle darüber sind der günstige Fall, nicht der ungünstige.
+Maßgeblich ist deshalb die letzte Zeile: **rund 100 Byte je Byte Content-Stream
+im ungünstigsten hier gemessenen Fall.** Bei der Vorgabe `--max-parsed-mb 16`
+folgt daraus eine Obergrenze von etwa **1,6 GB**, nicht 1 GB.
+
+Wer das gegen eine Maschine mit wenig Arbeitsspeicher absichern will, setzt
+`--max-parsed-mb` herunter; der Wert wirkt linear.
 
 ### Verschlüsselte Bomben
 
@@ -423,6 +561,13 @@ Content-Stream nicht in Operationen zerlegt, die Analyse sieht also keinen
 Text — und „0 Schwärzungen“ liest sich wie „nichts zu schwärzen“. Ein Absturz
 fällt auf; das hier nicht.
 
+Dieser Fall ist inzwischen **doppelt** zu. Zum einen greifen die Budgets auch
+hinter der Entschlüsselung (die Zeile „nachher“). Zum anderen ist ein
+Seiteninhalt, der sich nicht in Operationen zerlegen lässt, seither ein Grund,
+die **Datei abzulehnen** — siehe „Eine Seite, die sich nicht zerlegen lässt,
+kostet die ganze Datei“. Selbst wenn eine Datei künftig an beiden Budgets
+vorbeikäme, endete sie nicht mehr mit einer Ausgabe voller ungeschwärzter IBAN.
+
 Die letzte Zeile ist die eigentliche Gegenprobe: eine Datei **knapp unterhalb**
 des Budgets kostet verschlüsselt auf 0,3 MB genau so viel wie unverschlüsselt.
 Beide Wege messen jetzt dasselbe und lassen dasselbe durch — vorher hing an
@@ -431,8 +576,15 @@ einem Passwort, ob überhaupt gemessen wurde.
 Der Verstärkungsfaktor ist ebenfalls derselbe wie ohne Verschlüsselung:
 gemessen an einer verschlüsselten 13-kB-Datei mit 4 MB Content-Stream aus
 wiederholtem IBAN-Text **1 189 MB** — dort trägt die Trefferverwaltung den
-größeren Teil, weshalb dieser Wert deutlich über den 62 Byte je Byte des
+größeren Teil, weshalb dieser Wert deutlich über den 62–100 Byte je Byte des
 reinen Parsens liegt. Bei 64 MB wären das gut 19 GB; die Maschine hat 16.
+
+Diese Zeile ist inzwischen historisch: dieselbe Datei kommt heute gar nicht
+mehr so weit. 4 MB Seiteninhalt aus wiederholtem IBAN-Text setzen rund
+1,9 Mio. Zeichen auf **einer** Seite, und die Glyphengrenze (siehe „Grenzen für
+Eingabedateien“) bricht den Scan bei einer Million ab — nachgemessen Exit 1 bei
+**521 MB** statt 1 189 MB. Die Trefferverwaltung kann also nicht mehr in die
+Größenordnung kommen, in der sie hier gemessen wurde.
 
 Die Fälle stehen als Prüfmaterial im Baum
 (`crates/redact-pipeline/src/testdata/bombe_verschluesselt.pdf` und
@@ -605,9 +757,10 @@ in einer Sandbox tun (Container, `bwrap`, eigenes Benutzerkonto) — und wer nur
 die Kommandozeile braucht, baut ohne die Oberfläche:
 `cargo build --release -p redact-cli --no-default-features`.
 
-Anmerkung zur Einordnung: `lopdf 0.34` selbst enthält **kein** `unsafe` — und
-stürzt trotzdem ab. „Sicheres Rust“ schützt vor Speicherfehlern, nicht vor
-unbegrenzter Rekursion und nicht vor unbegrenztem Speicherverbrauch.
+Anmerkung zur Einordnung: `lopdf` selbst enthält **kein** `unsafe` — und stürzte
+in 0.34 trotzdem ab (RUSTSEC-2026-0187). „Sicheres Rust“ schützt vor
+Speicherfehlern, nicht vor unbegrenzter Rekursion und nicht vor unbegrenztem
+Speicherverbrauch.
 
 ### Dienstverweigerung
 
@@ -615,8 +768,9 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
 
 * **Andere Wege in die Rekursion.** Die Vorprüfung zählt `[` und `<<`. Findet
   jemand einen anderen Pfad in `lopdf`, der tief rekursiert, greift sie nicht.
-  Die eigentliche Schwachstelle RUSTSEC-2026-0187 besteht weiter; sie ist nur
-  nicht mehr erreichbar — siehe „Warum lopdf noch auf 0.34 steht".
+  RUSTSEC-2026-0187 selbst ist mit `lopdf 0.42` behoben (siehe unten); die
+  Vorprüfung deckt seither nicht mehr eine offene Schwachstelle zu, sondern
+  begrenzt den Aufwand.
 * **`LZWDecode`.** Solche Streams packt `lopdf` aus, nicht die Vorprüfung. Sie
   werden deshalb bis zu einer Rohgröße von 16 MB an `lopdf` durchgereicht;
   wieviel Speicher der Dekoder dabei belegt, ist nicht vorab begrenzt. Über
@@ -625,10 +779,28 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
 * **Rechenzeit unterhalb der Grenzen.** 100 000 Trefferkandidaten kosten
   rund 17 s. Das ist gewollt großzügig; wer engere Zusagen braucht, setzt
   `--max-candidates` herunter.
-* **Sehr große Bilder.** Streams mit `/Subtype /Image` werden nicht auf
-  Klammertiefe untersucht — hier ist das belegbar unbedenklich, weil `lopdf`
-  sie gar nicht auspackt. Ihre entpackte Größe zählt aber gegen das große
-  Budget.
+* **Sehr große Bilder.** Ihre entpackte Größe zählt gegen das große Budget.
+
+  **Richtigstellung — das war eine Lücke, keine Feinheit.** Hier stand bis
+  einschließlich dieser Fassung: *„Streams mit `/Subtype /Image` werden nicht
+  auf Klammertiefe untersucht — hier ist das belegbar unbedenklich, weil
+  `lopdf` sie gar nicht auspackt."* Der Satz war falsch, und er hat eine
+  Umgehung gedeckt: `/Subtype /Image` an ein Stream-Dictionary zu schreiben
+  kostet nichts, das Dictionary gehört dem Angreifer. Die Begründung galt für
+  `lopdf 0.34`; **seit 0.36 prüft `Stream::decompressed_content` das `/Subtype`
+  nicht mehr**, und `Document::get_page_content` packt einen Seiteninhalt mit
+  `/Subtype /Image` ganz normal aus. Ein so beschrifteter Stream war damit ein
+  Weg an der Tiefenprüfung und am engen Parse-Budget vorbei.
+
+  Heute entscheidet über Budget und Tiefenprüfung ausschließlich der
+  **ausgepackte Inhalt** (`looks_binary` in
+  `crates/redact-pdf/src/document.rs`) — das einzige Kriterium, das nicht dem
+  Angreifer gehört: wer PDF-Syntax unterbringen will, muss druckbare Zeichen
+  schreiben. Zwei Tests halten das fest, jeweils gegen dieselbe Nutzlast unter
+  sechs verschiedenen Dictionaries (`""`, `/Harmlos /Image`, `/Subtype /Image`,
+  `/Length1 4711`, `/Type /Metadata`, `/Type /XRef`):
+  `the_dictionary_does_not_decide_which_budget_applies` und
+  `the_dictionary_does_not_switch_off_the_depth_check`.
 
   Nachtrag zur Bildschwärzung: Seit Schwärzungen die **Pixel** eines Bildes
   überschreiben, wird ein betroffenes Bild sehr wohl dekodiert — nach RGBA8,
@@ -676,24 +848,65 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
   *Anhäufen* vieler Bilder, keine Zusage über den Gesamtverbrauch des
   Prozesses.
 
-### Die Zusicherungen oben gelten für die Kommandozeile, nicht für die Oberfläche
+### Die Zusicherungen oben gelten auch für die Oberfläche
 
-Nachtrag zur Dokumentationsprüfung (Stand: dieser Commit). Zwei der Punkte unter
-„Was zugesichert wird“ beschreiben den Weg durch `redact-cli`. Die grafische
-Oberfläche ist ein eigenständiger Ablauf — `redact-gui` hat keine Abhängigkeit
-auf `redact-cli` — und weicht davon ab:
+**Richtigstellung.** Bis einschließlich dieser Fassung stand hier, zwei der
+Punkte unter „Was zugesichert wird“ beschrieben nur den Weg durch `redact-cli`,
+und die Oberfläche weiche davon ab: sie schreibe Audit-Log und Review-Datei mit
+`std::fs::write` (genannt waren `crates/redact-gui/src/state.rs:1023` und
+`crates/redact-gui/src/app.rs:781`), und die `--max-…`-Grenzen wirkten dort
+nicht. **Beides trifft nicht mehr zu.** Die genannten Stellen tragen heute
+anderen Code; die Zusicherung ist stärker, als sie hier beschrieben war. Eine
+Doku, die zu wenig verspricht, ist harmloser als eine, die zu viel verspricht —
+aber sie schickt den Nutzer in den umständlicheren Weg, ohne dass es dafür einen
+Grund gäbe.
 
-* **Der eine Schreibpfad ist nicht der einzige.** Das geschwärzte PDF geht auch
-  in der Oberfläche durch `write_file`. Audit-Log und Review-Datei nicht: sie
-  entstehen über `std::fs::write` (`crates/redact-gui/src/state.rs:1023` bzw.
-  `crates/redact-gui/src/app.rs:781`). Damit fehlen für diese beiden Dateien
-  der Modus `0600`, die Symlink-Prüfung, die Kanonisierung des Zielpfads und
-  die `create_new`+`rename`-Sequenz. Sie entstehen mit den Vorgaberechten des
-  Kontos — und in beiden steht Klartext (siehe unten).
-* **Die Grenzen für Eingabedateien sind dort nicht einstellbar.** `--max-…`
-  sind Argumente der Kommandozeile. Die Oberfläche lädt über
-  `redact_pdf::load_from_bytes`, also mit `Limits::default()`: die Vorprüfung
-  läuft, aber mit den fest eingebauten Werten aus der Tabelle oben.
+Was heute gilt:
+
+* **Der eine Schreibpfad ist der einzige — für alle drei Dateien.**
+  Geschwärztes PDF, Review-Datei und Audit-Log gehen in beiden Programmen durch
+  `redact_pdf::document::write_file`:
+  * Review-Datei über `AppState::save_review_file` →
+    `redact_pipeline::write_review_file` → `write_file` mit `secret_options`,
+  * Audit-Log über `AppState::export` → `redact_pipeline::apply` →
+    `AuditLog::write` → `write_file` mit `secret_options`.
+
+  Damit gelten für beide der Modus `0600`, die Symlink-Prüfung, die
+  Kanonisierung des Zielpfads, der Eingabeschutz und die
+  `create_new`+`rename`-Sequenz. **Gemessen an der geschriebenen Datei**, nicht
+  am Aufrufgraphen:
+
+  | Test | misst |
+  |---|---|
+  | `export_removes_the_text_from_the_pdf` (`crates/redact-gui/src/state.rs`) | `assert_eq!(mode, 0o600)` auf das von der Oberfläche geschriebene Audit-Log |
+  | `both_ways_write_the_same_review_file` (`crates/redact-cli/tests/cli_and_gui_agree.rs`) | `0600` auf **beide** Review-Dateien, die aus dem Binary und die aus der Oberfläche |
+
+* **Die Grenzen für Eingabedateien gelten dort ebenfalls — und sind über
+  `redact-rs --gui` auch einstellbar.** Die Oberfläche lädt nicht mehr über
+  `redact_pdf::load_from_bytes` (also nicht mit `Limits::default()`), sondern
+  über `redact_pipeline::load_document(bytes, &self.config)`
+  (`crates/redact-gui/src/state.rs`) — dieselbe Ladefunktion, die
+  `redact_pipeline::run` benutzt, mit derselben `Config`. Im Einzelnen:
+
+  | Grenze | Weg in der Oberfläche |
+  |---|---|
+  | `--max-input-mb` | `AppState::load_document` liest über `redact_pipeline::read_input(path, self.config.max_input_bytes)` statt über `std::fs::read` |
+  | `--max-decompressed-mb`, `--max-parsed-mb`, Tiefengrenze | `load_document` → `load_from_bytes_with_limits(bytes, &config.limits)`, und nach einer Entschlüsselung `check_limits_after_decryption` |
+  | `--max-image-mb` | über `config.max_decoded_image_bytes` im Export |
+  | `--max-candidates` | `AppState::analyze` → `redact_pipeline::collect_regions_for` → `check_candidate_budget` |
+  | Aufwandskonto und Glyphengrenze je Seite | im Interpreter, also unterhalb beider Programme |
+
+  `redact-rs --gui auszug.pdf --max-parsed-mb 4` wirkt damit wirklich: die
+  Kommandozeile baut die `Config` und gibt sie unverändert an
+  `redact_gui::run` weiter (`crates/redact-cli/src/main.rs`).
+
+  **Was bleibt:** die Fensterfassung zum Doppelklicken (`redact-rs-gui.exe`,
+  und ebenso das Entwickler-Binary `redact-gui`) hat gar keine Kommandozeile.
+  Sie baut ein `Config::default()` und arbeitet deshalb immer mit den Vorgaben
+  aus der Tabelle unter „Grenzen für Eingabedateien“ — die Grenzen sind dort
+  nicht abgeschaltet, nur nicht verstellbar. Aus demselben Grund liest sie auch
+  die Einstellungsdatei nicht: `Settings::load()` wird ausschließlich in
+  `crates/redact-cli/src/main.rs` gerufen.
 
 ### Was in den beiden „privaten“ Dateien wirklich steht
 
@@ -761,28 +974,31 @@ tatsächlich in die Zieldatei des Links.
 
 Wenn `libc` einmal ohnehin im Graphen liegt, gehört hier `O_NOFOLLOW` hin.
 
-### Warum `lopdf` noch auf 0.34 steht
+### `lopdf` steht auf 0.42 — RUSTSEC-2026-0187 ist behoben
 
-Der Sprung auf 0.42 (dort ist RUSTSEC-2026-0187 behoben) ist technisch klein,
-lag aber außerhalb dessen, was dieser Arbeitsschritt anfassen durfte. Zu
-ändern wären:
+Hier stand bis einschließlich dieser Fassung ein Abschnitt „Warum `lopdf` noch
+auf 0.34 steht“ samt einer Liste dessen, was für den Sprung zu ändern wäre.
+**Der Sprung ist gemacht.** `Cargo.toml` und `Cargo.lock` führen `lopdf 0.42.0`;
+darin ist RUSTSEC-2026-0187 behoben. Die Ausnahme in `deny.toml` ist damit
+gegenstandslos und entfernt — `[advisories] ignore = []`.
 
-* `crates/redact-pdf/src/audit_bytes.rs` — `Dictionary::type_is` entfällt
-  (`get_type()` liefert jetzt `&[u8]` statt `&str`), und `Stream::filters()`
-  liefert `Vec<&[u8]>` statt `Vec<String>`, was `manual_decode` durchschlägt.
-* `crates/redact-pdf/src/document.rs` — `Object::type_name()` liefert `&[u8]`.
+Was der Umstieg gekostet hat, steht heute im Code:
 
-Auf 0.44 kommen `content.rs`, `ops.rs` und `redact.rs` hinzu
-(`Document::get_page_content()` liefert `Vec<u8>` statt `Result<Vec<u8>>`).
+* `crates/redact-pdf/src/audit_bytes.rs` — Filternamen kommen als Rohbytes
+  (`Vec<&[u8]>`) statt als `Vec<String>`; `Dictionary::type_is` ist entfallen.
+* `crates/redact-pdf/src/document.rs` — `/Prev` bleibt im geladenen Trailer
+  nicht mehr stehen, was `has_incremental_history` betrifft.
 
-Zwei Verhaltensänderungen sind vor dem Umstieg zu prüfen: `lopdf 0.42` behält
-kein `/Prev` mehr im Trailer (das nutzt `has_incremental_history`, um auf
-Vorversionen hinzuweisen), und es liest eingebettete Bilder anders, wodurch zwei
-Kanarienvogel-Tests in `crates/redact-pdf/tests/known_leaks.rs` anschlagen —
-dort vermutlich zum Guten.
+**Die Vorprüfung bleibt trotzdem.** Sie ist nicht mehr die Notbremse gegen eine
+offene Schwachstelle, sondern das, was sie ohnehin sein sollte: eine Grenze für
+das, was diese Anwendung an Aufwand zu treiben bereit ist. `lopdf` schützt sich
+gegen unbegrenzte Rekursion; gegen eine Dekompressionsbombe, gegen ein
+Aufwandskonto sprengende Form-XObject-Fächerung und gegen eine Million Glyphen
+auf einer Seite schützt es nicht, und das ist auch nicht seine Aufgabe.
 
-Bis dahin ist die Vorprüfung die Absicherung, und der Eintrag in `deny.toml`
-bleibt stehen. Er ist befristet, nicht dauerhaft.
+Eine Anmerkung, die den Sprung überdauert: `lopdf` enthält **kein** `unsafe`
+und stürzte trotzdem ab. „Sicheres Rust“ schützt vor Speicherfehlern, nicht vor
+unbegrenzter Rekursion und nicht vor unbegrenztem Speicherverbrauch.
 
 ---
 

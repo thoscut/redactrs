@@ -422,7 +422,7 @@ impl PdfRedactor {
         let data = doc
             .get_page_content(page_id)
             .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
-        let decoded = crate::ops::decode_content(&data);
+        let decoded = decode_or_fail(&data, "Der Content-Stream dieser Seite")?;
 
         let mut operations = rewrite_operations(&decoded, plans, inline_images, mirrors);
 
@@ -478,6 +478,28 @@ impl PdfRedactor {
 // ---------------------------------------------------------------------------
 // Content-Streams mit Inline-Bildern
 // ---------------------------------------------------------------------------
+
+/// Zerlegt einen Strom, der gleich **neu geschrieben** wird.
+///
+/// Was hier nicht in Operationen zerfällt, steht nachher nicht mehr in der
+/// Datei: [`encode_operations`] schreibt nur zurück, was übrig blieb. Früher
+/// fiel ein solcher Abschnitt kommentarlos unter den Tisch — der Nutzer bekam
+/// eine Datei, die er für vollständig hielt, und der Inhalt war weg. Lieber
+/// ein Fehler als eine stillschweigend beschnittene Seite.
+fn decode_or_fail(data: &[u8], what: &str) -> Result<Vec<Operation>> {
+    let decoded = crate::ops::decode_content_checked(data);
+    if !decoded.truncated.is_empty() {
+        return Err(RedactError::Pdf(format!(
+            "{what} ließ sich nicht vollständig in Operationen zerlegen: in {} \
+             Teilstück(en) von zusammen {} Byte bricht die Zerlegung ab, alles dahinter \
+             fehlt. Beim Neuschreiben ginge dieser Teil ersatzlos verloren; die Datei \
+             wird deshalb nicht ausgegeben.",
+            decoded.truncated.len(),
+            decoded.affected_bytes()
+        )));
+    }
+    Ok(decoded.operations)
+}
 
 /// Nimmt eine Warnung in den Bericht auf — jede höchstens einmal.
 fn push_warning(report: &mut RedactionReport, message: String) {
@@ -1119,7 +1141,7 @@ fn rewrite_form(
             .or_else(|_| stream.get_plain_content())
             .map_err(|e| RedactError::Pdf(e.to_string()))?
     };
-    let decoded = crate::ops::decode_content(&data);
+    let decoded = decode_or_fail(&data, "Der Inhalt eines Form-XObjects")?;
     let operations = rewrite_operations(&decoded, plans, inline_images, mirrors);
     let encoded = encode_operations(&operations)?;
 

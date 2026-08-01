@@ -151,9 +151,19 @@ fn a_broken_file_is_reported_and_the_rest_of_the_batch_runs() {
     assert!(message.contains("b_kaputt.pdf"), "{message}");
 
     // … in der Zusammenfassung gezählt …
+    //
+    // Seit #79 steht dort nicht mehr „2 verarbeitet“, sondern „2 vollständig
+    // geprüft“: eine Datei, deren Text nur zum Teil gelesen werden konnte, ist
+    // zwar verarbeitet, aber nicht geprüft — und wurde vorher genau hier
+    // mitgezählt. Diese beiden hier sind unauffällig, also stehen sie in der
+    // ersten Zahl und die mittlere ist 0.
     let summary = stdout(&out);
     assert!(summary.contains("3 Datei(en)"), "{summary}");
-    assert!(summary.contains("2 verarbeitet"), "{summary}");
+    assert!(summary.contains("2 vollständig geprüft"), "{summary}");
+    assert!(
+        summary.contains("0 verarbeitet (aber nicht vollständig geprüft)"),
+        "{summary}"
+    );
     assert!(summary.contains("1 fehlgeschlagen"), "{summary}");
 
     // … und der Rückgabewert sagt, dass nicht alles gut ging.

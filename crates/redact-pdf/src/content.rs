@@ -108,6 +108,14 @@ struct Budget {
     /// zweites Mal zählt er nicht — sonst finanzierte die Fächerung sich
     /// selbst.
     credited: HashSet<ObjectId>,
+    /// Type3-Schriften, deren Glyphprozeduren schon untersucht wurden — je
+    /// Strom und Ressourcenname.
+    ///
+    /// Ohne diese Sperre kostete **jedes** `Tj` einen vollen Durchlauf durch
+    /// alle `/CharProcs` der Schrift. Genau daraus bestünde die nächste
+    /// Vervielfachung: eine Schrift mit tausend Glyphprozeduren, tausendmal
+    /// gesetzt. Was danach doch untersucht wird, zahlt regulär vom Konto.
+    looked_at_type3: HashSet<(StreamKey, Vec<u8>)>,
     /// Begründung, sobald etwas aufgebraucht ist.
     exceeded: Option<String>,
 }
@@ -118,6 +126,7 @@ impl Default for Budget {
             operations: BASE_OPERATIONS,
             glyphs: MAX_GLYPHS_PER_SCAN,
             credited: HashSet::new(),
+            looked_at_type3: HashSet::new(),
             exceeded: None,
         }
     }
@@ -137,6 +146,14 @@ impl Budget {
         self.operations = self
             .operations
             .saturating_add(operations.saturating_mul(MAX_AMPLIFICATION));
+    }
+
+    /// `true` beim **ersten** Blick auf diese Type3-Schrift in diesem Strom.
+    ///
+    /// Siehe [`Budget::looked_at_type3`]: die Untersuchung selbst kostet, sie
+    /// darf nur nicht bei jedem einzelnen `Tj` neu anfallen.
+    fn first_look_at_type3(&mut self, stream: StreamKey, font: &[u8]) -> bool {
+        self.looked_at_type3.insert((stream, font.to_vec()))
     }
 
     /// Verbucht eine Operation. `false` heißt: sofort aussteigen.
@@ -792,7 +809,24 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
     // der Rest des Streams geht verloren — Text hinter einem Inline-Bild wäre
     // für die Analyse unsichtbar und könnte nie geschwärzt werden.
     // [`crate::ops::decode_content`] schneidet die Bilder vorher heraus.
-    let operations = crate::ops::decode_content(&content_data);
+    let decoded = crate::ops::decode_content_checked(&content_data);
+
+    // Ein Abschnitt, der nur bis zur Hälfte zerlegt wurde, fiel früher lautlos
+    // unter den Tisch — nicht der ganze Strom, deshalb greift die Prüfung
+    // darunter nicht, und mit ihm verschwand jeder Text, der dahinter stand.
+    // Derselbe Fehler, nur kleiner und deshalb noch schwerer zu bemerken.
+    if !decoded.truncated.is_empty() {
+        return Err(RedactError::Pdf(format!(
+            "Ein Teil des Seiteninhalts ließ sich nicht in Operationen zerlegen: in {} \
+             Teilstück(en) von zusammen {} Byte bricht die Zerlegung ab, alles dahinter \
+             fehlt. Dieser Text wurde nicht durchsucht und kann deshalb nicht geschwärzt \
+             worden sein; beim Neuschreiben der Seite ginge er zudem ersatzlos verloren. \
+             Die Datei wird abgelehnt, statt eine halbe Seite als geschwärzt auszugeben.",
+            decoded.truncated.len(),
+            decoded.affected_bytes(),
+        )));
+    }
+    let operations = decoded.operations;
 
     // Früher eine Warnung, jetzt ein Abbruch. Der Unterschied ist der
     // Rückgabewert: eine Warnung auf stderr macht aus einem Lauf, der den Text
@@ -1113,7 +1147,19 @@ fn scan_appearance(
         ));
         return;
     };
-    let operations = crate::ops::decode_content(&data);
+    let decoded = crate::ops::decode_content_checked(&data);
+    if !decoded.truncated.is_empty() {
+        sink.warn(format!(
+            "Ein Teil des Erscheinungsstroms einer Annotation (Objekt {} {}) ließ sich nicht \
+             in Operationen zerlegen; ab der Bruchstelle fehlt alles Weitere ({} Byte \
+             betroffen). Dieser Text wurde nicht durchsucht und kann deshalb nicht \
+             geschwärzt worden sein.",
+            id.0,
+            id.1,
+            decoded.affected_bytes()
+        ));
+    }
+    let operations = decoded.operations;
     if operations.is_empty() {
         return;
     }
@@ -1519,6 +1565,17 @@ fn scan_operations(
                     graphics,
                 );
                 if let Some(record) = record {
+                    // Eine Type3-Glyphe *ist* ein Content-Stream. Ob darin
+                    // Text steht, entscheidet sich erst, wenn sie wirklich
+                    // gesetzt wird — deshalb hier und nicht schon beim `Tf`.
+                    warn_about_text_in_charprocs(
+                        doc,
+                        resources,
+                        stream,
+                        &state.text.font_name,
+                        budget,
+                        sink,
+                    );
                     sink.show(record);
                 }
             }
@@ -1966,7 +2023,17 @@ fn load_xobject(
                      nicht geschwärzt worden sein."
                 ));
             };
-            let operations = crate::ops::decode_content(&data);
+            let decoded = crate::ops::decode_content_checked(&data);
+            if !decoded.truncated.is_empty() {
+                return XObjectEntry::Unusable(format!(
+                    "Ein Teil des Form-XObjects „{label}“ ließ sich nicht in Operationen \
+                     zerlegen; ab der Bruchstelle fehlt alles Weitere ({} Byte betroffen). \
+                     Dieser Text wurde nicht durchsucht und kann deshalb nicht geschwärzt \
+                     worden sein.",
+                    decoded.affected_bytes()
+                ));
+            }
+            let operations = decoded.operations;
             // Der Inhalt dieses Stroms bringt einmal Guthaben ein; jede
             // weitere Platzierung zehrt nur noch davon.
             budget.credit(Some(id), operations.len());
@@ -2038,7 +2105,16 @@ fn scan_tiling_pattern(
         ));
         return;
     };
-    let operations = crate::ops::decode_content(&data);
+    let decoded = crate::ops::decode_content_checked(&data);
+    if !decoded.truncated.is_empty() {
+        sink.warn(format!(
+            "Ein Teil des Kachelmusters „{label}“ ließ sich nicht in Operationen zerlegen; \
+             ab der Bruchstelle fehlt alles Weitere ({} Byte betroffen). Dieser Text wurde \
+             nicht durchsucht und kann deshalb nicht geschwärzt worden sein.",
+            decoded.affected_bytes()
+        ));
+    }
+    let operations = decoded.operations;
     // Ein Muster ohne Textoperator ist ein Schraffur- oder Logomuster: kein
     // Befund, keine Meldung.
     if !operations
@@ -2107,6 +2183,134 @@ fn scan_tiling_pattern(
         budget,
         sink,
     );
+}
+
+/// Meldet Type3-Glyphprozeduren, die selbst Text setzen.
+///
+/// Ein Type3-Font hat kein Fontprogramm: jede Glyphe ist ein Content-Stream
+/// unter `/CharProcs`. Üblicherweise malt der nur — dann ist alles in Ordnung
+/// und hier passiert nichts. Er darf aber auch `BT … Tj` enthalten, also mit
+/// einem *anderen* Font Klartext setzen. Dann geht die Schwärzung ins Leere,
+/// ohne es zu merken: der Zeichencode verschwindet sauber aus dem Seitenstrom,
+/// die Glyphe ist danach unsichtbar — und der Klartext steht weiter im
+/// Prozedurstrom, wo `leaks` ihn findet.
+///
+/// ## Warum nur eine Warnung, statt `/CharProcs` mitzudurchsuchen
+///
+/// Durchsuchen hieße hier: rekursiv interpretieren **und** anschließend
+/// umschreiben. Beides ist an dieser Stelle schlechter als eine ehrliche
+/// Meldung:
+///
+/// * Eine Glyphprozedur gehört keiner Stelle auf der Seite, sondern **allen**
+///   Vorkommen ihres Zeichencodes — im ganzen Dokument. Was man dort entfernt,
+///   entfernt man überall; was man dort stehen lässt, bleibt überall stehen.
+///   Dieselbe Unschärfe wie beim Kachelmuster, nur ohne dessen Nutzen: sichtbar
+///   ist der Text ohnehin schon weg, weil der Zeichencode aus dem Seitenstrom
+///   verschwindet.
+/// * Eine neue Rekursion muss gegen das Aufwandskonto [`Budget`] gerechnet
+///   werden. Eine Schrift mit vielen Glyphprozeduren, vielfach gesetzt, wäre
+///   sonst genau der nächste Weg an der Grenze vorbei — und dieser Weg wäre
+///   billiger als jeder bisherige, weil er nicht einmal ein Form-XObject
+///   braucht. Der Blick hierher zahlt deshalb je untersuchter Operation und
+///   findet je Strom und Schrift genau einmal statt.
+///
+/// Was bleibt, ist die Meldung: der Befund heißt dann nicht mehr „angewendet“,
+/// und der Nutzer weiß, wo er nachsehen muss.
+fn warn_about_text_in_charprocs(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    stream: StreamKey,
+    font_name: &[u8],
+    budget: &mut Budget,
+    sink: &mut dyn ContentSink,
+) {
+    if font_name.is_empty() || !budget.first_look_at_type3(stream, font_name) {
+        return;
+    }
+    let font = resources
+        .and_then(|r| r.get(b"Font").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(font_name).ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok().cloned());
+    let Some(font) = font else {
+        return;
+    };
+    if font.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Type3".as_slice()) {
+        return;
+    }
+    let procs = font
+        .get(b"CharProcs")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok().cloned());
+    let Some(procs) = procs else {
+        return;
+    };
+
+    let label = String::from_utf8_lossy(font_name).into_owned();
+    let mut with_text: Vec<String> = Vec::new();
+    let mut unreadable = 0usize;
+    for (name, value) in procs.iter() {
+        let Ok((id, resolved)) = doc.dereference(value) else {
+            unreadable += 1;
+            continue;
+        };
+        let Ok(proc_stream) = resolved.as_stream() else {
+            unreadable += 1;
+            continue;
+        };
+        let Ok(data) = proc_stream
+            .decompressed_content()
+            .or_else(|_| proc_stream.get_plain_content())
+        else {
+            unreadable += 1;
+            continue;
+        };
+        let decoded = crate::ops::decode_content_checked(&data);
+        if !decoded.truncated.is_empty() {
+            unreadable += 1;
+        }
+        // Der Inhalt bringt einmal Guthaben ein — wie jeder andere Strom auch.
+        budget.credit(id, decoded.operations.len());
+        let mut sets_text = false;
+        for op in &decoded.operations {
+            // Jede geprüfte Operation kostet. Ist das Konto leer, endet der
+            // Scan ohnehin; dann wird hier nichts mehr behauptet.
+            if !budget.operation() {
+                return;
+            }
+            if matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\"") {
+                sets_text = true;
+            }
+        }
+        if sets_text {
+            with_text.push(String::from_utf8_lossy(name).into_owned());
+        }
+    }
+
+    if unreadable > 0 {
+        sink.warn(format!(
+            "Von der Type3-Schrift „{label}“ ließen sich {unreadable} Glyphprozedur(en) \
+             (/CharProcs) nicht vollständig lesen. Steht dort Text, wurde er nicht \
+             durchsucht und kann deshalb nicht geschwärzt worden sein."
+        ));
+    }
+    if with_text.is_empty() {
+        return;
+    }
+    with_text.sort();
+    sink.warn(format!(
+        "Die Type3-Schrift „{label}“ setzt in {} ihrer Glyphprozeduren selbst Text \
+         (/CharProcs: {}). Diese Prozeduren sind eigene Ströme und wurden nicht \
+         durchsucht: eine Schwärzung entfernt zwar den Zeichencode aus dem Seiteninhalt \
+         — die Glyphe ist danach nicht mehr zu sehen —, der Klartext bleibt aber im \
+         Prozedurstrom stehen und ist in der Datei weiter zu finden. Bitte das Ergebnis \
+         dort prüfen.",
+        with_text.len(),
+        with_text.join(", ")
+    ));
 }
 
 /// Berechnet die Glyphen einer Text-Ausgabe-Operation und schreibt `tm` fort.

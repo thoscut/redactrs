@@ -311,6 +311,12 @@ fn residual_data_removals_reach_the_audit_log() {
 /// „0 Schwärzungen“ und hält die Datei für sauber. Die Warnung entsteht in
 /// `redact-pdf`; hier wird geprüft, dass sie bis zum Nutzer **und** ins
 /// Audit-Log durchkommt.
+///
+/// Seit #79 auch **bis in den Rückgabewert**: die Warnung allein ging in
+/// stderr unter, und im Stapelbetrieb zählte die Datei als „verarbeitet“.
+/// Dieser Test stand vorher auf `succeeds`, also auf Rückgabewert 0 — genau
+/// die Zusicherung, die der Befund als falsch erwiesen hat. Siehe
+/// `tests/incomplete.rs` und `redact_pipeline::coverage`.
 #[test]
 fn a_silent_dead_end_in_the_interpreter_reaches_the_user_and_the_log() {
     let dir = workdir("stiller-abbruch");
@@ -361,7 +367,21 @@ fn a_silent_dead_end_in_the_interpreter_reaches_the_user_and_the_log() {
         "--audit-log",
         audit.to_str().unwrap(),
     ]);
-    succeeds(&out);
+
+    // Kein Fehlschlag — die Ausgabe ist geschrieben …
+    assert!(
+        output.exists(),
+        "keine Ausgabe: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // … aber auch kein „alles gut“: der Text im XObject wurde nie gelesen.
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "eine ungelesene Stelle endet wieder mit {:?}:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(

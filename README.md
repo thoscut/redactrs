@@ -40,6 +40,10 @@ Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
 10. [Prüfen, ob die Schwärzung gewirkt hat](#pruefen)
 11. [Was dieses Werkzeug nicht leistet](#grenzen)
 12. [Grafische Oberfläche](#grafische-oberfläche)
+    * [Rechtecke ziehen, verschieben und an den Ecken nachziehen](#rechtecke-ziehen-verschieben-und-an-den-ecken-nachziehen)
+    * [Rückgängig und Wiederholen](#rückgängig-und-wiederholen)
+    * [Miniaturansichten und Zoom](#miniaturansichten-und-zoom)
+    * [Tastaturbedienung](#tastaturbedienung)
 13. [Architektur](#architektur)
 14. [Sicherheit — was zugesichert wird](#sicherheit)
 15. [Abweichungen vom Ursprungskonzept](#abweichungen-vom-ursprungskonzept)
@@ -85,8 +89,7 @@ Wie man das feststellt, steht unter
 Fertige Binaries für Windows und Linux liegen unter
 [Releases](https://github.com/thoscut/redactrs/releases).
 
-Das Windows-Archiv enthält **zwei Programme**, dazu die Beispieldateien und die
-SHA-256-Prüfsummen:
+Das Windows-Archiv enthält **zwei Programme**:
 
 | Datei | wofür |
 |---|---|
@@ -97,6 +100,29 @@ Zwei Dateien statt eines Schalters, weil `#![windows_subsystem = "windows"]`
 das Konsolenfenster nur um den Preis *jeder* Ausgabe auf stdout/stderr abschaltet
 (siehe `crates/redact-cli/src/bin/redact-rs-gui.rs`). Unter Linux gibt es diese
 Trennung nicht; dort startet `redact-rs` ohne Argumente die Oberfläche.
+
+Dazu liegt im Archiv (nachgesehen in `.github/workflows/release.yml`):
+
+* dieser `README.md` und [`SECURITY.md`](SECURITY.md) — sonst liefen die
+  Verweise in beiden Richtungen ins Leere,
+* die drei Lizenztexte `LICENSE-MIT`, `LICENSE-APACHE` und `LICENSE-OFL.txt`
+  (die eingebetteten Schriften stehen unter der SIL Open Font License),
+* das Verzeichnis `examples/`.
+
+**Die SHA-256-Prüfsummen liegen *nicht* im Archiv.** Sie sind eigene
+Release-Dateien und müssen getrennt heruntergeladen werden — was auch der
+einzige Weg ist, auf dem sie etwas beweisen: eine Prüfsumme im geprüften
+Archiv prüft nichts.
+
+| Release-Datei | Inhalt |
+|---|---|
+| `SHA256SUMS` | Prüfsummen der Archive |
+| `SHA256SUMS-BINARIES` | Prüfsummen der entpackten Binaries |
+
+```bash
+sha256sum -c SHA256SUMS                              # Linux
+Get-FileHash <datei> -Algorithm SHA256               # Windows (PowerShell)
+```
 
 Selbst bauen (benötigt **Rust 1.88** oder neuer — `rust-version` in
 `Cargo.toml`):
@@ -115,6 +141,15 @@ ein Mitglied — es würde also samt `eframe`/`egui`/`rfd` trotzdem gebaut. Erst
 Paketauswahl nimmt die Oberfläche aus dem Abhängigkeitsgraphen (dasselbe tut
 `scripts/build-windows.sh --no-gui`).
 
+`cargo build --release` erzeugt **drei** ausführbare Dateien, von denen nur die
+ersten beiden ausgeliefert werden:
+
+| Binary | Herkunft | Status |
+|---|---|---|
+| `redact-rs` | `crates/redact-cli/src/main.rs` | die Konsolenfassung, im Release enthalten |
+| `redact-rs-gui` | `crates/redact-cli/src/bin/redact-rs-gui.rs` | die Fensterfassung, im Windows-Archiv enthalten |
+| `redact-gui` | `crates/redact-gui/src/main.rs` | Nebenprodukt des GUI-Crates, **nicht** im Release und nirgends dokumentiert außer hier. Es öffnet dasselbe Fenster wie `redact-rs-gui`, kennt aber `-h`/`-V` und weist unbekannte Optionen zurück (`redact-rs-gui` übergeht sie, weil es unter Windows ohne Konsole nichts melden könnte). Beim Entwickeln praktisch, weil es ohne `redact-cli` gebaut wird. Für den Einsatz ist `redact-rs` bzw. `redact-rs-gui` gemeint. |
+
 Voraussetzungen zum Bauen der GUI unter Linux:
 
 ```bash
@@ -130,6 +165,22 @@ wird `kontoauszug_geschwaerzt.pdf`. Der Zusatz lässt sich mit
 überschrieben — ein zweiter Lauf soll ein bereits geprüftes Ergebnis nicht
 unbemerkt ersetzen. Für `--review` gilt dasselbe Schema
 (`kontoauszug_review.json`).
+
+Der Namenszusatz ist **ein Name**: Pfadtrenner, `..` und Steuerzeichen werden
+abgelehnt, bevor irgendetwas entsteht — sonst wäre er ein Wegweiser aus dem
+Eingabeverzeichnis heraus (die Begründung steht in
+[`SECURITY.md`](SECURITY.md)). Geprüft wird er **auch dann, wenn `-o` gesetzt
+ist** und der Zusatz gar nicht gebraucht würde: ein untaugliches
+`--output-suffix` soll auffallen, wo es steht, und nicht erst im nächsten Lauf
+ohne `-o`.
+
+```console
+$ redact-rs kontoauszug.pdf -o ok.pdf --output-suffix "/../boese"
+Fehler: Konfigurationsfehler: der Namenszusatz „/../boese“ ist keiner: er
+enthält einen Pfadtrenner. …
+$ echo $?
+2
+```
 
 ```text
 redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
@@ -148,6 +199,8 @@ redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
       --review                nur analysieren, nichts schwärzen
       --review-out <JSON>     Zieldatei des Review-Exports
       --apply-review <JSON>   geprüfte Review-Datei anwenden
+      --allow-unverified-review   Review-Datei ohne Prüfsumme trotzdem anwenden
+                                  (UNSICHER — siehe Review-Workflow)
       --audit-log <JSON>      Audit-Log schreiben
       --action <ART>          blackout (Standard) | whiteout | replace
       --replace-with <TEXT>   Ersatztext für --action replace
@@ -156,6 +209,8 @@ redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
                                   (UNSICHER — siehe unten)
       --max-decompressed-mb <MB>  Budget für alle entpackten Streams (1024)
       --max-parsed-mb <MB>        davon für geparste Streams (16)
+      --max-image-mb <MB>         gleichzeitig gehaltene dekodierte Bildbytes (256)
+      --max-input-mb <MB>         Obergrenze für die Eingabedatei selbst (512)
       --max-candidates <N>        Obergrenze für Trefferkandidaten (100000)
       --gui                   grafische Oberfläche starten
       --list-patterns         eingebaute Muster auflisten
@@ -164,16 +219,43 @@ redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
   -q, --quiet                 weniger Ausgabe
 ```
 
-Die drei `--max-…`-Grenzen sind Schutzschalter gegen präparierte Eingabedateien;
+Die fünf `--max-…`-Grenzen sind Schutzschalter gegen präparierte Eingabedateien;
 was sie abwehren und warum sie so hoch bzw. so niedrig liegen, steht in
-[`SECURITY.md`](SECURITY.md). Sie wirken **nur in der Kommandozeile** — die
-grafische Oberfläche lädt mit den fest eingebauten Vorgaben.
+[`SECURITY.md`](SECURITY.md).
+
+**Sie gelten in beiden Programmen.** Die Oberfläche lädt über
+`redact_pipeline::load_document` mit **derselben** `Config` wie ein Lauf ohne
+`--gui` (`crates/redact-gui/src/state.rs`), liest die Datei über dasselbe
+`redact_pipeline::read_input` und geht bei der Trefferauswertung durch dasselbe
+`collect_regions_for`, das `--max-candidates` prüft. Ein `redact-rs --gui
+auszug.pdf --max-parsed-mb 4` wirkt also wirklich. Was **nicht** gilt: die
+Fensterfassung `redact-rs-gui.exe` hat gar keine Kommandozeile und arbeitet
+deshalb immer mit den Vorgaben aus der Tabelle in
+[`SECURITY.md`](SECURITY.md) — nicht abgeschaltet, nur nicht verstellbar.
+
+`--allow-unverified-review` ist neben `--allow-undecodable-images` der zweite
+Schalter, der eine Prüfung aufhebt: siehe [Review-Workflow](#review-workflow).
 
 `--allow-undecodable-images` ist der einzige Schalter, der die Sicherheit
 *senkt*: siehe [Bilder werden wirklich geschwärzt](#bilder).
 
-Rückgabewerte: `0` Erfolg, `1` Verarbeitungsfehler, `2` Bedienfehler. Im
-Stapelbetrieb heißt `1`: mindestens eine Datei ist gescheitert.
+Rückgabewerte:
+
+| Wert | Bedeutung |
+|---|---|
+| `0` | Erfolg — und nichts blieb ungeprüft |
+| `1` | Verarbeitungsfehler. Im Stapelbetrieb: mindestens eine Datei ist gescheitert |
+| `2` | Bedienfehler (Argumente, Einstellungsdatei, Prüfsummen, `--max-candidates`) |
+| `3` | **Verarbeitet, aber nicht vollständig geprüft.** Es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. |
+
+`3` ist kein Fehler und kein „alles gut“ — es ist die Aufforderung, genau diese
+Stellen anzusehen. In einem Skript gehört er behandelt wie ein Fehler, solange
+niemand hingeschaut hat.
+
+Ein gewöhnliches `Warnung:` setzt den Rückgabewert **nicht**. Ein Rasterbild
+auf der Seite ist eine bekannte Grenze des Verfahrens und der Normalfall bei
+gescannten Auszügen; `NICHT GEPRÜFT` meint etwas anderes, nämlich eine Stelle,
+an der der Interpreter ausgestiegen ist.
 
 <a id="verschluesselte-pdfs"></a>
 ### Verschlüsselte PDFs
@@ -196,9 +278,31 @@ redact-rs --gui auszug.pdf
 
 Das Passwort landet **in keiner erzeugten Datei** — nicht in der Ausgabe-PDF,
 nicht im Audit-Log, nicht in der Review-Datei — und in keiner Fehlermeldung.
-Was dabei ungeprüft bleibt (die Vorprüfung kann verschlüsselte Streams nicht
-auspacken; der Arbeitsspeicher wird nicht überschrieben), steht in
+
+**Ein Passwort schaltet keine Grenze ab.** Die Vorprüfung läuft über Rohbytes
+und sieht an einer verschlüsselten Datei nur die Objektstruktur, nicht die
+Streams — deshalb läuft **nach** der Entschlüsselung dieselbe Prüfung ein
+zweites Mal auf dem entschlüsselten Dokument
+(`redact_pipeline::check_limits_after_decryption`). Es misst derselbe Code mit
+denselben Grenzen und denselben Meldungen wie bei einer unverschlüsselten
+Datei. Vorher hing an einem Passwort, ob überhaupt gemessen wurde: eine
+196-kB-Datei mit einem 64 MB entpackenden Content-Stream wurde ohne Passwort in
+0,0 s abgelehnt und lief mit Passwort in den OOM-Killer.
+
+Was auch danach ungeprüft bleibt (der Arbeitsspeicher wird nicht
+überschrieben; Berechtigungsbits werden nicht durchgesetzt), steht in
 [`SECURITY.md`](SECURITY.md#passwörter-verschlüsselter-pdfs).
+
+Ohne Passwort ist die Meldung knapp und nennt den Ausweg **nicht** — den nennt
+`redact-rs --help` unter `--password`:
+
+```console
+$ redact-rs auszug.pdf -o out.pdf
+Fehler: PDF-Fehler: auszug.pdf: Dokument ist verschlüsselt. Verschlüsselte PDFs
+werden nicht verarbeitet — bitte vorher entschlüsseln.
+$ echo $?
+1
+```
 
 <a id="stapel"></a>
 ### Mehrere Dateien auf einmal
@@ -273,9 +377,20 @@ Ein unbekannter Schlüssel (Tippfehler) und ein unbekanntes Thema beenden den
 Lauf mit einer Meldung. Eine Einstellung, die stillschweigend nicht wirkt, wäre
 das schlechtere Verhalten. Eine **fehlende** Datei ist dagegen kein Fehler.
 
-Die Datei gilt für beide Programme: sie wird beim Bauen von
-`redact_pipeline::Config` angewendet, und dieselbe `Config` bekommt die
-grafische Oberfläche.
+**Gelesen wird die Datei nur von `redact-rs` (bzw. `redact-rs.exe`).** Dort
+wird sie beim Bauen von `redact_pipeline::Config` angewendet — und weil
+`redact-rs --gui` dieselbe `Config` an die Oberfläche weiterreicht, gelten
+Namenszusatz, Muster, Schwelle, Polsterung und Thema auch dort.
+
+Die Fensterfassung zum Doppelklicken (`redact-rs-gui.exe`) liest sie
+**nicht**: sie baut ein `Config::default()` und ruft `Settings::load()` nie
+auf (`crates/redact-cli/src/bin/redact-rs-gui.rs`; dasselbe gilt für das
+Entwickler-Binary `redact-gui`). Wer per Doppelklick arbeitet und trotzdem
+seine Einstellungen will, startet über die Konsolenfassung:
+
+```bash
+redact-rs --gui kontoauszug.pdf
+```
 
 ### Eingebaute Muster
 
@@ -289,6 +404,7 @@ danebensteht. Genau dieselbe Tabelle liefert `redact-rs --list-patterns`.
 |----|--------------|---------|------|----------|
 | `iban_de` | Deutsche IBAN (DE + 2 Prüfziffern + 18 Ziffern), mod-97-geprüft | 0.95 | – | **an** |
 | `iban_intl` | Internationale IBAN (zu unspezifisch) | 0.90 | – | aus |
+| `glaeubiger_id` | SEPA-Gläubiger-ID (Creditor Identifier), mod-97-geprüft | 0.95 | – | **an** |
 | `konto_nr` | Kontonummer (6–10 Ziffern nach „Kto.“ o. ä.) | 0.85 | 0.30 | **an** |
 | `blz` | Bankleitzahl (8 Ziffern nach „BLZ“/„Bankleitzahl“) | 0.80 | 0.25 | **an** |
 | `bic` | BIC/SWIFT mit Länderkennung-Prüfung | 0.80 | – | **an** |
@@ -299,8 +415,8 @@ danebensteht. Genau dieselbe Tabelle liefert `redact-rs --list-patterns`.
 | `email` | E-Mail-Adresse | 0.90 | – | **an** |
 | `phone_de` | Deutsche Telefonnummer | 0.85 | 0.35 | **an** |
 
-Muster mit Prüfsumme (IBAN, BIC, Kreditkarte) verwerfen Treffer, die die
-Prüfung nicht bestehen — das drückt die Fehlalarmquote deutlich.
+Muster mit Prüfsumme (IBAN, Gläubiger-ID, BIC, Kreditkarte) verwerfen Treffer,
+die die Prüfung nicht bestehen — das drückt die Fehlalarmquote deutlich.
 Ausgeschaltete Muster lassen sich mit `--patterns amount_eur` gezielt aktivieren.
 
 **Was sich an den Vorgaben geändert hat** — und warum:
@@ -410,18 +526,20 @@ Damit lässt sich ein gescanntes Dokument sicher schwärzen, ganz ohne OCR: man
 zieht die Rechtecke von Hand (GUI oder `--manual-regions`), und die Bildpunkte
 darunter sind hinterher weg.
 
-Nachgemessen an einem 200×100-Bild, das eine Seite als Scan trägt, mit einer
-manuellen Region darüber:
+Nachgemessen an einem 200×100-Bild (`/DeviceRGB`, `/FlateDecode`), das eine
+Seite als Scan trägt, mit einer manuellen Region darüber:
 
 ```console
-$ redact-rs scan.pdf -o scan_geschwaerzt.pdf --manual-regions regionen.json
+$ redact-rs scan.pdf -o scan_geschwaerzt.pdf --manual-regions bildregion.json --no-patterns
 Seiten:             1
 Schwärzungen:       1
   davon wirksam:      0 (Zeichen entfernt)
-  davon ohne Textfund: 1 (Deck-Rechteck gezeichnet, kein Zeichen entfernt …)
+  davon ohne Textfund: 1 (Deck-Rechteck gezeichnet, kein Zeichen entfernt — richtig
+                          über Grafik, falsch bei danebenliegenden Koordinaten)
 Entfernte Zeichen:  0
 Deck-Rechtecke:     1
-Überschriebene Bilder: 1 (neu kodiert, verlustbehaftet)
+Überschriebene Bilder: 1 (neu kodiert: außerhalb der Schwärzung verlustfrei,
+                          Datei dadurch größer)
 ```
 
 Die Zeile „ohne Textfund“ ist hier der Normalfall und kein Mangel: in einem
@@ -430,14 +548,18 @@ Rasterbild steht für die Analyse kein Text, zu entfernen gibt es also nichts �
 siehe [`effect` je Region](#befund).
 
 Das Bild aus der Ausgabedatei erneut dekodiert und Pixel für Pixel mit dem
-Original verglichen: **4784 von 20 000 Pixeln geändert, alle 4784 auf Schwarz;
-kein einziges Pixel außerhalb des Rechtecks verändert.**
+Original verglichen (Region 80×40 pt bei `--padding 1.0`, also 82×42 Bildpunkte):
+**3696 von 20 000 Pixeln geändert, alle 3696 auf Schwarz; kein einziges Pixel
+außerhalb des Rechtecks verändert** — der veränderte Bereich ist genau
+`x 48…131`, `y 28…71`, und das ist die gepolsterte Region.
 
-> Das Wort **„verlustbehaftet“ in dieser Ausgabezeile ist falsch** und wird
-> noch korrigiert. Neu kodiert wird immer verlustfrei mit `/FlateDecode`
-> (`crates/redact-pdf/src/image.rs`); die Messung oben zeigt außerhalb der
-> Schwärzung null veränderte Pixel — auch dann, wenn das Original ein JPEG war.
-> Nicht bitgleich ist die *Datei*, nicht das *Bild*.
+Neu kodiert wird dabei immer **verlustfrei** mit `/FlateDecode`
+(`crates/redact-pdf/src/image.rs`), auch dann, wenn das Original ein JPEG war.
+Nicht bitgleich ist danach die *Datei*, nicht das *Bild*. Dass die
+Zusammenfassung das auch so sagt und nicht „verlustbehaftet“ schreibt, hält
+`overwritten_images_are_reported_and_logged` in
+`crates/redact-pipeline/src/audit.rs` fest — der Test prüft ausdrücklich auf
+die **Abwesenheit** des Wortes.
 
 ### Der Preis: die Datei ist nicht mehr bitgleich
 
@@ -469,25 +591,33 @@ blieben in der Datei. Deshalb bricht der Lauf in diesem Fall mit einem Fehler
 ab, statt eine Datei zu erzeugen, deren Schwärzung nur obenauf liegt:
 
 ```console
-$ redact-rs scan_jpx.pdf -o out.pdf --manual-regions regionen.json
+$ redact-rs scan_jpx.pdf -o out.pdf --manual-regions regionen.json --no-patterns
 Fehler: PDF-Fehler: Bild /Im0 auf Seite 1 lässt sich nicht dekodieren
-(Filter: JPXDecode). Die Schwärzung läge nur darüber; die Pixel blieben
-in der Datei.
+(JPXDecode (JPEG 2000) wird nicht dekodiert). Die Schwärzung läge nur darüber;
+die Pixel blieben in der Datei.
 $ echo $?
 1
 ```
 
-`--allow-undecodable-images` hebt das auf. Dann entsteht eine Ausgabe (Exit
-`0`), in der das Bild **ungeschwärzt** ist und die Schwärzung nur darüberliegt;
-es bleibt bei einer Warnung in der Zusammenfassung und im Audit-Log:
+`--allow-undecodable-images` hebt das auf. Dann entsteht eine Ausgabe, in der
+das Bild **ungeschwärzt** ist und die Schwärzung nur darüberliegt; es bleibt bei
+einer Meldung in der Zusammenfassung und im Audit-Log:
 
 ```console
-$ redact-rs scan_jpx.pdf -o out.pdf --manual-regions regionen.json \
+$ redact-rs scan_jpx.pdf -o out.pdf --manual-regions regionen.json --no-patterns \
       --allow-undecodable-images
 …
-Warnung: Bild /Im0 auf Seite 1 lässt sich nicht dekodieren (Filter: JPXDecode).
-Die Schwärzung läge nur darüber; die Pixel blieben in der Datei.
+NICHT GEPRÜFT: Bild /Im0 auf Seite 1 lässt sich nicht dekodieren (JPXDecode
+(JPEG 2000) wird nicht dekodiert). Die Schwärzung läge nur darüber; die Pixel
+blieben in der Datei.
+
+1 Stelle(n) in diesem Dokument wurden nicht durchsucht. …
+$ echo $?
+3
 ```
+
+Der Rückgabewert ist also **`3`, nicht `0`**: es ist eine Ausgabedatei
+entstanden, aber an dieser Stelle wurde nichts geprüft und nichts entfernt.
 
 Der Schalter ist für Fälle gedacht, in denen man das bewusst in Kauf nimmt —
 er macht die Ausgabe unsicher.
@@ -554,7 +684,7 @@ es nennt keine Herkunft und behauptet auch keine.
 ```json
 {
   "timestamp": "2026-08-01T09:04:22Z",
-  "tool": { "name": "redact-rs", "version": "0.1.0" },
+  "tool": { "name": "redact-rs", "version": "0.2.0" },
   "input":  { "path": "kontoauszug.pdf", "sha256": "466c0af4…" },
   "output": { "path": "geschwaerzt.pdf", "sha256": "c2c54724…" },
   "redactions": [
@@ -574,7 +704,9 @@ es nennt keine Herkunft und behauptet auch keine.
   ],
   "metadata_stripped": true,
   "metadata": {
-    "info": true, "xmp": false, "acroform": true, "xfa": true,
+    "info": true, "xmp": false, "piece_info": 0, "struct_tree": false,
+    "names": 0, "embedded_files": 0, "javascript": 0,
+    "acroform": true, "xfa": true,
     "field_values": 2, "file_attachments": 1, "open_action": true,
     "additional_actions": 2, "optional_content": true,
     "summary": ["/Info-Dictionary", "Formulardefinition (/AcroForm)", "…"]
@@ -612,7 +744,8 @@ aus dem Content-Stream entfernt hat. Vier Befunde sind möglich:
 Die Summen dazu stehen unter `effect`: `requested` ist die Zahl der geplanten
 Regionen, und `applied + covered + degenerate + missing_page` ergibt sie
 wieder. `pages` nennt die Seitenzahl des Dokuments, damit sich `missing_page`
-nachprüfen lässt; `missing_pages` listet die angesprochenen Seiten (0-basiert).
+nachprüfen lässt; `missing_pages` listet die angesprochenen Seiten (0-basiert)
+und steht nur dann im Log, wenn es welche gab.
 
 Jeder Befund außer `applied` steht auch in der Zusammenfassung auf der Konsole
 und als Warnung auf stderr — ein Lauf, der nichts entfernt hat, endet nicht
@@ -720,6 +853,10 @@ Zwei getrennte Fehler stecken darin:
    der Kodierung — dieselbe IBAN kann als UTF-16BE oder als Hex-String
    `<44453839…>` in der Datei stehen.
 
+   Die Tabelle misst, was die drei Werkzeuge *finden* — nicht, was redact-rs
+   schwärzt. Beide `/ActualText`-Zeilen werden inzwischen mitgeschwärzt, siehe
+   [Der Textspiegel im Seiteninhalt](#der-textspiegel-im-seiteninhalt).
+
 ### Die Prüfung, die das Werkzeug mitbringt
 
 `redact_pdf::leaks(bytes, needle)` (in
@@ -799,6 +936,12 @@ die Schrift benutzt eine Kodierung, die der Extraktor nicht auflösen konnte, da
 Muster passt auf diese Schreibweise nicht, oder die Negativliste hat alles
 blockiert. Siehe auch den gleichnamigen Abschnitt in [`SECURITY.md`](SECURITY.md).
 
+Für einen Teil dieser Fälle gibt es inzwischen ein Signal: Stellen, die die
+Analyse nicht durchsuchen **konnte**, stehen auf stderr mit `NICHT GEPRÜFT` und
+setzen den Rückgabewert auf `3`. Das deckt längst nicht alles ab — ein Muster,
+das schlicht nicht passt, merkt niemand, und ein Rasterbild zählt bewusst nicht
+dazu —, aber es macht einen Teil der stillen Fälle laut.
+
 <a id="grenzen"></a>
 
 ## Was dieses Werkzeug nicht leistet
@@ -841,13 +984,20 @@ nicht steht, ist deshalb nicht automatisch abgedeckt.
 
   ```console
   $ redact-rs nosubtype.pdf -o out.pdf --patterns iban_de
-  Treffer gesamt:     0
-  Warnung: XObject „Fx“ hat kein bekanntes /Subtype (weder /Form noch /Image);
-  sein Inhalt wurde nicht durchsucht. Steht dort Text, blieb er ungeschwärzt.
+  Schwärzungen:       0
+  …
+  NICHT GEPRÜFT: XObject „Fx“ hat kein bekanntes /Subtype (weder /Form noch
+  /Image); sein Inhalt wurde nicht durchsucht. Steht dort Text, blieb er
+  ungeschwärzt.
+
+  1 Stelle(n) in diesem Dokument wurden nicht durchsucht. …
+  $ echo $?
+  3
   ```
 
-  Eine solche Warnung ist der Hinweis, dass „0 Schwärzungen“ nichts bedeutet.
-  Sie ersetzt die Sichtprüfung nicht.
+  Eine solche Meldung ist der Hinweis, dass „0 Schwärzungen“ nichts bedeutet —
+  und sie ist an `NICHT GEPRÜFT` und am Rückgabewert `3` auch maschinell zu
+  erkennen. Sie ersetzt die Sichtprüfung nicht.
 
 ### Gescannte Dokumente
 
@@ -866,16 +1016,26 @@ nicht steht, ist deshalb nicht automatisch abgedeckt.
   Seiten:             1
   Schwärzungen:       0
   Entfernte Zeichen:  0
+  Deck-Rechtecke:     0
+  Metadaten:          nichts zu entfernen
   Ausgabe:            scan_geschwaerzt.pdf
   Warnung: 1 von 1 Seite(n) enthalten Rasterbilder. Geschwärzte Bereiche
   werden im Bild selbst überschrieben; gelesen wird der Bildinhalt aber
   nicht — Text *in* einem Bild (Scan, Foto) findet die Analyse ohne OCR nicht.
+  $ echo $?
+  0
   ```
 
   Festgehalten von `a_pure_scan_is_reported_even_without_any_redaction`
   (`crates/redact-pdf/tests/images.rs`). Die Ausgabedatei enthält trotzdem
   alles: wer ein gescanntes Dokument bearbeitet, muss die Seiten selbst
   ansehen und die Bereiche von Hand ziehen.
+
+  Der Rückgabewert bleibt hier `0`: ein Rasterbild ist kein Loch in der
+  Prüfung, sondern eine bekannte Grenze des Verfahrens, und ein Dokument mit
+  Bildern ist der Normalfall. `3` ist den Stellen vorbehalten, an denen der
+  Interpreter etwas **nicht durchsuchen konnte** — die beiden nächsten
+  Beispiele.
 * **JPEG-2000 und CCITT-Fax lassen sich nicht öffnen.** Eine Schwärzung darauf
   bricht den Lauf ab, statt nur zu überdecken — es sei denn, man erlaubt es mit
   `--allow-undecodable-images`, und dann ist die Ausgabe unsicher
@@ -925,7 +1085,45 @@ der ohne `#[ignore]` läuft und rot wird, sobald das Leck verschwindet.
 | Formularfeld-Werte (`/V`) bleiben stehen | `form_field_value_is_redacted_too` |
 | verwaiste Objekte werden mitgeschrieben | `objects_unpacked_from_an_object_stream_are_not_carried_over` |
 | inkrementelle Vorversionen bleiben erhalten | `incremental_history_is_dropped_when_the_file_is_rewritten` |
-| `/ActualText` spiegelt den geschwärzten Text | `struct_elem_actual_text_does_not_mirror_the_redacted_text` |
+| `/ActualText` eines Struktur-Elements spiegelt den geschwärzten Text | `struct_elem_actual_text_does_not_mirror_the_redacted_text` |
+| **Textspiegel im Seiteninhalt** (`/ActualText`, `/Alt`, `/E` an einem Marked-Content-Abschnitt) überleben die Schwärzung | 9 Fälle in [`crates/redact-pdf/tests/marked_content.rs`](crates/redact-pdf/tests/marked_content.rs) — siehe unten |
+
+#### Der Textspiegel im Seiteninhalt
+
+Ein getaggtes PDF darf den Glyphen eines Abschnitts einen Ersatztext
+beistellen: `/Span <</ActualText (DE89 …)>> BDC … EMC`. Der steht als Klartext
+**im Content-Stream**, nicht in einem Objekt daneben. Die Glyphen wurden
+korrekt entfernt, das Deck-Rechteck saß richtig — und `pdftotext` gab in der
+Voreinstellung trotzdem die vollständige IBAN aus, weil es den Spiegel
+bevorzugt.
+
+Die drei Schlüssel `/ActualText`, `/Alt` und `/E`
+(`MIRROR_KEYS` in `crates/redact-pdf/src/content.rs`) werden jetzt **geleert**,
+sobald von den Glyphen darunter etwas entfernt wurde — nicht nur gefunden.
+Gedeckt sind neun Wege, auf denen so ein Spiegel in einer Datei stehen kann:
+
+| Fall | Test |
+|---|---|
+| `/Span <</ActualText (…)>> BDC` im Seitenstrom | `span_with_actual_text_in_the_page_stream` |
+| `/Figure <</Alt (…)>> BDC` | `figure_with_alt_text_in_the_page_stream` |
+| als Punkt-Operator `DP` statt `BDC` | `marked_content_point_with_actual_text` |
+| als Hex-String `<44453839…>` | `actual_text_written_as_a_hex_string` |
+| innerhalb eines Form-XObjects | `actual_text_inside_a_form_xobject` |
+| über `/Resources /Properties` der Seite | `actual_text_reached_through_resources_properties` |
+| dito im Form-XObject, über dessen eigene Ressourcen | `actual_text_through_properties_inside_a_form_xobject` |
+| als **indirekter Verweis** auf ein eigenes Objekt | `actual_text_as_an_indirect_reference` |
+| **Gegenprobe**: ein Abschnitt, den keine Schwärzung berührt, behält seinen Spiegel | `an_untouched_section_keeps_its_actual_text` |
+
+Die letzte Zeile ist die wichtigere Hälfte: ein Durchgang, der *jeden*
+`/ActualText` löscht, macht getaggte PDFs für Screenreader und PDF/UA
+unbrauchbar — und niemand würde es merken, weil das Leck-Orakel dazu schweigt.
+Orakel ist in allen Fällen ausschließlich `redact_pdf::leaks`, nie der eigene
+Extraktor: der liest den Spiegel gar nicht und sähe deshalb nichts.
+
+```bash
+cargo test -p redact-pdf --test marked_content
+# test result: ok. 9 passed
+```
 
 ### Verarbeitung
 
@@ -937,11 +1135,36 @@ der ohne `#[ignore]` läuft und rot wird, sobald das Leck verschwindet.
   Meldung wie ein falsches Passwort.
 * **Strukturell defekte PDFs** werden abgelehnt, nicht repariert — eine
   „reparierte“ Datei könnte Inhalte enthalten, die der Analyse entgehen.
+* **Eine Seite, die sich nicht in Operationen zerlegen lässt, kostet die ganze
+  Datei.** Lässt sich der Content-Stream einer Seite (oder auch nur ein
+  Teilstück davon) nicht zerlegen, wird die **Datei abgelehnt** — nicht
+  gewarnt. Ihr Text wurde nicht durchsucht und kann deshalb nicht geschwärzt
+  worden sein; beim Neuschreiben ginge er zudem ersatzlos verloren. Vorher
+  meldete derselbe Lauf „Schwärzungen: 0“ mit Rückgabewert 0, und die
+  Kontonummer stand unverändert in der Ausgabe. Eine Warnung auf stderr hätte
+  daraus im Stapelbetrieb trotzdem eine „verarbeitete“ Datei gemacht.
 * **Kein Plugin-System.** Die Stapelverarbeitung gibt es inzwischen
   ([siehe oben](#stapel)), sie steigt aber **nicht** in Unterverzeichnisse ab.
-* **Keine unbegrenzte Größe.** Sehr viele Treffer in einer Datei lassen die
-  Konfliktauflösung quadratisch wachsen; der Lauf bricht ab `--max-candidates`
-  (Vorgabe 100 000) mit Exit 2 ab. Details und Messwerte in
+* **Keine unbegrenzte Größe.** Sechs Grenzen greifen, jede mit einer eigenen
+  Meldung und einem Rückgabewert statt eines Speicherfehlers:
+
+  | Was | Vorgabe | Stellschraube |
+  |---|---|---|
+  | Größe der Eingabedatei | 512 MB | `--max-input-mb` |
+  | entpackte Bytes über alle Streams | 1024 MB | `--max-decompressed-mb` |
+  | davon: Streams, die geparst werden | 16 MB | `--max-parsed-mb` |
+  | gleichzeitig gehaltene dekodierte Bildbytes | 256 MB | `--max-image-mb` |
+  | Trefferkandidaten je Datei | 100 000 | `--max-candidates` (Exit 2) |
+  | Zeichen, die **eine Seite** setzen darf | 1 000 000 | fest |
+
+  Dazu ein **Aufwandskonto** gegen die Vervielfachung durch Form-XObjects: Eine
+  Datei von 2 368 Byte hält jede Byte-Grenze ein und lässt trotzdem acht
+  Form-XObjects einander so oft zeichnen, dass über zwei Millionen Durchläufe
+  entstehen. Dagegen hilft keine Größengrenze. Das Konto zählt deshalb, was
+  wirklich anfällt, und wächst mit dem Inhalt, den die Datei *mitbringt* —
+  nicht mit dem, was sie daraus macht. Ist es leer, wird die Datei abgelehnt.
+
+  Details, Messwerte und die Begründung jeder Zahl in
   [`SECURITY.md`](SECURITY.md).
 
 ### Was der Nutzer selbst tun muss
@@ -968,25 +1191,117 @@ redact-rs                          # GUI ohne Dokument
 redact-rs --gui kontoauszug.pdf    # GUI mit vorgeladenem PDF
 ```
 
-Ein PDF lässt sich auch **per Drag & Drop** auf das Fenster ziehen. Beim
-Export ist der Dateiname bereits vorbelegt: dasselbe Verzeichnis wie das
-Original, mit dem Namenszusatz aus dem Feld „Namenszusatz“.
-
-Die GUI (egui/eframe, ein einziges Binary ohne zusätzliche Laufzeit) zeigt die
-Seiten mit allen gefundenen Treffern als farbige Rahmen:
+Unter Windows genügt ein Doppelklick auf `redact-rs-gui.exe` — oder man zieht
+ein PDF auf ihr Symbol. Die GUI (egui/eframe, ein einziges Binary ohne
+zusätzliche Laufzeit) zeigt die Seiten so, wie `redact-render` sie rastert, mit
+allen gefundenen Treffern als farbige Rahmen:
 🔵 Muster · 🟢 Positivliste · 🔴 Negativliste (blockiert) · 🟠 manuell.
-Neue Bereiche zieht man mit der Maus, Treffer schaltet man per Checkbox ab.
+
+### Dokumente öffnen
+
+Über „🗁 Öffnen“ (Strg+O) oder **per Drag & Drop** auf das Fenster. Bei mehreren
+abgelegten Dateien gewinnt die erste PDF, Nicht-PDFs werden abgelehnt
+(`classify_drop` in `crates/redact-gui/src/lib.rs` — eine reine Funktion,
+damit das ohne Maus prüfbar ist). Gingen dabei von Hand gezogene Rechtecke
+verloren, wird vorher gefragt.
 
 Ist das geöffnete Dokument **verschlüsselt**, erscheint ein Fenster mit
 verdeckter Eingabe. Das ist zugleich der bequemste Weg, ein Passwort *nicht*
 über die Kommandozeile zu geben. Passt es nicht, bleibt die Frage stehen; das
 falsche Passwort wird nicht behalten und steht in keiner Meldung.
 
+### Rechtecke ziehen, verschieben und an den Ecken nachziehen
+
+Ein neuer Bereich entsteht durch Aufziehen mit der Maus — sichtbar **ab dem
+Bild des Drucks** und beginnend **am Druckpunkt**, nicht erst dort, wo egui den
+Zug bemerkt. Ein Klick wählt ein vorhandenes Rechteck aus.
+
+Ein ausgewähltes Rechteck trägt **vier Eckgriffe** (`Handle::TopLeft` …
+`BottomRight` in `crates/redact-gui/src/selector.rs`). Daran lässt es sich
+nachziehen: die gegenüberliegende Ecke bleibt stehen, der Mauszeiger zeigt die
+Ziehrichtung an. Die Fangzone ist mit 16 Bildschirmpunkten bewusst größer als
+das gezeichnete 5-pt-Quadrat — eine Zone in Zeichnungsgröße trifft man nur
+zufällig.
+
+Zieht man ein Rechteck über einen Treffer der **Negativliste**, überstimmt die
+bewusste Handbewegung die Schutzliste — und die Oberfläche **sagt es** in der
+Statuszeile, statt die Wirkung stillschweigend umzukehren. Strg+Z nimmt es
+zurück.
+
+### Rückgängig und Wiederholen
+
+**Strg+Z** und **Strg+Y**, auch über die Knöpfe ↺ / ↻ in der Leiste. Der
+Verlauf hält bis zu **50 Schnappschüsse** je Richtung
+(`HISTORY_LIMIT` in `crates/redact-gui/src/history.rs`); ältere fallen unten
+heraus. Eine neue Änderung nach einem Rückgängig macht den
+Wiederholen-Stapel ungültig. Beim Öffnen eines anderen Dokuments wird der
+Verlauf verworfen — er gehört zum Inhalt, nicht zum Fenster.
+
+Erfasst sind alle Änderungen an der Trefferliste: Anlegen, Löschen,
+Verschieben, Nachziehen, An- und Abwählen, das Übernehmen einer Review-Datei.
+
+### Miniaturansichten und Zoom
+
+Links steht eine Spalte mit **Miniaturansichten**, Seitenzahl neben jedem Bild.
+Sie zeigt dieselben Kleinbilder, die der Hauptbereich ohnehin anfordert — es
+wird nichts doppelt gerendert. Die Spalte lässt sich am Rand zwischen 96 und
+260 Punkt breit ziehen.
+
+Der **Zoom** reicht von **0,25× bis 4×** (`MIN_ZOOM`/`MAX_ZOOM` in
+`crates/redact-gui/src/state.rs`), Schrittweite 1,25×. In der Leiste stehen
+dafür vier Knöpfe: ➖ Kleiner, ➕ Größer, ⛶ Passend (ganze Seite ins Fenster)
+und ⟲ 100 %; daneben ein Schieberegler für den stufenlosen Wert. Gerendert wird
+auf einem eigenen Thread, damit Seitenwechsel und Zoomen die Oberfläche nicht
+anhalten; lässt sich eine Seite nicht rasterisieren, springt eine schematische
+Vorschau ein und zeigt wenigstens die Lage des Textes.
+
+### Tastaturbedienung
+
+| Taste | Wirkung |
+|---|---|
+| Strg+O | PDF öffnen |
+| Strg+S | Geschwärztes PDF exportieren |
+| Strg+Z / Strg+Y | Rückgängig / Wiederholen |
+| Bild auf/ab, Pos1/Ende | blättern |
+| Pfeiltasten | mit Auswahl: das Rechteck um 1 pt verschieben (mit Umschalt 10 pt) — ohne Auswahl: blättern |
+| Entf | ausgewähltes Rechteck löschen |
+| Esc | Auswahl aufheben |
+
+Unter macOS tritt die Befehlstaste an die Stelle von Strg. **Liegt der Fokus in
+einem Textfeld, gehören alle Tasten dorthin** und nirgendwo sonst hin — sonst
+löschte die Rücktaste im Feld „Ersetzen“ die ausgewählte Region. Ein Knopf mit
+Fokus (nach einem Druck auf Tabulator) ist dabei kein Textfeld; die Kürzel
+wirken dort weiter (`a_tab_press_does_not_kill_every_shortcut` in
+`crates/redact-gui/src/app.rs`).
+
+### Trefferliste
+
+Neben der Miniaturspalte steht die Trefferliste. Ihre Überschrift nennt
+**beide** Zahlen — gefundene Treffer und die, die tatsächlich geschwärzt werden;
+nur die zweite sagt etwas über das Ergebnis. Treffer, die die Konfliktauflösung
+verwirft (blockiert, doppelt), stehen ausgegraut und durchgestrichen statt
+angehakt und farbig. Geschützte Einträge der Negativliste werden **nicht**
+durchgestrichen — durchgestrichen läse sich wie „entfernt“, gemeint ist das
+Gegenteil; dort steht das Wort „geschützt“.
+
+Je Eintrag lässt sich
+
+* die Schwärzung **abwählen** (Häkchen) — ein Negativlisten-Treffer bleibt aus,
+* die **Schwärzungsart ändern**: `blackout`, `whiteout` oder `replace` samt
+  eigenem Ersatztext, je Treffer einzeln. Neue Treffer bekommen die Art aus
+  `--action`/`--replace-with`.
+
+Über „🗄 Review speichern“ / „📋 Review laden“ geht der Stand als JSON hinaus
+und wieder herein — mit der SHA-256-Prüfsumme des Dokuments, geprüft von
+**derselben** Funktion, die `--apply-review` benutzt. Eine Review-Datei zu einem
+anderen PDF wird abgelehnt.
+
 Ob die Oberfläche hell oder dunkel startet, sagt `theme` in der
 [Einstellungsdatei](#einstellungsdatei); umschalten lässt es sich jederzeit in
-der Leiste oben.
+der Leiste oben. Die vier Trefferfarben erreichen in beiden Themen mindestens
+3:1 Kontrast (WCAG 1.4.11), geprüft gegen die Flächen, die egui wirklich malt.
 
-### GUI und CLI teilen sich inzwischen die Verarbeitungskette
+### GUI und CLI teilen sich die Verarbeitungskette — und das ist geprüft
 
 Hier stand früher eine Liste von Unterschieden zwischen beiden Programmen —
 die GUI hatte den Ablauf abgetippt statt geteilt und war davon abgewichen
@@ -998,17 +1313,37 @@ Beide gehen jetzt durch dasselbe Crate **`redact-pipeline`**: `redact-cli` und
 Review-Datei und Audit-Log gehen über `redact_pipeline::write_review_file`,
 also über den einen Schreibpfad mit Modus `0600`).
 
-Was **weiterhin gilt**: Es gibt keinen Test, der beide *Programme* startet und
-ihre Ausgabedateien byteweise vergleicht. Dass die Kette dieselbe ist, ist am
-gemeinsamen Crate ablesbar, nicht an einem End-to-End-Vergleich. Wer ein
-nachvollziehbares, prüfbares Ergebnis braucht, nimmt weiterhin die
-Kommandozeile — oder exportiert aus der GUI eine Review-Datei und wendet sie
-mit `redact-rs --apply-review` an.
+**Den End-to-End-Vergleich gibt es inzwischen.**
+[`crates/redact-cli/tests/cli_and_gui_agree.rs`](crates/redact-cli/tests/cli_and_gui_agree.rs)
+startet das gebaute `redact-rs`-Binary als eigenen Prozess und daneben
+`AppState` (laden → analysieren → exportieren) mit denselben Einstellungen und
+vergleicht die Ausgabedatei **byteweise** sowie das Audit-Log Feld für Feld
+(beide Prüfsummen eingeschlossen; ausgenommen sind nur Zeitstempel und Pfade,
+die zwangsläufig verschieden sind). Fünf Fälle laufen dort:
+
+| Test | prüft |
+|---|---|
+| `the_binary_and_the_window_produce_the_same_file_and_the_same_log` | Vorgabe-Aktion, `--padding 3`: gleiche Bytes, gleiches Log |
+| `the_binary_and_the_window_agree_on_a_replacement_too` | dasselbe mit `--action replace` — der schärfere Fall, weil eine Font-Ressource dazukommt |
+| `both_ways_write_the_same_review_file` | gleiche Review-Datei, beide mit Modus `0600` |
+| `both_ways_write_the_same_review_file_with_a_replacement` | dasselbe mit Ersatztext |
+| `a_deviating_window_would_be_caught` | **Gegenprobe**: die früher bestandene Abweichung (feste Polsterung) muss zu verschiedenen Bytes führen |
+
+```bash
+cargo test -p redact-cli --test cli_and_gui_agree
+# test result: ok. 5 passed
+```
+
+Was trotzdem für die Kommandozeile spricht: nur dort ist der ganze Lauf ein
+einzelner, wiederholbarer Befehl, den man in ein Skript schreiben und in einem
+Protokoll nachlesen kann. Wer aus der GUI ein nachvollziehbares Ergebnis
+braucht, exportiert eine Review-Datei und wendet sie mit
+`redact-rs --apply-review` an.
 
 ## Architektur
 
 ```
-redact-core       Domänenmodell, Traits, Konfliktauflösung, Review-Format
+redact-core       Domänenmodell, Konfliktauflösung, Review-Format, Namensregeln
 redact-pdf        Content-Stream-Interpreter, Textextraktion, echte Schwärzung,
                   Leck-Detektor (`leaks`)
 redact-patterns   Regex-Muster inkl. IBAN-/BIC-/Luhn-Prüfung
@@ -1114,9 +1449,16 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   werden abgelehnt, nicht repariert. Das Passwort steht in keiner erzeugten
   Datei und in keiner Meldung
   ([`SECURITY.md`](SECURITY.md#passwörter-verschlüsselter-pdfs)).
-* Review-Datei und Audit-Log entstehen unter Unix mit Modus `0600` — das gilt
-  für die Kommandozeile; die Oberfläche schreibt beide anders
-  ([siehe oben](#grafische-oberfläche)).
+* Review-Datei und Audit-Log entstehen unter Unix mit Modus `0600` — **in
+  beiden Programmen**. Sie gehen durch denselben Schreibpfad
+  (`redact_pipeline::write_review_file` bzw. `AuditLog::write`, beide über
+  `redact_pdf::document::write_file` mit `secret_options`), und beide Programme
+  rufen ihn. Gemessen an der geschriebenen Datei: die Oberfläche in
+  `export_removes_the_text_from_the_pdf`
+  (`crates/redact-gui/src/state.rs`, `assert_eq!(mode, 0o600)` auf das
+  Audit-Log), beide Wege nebeneinander in `both_ways_write_the_same_review_file`
+  (`crates/redact-cli/tests/cli_and_gui_agree.rs`). Mit `0644` und ohne
+  Symlink-Prüfung entstanden sie in der Oberfläche früher — das ist geschlossen.
 
 ## Abweichungen vom Ursprungskonzept
 
@@ -1125,8 +1467,9 @@ Alle Abweichungen sind bewusst:
 
 | Konzept | Umsetzung | Begründung |
 |---------|-----------|------------|
+| fünf Traits (`Extractor`, `Analyzer`, …) in `redact-core/src/traits.rs` | **keine Traits**; `traits.rs` ist gelöscht, die Methoden sind inhärent (`PdfExtractor::extract_with_warnings`, `PatternMatcher::find_matches`, `BookingMatcher::find_matches`, `PdfRedactor::apply_with_report`) | Von jedem Trait gab es genau eine Implementierung, kein `dyn`-Gebrauch und keine generische Schranke. Der letzte, `Extractor`, blieb nur stehen, weil sieben Testdateien ihn importieren mussten, um `extract` überhaupt aufrufen zu dürfen — ein Trait, den nur Tests brauchen, ist die Umkehrung seines Zwecks. |
 | `Extractor::extract → Vec<Region>` | `→ Vec<TextRun>` | Eine `Region` braucht zwingend eine `Source`; bei reiner Extraktion steht die noch gar nicht fest. `TextRun` liefert zusätzlich die Glyph-Boxen, ohne die für einen Regex-Treffer *innerhalb* einer Zeile keine exakte Box berechenbar wäre. |
-| `Analyzer::analyze(&[Region])` | `analyze(&[TextRun])` | Dieselbe Begründung: Analyse braucht Text **mit** Zeichenkoordinaten. |
+| `Analyzer::analyze(&[Region])` | Analyse auf `&[TextRun]` | Dieselbe Begründung: Analyse braucht Text **mit** Zeichenkoordinaten. |
 | Matching auf einzelnen Text-Runs | Matching auf zusammengesetzten **Zeilen** | Eine IBAN wird in der Praxis über mehrere `Tj`-Operationen ausgegeben. Ohne Zeilenbildung liegt der Recall weit unter dem Ziel. Über einen Zeilenumbruch hinweg trifft aber auch das nicht. |
 | `BookingMatcher`: `text.contains(pattern)` | normalisierter Vergleich (Groß-/Kleinschreibung, Leerraum-Menge) | Sonst scheitert der Vergleich an jeder abweichenden Anzahl Leerzeichen. |
 | Negativliste blockiert alles | Negativliste blockiert *nicht* manuelle Regionen | Eine bewusste Nutzerentscheidung darf nicht automatisch verworfen werden. |
@@ -1150,9 +1493,9 @@ Alle Abweichungen sind bewusst:
 | Das Audit-Log bescheinigt nur Gemessenes | erfüllt | `a_region_on_a_page_that_does_not_exist_is_not_logged_as_applied`, `a_region_without_text_under_it_is_covered_not_missing`, `a_degenerate_padding_is_not_logged_as_a_redaction` — jeweils mit Gegenprobe |
 | Review-Datei wirkt nur auf ihr eigenes Dokument | erfüllt, auch hinter `--manual-regions` | `review_file_from_another_document_is_rejected`, `a_foreign_review_file_behind_manual_regions_is_refused_too` |
 | Metadaten im Ausgabe-PDF entfernt | erfüllt | `metadata_is_stripped`, `names_tree_is_removed_as_the_module_documentation_promises` |
-| GUI: Rechtecke ziehen, Treffer abwählen, Export | umgesetzt | Logik als reine Funktionen getestet; das Fensterverhalten selbst ist nicht automatisiert prüfbar |
+| GUI: Rechtecke ziehen, Treffer abwählen, Export | umgesetzt, darüber hinaus | dazu Eckgriffe, Rückgängig/Wiederholen, Miniaturansichten, Zoom 0,25×–4×, Tastaturbedienung, Drag & Drop und die Schwärzungsart je Treffer ([Details](#grafische-oberfläche)). Alle Rechnungen und Zustandsübergänge liegen als reine Funktionen in `state.rs`, `selector.rs`, `viewer.rs`, `history.rs`, `focus.rs` und sind ohne Fenster getestet; das Fensterverhalten selbst ist nicht automatisiert prüfbar |
 | GUI-Binary unter 30 MB | erfüllt (für die gemessene Datei) | Windows 7,4 MB nachgemessen (`dist/redact-rs.exe`, 7 395 328 Byte) — das ist die **Konsolenfassung**. `redact-rs-gui.exe` ist seitdem als zweite Datei dazugekommen und hier **nicht** nachgemessen; der Linux-Wert (13 MB) stammt ebenfalls aus einer früheren Messung. |
-| Export der GUI identisch zur CLI | erfüllt | `cli_and_gui_agree.rs` startet das gebaute Binary als eigenen Prozess und daneben `AppState` (laden → analysieren → exportieren) und vergleicht Ausgabedatei **byteweise** sowie das Audit-Log Feld für Feld — mit Vorgabe-Aktion und mit `--action replace`. Die Gegenprobe `a_deviating_window_would_be_caught` stellt die früher bestandene Abweichung nach und muss anschlagen. |
+| Export der GUI identisch zur CLI | erfüllt | `cli_and_gui_agree.rs` startet das gebaute Binary als eigenen Prozess und daneben `AppState` (laden → analysieren → exportieren) und vergleicht Ausgabedatei **byteweise** sowie das Audit-Log Feld für Feld — inzwischen fünf Fälle: Vorgabe-Aktion, `--action replace`, die Review-Datei in beiden Varianten und die Gegenprobe `a_deviating_window_would_be_caught`, die die früher bestandene Abweichung nachstellt und anschlagen muss (Tabelle unter [Grafische Oberfläche](#grafische-oberfläche)). |
 
 Von dem, was das Konzept in §11 außerhalb des MVP führt, sind das
 [Entschlüsseln passwortgeschützter PDFs](#verschluesselte-pdfs) und die

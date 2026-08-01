@@ -59,6 +59,45 @@ macro_rules! mit_kontext {
     };
 }
 
+/// Wie viele Buchstaben ein Kontext-Schlüsselwort **vor** seinem Kern haben
+/// darf — „Vertrags“ in „Vertragskonto“.
+///
+/// ## Warum die Zahl da steht, wo vorher `*` stand
+///
+/// `(?i:[a-zäöüß]*konto…)` hatte keinen Look-behind davor, das `*` konnte also
+/// an *jeder* Position anfangen und lief von dort bis zum Ende der
+/// Buchstabenkette, bevor es rückwärts nach „konto“ suchte. Über einer Zeile
+/// aus n Buchstaben sind das n Startpositionen × n Buchstaben — quadratisch.
+/// Gemessen: **eine einzige Zeile aus 1 600 Buchstaben** riss das
+/// Rückschritt-Budget von `fancy-regex`, und der ganze Lauf endete mit
+/// „Max limit for backtracking count exceeded“ und Rückgabewert 1. Die
+/// dokumentierten Grenzen (16 MB geparster Inhalt) waren dabei nie im Spiel.
+///
+/// Mit einer Obergrenze probiert die Suche je Position höchstens
+/// `MAX_KEYWORD_PREFIX + 1` Längen durch: der Aufwand wird linear, und die
+/// Schwelle verschwindet ganz statt sich nur zu verschieben.
+///
+/// ## Warum 24
+///
+/// Es ist die Länge des längsten Bestimmungsworts, das auf einem deutschen
+/// Auszug realistisch vor „konto“ steht, plus Luft:
+/// „Wertpapierverrechnungs“ sind 22 Zeichen, „Gemeinschafts“ 13,
+/// „Fremdwährungs“ 13, „Vertrags“ 8. `tests/backtracking.rs` hält genau diese
+/// Zusammensetzungen fest, damit die Zahl nicht unter die Sprache rutscht.
+///
+/// Was darüber liegt, verliert nur seinen *Kontextbonus*: der Treffer bleibt,
+/// bekommt aber `confidence_without_context` und fällt damit unter das
+/// voreingestellte Mindestvertrauen. Ein 25 Zeichen langes Wort vor „konto“
+/// ist kein Kontoauszugsdeutsch mehr, sondern genau die Buchstabenkette, um
+/// die es hier geht.
+///
+/// ## Warum öffentlich
+///
+/// Die Zahl ist eine Eigenschaft der *gelieferten* Muster: wer sich in einer
+/// eigenen Pattern-Konfiguration an `konto_nr` anlehnt, soll sie nachschlagen
+/// können, statt sie aus dem Regex abzulesen.
+pub const MAX_KEYWORD_PREFIX: usize = 24;
+
 /// Ziffernkette, die weder in einer längeren Kette noch in einer IBAN steckt.
 ///
 /// `\b` genügt bei reinen Ziffernfolgen nicht, weil eine Kontonummer sonst
@@ -153,8 +192,12 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
             // 0815"). Ein kurzer erster Block zählt deshalb nur, wenn ihm
             // mindestens ein weiterer Block folgt — sonst wäre jede Jahreszahl
             // eine Kontonummer.
+            // Das `{0,24}` vor „konto“ ist keine Kosmetik, sondern die
+            // Korrektur zu #78 — siehe [`MAX_KEYWORD_PREFIX`]. Mit `*` an
+            // dieser Stelle sprengte eine Zeile aus 1 600 Buchstaben das
+            // Rückschritt-Budget und beendete den ganzen Lauf mit einem Fehler.
             mit_kontext!(
-                r"(?i:[a-zäöüß]*konto(?:nummer|-?nr\.?)?|kto\.?)",
+                r"(?i:[a-zäöüß]{0,24}konto(?:nummer|-?nr\.?)?|kto\.?)",
                 r"(?<![0-9A-Za-z])(?:[0-9]{4,10}(?:[ ][0-9]{2,6})+|[0-9]{6,10})(?![0-9A-Za-z])"
             ),
             "Kontonummer (6–10 Ziffern nach einem Schlüsselwort wie „Kto.“)",
@@ -345,6 +388,189 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Liefert jeden **unbegrenzten** Quantor eines Regex zusammen mit dem
+    /// Ausdruck, auf den er sich bezieht — `"[a-zäöüß]*"`, `"(?:\.[0-9]{3})*"`.
+    ///
+    /// Zeichenklassen werden dabei übersprungen: das `+` in
+    /// `[A-Za-z0-9._%+-]` ist ein Literal und kein Quantor. Genau daran ist
+    /// eine Suche nach `regex.contains('+')` gescheitert, und deshalb steht
+    /// hier ein kleiner Zeichenlauf statt einer Textsuche. Unbegrenzt sind
+    /// `*`, `+` und `{n,}`; `{n,m}` ist begrenzt und interessiert nicht.
+    fn unbegrenzte_quantoren(regex: &str) -> Vec<String> {
+        let c: Vec<char> = regex.chars().collect();
+        let text = |von: usize, bis: usize| c[von..bis.min(c.len())].iter().collect::<String>();
+
+        let mut gefunden = Vec::new();
+        let mut i = 0usize;
+        // Anfang und Ende des zuletzt gelesenen Ausdrucks.
+        let mut atom: Option<(usize, usize)> = None;
+        let mut gruppen: Vec<usize> = Vec::new();
+
+        while i < c.len() {
+            match c[i] {
+                // Maskiertes Zeichen: zwei Zeichen, ein Ausdruck.
+                '\\' => {
+                    atom = Some((i, i + 2));
+                    i += 2;
+                }
+                // Zeichenklasse am Stück überlesen.
+                '[' => {
+                    let start = i;
+                    i += 1;
+                    if c.get(i) == Some(&'^') {
+                        i += 1;
+                    }
+                    // Ein `]` unmittelbar am Anfang ist ein Literal.
+                    if c.get(i) == Some(&']') {
+                        i += 1;
+                    }
+                    while i < c.len() && c[i] != ']' {
+                        i += if c[i] == '\\' { 2 } else { 1 };
+                    }
+                    i += 1;
+                    atom = Some((start, i));
+                }
+                '(' => {
+                    gruppen.push(i);
+                    atom = None;
+                    i += 1;
+                }
+                ')' => {
+                    let start = gruppen.pop().unwrap_or(i);
+                    i += 1;
+                    atom = Some((start, i));
+                }
+                '*' | '+' => {
+                    let (von, bis) = atom.unwrap_or((i, i));
+                    gefunden.push(format!("{}{}", text(von, bis), c[i]));
+                    atom = None;
+                    i += 1;
+                }
+                '{' => {
+                    let start = i;
+                    while i < c.len() && c[i] != '}' {
+                        i += 1;
+                    }
+                    i += 1;
+                    // `{n,}` ist nach oben offen, `{n,m}` und `{n}` nicht.
+                    if text(start, i).ends_with(",}") {
+                        let (von, bis) = atom.unwrap_or((start, start));
+                        gefunden.push(format!("{}{}", text(von, bis), text(start, i)));
+                    }
+                    atom = None;
+                }
+                _ => {
+                    atom = Some((i, i + 1));
+                    i += 1;
+                }
+            }
+        }
+        gefunden
+    }
+
+    /// Kein eingebautes Muster darf einen unbegrenzten Quantor an einer
+    /// Stelle haben, an die die Suche von *jeder* Position aus hineinlaufen
+    /// kann — genau daran hing #78.
+    ///
+    /// ## Wonach gesucht wird
+    ///
+    /// Ein unbegrenzter Quantor allein ist harmlos. Teuer wird er erst, wenn
+    /// die Suche **von jeder Position aus** hineinlaufen kann: dann läuft sie
+    /// über denselben Text so oft, wie er Zeichen hat. Zwei Dinge verhindern
+    /// das, und jede Ausnahme unten nennt, welches davon greift:
+    ///
+    /// * ein **Look-behind** davor (`(?<![0-9A-Za-z])`) — er schneidet die
+    ///   Startpositionen innerhalb eines Tokens weg, es bleibt eine je Token;
+    /// * ein **Literal** davor („steuerliche", „konto") — dann sind die
+    ///   Startpositionen die Fundstellen dieses Literals, nicht die Zeichen.
+    ///
+    /// Wo beides nicht ging, steht eine Obergrenze am Quantor selbst
+    /// ([`MAX_KEYWORD_PREFIX`]).
+    ///
+    /// Geprüft wird die Bauform, nicht die Laufzeit — die misst
+    /// `tests/backtracking.rs`. Dieser Test hier sagt einem neuen Muster
+    /// *vorher*, worauf es zu achten hat.
+    #[test]
+    fn no_builtin_pattern_has_an_unguarded_unbounded_quantifier() {
+        // Ausdruck + Begründung, je Muster. Wer ein Muster ändert und hier
+        // landet, muss die Begründung mitliefern statt die Zeile zu streichen.
+        let begruendet: &[(&str, &str)] = &[
+            // Zwischen Schlüsselwort und Ziffern (Makro `mit_kontext!`):
+            // erreichbar erst, nachdem ein Schlüsselwort-Literal gegriffen hat.
+            (r"[ \t]*", "steht hinter einem Schlüsselwort-Literal"),
+            // Dasselbe Argument: hinter dem Literal „steuerliche".
+            (r"[ ]+", "steht hinter dem Literal „steuerliche“"),
+            // Alles am Local-Part und an der Domain steht hinter
+            // `(?<![A-Za-z0-9._%+-])` — je zusammenhängendem Token genau eine
+            // Startposition. Die Label-Wiederholung beginnt zusätzlich mit
+            // einem eigenen Punkt.
+            (r"[A-Za-z0-9._%+-]+", "steht hinter einem Look-behind"),
+            (r"[A-Za-z0-9-]+", "steht hinter `@` bzw. einem Punkt"),
+            (
+                r"(?:\.[A-Za-z0-9-]+)*",
+                "jede Wiederholung beginnt mit einem Punkt",
+            ),
+            (
+                r"[A-Za-z]{2,}",
+                "letzter Ausdruck des Musters, davor ein Punkt",
+            ),
+            // Jede Wiederholung beginnt mit einem eigenen Trennzeichen, und
+            // davor steht ein Look-behind.
+            (
+                r"(?:\.[0-9]{3})*",
+                "jede Wiederholung beginnt mit einem Punkt",
+            ),
+            (
+                r"(?:[ ][0-9]{2,6})+",
+                "jede Wiederholung beginnt mit einem Leerzeichen",
+            ),
+        ];
+
+        for d in builtin_patterns() {
+            for quantor in unbegrenzte_quantoren(&d.regex) {
+                assert!(
+                    begruendet.iter().any(|(ausdruck, _)| *ausdruck == quantor),
+                    "{}: unbegrenzter Quantor „{quantor}“ ohne Begründung.\n\
+                     Entweder ein Look-behind oder ein Literal davor, oder eine \n\
+                     Obergrenze am Quantor (siehe MAX_KEYWORD_PREFIX) — oder ein \n\
+                     Eintrag in der Ausnahmeliste dieses Tests *mit* Begründung.\n\
+                     Regex: {}",
+                    d.id,
+                    d.regex
+                );
+            }
+        }
+
+        // Gegenprobe: der Zeichenlauf findet die Bauform überhaupt, sonst wäre
+        // der Test oben ein grüner Haken ohne Aussage.
+        assert_eq!(
+            unbegrenzte_quantoren(r"(?i:[a-zäöüß]*konto)"),
+            vec!["[a-zäöüß]*"],
+            "der alte, quadratische Präfix von #78 würde nicht mehr auffallen"
+        );
+        // Und ein Literal `+` in einer Zeichenklasse ist kein Quantor.
+        assert!(unbegrenzte_quantoren(r"(?<![A-Za-z0-9._%+-])x").is_empty());
+    }
+
+    /// Die Zahl in [`MAX_KEYWORD_PREFIX`] und die Zahl im Regex sind dieselbe.
+    ///
+    /// `concat!` verlangt Literale, der Regex trägt die Obergrenze also
+    /// ausgeschrieben. Ohne diesen Test liefe die Begründung an der Konstanten
+    /// von der Wirkung im Muster weg.
+    #[test]
+    fn the_keyword_prefix_bound_is_the_one_that_is_documented() {
+        let konto = builtin_patterns()
+            .into_iter()
+            .find(|d| d.id == "konto_nr")
+            .unwrap();
+        assert!(
+            konto.regex.contains(&format!("{{0,{MAX_KEYWORD_PREFIX}}}")),
+            "der Regex von konto_nr benutzt nicht die dokumentierte Obergrenze \
+             {MAX_KEYWORD_PREFIX}: {}",
+            konto.regex
+        );
     }
 
     /// Die Überlappung von `konto_nr` und `blz` auf achtstelligen Ziffern muss

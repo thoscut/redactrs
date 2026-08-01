@@ -126,7 +126,13 @@ pub struct Cli {
     pub action: ActionArg,
 
     /// Ersatztext für `--action replace`.
-    #[arg(long, value_name = "TEXT", default_value = "[GESCHWÄRZT]")]
+    ///
+    /// Der Wert gilt auch dann, wenn `--action` etwas anderes sagt: in der
+    /// Oberfläche lässt sich die Art je Treffer umstellen, und dann soll der
+    /// hier genannte Text erscheinen und nicht die Vorgabe. Die Vorgabe selbst
+    /// steht in [`redact_core::DEFAULT_REPLACEMENT`] — **nicht** als Literal an
+    /// dieser Stelle, denn sonst hätte die Oberfläche wieder eine zweite.
+    #[arg(long, value_name = "TEXT", default_value = redact_core::DEFAULT_REPLACEMENT)]
     pub replace_with: String,
 
     /// Zusätzlicher Rand um jede Schwärzung, in Punkt.
@@ -299,6 +305,10 @@ impl Cli {
             allow_unverified_review: self.allow_unverified_review,
             audit_log: self.audit_log.clone(),
             action: self.action.to_action(&self.replace_with),
+            // Zusätzlich zu `action`, nicht statt: `Action::Blackout` hat kein
+            // Textfeld, `--action blackout --replace-with X` verlor X sonst
+            // schon hier. Siehe [`Config::replace_with`].
+            replace_with: self.replace_with.clone(),
             padding: self.padding.unwrap_or(settings.padding),
             allow_undecodable_images: self.allow_undecodable_images,
             max_decoded_image_bytes: self.max_image_mb.saturating_mul(1024 * 1024),
@@ -379,8 +389,28 @@ Einstellungsdatei — Namenszusatz, Muster, Mindestvertrauen, Polsterung, Thema:
   ~/.config/redact-rs/settings.yaml   bzw.   %APPDATA%\\redact-rs\\settings.yaml
   {} zeigt auf eine andere Datei.
   Rangfolge: Kommandozeile schlägt Datei schlägt Vorgabe.
+
+Rückgabewerte:
+  {EXIT_OK}  Fertig. Das Dokument wurde vollständig durchsucht.
+  {EXIT_ERROR}  Fehlgeschlagen — keine (oder keine brauchbare) Ausgabe. Im Stapel:
+     mindestens eine Datei ist gescheitert; die übrigen wurden bearbeitet.
+  {EXIT_USAGE}  Bedienfehler: ein Schalter, die Einstellungsdatei oder eine mitgegebene
+     Datei passt nicht (z.B. eine Review-Datei zu einem anderen Dokument).
+  {EXIT_INCOMPLETE}  Verarbeitet, aber nicht vollständig geprüft. Die Ausgabe ist
+     geschrieben und was gefunden wurde, ist geschwärzt — für einen Teil des
+     Dokuments konnte die Analyse aber nicht einstehen: ein Font ohne
+     /ToUnicode, ein zu tief verschachteltes Form-XObject, ein Kachelmuster
+     mit Text, eine Annotation ohne Erscheinungsstrom, ein Bild, das sich
+     nicht dekodieren ließ. Dort kann etwas stehen geblieben sein.
+     Diese Ausgabe gehört von Hand geprüft. Die betroffenen Stellen stehen
+     auf stderr und im Audit-Log; im Stapel weist die Zusammenfassung solche
+     Dateien getrennt aus, sie zählen nicht als „verarbeitet“.
 ",
-        redact_pipeline::settings::SETTINGS_ENV
+        redact_pipeline::settings::SETTINGS_ENV,
+        EXIT_OK = crate::EXIT_OK,
+        EXIT_ERROR = crate::EXIT_ERROR,
+        EXIT_USAGE = crate::EXIT_USAGE,
+        EXIT_INCOMPLETE = crate::EXIT_INCOMPLETE,
     )
 }
 
@@ -545,6 +575,76 @@ mod tests {
             ActionArg::Replace.to_action("[IBAN]"),
             redact_core::Action::Replace("[IBAN]".into())
         );
+    }
+
+    // ---------------------------------------------------------- Ersatztext
+
+    /// **#76 (a): der Vorgabe-Ersatztext hat genau eine Quelle.**
+    ///
+    /// Die Zeichenkette stand als clap-Literal hier *und* als eigene
+    /// Konstante in `redact-gui/src/state.rs`. Ein Test, der beide Literale
+    /// vergleicht, meldet das Auseinanderlaufen erst hinterher; eine
+    /// gemeinsame Konstante lässt es nicht zu. Der Vergleich hier ist deshalb
+    /// kein Gleichheitstest zweier Wahrheiten, sondern die Zusicherung, dass
+    /// dieser Schalter überhaupt keine eigene mehr hat.
+    #[test]
+    fn the_replacement_default_comes_from_redact_core() {
+        assert_eq!(
+            Cli::parse_from(["redact-rs", "in.pdf"]).replace_with,
+            redact_core::DEFAULT_REPLACEMENT
+        );
+        // Und was im Hilfetext steht, ist derselbe Wert — clap druckt den
+        // `default_value`, nicht einen zweiten.
+        let help = Cli::command().render_long_help().to_string();
+        assert!(
+            help.contains(redact_core::DEFAULT_REPLACEMENT),
+            "der Hilfetext nennt eine andere Vorgabe:\n{help}"
+        );
+    }
+
+    /// **#76 (b): `--replace-with` überlebt jede `--action`.**
+    ///
+    /// `Action::Blackout` hat kein Textfeld — mit
+    /// `--action blackout --replace-with "[IBAN]"` war `[IBAN]` schon vor dem
+    /// ersten Fenster weg, und wer in der Trefferliste der Oberfläche auf
+    /// „Ersetzen“ umstellte, bekam die Vorgabe statt seines Textes.
+    #[test]
+    fn replace_with_survives_every_action() {
+        for art in ["blackout", "whiteout", "replace"] {
+            let config = Cli::parse_from([
+                "redact-rs",
+                "in.pdf",
+                "--action",
+                art,
+                "--replace-with",
+                "[IBAN]",
+            ])
+            .config(&Settings::default());
+            assert_eq!(
+                config.replacement(),
+                "[IBAN]",
+                "--action {art} frisst --replace-with"
+            );
+            // Auch das rohe Feld trägt ihn — die Oberfläche liest es.
+            assert_eq!(config.replace_with, "[IBAN]");
+        }
+
+        // Ohne den Schalter bleibt es bei der einen Vorgabe.
+        let config = Cli::parse_from(["redact-rs", "in.pdf"]).config(&Settings::default());
+        assert_eq!(config.replacement(), redact_core::DEFAULT_REPLACEMENT);
+
+        // Und `--action replace` trägt den Text weiterhin selbst, denn nur so
+        // kommt er in die Review-Datei.
+        let config = Cli::parse_from([
+            "redact-rs",
+            "in.pdf",
+            "--action",
+            "replace",
+            "--replace-with",
+            "[IBAN]",
+        ])
+        .config(&Settings::default());
+        assert_eq!(config.action, redact_core::Action::Replace("[IBAN]".into()));
     }
 
     #[test]

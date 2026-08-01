@@ -1265,28 +1265,56 @@ fn apply_soft_mask(
 // Content-Stream mit Inline-Bildern
 // ---------------------------------------------------------------------------
 
+/// Ergebnis von [`decode_content_checked`].
+///
+/// Wichtig ist das zweite Feld: lopdfs Content-Parser **bricht am ersten
+/// Fehler ab und verwirft den Rest** — kommentarlos, mit `Ok`. Beim Lesen
+/// heißt das „dort stand kein Text“, beim Neuschreiben „diesen Teil der Seite
+/// gab es nie“; beides falsch, beides still. Wer diese Funktion benutzt, muss
+/// sich dazu verhalten.
+#[derive(Debug, Default)]
+pub struct DecodedContent {
+    pub operations: Vec<Operation>,
+    /// Länge (in Bytes) jedes Teilstücks, das der Parser nur **teilweise**
+    /// aufgebraucht hat. Der Rest dahinter fehlt in `operations`.
+    pub truncated: Vec<usize>,
+}
+
+impl DecodedContent {
+    /// Größe der Teilstücke, in denen etwas fehlt.
+    pub fn affected_bytes(&self) -> usize {
+        self.truncated.iter().sum()
+    }
+}
+
 /// Dekodiert einen Content-Stream und fasst `BI … ID … EI` zu je einer
 /// Operation `BI` mit Dictionary und Rohdaten zusammen.
 ///
 /// lopdfs Parser kennt keine Inline-Bilder: die Binärdaten hinter `ID` bringen
 /// ihn aus dem Tritt, der Rest des Streams geht verloren. Deshalb werden die
 /// Blöcke vorher herausgeschnitten und die Teilstücke einzeln geparst.
+///
+/// **Verwirft stillschweigend, was sich nicht zerlegen lässt.** Für alles,
+/// was danach eine Aussage über Vollständigkeit trifft — Suchen, Schwärzen,
+/// Neuschreiben —, ist [`decode_content_checked`] die richtige Tür.
 pub fn decode_content(data: &[u8]) -> Vec<Operation> {
+    decode_content_checked(data).operations
+}
+
+/// Wie [`decode_content`], meldet aber die Abschnitte, die verloren gingen.
+pub fn decode_content_checked(data: &[u8]) -> DecodedContent {
+    let mut out = DecodedContent::default();
     let images = find_inline_images(data);
     if images.is_empty() {
-        return Content::decode(data)
-            .map(|c| c.operations)
-            .unwrap_or_default();
+        decode_chunk(data, &mut out);
+        return out;
     }
-    let mut out = Vec::new();
     let mut pos = 0usize;
     for (start, end, dict, payload) in images {
         if start > pos {
-            if let Ok(content) = Content::decode(&data[pos..start]) {
-                out.extend(content.operations);
-            }
+            decode_chunk(&data[pos..start], &mut out);
         }
-        out.push(Operation::new(
+        out.operations.push(Operation::new(
             "BI",
             vec![
                 Object::Dictionary(dict),
@@ -1296,11 +1324,48 @@ pub fn decode_content(data: &[u8]) -> Vec<Operation> {
         pos = end;
     }
     if pos < data.len() {
-        if let Ok(content) = Content::decode(&data[pos..]) {
-            out.extend(content.operations);
-        }
+        decode_chunk(&data[pos..], &mut out);
     }
     out
+}
+
+/// Zerlegt ein Teilstück zwischen zwei Inline-Bildern.
+///
+/// `Content::decode` liefert auch dann `Ok`, wenn es nach dem ersten
+/// unverständlichen Byte aufgibt — der Rest ist dann einfach weg. Nur
+/// `Content::decode_strict` sagt, ob das ganze Teilstück aufgebraucht wurde.
+/// Deshalb hier zuerst streng, und erst wenn das scheitert, nachsichtig: die
+/// Operationen vor dem Bruch sollen erhalten bleiben, aber der Bruch selbst
+/// muss aktenkundig werden.
+fn decode_chunk(chunk: &[u8], out: &mut DecodedContent) {
+    if let Ok(content) = Content::decode_strict(chunk) {
+        out.operations.extend(content.operations);
+        return;
+    }
+    // Zweiter Versuch mit sauberem Abschluss: lopdf verlangt hinter einem
+    // Kommentar ein Zeilenende und kennt weder NUL noch Seitenvorschub als
+    // Leerraum, obwohl PDF 32000-1 (Tabelle 1) beide dazuzählt. Beides ist
+    // kein Inhaltsverlust und darf keinen Fehlalarm auslösen.
+    let mut tidied: Vec<u8> = chunk.to_vec();
+    while tidied.last().is_some_and(|b| is_pdf_whitespace(*b)) {
+        tidied.pop();
+    }
+    tidied.push(b'\n');
+    if let Ok(content) = Content::decode_strict(&tidied) {
+        out.operations.extend(content.operations);
+        return;
+    }
+    // Jetzt ist wirklich etwas abgeschnitten. Was davor steht, wird gerettet.
+    if let Ok(content) = Content::decode(chunk) {
+        out.operations.extend(content.operations);
+    }
+    out.truncated.push(chunk.len());
+}
+
+/// Leerraum nach PDF 32000-1, Tabelle 1 — einschließlich NUL und
+/// Seitenvorschub, die Rusts `is_ascii_whitespace` nicht bzw. anders sieht.
+fn is_pdf_whitespace(byte: u8) -> bool {
+    matches!(byte, 0x00 | 0x09 | 0x0a | 0x0c | 0x0d | 0x20)
 }
 
 type InlineImage = (usize, usize, Dictionary, Vec<u8>);
@@ -1381,17 +1446,149 @@ fn parse_inline_image(data: &[u8], start: usize) -> Option<InlineImage> {
         .and_then(|o| o.as_i64().ok())
         .filter(|l| *l >= 0)
         .map(|l| l as usize);
-    let end_of_data = match declared {
-        Some(len) if begin + len <= data.len() => begin + len,
-        _ => find_ei(data, begin)?,
+
+    // Wo die Nutzdaten enden, ist die einzige Frage, die hier zählt — an ihr
+    // hängt der **ganze Rest des Stroms**. Zu früh: das Bild ist abgeschnitten
+    // und dahinter steht Binärmüll, der beim Zerlegen samt Text verschwindet.
+    // Zu spät: der folgende Text steckt in der Nutzlast, wird nie durchsucht
+    // und wandert wortwörtlich in die Ausgabe zurück.
+    //
+    // Deshalb wird jede Längenangabe **geprüft**, statt ihr geglaubt zu
+    // werden: an ihrem Ende muss das Token `EI` stehen. Die Reihenfolge:
+    //
+    // 1. `/L` bzw. `/Length` — verlässlich, *wenn* es stimmt.
+    // 2. die aus `/W`, `/H`, `/BPC` und `/CS` **gerechnete** Länge. Ohne
+    //    Filter ist sie exakt und schlägt jede Suche.
+    // 3. erst zuletzt die Suche nach einem `EI`, hinter dem wirklich ein
+    //    Operatorstrom weitergeht — binäre Nutzdaten enthalten `EI` zufällig.
+    let ends_at = |len: usize| -> Option<usize> {
+        let end = begin.checked_add(len)?;
+        (end <= data.len() && ei_follows(data, end)).then_some(end)
     };
+    let end_of_data = declared
+        .and_then(ends_at)
+        .or_else(|| unfiltered_payload_len(&dict).and_then(ends_at))
+        .or_else(|| find_ei(data, begin))
+        // Letzte Rückfallebene: eine Längenangabe, die sich nicht bestätigen
+        // ließ, ist immer noch besser als gar keine Grenze — sonst wäre ein
+        // Bild am Stromende ohne `EI` überhaupt kein Bild mehr.
+        .or_else(|| {
+            declared
+                .and_then(|len| begin.checked_add(len))
+                .filter(|end| *end <= data.len())
+        })?;
     let payload = data.get(begin..end_of_data)?.to_vec();
     let after = find_ei_end(data, end_of_data).unwrap_or(data.len());
     Some((start, after, dict, payload))
 }
 
+/// Steht ab `pos` — nach beliebig viel Leerraum — das Token `EI`?
+fn ei_follows(data: &[u8], pos: usize) -> bool {
+    let mut i = pos;
+    while i < data.len() && data[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    data.get(i) == Some(&b'E')
+        && data.get(i + 1) == Some(&b'I')
+        && data
+            .get(i + 2)
+            .map(|b| b.is_ascii_whitespace() || is_delimiter(*b))
+            .unwrap_or(true)
+}
+
+/// Länge der Nutzdaten eines **ungefilterten** Inline-Bildes, aus seinem
+/// Dictionary gerechnet.
+///
+/// Ohne Filter ist das keine Schätzung, sondern die Rechnung aus PDF 32000-1,
+/// 8.9.5.1: je Zeile `ceil(Breite · Komponenten · Bits / 8)` Bytes, mal Höhe.
+/// Sie ist der einzige Weg, der ein `EI` in den Binärdaten gar nicht erst
+/// befragen muss.
+///
+/// `None`, sobald etwas unklar ist — ein Filter, ein Farbraum, der erst über
+/// die Ressourcen aufzulösen wäre, eine fehlende Angabe. Dann entscheidet die
+/// Suche, nicht eine geratene Zahl.
+fn unfiltered_payload_len(dict: &Dictionary) -> Option<usize> {
+    if dict.get(b"F").is_ok() || dict.get(b"Filter").is_ok() {
+        return None;
+    }
+    let int = |long: &[u8], short: &[u8]| {
+        dict.get(short)
+            .or_else(|_| dict.get(long))
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+    };
+    let width = int(b"Width", b"W")?;
+    let height = int(b"Height", b"H")?;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let is_mask = dict
+        .get(b"IM")
+        .or_else(|_| dict.get(b"ImageMask"))
+        .ok()
+        .and_then(|o| o.as_bool().ok())
+        .unwrap_or(false);
+    let (components, bits) = if is_mask {
+        // Eine Stencil-Maske hat genau ein Bit je Pixel.
+        (1i64, 1i64)
+    } else {
+        let space = dict
+            .get(b"CS")
+            .or_else(|_| dict.get(b"ColorSpace"))
+            .ok()
+            .and_then(|o| o.as_name().ok())?;
+        let components = match space {
+            b"G" | b"DeviceGray" | b"CalGray" | b"I" | b"Indexed" => 1,
+            b"RGB" | b"DeviceRGB" | b"CalRGB" | b"Lab" => 3,
+            b"CMYK" | b"DeviceCMYK" => 4,
+            // Ein benannter Farbraum aus den Ressourcen: die Komponentenzahl
+            // steht hier nicht, also wird hier auch nicht gerechnet.
+            _ => return None,
+        };
+        (components, int(b"BitsPerComponent", b"BPC").unwrap_or(8))
+    };
+    if !(1..=16).contains(&bits) {
+        return None;
+    }
+    let row_bytes = width
+        .checked_mul(components)?
+        .checked_mul(bits)?
+        .checked_add(7)?
+        / 8;
+    usize::try_from(row_bytes.checked_mul(height)?).ok()
+}
+
+/// Wie viele Token hinter einem `EI` geprüft werden, bevor es als echtes Ende
+/// des Bildes gilt.
+///
+/// Acht sind genug: sobald ein Byte auftaucht, das in keinem Token vorkommen
+/// kann, ist die Sache entschieden. Binärdaten schaffen selten mehr als zwei
+/// oder drei Token, bevor sie sich verraten.
+const EI_TAIL_TOKENS: usize = 8;
+
+/// Wie weit hinter einem `EI` dafür höchstens gelesen wird.
+///
+/// Ein einzelnes Token darf nicht beliebig lang werden: eine nie geschlossene
+/// Zeichenkette liefe sonst je Kandidat bis zum Stromende, und ein Strom voller
+/// `EI`-Kandidaten würde quadratisch. Vier Kilobyte gültig aussehender Syntax
+/// sind ohnehin Beweis genug.
+const EI_TAIL_WINDOW: usize = 4096;
+
 /// Sucht das `EI`, das den Bilddatenblock beendet.
+///
+/// Binäre Bilddaten können `EI` zufällig enthalten — mit Leerzeichen davor und
+/// dahinter, also in genau der Form, die ein echtes Ende hat. Wer am ersten
+/// Treffer stehen bleibt, schneidet das Bild ab und macht aus dem Rest des
+/// Stroms Binärmüll; beim Neuschreiben ist der Text dahinter dann ersatzlos
+/// weg. Ironischerweise hexkodiert [`crate::image`] beim *Schreiben* genau
+/// deshalb — beim Lesen fehlte dieselbe Vorsicht.
+///
+/// Deshalb zählt nur ein `EI`, hinter dem etwas steht, das wirklich wie ein
+/// Operatorstrom aussieht. Findet sich keines, bleibt der erste Treffer als
+/// Rückfallebene: eine Grenze an der falschen Stelle ist immer noch besser
+/// als gar kein Bild.
 fn find_ei(data: &[u8], from: usize) -> Option<usize> {
+    let mut fallback = None;
     let mut i = from;
     while i + 1 < data.len() {
         if data[i] == b'E'
@@ -1403,11 +1600,69 @@ fn find_ei(data: &[u8], from: usize) -> Option<usize> {
                 .map(|b| b.is_ascii_whitespace() || is_delimiter(*b))
                 .unwrap_or(true)
         {
-            return Some(i - 1);
+            if tail_looks_like_operators(data, i + 2) {
+                return Some(i - 1);
+            }
+            fallback.get_or_insert(i - 1);
         }
         i += 1;
     }
-    None
+    fallback
+}
+
+/// Geht ab `pos` ein paar Token weit und prüft, ob das noch PDF-Syntax ist.
+///
+/// Kein Beweis, sondern ein Filter: Binärdaten stolpern schon nach ein, zwei
+/// Token über ein Byte, das in keinem Token vorkommt (Steuerzeichen, alles
+/// über 0x7E). Ein `BI`/`ID` beendet die Prüfung sofort mit „ja“ — dahinter
+/// beginnt das nächste Inline-Bild, dessen Daten wieder binär sein dürfen.
+fn tail_looks_like_operators(data: &[u8], pos: usize) -> bool {
+    let data = &data[..data.len().min(pos.saturating_add(EI_TAIL_WINDOW))];
+    let mut i = pos;
+    for _ in 0..EI_TAIL_TOKENS {
+        while i < data.len() && data[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        // Der Strom ist zu Ende — das ist ein sauberer Abschluss.
+        let Some(byte) = data.get(i).copied() else {
+            return true;
+        };
+        match byte {
+            // Name
+            b'/' => {
+                i += 1;
+                while i < data.len() && !data[i].is_ascii_whitespace() && !is_delimiter(data[i]) {
+                    i += 1;
+                }
+            }
+            b'(' => i = skip_literal_string(data, i),
+            b'<' | b'>' | b'[' | b']' | b'{' | b'}' => i += 1,
+            b'%' => {
+                while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
+                    i += 1;
+                }
+            }
+            b'+' | b'-' | b'.' | b'0'..=b'9' => {
+                i += 1;
+                while i < data.len() && matches!(data[i], b'+' | b'-' | b'.' | b'0'..=b'9') {
+                    i += 1;
+                }
+            }
+            b'\'' | b'"' => i += 1,
+            b if b.is_ascii_alphabetic() => {
+                let start = i;
+                while i < data.len() && (data[i].is_ascii_alphanumeric() || data[i] == b'*') {
+                    i += 1;
+                }
+                if matches!(&data[start..i], b"BI" | b"ID") {
+                    return true;
+                }
+            }
+            // Steuerzeichen, hohe Bytes, alles andere: keine Operatorsyntax.
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn find_ei_end(data: &[u8], from: usize) -> Option<usize> {
@@ -2178,6 +2433,85 @@ mod tests {
     fn inline_image_scanner_ignores_bi_inside_strings() {
         let found = find_inline_images(b"(BI ID EI) Tj 0 0 1 1 re f");
         assert!(found.is_empty());
+    }
+
+    /// Gefilterte Nutzdaten: die Länge lässt sich nicht rechnen, und `/L`
+    /// fehlt. Dann entscheidet allein, ob hinter dem `EI` wirklich ein
+    /// Operatorstrom weitergeht — sonst schnitte das erste zufällige `EI`
+    /// das Bild ab und machte aus dem Rest der Seite Binärmüll.
+    #[test]
+    fn a_filtered_inline_image_ends_at_the_ei_that_operators_follow() {
+        let mut payload = vec![0x78u8, 0x9c, 0x01, 0x02];
+        payload.extend_from_slice(b" EI ");
+        payload.extend_from_slice(&[0x80, 0xff, 0x0e, 0x9a]);
+
+        let mut content = b"q BI /W 2 /H 2 /CS /G /BPC 8 /F /Fl ID ".to_vec();
+        content.extend_from_slice(&payload);
+        content.extend_from_slice(b"\nEI\nQ 0 0 5 5 re f");
+
+        let images = find_inline_images(&content);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].3, payload, "die Nutzdaten wurden abgeschnitten");
+
+        let decoded = decode_content_checked(&content);
+        assert!(
+            decoded.truncated.is_empty(),
+            "hinter dem Bild ging etwas verloren"
+        );
+        let operators: Vec<&str> = decoded
+            .operations
+            .iter()
+            .map(|op| op.operator.as_str())
+            .collect();
+        assert_eq!(operators, ["q", "BI", "Q", "re", "f"]);
+    }
+
+    /// Ein `/L`, das der Erzeuger zu groß angegeben hat, wird nicht geglaubt:
+    /// an seinem Ende steht kein `EI`, also entscheidet die gerechnete Länge.
+    #[test]
+    fn a_declared_length_only_counts_when_an_ei_follows_it() {
+        let payload: Vec<u8> = (0u8..4).collect();
+        let mut content = b"BI /W 2 /H 2 /CS /G /BPC 8 /L 40 ID ".to_vec();
+        content.extend_from_slice(&payload);
+        content.extend_from_slice(b"\nEI\n0 0 5 5 re f");
+
+        let images = find_inline_images(&content);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].3, payload);
+        assert_eq!(unfiltered_payload_len(&images[0].2), Some(4));
+    }
+
+    /// Eine Stencil-Maske rechnet mit einem Bit je Pixel, aufgerundet je Zeile.
+    #[test]
+    fn the_payload_length_of_a_stencil_mask_is_rounded_up_per_row() {
+        let mut dict = Dictionary::new();
+        dict.set("W", Object::Integer(9));
+        dict.set("H", Object::Integer(3));
+        dict.set("IM", Object::Boolean(true));
+        assert_eq!(unfiltered_payload_len(&dict), Some(6));
+
+        // Ein benannter Farbraum aus den Ressourcen: hier wird nicht geraten.
+        let mut dict = Dictionary::new();
+        dict.set("W", Object::Integer(4));
+        dict.set("H", Object::Integer(4));
+        dict.set("CS", Object::Name(b"Cs1".to_vec()));
+        assert_eq!(unfiltered_payload_len(&dict), None);
+    }
+
+    /// Ein Teilstück, das der Parser nur zur Hälfte aufbraucht, wird gemeldet
+    /// — `Content::decode` allein liefert dafür ein arglos aussehendes `Ok`.
+    #[test]
+    fn a_partially_parsed_chunk_is_reported_instead_of_dropped() {
+        let decoded = decode_content_checked(b"q Q \x01\x02 0 0 5 5 re f");
+        assert_eq!(decoded.truncated.len(), 1);
+        assert!(decoded.affected_bytes() > 0);
+
+        // Gegenprobe: ein abschließender Kommentar ohne Zeilenende und ein
+        // Seitenvorschub als Leerraum sind kein Verlust.
+        assert!(decode_content_checked(b"q Q % Schluss")
+            .truncated
+            .is_empty());
+        assert!(decode_content_checked(b"q Q\x0c").truncated.is_empty());
     }
 
     // -----------------------------------------------------------------

@@ -13,6 +13,41 @@ use redact_pipeline::{Outcome, Settings};
 
 use crate::cli::Cli;
 
+/// Alles gelaufen, alles gesehen.
+pub const EXIT_OK: u8 = 0;
+
+/// Der Lauf ist gescheitert: keine (oder keine vollständige) Ausgabe.
+pub const EXIT_ERROR: u8 = 1;
+
+/// Bedienfehler — die Kommandozeile, die Einstellungsdatei oder eine
+/// mitgegebene Datei passt nicht ([`RedactError::Config`]).
+pub const EXIT_USAGE: u8 = 2;
+
+/// **Verarbeitet, aber nicht vollständig geprüft.**
+///
+/// Die Ausgabe ist geschrieben, und was gefunden wurde, ist geschwärzt. Für
+/// einen Teil des Dokuments konnte die Analyse aber nicht einstehen: ein Font
+/// ohne `/ToUnicode`, ein Form-XObject unterhalb der Verschachtelungsgrenze,
+/// ein Kachelmuster mit Text, eine Annotation ohne Erscheinungsstrom. Dort kann
+/// etwas stehen geblieben sein, ohne dass es jemand gemerkt hätte.
+///
+/// ## Warum ein eigener Wert und nicht die 2
+///
+/// Die 2 heißt in diesem Programm seit jeher **Bedienfehler** — „der Schalter
+/// passt nicht“, „diese Review-Datei gehört woandershin“. Sie auf einen
+/// Dokumentbefund zu legen, hieße zwei sehr verschiedene Nachrichten unter
+/// einer Zahl zu senden: die eine ist an den Aufrufenden gerichtet und heißt
+/// „mach es anders“, die andere an die Prüfung des Ergebnisses und heißt
+/// „schau selbst nach“.
+///
+/// ## Warum nicht bei jeder Warnung
+///
+/// Ein Rückgabewert, der bei harmlosen Warnungen anspringt, wird nach der
+/// zweiten Datei weggedrückt. Er gilt deshalb **nur** für Deckungslücken;
+/// welche Warnung das ist und welche nicht, entscheidet
+/// [`redact_pipeline::coverage`] — mit Begründung je Ausnahme.
+pub const EXIT_INCOMPLETE: u8 = 3;
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match dispatch(&cli) {
@@ -24,9 +59,9 @@ fn main() -> ExitCode {
             // `ESC [ 2 K` darin löschte er beim Ausgeben die Zeile darüber.
             eprintln!("Fehler: {}", safe_text(&e.to_string()));
             if let RedactError::Config(_) = e {
-                return ExitCode::from(2);
+                return ExitCode::from(EXIT_USAGE);
             }
-            ExitCode::FAILURE
+            ExitCode::from(EXIT_ERROR)
         }
     }
 }
@@ -77,10 +112,21 @@ fn dispatch(cli: &Cli) -> Result<ExitCode> {
         } else if !cli.quiet {
             report(&outcome);
         }
-        return Ok(ExitCode::SUCCESS);
+        // Eine Datei, die nur teilweise durchsucht werden konnte, ist kein
+        // Fehler — sie ist aber auch kein „alles gut“. Siehe [`EXIT_INCOMPLETE`].
+        return Ok(exit_code_for(&outcome));
     }
 
     batch::run(cli, &settings, &inputs)
+}
+
+/// Der Rückgabewert eines gelungenen Laufs: 0 oder [`EXIT_INCOMPLETE`].
+pub fn exit_code_for(outcome: &Outcome) -> ExitCode {
+    if outcome.fully_inspected() {
+        ExitCode::from(EXIT_OK)
+    } else {
+        ExitCode::from(EXIT_INCOMPLETE)
+    }
 }
 
 /// Die Zusammenfassung eines einzelnen Laufs.
@@ -182,8 +228,25 @@ fn report(outcome: &Outcome) {
             }
         }
     }
+    // Warnungen bleiben Warnungen — aber die, für die der Rückgabewert
+    // anspringt, werden auch als solche ausgewiesen. Sonst stünde die
+    // wichtigste Zeile des Laufs zwischen Mitteilungen über Bildkodierung.
     for warning in &outcome.warnings {
-        eprintln!("Warnung: {}", safe_text(warning));
+        let marke = if redact_pipeline::is_coverage_gap(warning) {
+            "NICHT GEPRÜFT"
+        } else {
+            "Warnung"
+        };
+        eprintln!("{marke}: {}", safe_text(warning));
+    }
+    let gaps = outcome.coverage_gaps().len();
+    if gaps > 0 {
+        eprintln!(
+            "\n{gaps} Stelle(n) in diesem Dokument wurden nicht durchsucht. Was dort \
+             steht, kann nicht geschwärzt worden sein — bitte das Ergebnis dort von \
+             Hand prüfen. (Rückgabewert {EXIT_INCOMPLETE}: verarbeitet, aber nicht \
+             vollständig geprüft.)"
+        );
     }
 }
 

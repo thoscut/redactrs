@@ -55,6 +55,19 @@ struct Entry {
     /// Klartext des Fehlers, falls diese Datei gescheitert ist.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Durchgelaufen, aber nicht vollständig durchsucht.
+    ///
+    /// Steht auch im JSON, damit ein Skript die betroffenen Dateien beim Namen
+    /// nennen kann. Der Rückgabewert des Prozesses ist eine Zahl für den
+    /// ganzen Stapel; welche Datei es war, steht nur hier.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    incomplete: bool,
+}
+
+impl Entry {
+    fn failed(&self) -> bool {
+        self.error.is_some()
+    }
 }
 
 /// Löst die Eingaben auf: Verzeichnisse werden zu ihren PDF-Dateien.
@@ -136,9 +149,10 @@ fn reject_single_target_switches(cli: &Cli) -> Result<()> {
 
 /// Arbeitet den Stapel ab.
 ///
-/// Gibt [`ExitCode::FAILURE`] zurück, sobald **eine** Datei gescheitert ist —
-/// der Rückgabewert ist die Antwort auf „ist alles gut gegangen?“, und
-/// „größtenteils“ ist darauf keine Antwort.
+/// Der Rückgabewert ist die Antwort auf „ist alles gut gegangen?“, und
+/// „größtenteils“ ist darauf keine Antwort: [`crate::EXIT_ERROR`], sobald
+/// **eine** Datei gescheitert ist, sonst [`crate::EXIT_INCOMPLETE`], sobald
+/// **eine** nicht vollständig durchsucht werden konnte. Siehe [`exit_code`].
 pub fn run(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> Result<ExitCode> {
     reject_single_target_switches(cli)?;
 
@@ -154,6 +168,7 @@ pub fn run(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> Result<ExitCod
         let entry = match redact_pipeline::run(&cli.config_for(settings, input)) {
             Ok(outcome) => Entry {
                 input: input.display().to_string(),
+                incomplete: !outcome.fully_inspected(),
                 outcome: Some(outcome),
                 error: None,
             },
@@ -161,6 +176,7 @@ pub fn run(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> Result<ExitCod
                 input: input.display().to_string(),
                 outcome: None,
                 error: Some(e.to_string()),
+                incomplete: false,
             },
         };
         // Gescheiterte Dateien werden sofort gemeldet — auch mit `--quiet` und
@@ -169,16 +185,44 @@ pub fn run(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> Result<ExitCod
         if let Some(error) = &entry.error {
             eprintln!("FEHLGESCHLAGEN {}: {}", safe_path(input), safe_text(error));
         }
+        // Dasselbe für eine Datei, die nur teilweise durchsucht werden konnte:
+        // sie ist nicht gescheitert, aber sie braucht eine Hand. Am Ende steht
+        // sie noch einmal in der Zusammenfassung — hier steht sie *neben* der
+        // Datei, um die es geht.
+        if entry.incomplete {
+            eprintln!(
+                "NICHT VOLLSTÄNDIG GEPRÜFT {}: {}",
+                safe_path(input),
+                safe_text(
+                    &entry
+                        .outcome
+                        .as_ref()
+                        .map(|o| o.coverage_gaps().join(" "))
+                        .unwrap_or_default()
+                )
+            );
+        }
         entries.push(entry);
     }
 
     report(cli, &entries)?;
-    let failed = entries.iter().filter(|e| e.error.is_some()).count();
-    Ok(if failed == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    Ok(exit_code(&entries))
+}
+
+/// Der Rückgabewert des ganzen Stapels.
+///
+/// **Ein gescheiterter Lauf schlägt eine Deckungslücke.** Beides zugleich lässt
+/// sich in einer Zahl nicht sagen, und „eine Datei ließ sich gar nicht
+/// verarbeiten“ ist die dringendere der beiden Nachrichten — die andere steht
+/// in der Zusammenfassung und, mit Dateinamen, im JSON.
+fn exit_code(entries: &[Entry]) -> ExitCode {
+    if entries.iter().any(Entry::failed) {
+        return ExitCode::from(crate::EXIT_ERROR);
+    }
+    if entries.iter().any(|e| e.incomplete) {
+        return ExitCode::from(crate::EXIT_INCOMPLETE);
+    }
+    ExitCode::from(crate::EXIT_OK)
 }
 
 /// Die Zusammenfassung am Ende.
@@ -197,19 +241,41 @@ fn report(cli: &Cli, entries: &[Entry]) -> Result<()> {
         };
         let target = outcome.output.as_deref().or(outcome.review_out.as_deref());
         println!(
-            "{} → {} ({} Schwärzung(en))",
+            "{} → {} ({} Schwärzung(en)){}",
             safe_text(&entry.input),
             target.map(safe_text).unwrap_or_else(|| "—".to_string()),
-            outcome.redactions
+            outcome.redactions,
+            if entry.incomplete {
+                "  ← nicht vollständig geprüft"
+            } else {
+                ""
+            }
         );
     }
 
-    let failed = entries.iter().filter(|e| e.error.is_some()).count();
+    // Drei Zahlen, drei verschiedene Aussagen — und keine Datei zählt in
+    // zweien mit. „Verarbeitet“ hieß vorher auch für die Dateien, deren Text
+    // niemand gelesen hatte; wer zwanzig Auszüge laufen ließ, bekam
+    // „20 verarbeitet, 0 fehlgeschlagen“ und Rückgabewert 0, obwohl in einer
+    // davon eine Kontonummer unberührt stand. Deshalb steht die mittlere
+    // Zahl jetzt für sich.
+    let failed = entries.iter().filter(|e| e.failed()).count();
+    let incomplete = entries.iter().filter(|e| e.incomplete).count();
     println!(
-        "\n{} Datei(en): {} verarbeitet, {failed} fehlgeschlagen.",
+        "\n{} Datei(en): {} vollständig geprüft, {incomplete} verarbeitet (aber nicht \
+         vollständig geprüft), {failed} fehlgeschlagen.",
         entries.len(),
-        entries.len() - failed
+        entries.len() - failed - incomplete
     );
+    if incomplete > 0 {
+        println!(
+            "\nBei {incomplete} Datei(en) blieb ein Teil des Dokuments ungelesen — was \
+             dort steht, kann nicht geschwärzt worden sein. Die Stellen stehen oben \
+             auf stderr; bitte diese Ergebnisse von Hand prüfen. \
+             (Rückgabewert {}.)",
+            crate::EXIT_INCOMPLETE
+        );
+    }
     Ok(())
 }
 

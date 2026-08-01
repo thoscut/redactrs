@@ -11,7 +11,7 @@
 # Rangfolge: Kommandozeile schlägt diese Datei schlägt Vorgabe. Was hier
 # steht, wirkt also nur, solange der entsprechende Schalter fehlt.
 #
-# ACHTUNG, zwei Dinge, die überraschen können:
+# ACHTUNG, drei Dinge, die überraschen können:
 #
 #  * Ein unbekannter Schlüssel oder ein unbekanntes Thema beendet den Lauf
 #    mit Exit 2. Das ist Absicht: eine stillschweigend wirkungslose
@@ -19,6 +19,11 @@
 #    sonst auf eine Schwelle, die gar nicht gilt.
 #  * Steht hier ein `output_suffix`, ändert sich der Name der Ausgabedatei
 #    auch dann, wenn man gar nicht mehr an diese Datei denkt.
+#  * Gelesen wird die Datei NUR von `redact-rs` (bzw. `redact-rs.exe`). Die
+#    Fensterfassung zum Doppelklicken (`redact-rs-gui.exe`) baut ihre
+#    Konfiguration aus den eingebauten Vorgaben und ruft `Settings::load()`
+#    nie auf. Wer die Oberfläche mit diesen Einstellungen will, startet sie
+#    über die Konsolenfassung: `redact-rs --gui datei.pdf`.
 
 # Namenszusatz der Ausgabedatei (--output-suffix).
 # Aus `kontoauszug.pdf` wird `kontoauszug_geschwaerzt.pdf`.

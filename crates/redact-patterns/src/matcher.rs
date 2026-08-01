@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use fancy_regex::Regex;
+use fancy_regex::{Regex, RegexBuilder};
 use redact_core::{RedactError, Region, Result, Source, TextRun};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -23,6 +23,45 @@ const VALIDATED_CONFIDENCE: f32 = 0.99;
 /// Verdachtsfälle sehen will, senkt die Schwelle bewusst ab; die Vorgabe
 /// schwärzt lieber zu wenig als einen ganzen Auszug unleserlich zu machen.
 pub const DEFAULT_MIN_CONFIDENCE: f32 = 0.5;
+
+/// Wie viele Rückschritte eine einzelne Suche kosten darf.
+///
+/// ## Was hier gezählt wird
+///
+/// `fancy-regex` verbucht die Rückschritte **je Suchaufruf**, und ein
+/// Suchaufruf läuft über einen ganzen Text-Run. Der Zähler wächst deshalb auch
+/// bei einem streng linearen Muster mit der Länge des Runs — gemessen rund ein
+/// Dutzend Schritte je Zeichen bei `phone_de`, dem Muster mit den meisten
+/// Schlüsselwort-Alternativen. Das Budget ist damit keine Aussage über die
+/// Güte eines Musters, sondern eine Obergrenze für „diese eine Zeile".
+///
+/// ## Warum es überhaupt gesetzt wird
+///
+/// Die Vorgabe von `fancy-regex` ist 1 000 000. Sie stand hier nicht als
+/// Entscheidung, sondern weil niemand sie angefasst hatte — und sie reichte für
+/// rund 80 000 Zeichen in einem Run. Ein PDF, das eine lange Zeile in *einer*
+/// Show-Text-Operation setzt, kam damit nicht durch, obwohl es jede
+/// dokumentierte Grenze einhielt. Ein Wert, der in diesem Quelltext steht,
+/// ändert sich außerdem nicht still bei einem Versionssprung der Bibliothek.
+///
+/// ## Warum 64 Millionen
+///
+/// Es ist die Grenze gegen das Absurde, nicht gegen das Große. Bei rund zwölf
+/// Schritten je Zeichen trägt sie einen einzelnen Text-Run von etwa fünf
+/// Millionen Zeichen — das ist mehr, als `--max-parsed-mb` (16 MB) an
+/// Seiteninhalt überhaupt in eine Zeile bringen kann, und um Größenordnungen
+/// mehr als ein Kontoauszug hat. Nach oben offen darf sie trotzdem nicht sein:
+/// die Muster einer [`PatternConfig`] kommen von außen, und ein von Hand
+/// geschriebenes `(a+)+b` ist mit keinem Look-behind zu retten. Gemessen kostet
+/// eine Million Rückschritte rund 45 ms; das Budget bricht einen entarteten
+/// Ausdruck also nach wenigen Sekunden ab statt nie.
+///
+/// **Kein Ersatz für ein gutes Muster.** Ein quadratisches Muster bleibt
+/// quadratisch; ein größeres Budget verschiebt die Schwelle nur und bezahlt die
+/// Verschiebung mit Laufzeit. Die eingebauten Muster sind deshalb linear
+/// gebaut (siehe `builtin::MAX_KEYWORD_PREFIX`), und dieses Budget fängt nur
+/// das ab, was von außen kommt.
+pub const BACKTRACK_LIMIT: usize = 64_000_000;
 
 /// Ein Eintrag in einer Pattern-Konfigurationsdatei.
 ///
@@ -162,6 +201,23 @@ fn known_ids_list() -> String {
     builtin_pattern_ids().join(", ")
 }
 
+/// Kompiliert einen Regex mit dem Rückschritt-Budget dieses Projekts.
+///
+/// **Die eine Stelle**, an der ein Muster zum Suchen kompiliert wird — und
+/// zwar unabhängig davon, ob es eingebaut ist oder aus einer
+/// [`PatternConfig`] kommt. Ein `Regex::new` daneben bekäme wieder die Vorgabe
+/// von `fancy-regex`, und ausgerechnet die Muster von außen liefen dann ohne
+/// die Grenze, für die es sie gibt.
+///
+/// (`builtin::tests` benutzt `Regex::new` — dort wird nur *kompiliert*, nie
+/// gesucht, und das Budget ist eine Laufzeitgrenze.)
+fn compile(id: &str, regex: &str) -> Result<Regex> {
+    RegexBuilder::new(regex)
+        .backtrack_limit(BACKTRACK_LIMIT)
+        .build()
+        .map_err(|e| RedactError::Pattern(format!("Regex von '{id}' ist ungültig: {e}")))
+}
+
 /// Ein kompiliertes, aktives Pattern.
 struct Compiled {
     /// Index in [`PatternMatcher::defs`] — hält die Ausgabereihenfolge stabil.
@@ -243,9 +299,7 @@ impl PatternMatcher {
                 // Deaktivierte Patterns werden nie kompiliert.
                 continue;
             }
-            let regex = Regex::new(&def.regex).map_err(|e| {
-                RedactError::Pattern(format!("Regex von '{}' ist ungültig: {e}", def.id))
-            })?;
+            let regex = compile(&def.id, &def.regex)?;
             // Ein zweiter Konfidenzwert ohne Kontext-Gruppe wäre wirkungslos —
             // und damit ein stiller Konfigurationsfehler.
             if def.confidence_without_context.is_some()
@@ -353,12 +407,7 @@ impl PatternMatcher {
             for compiled in &self.compiled {
                 let def = &self.defs[compiled.def_index];
                 for found in compiled.regex.captures_iter(&run.text) {
-                    let caps = found.map_err(|e| {
-                        RedactError::Pattern(format!(
-                            "Fehler beim Suchen mit Pattern '{}': {e}",
-                            def.id
-                        ))
-                    })?;
+                    let caps = found.map_err(|e| search_error(def, run, e))?;
                     // Gruppe 0 existiert bei jedem Treffer.
                     let whole = caps.get(0).expect("Gesamttreffer existiert immer");
                     let m = caps.name(TARGET_GROUP).unwrap_or(whole);
@@ -390,6 +439,39 @@ impl PatternMatcher {
         }
         Ok(regions)
     }
+}
+
+/// Die Meldung, wenn eine Suche nicht zu Ende gelaufen ist.
+///
+/// Die rohe Meldung von `fancy-regex` lautet „Error executing regex: Max limit
+/// for backtracking count exceeded". Sie sagt weder, an welchem Text es lag,
+/// noch was man dagegen tun kann — und sie hat einmal einen ganzen Lauf an
+/// einer Datei beendet, die jede dokumentierte Grenze einhielt. Wenn dieser
+/// Fall wiederkommt, dann soll er wenigstens die Zahlen mitbringen: welches
+/// Muster, wie lang die Zeile, welche Seite.
+fn search_error(def: &PatternDef, run: &TextRun, error: fancy_regex::Error) -> RedactError {
+    if matches!(
+        error,
+        fancy_regex::Error::RuntimeError(fancy_regex::RuntimeError::BacktrackLimitExceeded)
+    ) {
+        return RedactError::Pattern(format!(
+            "Das Muster '{}' hat auf Seite {} an einer Textzeile aus {} Zeichen das \
+             Rückschritt-Budget von {BACKTRACK_LIMIT} erschöpft. Die Zeile wurde damit \
+             nicht vollständig durchsucht. Ist '{}' ein eigenes Muster aus \
+             --patterns-config, steckt der Aufwand fast immer in einem unbegrenzten \
+             Quantor (`*`, `+`) ohne Look-behind davor — der läuft von jeder Position \
+             aus erneut über denselben Text. Ein eingebautes Muster an dieser Stelle \
+             ist ein Fehler von redact-rs und gehört gemeldet.",
+            def.id,
+            run.page + 1,
+            run.text.chars().count(),
+            def.id,
+        ));
+    }
+    RedactError::Pattern(format!(
+        "Fehler beim Suchen mit Pattern '{}': {error}",
+        def.id
+    ))
 }
 
 /// Schneidet führenden/abschließenden Whitespace aus dem Byte-Bereich heraus,
