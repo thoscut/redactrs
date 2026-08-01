@@ -172,7 +172,6 @@ impl EntryEffect {
             Self::Covered
         }
     }
-
 }
 
 /// Der Befund je Region samt Summen — die eine Quelle für Log, Zusammenfassung
