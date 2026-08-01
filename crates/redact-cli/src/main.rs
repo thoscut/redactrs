@@ -8,7 +8,7 @@ mod cli;
 use std::process::ExitCode;
 
 use clap::Parser;
-use redact_core::{RedactError, Result};
+use redact_core::{safe_text, RedactError, Result};
 use redact_pipeline::{Outcome, Settings};
 
 use crate::cli::Cli;
@@ -18,7 +18,11 @@ fn main() -> ExitCode {
     match dispatch(&cli) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("Fehler: {e}");
+            // Die eine Stelle, an der jeder Fehler herauskommt — und damit die
+            // eine Stelle, an der er entschärft werden muss. In fast jeder
+            // Meldung steckt ein Dateiname, und der kommt von außen: mit
+            // `ESC [ 2 K` darin löschte er beim Ausgeben die Zeile darüber.
+            eprintln!("Fehler: {}", safe_text(&e.to_string()));
             if let RedactError::Config(_) = e {
                 return ExitCode::from(2);
             }
@@ -79,8 +83,13 @@ fn dispatch(cli: &Cli) -> Result<ExitCode> {
     batch::run(cli, &settings, &inputs)
 }
 
+/// Die Zusammenfassung eines einzelnen Laufs.
+///
+/// Jeder Text, der aus der Datei stammt — Pfade, blockierte Treffer,
+/// Warnungen —, geht durch [`safe_text`]: ein Dateiname darf Steuerzeichen
+/// enthalten, und roh ausgegeben steuern die das Terminal statt dazustehen.
 fn report(outcome: &Outcome) {
-    println!("Eingabe:            {}", outcome.input);
+    println!("Eingabe:            {}", safe_text(&outcome.input));
     println!("Seiten:             {}", outcome.pages);
     if outcome.text_runs > 0 {
         println!("Textzeilen:         {}", outcome.text_runs);
@@ -89,15 +98,19 @@ fn report(outcome: &Outcome) {
     if outcome.blocked > 0 {
         println!("Durch Negativliste blockiert: {}", outcome.blocked);
         for detail in &outcome.blocked_details {
-            println!("  - {detail}");
+            println!("  - {}", safe_text(detail));
         }
     }
     match &outcome.review_out {
         Some(path) => {
-            println!("Review geschrieben: {path}");
+            println!("Review geschrieben: {}", safe_text(path));
             println!();
             println!("Datei prüfen, `enabled` anpassen und dann anwenden mit:");
-            println!("  redact-rs {} --apply-review {path}", outcome.input);
+            println!(
+                "  redact-rs {} --apply-review {}",
+                safe_text(&outcome.input),
+                safe_text(path)
+            );
         }
         None => {
             // Absicht und Ergebnis werden getrennt ausgewiesen. „Schwärzungen“
@@ -158,19 +171,19 @@ fn report(outcome: &Outcome) {
             } else {
                 println!(
                     "Metadaten entfernt: {}",
-                    outcome.metadata_removed.join(", ")
+                    safe_text(&outcome.metadata_removed.join(", "))
                 );
             }
             if let Some(path) = &outcome.output {
-                println!("Ausgabe:            {path}");
+                println!("Ausgabe:            {}", safe_text(path));
             }
             if let Some(path) = &outcome.audit_log {
-                println!("Audit-Log:          {path}");
+                println!("Audit-Log:          {}", safe_text(path));
             }
         }
     }
     for warning in &outcome.warnings {
-        eprintln!("Warnung: {warning}");
+        eprintln!("Warnung: {}", safe_text(warning));
     }
 }
 

@@ -77,6 +77,16 @@ laufenden Prozess. Gegen den hilft kein Anwendungsprogramm.
     stehen die *gefundenen* Geheimnisse im Klartext.
 * **Die Schreibziele werden geprüft, bevor gerechnet wird.** Ein Lauf, dessen
   Audit-Log-Ziel nicht taugt, schreibt auch kein PDF.
+* **Der Namenszusatz ist ein Name.** `--output-suffix` und `output_suffix` aus
+  der Einstellungsdatei dürfen keinen Pfadtrenner, kein `..` und kein
+  Steuerzeichen enthalten; sonst bricht der Lauf ab, bevor etwas entsteht.
+  Siehe „Ein Namenszusatz ist kein Wegweiser“.
+* **Nichts aus einer fremden Datei steuert die Anzeige.** Dateinamen und
+  Meldungen gehen auf dem Weg nach stdout/stderr durch
+  `redact_core::safe_text`. Siehe „Fremde Zeichen auf dem Terminal“.
+* **Die Fehlermeldung der Einstellungsdatei gibt deren Inhalt nicht wieder.**
+  `REDACT_RS_CONFIG` zeigt auf einen beliebigen Pfad. Siehe „Die
+  Einstellungsdatei als Vorleser“.
 * **Das Passwort eines verschlüsselten PDFs steht in keiner erzeugten Datei.**
   Weder in der Ausgabe-PDF noch im Audit-Log noch in der Review-Datei, und in
   keiner Fehlermeldung. Siehe den eigenen Abschnitt unten.
@@ -132,16 +142,45 @@ durchsucht Ausgabe-PDF, Audit-Log und Review-Datei — die PDF mit
 `redact_pdf::leaks`, also auf allen Ebenen inklusive entpackter Streams — sowie
 stdout und stderr.
 
-### Was dabei ungeprüft bleibt
+### Die Grenzen gelten auch hinter der Entschlüsselung
 
-**Die Vorprüfung greift bei verschlüsselten Dateien kaum.** `prescan` läuft über
-die Rohbytes und kann verschlüsselte Streams nicht auspacken; die Grenze
-`--max-decompressed-mb` misst dort also nichts. Was nach der Entschlüsselung
-aus den Streams wird, ist vorher nicht bekannt. Die Tiefengrenze der Rohbytes
-und alle Grenzen *nach* dem Laden (Bildbudget, Trefferkandidaten) gelten
-weiterhin. Wer ein verschlüsseltes PDF öffnet, gibt ihm also ausdrücklich mehr
-Vertrauen als einem unverschlüsselten — was insofern zusammenpasst, als man
-sein Passwort kennt.
+Sie greifen nur **zweistufig**, weil die Vorprüfung `prescan` über Rohbytes
+läuft und an einer verschlüsselten Datei nur die Hälfte sehen kann:
+
+| | verschlüsselt? | auf den Rohbytes messbar |
+|---|---|---|
+| Objektstruktur (`<<`, `[`, Namen, Zahlen) | nein | ja |
+| Zeichenketten und **Streams** | ja | nein — es ist Rauschen |
+
+* **Vor** der Entschlüsselung läuft `prescan` wie immer. Was dort zu sehen ist,
+  ist geprüft: eine Datei mit 200 000 offenen `[` in einem gewöhnlichen Objekt
+  fällt schon hier durch, verschlüsselt oder nicht.
+* **Nach** der Entschlüsselung läuft dieselbe Prüfung ein zweites Mal, jetzt auf
+  dem entschlüsselten Dokument (`redact_pipeline::check_limits_after_decryption`).
+  Dazu wird das Dokument serialisiert — die Streams stehen darin als das, was
+  sie sind: komprimiert, aber nicht mehr verschlüsselt. Es misst also
+  derselbe Code mit denselben Grenzen und denselben Meldungen wie bei einer
+  unverschlüsselten Datei.
+
+Erst *nach* dem Laden zu prüfen ist nur deshalb vertretbar, weil das Laden
+selbst billig ist: `lopdf` legt Streams als Rohbytes ab und packt sie nicht aus.
+Der teure Teil — die Zerlegung des Seiteninhalts in Operationen, rund 62 Byte
+Arbeitsspeicher je Byte Stream — kommt erst danach.
+
+**Richtigstellung.** Bis einschließlich dieser Fassung stand hier: *„Wer ein
+verschlüsseltes PDF öffnet, gibt ihm ausdrücklich mehr Vertrauen als einem
+unverschlüsselten — was insofern zusammenpasst, als man sein Passwort kennt."*
+Der Satz war falsch, und er hat eine Lücke gedeckt.
+
+Falsch ist er, weil er das Vertrauen an die falsche Stelle hängt.
+Passwortgeschützte Kontoauszüge werden **samt Passwort** verschickt; das ist
+der Normalfall, für den `--password` überhaupt existiert. Das Vertrauen gilt
+dann dem Absender, nicht der Byte-Struktur der Datei — und der Absender ist im
+Bedrohungsmodell dieses Werkzeugs ausdrücklich *nicht* vertrauenswürdig.
+Gedeckt hat er, dass ein Passwort nicht nur die Entschlüsselung freischaltete,
+sondern sämtliche Stream-Budgets **abschaltete**: nach
+`Document::load_mem_with_options` lief nur noch `validate`. Zwei Messungen dazu
+stehen unter „Verschlüsselte Bomben".
 
 **Das Passwort im Arbeitsspeicher wird nicht überschrieben.** Es steht als
 gewöhnlicher `String` im Prozess und wird beim Freigeben nicht genullt; ein
@@ -164,7 +203,8 @@ anzeigende Software. Wer die Datei öffnen darf, kann sie hier schwärzen.
 
 | Grenze | Vorgabe | Stellschraube |
 |--------|---------|---------------|
-| Verschachtelungstiefe (`[`, `<<`) | 128 | fest |
+| **Größe der Eingabedatei** | **512 MB** | **`--max-input-mb`** |
+| Verschachtelungstiefe (`[`, `<<`) | 100 | fest |
 | dito, in binär aussehender Nutzlast | 256 | fest |
 | entpackte Bytes über **alle** Streams | 1024 MB | `--max-decompressed-mb` |
 | davon: Streams, die geparst werden | 16 MB | `--max-parsed-mb` |
@@ -172,11 +212,32 @@ anzeigende Software. Wer die Datei öffnen darf, kann sie hier schwärzen.
 | Rohgröße eines LZW-/ASCII85-Streams | 16 MB | fest |
 | Bildpunkte **je Bild** (Dekodieren) | 40 000 000 | fest |
 | gleichzeitig gehaltene **dekodierte** Bildbytes | 256 MB | `--max-image-mb` |
+| Größe der Einstellungsdatei | 1 MB | fest |
+
+Alle Grenzen dieser Tabelle gelten für verschlüsselte Dateien genauso — siehe
+„Die Grenzen gelten auch hinter der Entschlüsselung“.
 
 Die Vorprüfung (`redact_pdf::document::prescan`) läuft über die **Rohbytes**,
 bevor `lopdf` die Datei zu sehen bekommt, und schließt die ausgepackten Streams
 mit ein. Sie muss davor laufen: der Stapelüberlauf beendet den Prozess, bevor
 irgendein Fehlerwert entstehen könnte.
+
+Die erste Zeile steht **vor** allen anderen, und zwar wörtlich: die
+Eingabedatei wird in einem Stück gelesen — die Prüfsumme im Audit-Log soll die
+der *verarbeiteten* Bytes sein und nicht die einer inzwischen ausgetauschten
+Datei —, und ohne diese Grenze stand damit in der Datei, wie viel
+Arbeitsspeicher der Lauf belegt. `redact_pipeline::read_input` fragt deshalb
+zuerst nach Art und Länge und liest dann über einen begrenzten Leser; siehe
+„Unbegrenzte Eingabedatei“.
+
+**Zur Zahl 512 MB.** Es ist eine Grenze gegen das Absurde, nicht gegen das
+Große. Die Vorlage ist ein Kontoauszug: ein paar hundert Kilobyte, mit
+eingescannten Seiten einige Megabyte; selbst ein Jahrgang farbig gescannter
+Auszüge in 600 dpi bleibt weit darunter. 512 MB lassen sich auf jeder Maschine
+lesen, auf der die Oberfläche läuft, und sind zwei Zehnerpotenzen von dem
+entfernt, was die Maschine umwirft. Wer wirklich mehr braucht, sagt es mit
+`--max-input-mb` — das ist dann eine bewusste Entscheidung und keine, die eine
+fremde Datei für den Nutzer trifft.
 
 Die beiden letzten Zeilen sind eine **eigene** Klasse und stehen bewusst
 getrennt: `--max-decompressed-mb` und `--max-parsed-mb` verbuchen die
@@ -185,6 +246,108 @@ ausgepackt werden — 4 Byte je Bildpunkt. Bei einem gewöhnlichen
 Schwarzweiß-Scan (`/DeviceGray`, `/BitsPerComponent 1`) liegt zwischen beidem
 der **Faktor 32**; die Rohbyte-Grenzen greifen dort also nicht. Siehe
 „Speicherbedarf der Bildschwärzung“ unter „Messungen“.
+
+---
+
+## Wege, die nicht über den Speicher gehen
+
+### Ein Namenszusatz ist kein Wegweiser
+
+Ohne Ausgabedatei entsteht das Ergebnis **neben** der Eingabe, mit einem Zusatz
+im Dateinamen. Der Zusatz kam ungeprüft aus `--output-suffix`, aus der
+Einstellungsdatei und aus dem Feld in der Seitenleiste. Mit einem Pfadtrenner
+darin war er kein Zusatz mehr:
+
+```yaml
+# ~/.config/redact-rs/settings.yaml
+output_suffix: "/../../ziel/alle"
+```
+
+```
+$ redact-rs b3/ --force
+b3/drei.pdf → b3/drei/../../ziel/alle.pdf (0 Schwärzung(en))
+b3/eins.pdf → b3/eins/../../ziel/alle.pdf (0 Schwärzung(en))
+b3/zwei.pdf → b3/zwei/../../ziel/alle.pdf (0 Schwärzung(en))
+
+3 Datei(en): 3 verarbeitet, 0 fehlgeschlagen.
+$ echo $?
+0
+```
+
+In `ziel/alle.pdf` stand nur das Ergebnis der **letzten** Datei. Drei Dinge
+gingen dabei schief, und der Rückgabewert meldete keines davon: der Dateistamm
+war weg, alle Stapel-Ergebnisse kollidierten auf demselben Pfad (genau das, was
+`batch::reject_single_target_switches` für `-o` verhindert), und geschrieben
+wurde außerhalb des Eingabeverzeichnisses — die Zwischenverzeichnisse legte
+`check_target` selbst mit `create_dir_all` an. Symlinkschutz und Eingabeschutz
+hielten; sie sind die letzte Bremse, nicht die erste.
+
+Geprüft wird jetzt an zwei Stellen: beim Lesen der Einstellungsdatei
+(`Settings::validate`) und vor dem ersten Schreibziel
+(`redact_pipeline::plan_outputs`, gilt damit für Kommandozeile, Stapel und
+Oberfläche). Zusätzlich neutralisiert `redact_core::output_path_with_suffix`
+Pfadtrenner zu `_` — erreicht wird das im laufenden Programm nie, es ist die
+Bremse für einen künftigen Aufrufer, der beide Prüfungen vergisst.
+
+### Fremde Zeichen auf dem Terminal
+
+Ein Dateiname darf unter Unix jedes Byte außer `/` und `NUL` enthalten, also
+auch `ESC [ 3 1 m` oder `ESC [ 2 K`. Roh ausgegeben führt das Terminal die
+Folge aus. `od -c` auf die Zusammenfassung eines Stapels zeigte vorher
+
+```
+b   6   /   a  033   [   3   1   m   r   o   t  033   [   2   K   .   p   d   f
+```
+
+Damit ließ sich die Zusammenfassung optisch fälschen — Zeilen löschen, den
+Cursor hochfahren, aus „1 fehlgeschlagen“ ein „0 fehlgeschlagen“ machen. Wer
+ein Schwärzungsergebnis an dieser Zusammenfassung prüft, prüft dann das, was
+der Absender der Datei zeigen wollte.
+
+Jeder Text, der aus einer Datei stammt, geht deshalb durch
+`redact_core::safe_text`: C0-Steuerzeichen einschließlich Zeilenumbruch, `DEL`,
+die C1-Zeichen und die Richtungsumschalter (`U+202A`–`U+202E`, `U+2066`–`U+2069`
+— `rechnung<U+202E>fdp.exe` liest sich sonst als `rechnungexe.pdf`) werden zur
+sichtbaren Form `\u{1b}`. Betroffen sind die Zusammenfassung, die
+Stapelmeldungen und die eine Stelle, an der jeder Fehler herauskommt
+(`main::main`). In `--json` bleibt der Name vollständig: `serde_json` schreibt
+Steuerzeichen selbst als ``, und dort liest ihn ein Programm, keine Anzeige.
+
+### Die Einstellungsdatei als Vorleser
+
+`REDACT_RS_CONFIG` zeigt auf einen beliebigen Pfad, und an der Vorgabestelle
+kann ein Symlink stehen. Zeigt einer der beiden auf eine fremde Datei, lautete
+die Meldung
+
+```
+Fehler: Konfigurationsfehler: …/s4.yaml: Einstellungen nicht lesbar:
+        unknown field `root:*:20501:0:99999:7::`, …
+```
+
+Keine Rechtegrenze wird dabei überschritten — das Programm läuft mit den
+Rechten des Nutzers, der die Datei ohnehin lesen dürfte. Es war aber ein Weg,
+beliebige Zeilen einer fremden Datei in Protokolle, Fehlerberichte und
+Bildschirmfotos zu befördern, und dafür gibt es keinen Grund.
+
+Die Meldung wird jetzt selbst gebaut (`settings::describe_yaml_error`): Art des
+Fehlers, Zeile und Spalte, die erlaubten Schlüssel. Der beanstandete Schlüssel
+wird nur wiedergegeben, wenn er *wie ein Schlüssel dieser Datei aussieht* —
+höchstens 32 Zeichen, ASCII, beginnend mit Buchstabe oder `_`, danach
+Buchstaben, Ziffern, `_` und `-`. Ein Tippfehler (`output_sufix`) ist damit
+weiterhin beim Namen genannt, `root:*:20501:0:99999:7::` nicht:
+
+```
+Fehler: Konfigurationsfehler: /etc/shadow: Einstellungen nicht lesbar
+(Zeile 1, Spalte 1): unbekannter Schlüssel. Erlaubt sind: output_suffix,
+patterns, min_confidence, padding, theme. (Der Inhalt der Datei wird hier
+nicht wiedergegeben — REDACT_RS_CONFIG und die Vorgabestelle können auf eine
+beliebige fremde Datei zeigen.)
+```
+
+Dieselbe Überlegung gilt für die Größe: die Einstellungsdatei wird nur gelesen,
+wenn sie eine gewöhnliche Datei unter 1 MB ist. Sonst wäre `REDACT_RS_CONFIG`
+auf eine dünn belegte 6-GB-Datei derselbe Speicherfehler wie oben, nur an einer
+anderen Stelle.
 
 ---
 
@@ -237,6 +400,68 @@ Auspacken, sondern das Parsen: aus jedem Operator wird eine eigene
 ein großes für alle Streams (Bilder, Schriften, eingebettete Dateien werden nur
 gespeichert) und ein sehr viel engeres für die Streams, die tatsächlich geparst
 werden. 16 MB × 62 ≈ 1 GB ist die Obergrenze, die daraus folgt.
+
+### Verschlüsselte Bomben
+
+Dieselben beiden Bomben wie oben, nur RC4-verschlüsselt (Standard-Handler,
+`/V 1 /R 2`) und mit bekanntem Passwort. „vorher“ ist der Stand, in dem nach
+`Document::load_mem_with_options` nur `validate` lief.
+
+| Datei | Aufruf | vorher | nachher |
+|---|---|---|---|
+| 196 kB, Content-Stream **64 MB** entpackt | ohne Passwort | Exit 1, 8,0 MB, 0,0 s | unverändert |
+| dito | mit Passwort | **SIGKILL** durch den systemweiten OOM-Killer; unter `ulimit -v 4 GB` stattdessen **SIGABRT**, Exit 134, nach 10,6 s bei **3 876 MB** | Exit 1, **22,8 MB**, 0,0 s |
+| 1,3 kB, **200 000** offene `[` im Content-Stream | ohne Passwort | Exit 1 (Tiefengrenze) | unverändert |
+| dito | mit Passwort | **Exit 0**, Ausgabe geschrieben, IBAN unverändert darin, 8,0 MB | Exit 1, **7,9 MB**, 0,0 s |
+| 33 kB, harmloses verschlüsseltes PDF | mit Passwort | Exit 0, 7,9 MB | unverändert |
+
+Die dritte Zeile ist der stillere und deshalb schlimmere Fall. Der Lauf endete
+mit „0 Schwärzungen“ und schrieb eine Ausgabedatei; `redact_pdf::leaks` fand die
+IBAN darin unverändert. `lopdf` bekommt einen so tief verschachtelten
+Content-Stream nicht in Operationen zerlegt, die Analyse sieht also keinen
+Text — und „0 Schwärzungen“ liest sich wie „nichts zu schwärzen“. Ein Absturz
+fällt auf; das hier nicht.
+
+Der Verstärkungsfaktor ist derselbe wie bei einer unverschlüsselten Datei:
+gemessen an einer verschlüsselten 13-kB-Datei mit 4 MB Content-Stream **1 189 MB**
+(rund 300 Byte je Byte, mit dem Vielfachen aus der Konfliktauflösung obendrauf).
+Bei 64 MB wären das gut 19 GB — die Maschine hat 16.
+
+Die Fälle stehen als Prüfmaterial im Baum
+(`crates/redact-pipeline/src/testdata/bombe_verschluesselt.pdf` und
+`bombe_verschachtelt.pdf`, 33 kB bzw. 1,3 kB) und werden von
+`crates/redact-cli/tests/hardening.rs` gemessen. Der Test prüft nicht auf
+Megabyte, sondern auf das, was sich in einem Testfall sauber messen lässt:
+`status.code().is_some()` — ein durch ein Signal beendeter Prozess hat unter
+Unix **keinen** Rückgabewert, genau daran ist ein Speicherfehler zu erkennen.
+
+### Unbegrenzte Eingabedatei
+
+Eine dünn belegte Datei (`truncate -s 6G`): 6 442 450 944 Byte Nennlänge, 4 kB
+wirklich auf der Platte. `std::fs::read` legt einen Puffer in Dateigröße an,
+bevor irgendetwas geprüft wird.
+
+| | vorher | nachher |
+|---|---|---|
+| einzeln (`redact-rs riesig.pdf -o out.pdf`) | Exit 1 nach **19,9 s**, **6 149 MB** | Exit 1 nach **0,0 s**, **7,9 MB** |
+| in einem Stapelverzeichnis mit zwei gesunden Dateien | Exit 1 nach **27,0 s**, **6 152 MB** | Exit 1 nach **0,1 s**, **8,8 MB** |
+
+Linear skalierend: 32 GB Nennlänge reißen den Rechner um, und dafür braucht es
+weder Rechte noch Plattenplatz.
+
+Zum Stapel gehört die zweite Hälfte des Befunds: die Datei wurde **nicht einmal
+namentlich genannt**, solange sie den Lauf aufhielt. Vor der Stapelverarbeitung
+suchte immer ein Mensch die Datei aus; jetzt genügt eine Datei im Verzeichnis.
+Seither steht jeder Name mit Zähler auf stderr, **bevor** die Datei geöffnet
+wird (stderr, weil `--json` seine Zusammenfassung nach stdout schreibt):
+
+```
+[1/3] b3/a.pdf
+[2/3] b3/riesig.pdf
+FEHLGESCHLAGEN b3/riesig.pdf: PDF-Fehler: b3/riesig.pdf: 6144 MB groß,
+erlaubt sind 512 MB (--max-input-mb). …
+[3/3] b3/z.pdf
+```
 
 ### Speicherbedarf der Bildschwärzung
 

@@ -18,11 +18,30 @@
 //! Datei auf denselben Pfad zeigen. Dieselbe Datei zweimal genannt scheitert
 //! beim zweiten Mal am Schreibpfad („existiert bereits“), wird gemeldet und
 //! reißt nichts mit.
+//!
+//! ## Jede Datei wird genannt, bevor sie angefasst wird
+//!
+//! Vor der Stapelverarbeitung suchte immer ein Mensch die Datei aus; wer den
+//! Lauf hängen sah, wusste, woran. Jetzt genügt eine Datei im Verzeichnis, und
+//! die Zusammenfassung kommt erst am Ende. Eine dünn belegte Datei mit 6 GB
+//! Nennlänge hielt den Lauf 21 s lang bei 6 149 MB Spitzenspeicher auf, ohne
+//! dass ihr Name irgendwo stand. Deshalb geht der Name **vor** dem Öffnen nach
+//! stderr — stderr, weil `--json` seine Zusammenfassung nach stdout schreibt
+//! und die eine Maschine liest.
+//!
+//! ## Namen aus fremder Hand
+//!
+//! Ein Dateiname darf unter Unix fast jedes Byte enthalten, auch `ESC [ 2 K`.
+//! Roh ausgegeben löscht das Zeilen und färbt Text — damit ließe sich diese
+//! Zusammenfassung optisch fälschen, bis zur erfundenen Zeile
+//! „0 fehlgeschlagen“. Jeder Name geht deshalb durch
+//! [`redact_core::safe_path`]. Für `--json` braucht es das nicht: `serde_json`
+//! schreibt Steuerzeichen selbst als ``.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use redact_core::{RedactError, Result};
+use redact_core::{safe_path, safe_text, RedactError, Result};
 use redact_pipeline::{Outcome, Settings};
 
 use crate::cli::Cli;
@@ -124,7 +143,14 @@ pub fn run(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> Result<ExitCod
     reject_single_target_switches(cli)?;
 
     let mut entries = Vec::with_capacity(inputs.len());
-    for input in inputs {
+    let total = inputs.len();
+    for (index, input) in inputs.iter().enumerate() {
+        // **Vor** dem Öffnen: welche Datei ist gerade dran. Sonst hängt der
+        // Lauf an einer Datei, deren Name nirgends steht — und je größer sie
+        // ist, desto länger dauert das.
+        if !cli.quiet {
+            eprintln!("[{}/{total}] {}", index + 1, safe_path(input));
+        }
         let entry = match redact_pipeline::run(&cli.config_for(settings, input)) {
             Ok(outcome) => Entry {
                 input: input.display().to_string(),
@@ -141,7 +167,7 @@ pub fn run(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> Result<ExitCod
         // auch mit `--json`. Wer einen Stapel laufen lässt, sieht sonst erst
         // ganz am Ende, dass etwas nicht geklappt hat.
         if let Some(error) = &entry.error {
-            eprintln!("FEHLGESCHLAGEN {}: {error}", entry.input);
+            eprintln!("FEHLGESCHLAGEN {}: {}", safe_path(input), safe_text(error));
         }
         entries.push(entry);
     }
@@ -172,8 +198,8 @@ fn report(cli: &Cli, entries: &[Entry]) -> Result<()> {
         let target = outcome.output.as_deref().or(outcome.review_out.as_deref());
         println!(
             "{} → {} ({} Schwärzung(en))",
-            entry.input,
-            target.unwrap_or("—"),
+            safe_text(&entry.input),
+            target.map(safe_text).unwrap_or_else(|| "—".to_string()),
             outcome.redactions
         );
     }

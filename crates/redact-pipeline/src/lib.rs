@@ -45,7 +45,8 @@ use redact_core::{
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::document::{
-    check_target, load_from_bytes_with_limits, validate, write_file, Limits, WriteOptions,
+    check_target, load_from_bytes_with_limits, prescan, save_to_bytes, validate, write_file,
+    Limits, WriteOptions,
 };
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
@@ -57,6 +58,34 @@ pub const DEFAULT_PADDING: f64 = 1.0;
 
 /// Vorgabe für `--max-candidates`, siehe [`Config::max_candidates`].
 pub const DEFAULT_MAX_CANDIDATES: usize = 100_000;
+
+/// Vorgabe für `--max-input-mb`: 512 MB.
+///
+/// ## Warum es diese Grenze überhaupt gibt
+///
+/// Die Eingabedatei wird in einem Stück in den Speicher gelesen — sie muss es
+/// werden, denn die Prüfsumme im Audit-Log soll die der *verarbeiteten* Bytes
+/// sein und nicht die einer Datei, die sich zwischendurch geändert hat. Ohne
+/// Grenze ist die Größe des Speicherbedarfs damit eine Angabe der Datei.
+/// Gemessen an einer dünn belegten Datei (`truncate -s 6G`, 4 kB wirklich auf
+/// der Platte): Spitzenspeicher 6 149 MB, nach 20 s ein Fehler. Bei 32 GB
+/// Nennlänge holt der Kernel den Prozess mit dem OOM-Killer, und den holt er
+/// sich nicht immer allein.
+///
+/// Solange ein Mensch jede Datei einzeln aussuchte, war das theoretisch. Mit
+/// der Stapelverarbeitung genügt eine Datei im Verzeichnis.
+///
+/// ## Warum 512 MB
+///
+/// Es ist eine Grenze gegen das Absurde, nicht gegen das Große. Die Vorlage
+/// ist ein Kontoauszug: ein paar hundert Kilobyte, mit eingescannten Seiten
+/// einige Megabyte. Selbst ein Jahrgang farbig gescannter Auszüge in 600 dpi
+/// bleibt weit darunter. 512 MB lassen sich auf jeder Maschine lesen, auf der
+/// die Oberfläche läuft — und sie sind zwei Zehnerpotenzen von dem entfernt,
+/// was die Maschine umwirft. Wer wirklich mehr braucht, sagt es mit
+/// `--max-input-mb`; das ist eine bewusste Entscheidung und keine, die eine
+/// fremde Datei für den Nutzer trifft.
+pub const DEFAULT_MAX_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Ein Passwort, das sich nicht versehentlich ausplaudern lässt.
 ///
@@ -132,6 +161,10 @@ pub struct Config {
     pub max_decoded_image_bytes: u64,
     /// Obergrenzen für die Eingabedatei (siehe `SECURITY.md`).
     pub limits: Limits,
+    /// Obergrenze für die Eingabedatei selbst, in Byte (`--max-input-mb`).
+    ///
+    /// Sie greift **vor** dem Lesen; siehe [`read_input`].
+    pub max_input_bytes: u64,
     /// Obergrenze für die Zahl der Trefferkandidaten (Zeitbremse).
     pub max_candidates: usize,
     /// Passwort eines verschlüsselten Dokuments.
@@ -172,6 +205,7 @@ impl Default for Config {
             allow_undecodable_images: false,
             max_decoded_image_bytes: redact_pdf::image::DEFAULT_MAX_DECODED_IMAGE_BYTES,
             limits: Limits::default(),
+            max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
             max_candidates: DEFAULT_MAX_CANDIDATES,
             password: None,
             theme: settings::THEMES[0].to_string(),
@@ -261,12 +295,32 @@ pub fn password_required(error: &RedactError) -> bool {
 /// Dekompressionsbombe, kaputter Katalog — bleibt bestehen; ein Passwort soll
 /// keinen fremden Fehler übertünchen.
 ///
-/// Der erste Anlauf hat die Vorprüfung der Rohbytes bereits bestanden (sonst
-/// wäre es nicht die Verschlüsselungs-Ablehnung geworden), deshalb läuft sie
-/// nicht ein zweites Mal. **Grenze:** was `prescan` an einem verschlüsselten
-/// Dokument messen kann, ist wenig — die Streams lassen sich vor der
-/// Entschlüsselung nicht auspacken, `--max-decompressed-mb` greift dort also
-/// nicht. Siehe `SECURITY.md`.
+/// ## Die Grenzen gelten auch hier — sie greifen nur zweistufig
+///
+/// Die Vorprüfung [`redact_pdf::document::prescan`] misst Rohbytes. An einer
+/// verschlüsselten Datei sieht sie deshalb nur die Hälfte:
+///
+/// | | verschlüsselt? | von `prescan` auf den Rohbytes messbar |
+/// |---|---|---|
+/// | Objektstruktur (`<<`, `[`, Namen, Zahlen) | nein | ja |
+/// | Zeichenketten und **Streams** | ja | nein — es ist Rauschen |
+///
+/// Der erste Anlauf oben hat die Rohbytes also bereits geprüft, und was dort
+/// zu sehen war, ist geprüft: eine Datei mit 200 000 offenen `[` in einem
+/// gewöhnlichen Objekt fällt schon dort durch, verschlüsselt oder nicht.
+/// Nicht zu sehen war der Inhalt der Streams — und genau dort liegen beide
+/// Bomben, gegen die die Budgets gedacht sind.
+///
+/// Deshalb läuft die Prüfung nach der Entschlüsselung ein zweites Mal, jetzt
+/// auf dem entschlüsselten Dokument (siehe [`check_limits_after_decryption`]).
+/// Vorher galten `--max-decompressed-mb`, `--max-parsed-mb` und die
+/// Tiefengrenze für eine verschlüsselte Datei überhaupt nicht. Gemessen an
+/// einer 196 kB großen Datei mit einem 64 MB entpackenden Content-Stream:
+/// ohne Passwort Ablehnung in 0,0 s; **mit** Passwort Spitzenspeicher über
+/// 15 GB und Abbruch durch den OOM-Killer, mit `ulimit -v` stattdessen
+/// SIGABRT. Dieselbe Datei mit 200 000-facher Verschachtelung lief mit
+/// Passwort auf Rückgabewert 0 durch und schrieb eine Ausgabe, in der die
+/// IBAN unverändert stand — unverschlüsselt wurde sie abgelehnt.
 pub fn load_document(bytes: &[u8], config: &Config) -> Result<Document> {
     let rejected = match load_from_bytes_with_limits(bytes, &config.limits) {
         Ok(doc) => return Ok(doc),
@@ -283,7 +337,111 @@ pub fn load_document(bytes: &[u8], config: &Config) -> Result<Document> {
     let doc = Document::load_mem_with_options(bytes, LoadOptions::with_password(password.reveal()))
         .map_err(|_| RedactError::Pdf(WRONG_PASSWORD.to_string()))?;
     validate(&doc)?;
+    check_limits_after_decryption(&doc, &config.limits)?;
     Ok(doc)
+}
+
+/// Wendet die Budgets und die Tiefengrenze auf ein **entschlüsseltes**
+/// Dokument an.
+///
+/// ## Wie
+///
+/// Das entschlüsselte Dokument wird serialisiert und die Vorprüfung läuft über
+/// diese Bytes. Das ist keine Umständlichkeit, sondern der Punkt: die Streams
+/// stehen dort als das, was sie sind — komprimiert, aber nicht mehr
+/// verschlüsselt —, und damit misst hier **derselbe Code mit denselben Grenzen
+/// und denselben Meldungen** wie bei einer unverschlüsselten Datei. Eine
+/// zweite Buchhaltung neben [`redact_pdf::document::prescan`] wäre eine
+/// zweite Stelle, an der die Zahlen auseinanderlaufen könnten.
+///
+/// Teuer ist das nicht: serialisiert wird der komprimierte Zustand, für die
+/// gemessene Bombe rund 200 kB. Das Auspacken übernimmt die Vorprüfung, und
+/// die packt von vornherein nur bis zum Budget aus.
+///
+/// ## Wann es zu spät wäre
+///
+/// Erst *nach* dem Laden zu prüfen ist nur deshalb vertretbar, weil das Laden
+/// selbst billig ist: `lopdf` legt Streams als Rohbytes ab und packt sie nicht
+/// aus. Der teure Teil ist das, was danach kommt — die Zerlegung des
+/// Seiteninhalts in Operationen (rund 60 Byte Arbeitsspeicher je Byte
+/// Stream) — und der kommt erst nach dieser Prüfung.
+pub fn check_limits_after_decryption(doc: &Document, limits: &Limits) -> Result<()> {
+    let bytes = save_to_bytes(doc)?;
+    prescan(&bytes, limits).map_err(|e| match e {
+        // Der Zusatz sagt, welcher der beiden Durchgänge angeschlagen hat —
+        // die Datei sah von außen harmlos aus, und das gehört in die Meldung.
+        //
+        // Bewusst „entschlüsselt“ und nicht „verschlüsselt“: [`password_required`]
+        // sucht nach letzterem, und die Oberfläche fragte sonst wieder nach
+        // einem Passwort, das längst gepasst hat.
+        RedactError::Pdf(msg) => RedactError::Pdf(format!("entschlüsselt gilt weiter: {msg}")),
+        other => other,
+    })
+}
+
+/// Liest die Eingabedatei — mit einer Obergrenze **vor** dem ersten Byte.
+///
+/// ## Warum die Reihenfolge zählt
+///
+/// `std::fs::read` legt einen Puffer in Dateigröße an und füllt ihn. Wie groß
+/// der wird, stand damit in der Datei, nicht in der Konfiguration: eine dünn
+/// belegte Datei (`truncate -s 6G`) belegt 4 kB auf der Platte und 6 GB im
+/// Speicher. Gemessen wurden 6 149 MB Spitzenspeicher, bevor überhaupt
+/// feststand, dass es kein PDF ist.
+///
+/// Hier wird deshalb zuerst gefragt und dann gelesen:
+///
+/// 1. Es muss eine **gewöhnliche Datei** sein. Eine benannte Pipe hat die
+///    Länge 0 und liefert trotzdem endlos.
+/// 2. Die Länge muss unter `max_bytes` liegen.
+/// 3. Gelesen wird über einen **begrenzten** Leser. Das ist kein Gürtel zum
+///    Hosenträger: zwischen der Frage und dem Lesen kann die Datei wachsen,
+///    und über einen `/proc`-Pfad oder ein Netzdateisystem lügt die Länge auch
+///    ohne Zutun.
+///
+/// Die Meldung nennt die Datei beim Namen. Im Stapel nennt
+/// `redact_cli::batch` sie zusätzlich schon *vorher*: wer zwanzig Dateien
+/// laufen lässt, soll nicht raten müssen, an welcher es hängt.
+pub fn read_input(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let name = redact_core::safe_path(path);
+    let meta = std::fs::metadata(path)
+        .map_err(|e| RedactError::Pdf(format!("{name}: nicht lesbar: {e}")))?;
+    if !meta.is_file() {
+        return Err(RedactError::Pdf(format!(
+            "{name}: keine gewöhnliche Datei. redact-rs liest nur Dateien — \
+             eine Pipe oder ein Gerät hätte keine Größe, an der sich eine \
+             Grenze festmachen ließe."
+        )));
+    }
+    if meta.len() > max_bytes {
+        return Err(RedactError::Pdf(format!(
+            "{name}: {} MB groß, erlaubt sind {} MB (--max-input-mb). \
+             Die Datei wird zum Prüfen der Prüfsumme in einem Stück gelesen; \
+             ohne diese Grenze bestimmte die Datei, wie viel Arbeitsspeicher \
+             das Werkzeug belegt.",
+            meta.len() / (1024 * 1024),
+            max_bytes / (1024 * 1024)
+        )));
+    }
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| RedactError::Pdf(format!("{name}: nicht lesbar: {e}")))?;
+    // `max_bytes + 1`: so ist eine Datei, die zwischen Frage und Lesen
+    // gewachsen ist, am Ergebnis zu erkennen statt am Speicherverbrauch.
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| RedactError::Pdf(format!("{name}: nicht lesbar: {e}")))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(RedactError::Pdf(format!(
+            "{name}: die Datei ist während des Lesens über die Grenze von \
+             {} MB hinaus gewachsen (--max-input-mb).",
+            max_bytes / (1024 * 1024)
+        )));
+    }
+    Ok(bytes)
 }
 
 /// Führt einen kompletten Lauf aus.
@@ -305,7 +463,10 @@ pub fn run(config: &Config) -> Result<Outcome> {
     // Die Bytes werden **einmal** gelesen: die Prüfsumme muss die der
     // verarbeiteten Bytes sein, nicht die einer inzwischen ausgetauschten
     // Datei. Die Oberfläche macht es genauso (`AppState::load_bytes`).
-    let bytes = std::fs::read(&config.input)?;
+    //
+    // `read_input` statt `std::fs::read`: gelesen wird erst, wenn feststeht,
+    // dass es eine gewöhnliche Datei unterhalb von `--max-input-mb` ist.
+    let bytes = read_input(&config.input, config.max_input_bytes)?;
     outcome.input_sha256 = sha256_bytes(&bytes);
     let mut doc = load_document(&bytes, config).map_err(|e| match e {
         RedactError::Pdf(msg) => RedactError::Pdf(format!("{}: {msg}", config.input.display())),
@@ -747,6 +908,7 @@ pub fn secret_options(config: &Config) -> WriteOptions {
 }
 
 /// Alle Schreibziele eines Laufs, vorab geprüft.
+#[derive(Debug)]
 pub struct OutputPlan {
     pub output: Option<PathBuf>,
 }
@@ -758,6 +920,12 @@ pub struct OutputPlan {
 /// ignoriert, und der Vergleich „Ausgabe == Eingabe“ verglich rohe Pfade und
 /// war damit über `./in.pdf`, `dir/../in.pdf` oder einen Symlink zu umgehen.
 pub fn plan_outputs(config: &Config) -> Result<OutputPlan> {
+    // Der Namenszusatz bestimmt jeden Pfad, der hier gleich geprüft wird —
+    // also gehört er selbst vor die Prüfung. Die Einstellungsdatei prüft ihn
+    // schon beim Lesen; hier gilt es zusätzlich für `--output-suffix`, für das
+    // Feld in der Seitenleiste der Oberfläche und für jeden künftigen Weg.
+    redact_core::check_output_suffix(&config.output_suffix)?;
+
     if config.review {
         check_target(&review_target(config), &secret_options(config))?;
         return Ok(OutputPlan { output: None });
@@ -1034,6 +1202,195 @@ mod tests {
             .expect_err("falsches Passwort")
             .to_string();
         assert!(!error.contains(PW), "{error}");
+    }
+
+    // ------------------- Befund 3: die Grenzen gelten auch entschlüsselt
+
+    /// **Die Auflage:** die verschlüsselte Dekompressionsbombe endet mit einem
+    /// klaren Fehler statt mit SIGKILL oder SIGABRT.
+    ///
+    /// Speicher lässt sich in einem Test nur schlecht messen — ein
+    /// Prozessabbruch reißt den Testläufer mit, statt einen Wert zu liefern.
+    /// Gemessen wird deshalb, was sich messen lässt: **abgelehnt oder
+    /// angenommen**, und ob die Meldung die überschrittene Größe nennt. Die
+    /// Speicherzahlen (vorher 3 876 MB und SIGABRT, nachher 22,8 MB und
+    /// Rückgabewert 1) stehen in `SECURITY.md`.
+    #[test]
+    fn an_encrypted_decompression_bomb_is_refused_instead_of_eating_the_machine() {
+        let config = encrypted_config(Some(testing::ENCRYPTED_PDF_PASSWORD));
+        let error = load_document(testing::ENCRYPTED_BOMB_PDF, &config)
+            .expect_err("die Bombe muss abgelehnt werden")
+            .to_string();
+
+        // Die Meldung nennt das Budget, das sie gerissen hat …
+        assert!(error.contains("Budget"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "{}",
+                config.limits.max_parsed_bytes / (1024 * 1024)
+            )),
+            "die Meldung nennt die Grenze nicht: {error}"
+        );
+        // … und sie sagt, dass es an der entschlüsselten Datei gemessen wurde.
+        assert!(error.contains("entschlüsselt gilt weiter"), "{error}");
+        // Aber sie darf nicht wie „hier fehlt ein Passwort“ aussehen: die
+        // Oberfläche fragte sonst nach einem Passwort, das gerade gepasst hat.
+        let error = load_document(testing::ENCRYPTED_BOMB_PDF, &config).unwrap_err();
+        assert!(
+            !password_required(&error),
+            "die Oberfläche fragt nach dem Passwort statt abzubrechen: {error}"
+        );
+    }
+
+    /// **Die Auflage:** die verschlüsselte Verschachtelungsbombe läuft nicht
+    /// mehr mit Rückgabewert 0 durch.
+    ///
+    /// Vorher: Rückgabewert 0, Ausgabe geschrieben, IBAN unverändert darin.
+    /// Das ist der schlimmere der beiden Fälle — ein Absturz fällt auf, eine
+    /// Datei mit „0 Schwärzungen“ nicht.
+    #[test]
+    fn an_encrypted_nesting_bomb_no_longer_passes_as_a_clean_document() {
+        let config = encrypted_config(Some(testing::ENCRYPTED_PDF_PASSWORD));
+        let error = load_document(testing::ENCRYPTED_NESTING_BOMB_PDF, &config)
+            .expect_err("die Verschachtelung muss auffallen")
+            .to_string();
+        assert!(error.contains("Verschachtelungstiefe"), "{error}");
+        assert!(
+            error.contains(&config.limits.max_nesting_depth.to_string()),
+            "{error}"
+        );
+    }
+
+    /// Die eigenen Grenzen gelten auch dahinter: wer sie hochsetzt, kommt an
+    /// derselben Datei durch — und wer sie herunterzieht, an einer harmlosen
+    /// nicht mehr.
+    ///
+    /// Ohne diese Gegenprobe könnte die Prüfung eine feste Zahl benutzen und
+    /// der Test bliebe grün.
+    #[test]
+    fn the_check_after_decryption_uses_the_configured_limits() {
+        let mut config = encrypted_config(Some(testing::ENCRYPTED_PDF_PASSWORD));
+
+        // Großzügiger als die Bombe: sie kommt durch.
+        config.limits.max_parsed_bytes = (testing::ENCRYPTED_BOMB_MB + 1) * 1024 * 1024;
+        assert!(
+            load_document(testing::ENCRYPTED_BOMB_PDF, &config).is_ok(),
+            "mit ausreichendem Budget muss dieselbe Datei laden"
+        );
+
+        // Enger als das harmlose Prüf-PDF: auch das fällt durch.
+        config.limits = Limits {
+            max_parsed_bytes: 1,
+            ..Limits::default()
+        };
+        let error = load_document(testing::ENCRYPTED_PDF, &config)
+            .expect_err("mit Budget 1 kommt nichts durch")
+            .to_string();
+        assert!(error.contains("entschlüsselt gilt weiter"), "{error}");
+    }
+
+    /// Und die wichtigste Gegenprobe: ein gewöhnliches verschlüsseltes
+    /// Dokument geht weiterhin durch. Eine Grenze, die alles ablehnt, ist
+    /// keine Härtung, sondern ein Ausfall.
+    #[test]
+    fn an_ordinary_encrypted_document_still_opens() {
+        let config = encrypted_config(Some(testing::ENCRYPTED_PDF_PASSWORD));
+        let doc = load_document(testing::ENCRYPTED_PDF, &config).expect("muss weiterhin laden");
+        assert_eq!(redact_pdf::page_count(&doc), 1);
+        check_limits_after_decryption(&doc, &config.limits).expect("harmlos");
+    }
+
+    // ------------------------- Befund 4: Obergrenze für die Eingabedatei
+
+    fn tempdir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("redact-eingabe-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// **Die Auflage:** die Grenze greift *vor* dem Lesen.
+    ///
+    /// Gemessen wird das an einer dünn belegten Datei: sie belegt 4 kB auf der
+    /// Platte und meldet 6 GB Länge. Wird sie gelesen, kostet das 6 GB
+    /// Arbeitsspeicher (gemessen: 6 149 MB); wird sie an ihrer *Angabe*
+    /// abgelehnt, kostet es nichts. Der Unterschied ist im Test daran zu
+    /// sehen, dass die Meldung die Größe nennt — dafür muss sie vor dem Lesen
+    /// bekannt gewesen sein.
+    #[test]
+    fn a_file_larger_than_the_budget_is_refused_before_it_is_read() {
+        let dir = tempdir("gross");
+        let path = dir.join("riesig.pdf");
+        let file = std::fs::File::create(&path).unwrap();
+        // Dünn belegt: 6 GB Nennlänge, 0 Byte geschrieben.
+        file.set_len(6 * 1024 * 1024 * 1024).unwrap();
+        drop(file);
+
+        let error = read_input(&path, DEFAULT_MAX_INPUT_BYTES)
+            .expect_err("6 GB müssen abgelehnt werden")
+            .to_string();
+        assert!(error.contains("6144 MB"), "{error}");
+        assert!(error.contains("512 MB"), "{error}");
+        assert!(
+            error.contains("riesig.pdf"),
+            "die Datei wird nicht genannt: {error}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Und die Gegenprobe: eine Datei unterhalb der Grenze wird vollständig
+    /// gelesen, Byte für Byte wie mit `std::fs::read`.
+    #[test]
+    fn a_file_within_the_budget_is_read_completely() {
+        let dir = tempdir("klein");
+        let path = dir.join("klein.pdf");
+        let content: Vec<u8> = (0..=255u8).cycle().take(300_000).collect();
+        std::fs::write(&path, &content).unwrap();
+
+        assert_eq!(read_input(&path, DEFAULT_MAX_INPUT_BYTES).unwrap(), content);
+        // Genau auf der Grenze ist noch erlaubt, ein Byte darüber nicht.
+        assert!(read_input(&path, content.len() as u64).is_ok());
+        assert!(read_input(&path, content.len() as u64 - 1).is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Ein Verzeichnis (oder eine Pipe) hat keine Größe, an der sich eine
+    /// Grenze festmachen ließe — und wird deshalb gar nicht erst gelesen.
+    #[test]
+    fn only_regular_files_are_read() {
+        let dir = tempdir("art");
+        let error = read_input(&dir, DEFAULT_MAX_INPUT_BYTES)
+            .expect_err("ein Verzeichnis ist keine Eingabedatei")
+            .to_string();
+        assert!(error.contains("gewöhnliche Datei"), "{error}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --------------- Befund 5: Namenszusatz mit Pfadanteilen, zentral
+
+    /// Vor dem ersten Schreibziel wird der Namenszusatz geprüft — egal, ob er
+    /// aus der Einstellungsdatei, von `--output-suffix` oder aus dem Feld in
+    /// der Seitenleiste kommt.
+    #[test]
+    fn plan_outputs_refuses_a_suffix_with_a_path_component() {
+        let config = Config {
+            input: PathBuf::from("/daten/b3/eins.pdf"),
+            output_suffix: "/../../ziel/alle".to_string(),
+            ..Config::default()
+        };
+        let error = plan_outputs(&config)
+            .expect_err("der Zusatz muss auffallen")
+            .to_string();
+        assert!(error.contains("Namenszusatz"), "{error}");
+        // Und es wurde dabei nichts angelegt: `check_target` legt sonst mit
+        // `create_dir_all` die Zwischenverzeichnisse an.
+        assert!(
+            !Path::new("/daten").exists(),
+            "ein Verzeichnis wurde angelegt"
+        );
     }
 
     #[test]

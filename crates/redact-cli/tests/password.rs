@@ -290,6 +290,18 @@ fn the_encrypted_fixture_does_not_ship_in_the_binary() {
         !binary_contains(ENCRYPTED_PDF_PASSWORD.as_bytes()),
         "das Passwort des Prüf-PDFs liegt im ausgelieferten Binary"
     );
+    // Dasselbe gilt für die beiden verschlüsselten Bomben, die seit den
+    // Befunden 3a/3b danebenliegen — zusammen 35 kB, die niemand ausliefern
+    // will, und der Grund für die Prüfung ist bei ihnen derselbe.
+    for fixture in [
+        redact_pipeline::testing::ENCRYPTED_BOMB_PDF,
+        redact_pipeline::testing::ENCRYPTED_NESTING_BOMB_PDF,
+    ] {
+        assert!(
+            !binary_contains(fixture),
+            "eine der verschlüsselten Prüfbomben liegt im ausgelieferten Binary"
+        );
+    }
     // Gegenprobe: die Suche findet, was wirklich drinsteht — sonst prüfte sie
     // nichts. `redact-rs` steht als Werkzeugname in jedem Audit-Log.
     assert!(binary_contains(b"redact-rs"), "die Suche taugt nicht");

@@ -177,6 +177,16 @@ pub struct Cli {
     #[arg(long, value_name = "MB", default_value_t = 256)]
     pub max_image_mb: u64,
 
+    /// Obergrenze für die Eingabedatei selbst.
+    ///
+    /// Die Datei wird in einem Stück gelesen — die Prüfsumme im Audit-Log soll
+    /// die der verarbeiteten Bytes sein. Ohne diese Grenze bestimmte damit die
+    /// Datei, wie viel Arbeitsspeicher der Lauf belegt: eine dünn belegte
+    /// Datei mit 6 GB Nennlänge belegt 4 kB auf der Platte und 6 GB im
+    /// Speicher. Im Stapelbetrieb genügt dafür eine Datei im Verzeichnis.
+    #[arg(long, value_name = "MB", default_value_t = redact_pipeline::DEFAULT_MAX_INPUT_BYTES / (1024 * 1024))]
+    pub max_input_mb: u64,
+
     /// Obergrenze für die Zahl der Trefferkandidaten in einer Datei.
     ///
     /// Die Konfliktauflösung wächst quadratisch mit dieser Zahl; ohne Grenze
@@ -293,6 +303,7 @@ impl Cli {
             allow_undecodable_images: self.allow_undecodable_images,
             max_decoded_image_bytes: self.max_image_mb.saturating_mul(1024 * 1024),
             limits: self.limits(),
+            max_input_bytes: self.max_input_mb.saturating_mul(1024 * 1024),
             max_candidates: self.max_candidates,
             password: self.password(),
             theme: settings.theme.clone(),

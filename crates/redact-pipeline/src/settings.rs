@@ -58,6 +58,30 @@ pub const SETTINGS_ENV: &str = "REDACT_RS_CONFIG";
 /// Erlaubte Werte für [`Settings::theme`].
 pub const THEMES: [&str; 2] = ["hell", "dunkel"];
 
+/// Die Schlüssel, die [`Settings`] kennt — für die Fehlermeldung.
+///
+/// Sie stehen hier von Hand, weil `serde` sie zwar in seiner eigenen Meldung
+/// aufzählt, diese Meldung aber nicht benutzt wird (siehe
+/// [`Settings::from_yaml`]). Der Test `the_listed_keys_are_the_real_ones`
+/// misst nach, dass die Liste stimmt.
+pub const KEYS: [&str; 5] = [
+    "output_suffix",
+    "patterns",
+    "min_confidence",
+    "padding",
+    "theme",
+];
+
+/// Obergrenze für die Einstellungsdatei.
+///
+/// Sie ist eine von Hand gepflegte Datei mit fünf Schlüsseln; ein Kilobyte
+/// reicht dafür tausendfach. Die Grenze steht trotzdem da, und zwar aus
+/// demselben Grund wie die für die Eingabe-PDF: `REDACT_RS_CONFIG` zeigt auf
+/// einen beliebigen Pfad, und `std::fs::read_to_string` liest, was da steht —
+/// eine dünn belegte Datei mit 6 GB Nennlänge belegte 6 GB Arbeitsspeicher,
+/// bevor die erste Zeile ausgewertet wäre.
+pub const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
+
 /// Die Einstellungsdatei als Struktur.
 ///
 /// Jedes Feld hat eine eingebaute Vorgabe; eine Datei, die nur einen Schlüssel
@@ -109,28 +133,72 @@ impl Settings {
     }
 
     /// Liest eine bestimmte Datei.
+    ///
+    /// Gelesen wird erst, nachdem feststeht, dass es eine gewöhnliche Datei
+    /// von vernünftiger Größe ist — `REDACT_RS_CONFIG` zeigt auf einen
+    /// beliebigen Pfad, und der kann eine benannte Pipe oder eine 6 GB große
+    /// dünn belegte Datei sein.
     pub fn load_from(path: &Path) -> Result<Self> {
+        let name = redact_core::safe_path(path);
+        let meta = std::fs::metadata(path).map_err(|e| {
+            RedactError::Config(format!("Einstellungsdatei {name} nicht lesbar: {e}"))
+        })?;
+        if !meta.is_file() {
+            return Err(RedactError::Config(format!(
+                "Einstellungsdatei {name} ist keine gewöhnliche Datei"
+            )));
+        }
+        if meta.len() > MAX_SETTINGS_BYTES {
+            return Err(RedactError::Config(format!(
+                "Einstellungsdatei {name} ist mit {} Byte zu groß (Grenze {} Byte). \
+                 Die Einstellungsdatei hat {} Schlüssel; das ist keine.",
+                meta.len(),
+                MAX_SETTINGS_BYTES,
+                KEYS.len()
+            )));
+        }
         let text = std::fs::read_to_string(path).map_err(|e| {
-            RedactError::Config(format!(
-                "Einstellungsdatei {} nicht lesbar: {e}",
-                path.display()
-            ))
+            RedactError::Config(format!("Einstellungsdatei {name} nicht lesbar: {e}"))
         })?;
         Self::from_yaml(&text).map_err(|e| match e {
-            RedactError::Config(msg) => RedactError::Config(format!("{}: {msg}", path.display())),
+            RedactError::Config(msg) => RedactError::Config(format!("{name}: {msg}")),
             other => other,
         })
     }
 
     /// Wertet den Inhalt einer Einstellungsdatei aus.
+    ///
+    /// ## Warum die Meldung den Dateiinhalt nicht wiedergibt
+    ///
+    /// `serde_yaml` schreibt in seine Fehlermeldung, woran es lag — und dazu
+    /// gehört der Text, der nicht gepasst hat. Bei einer Einstellungsdatei ist
+    /// das genau richtig. Nur ist nicht gesichert, dass hier eine
+    /// Einstellungsdatei liegt: `REDACT_RS_CONFIG` zeigt auf einen beliebigen
+    /// Pfad, und an der Vorgabestelle kann ein Symlink stehen. Zeigt einer der
+    /// beiden auf `/etc/shadow`, lautete die Meldung bisher
+    ///
+    /// ```text
+    /// Einstellungen nicht lesbar: unknown field `root:*:20501:0:99999:7::`, …
+    /// ```
+    ///
+    /// Keine Rechtegrenze wird dabei überschritten — das Programm liest mit den
+    /// Rechten des Nutzers, der die Datei ohnehin lesen dürfte. Es ist aber ein
+    /// Weg, beliebige Zeilen einer fremden Datei in Protokolle,
+    /// Fehlerberichte und Bildschirmfotos zu befördern, und dafür gibt es
+    /// keinen Grund.
+    ///
+    /// Deshalb wird die Meldung hier selbst gebaut: Art des Fehlers, Zeile und
+    /// Spalte, die erlaubten Schlüssel. Der beanstandete Schlüssel wird nur
+    /// dann genannt, wenn er *wie ein Schlüssel dieser Datei aussieht* — siehe
+    /// [`echoable_key`]. Ein Tippfehler (`output_sufix`) ist damit weiterhin
+    /// beim Namen genannt, eine Zeile aus einer Passwortdatei nicht.
     pub fn from_yaml(text: &str) -> Result<Self> {
         // Eine leere Datei ist `null` und keine leere Abbildung — sie soll die
         // Vorgaben ergeben und keinen Fehler.
         if text.trim().is_empty() {
             return Ok(Self::default());
         }
-        let settings: Self = serde_yaml::from_str(text)
-            .map_err(|e| RedactError::Config(format!("Einstellungen nicht lesbar: {e}")))?;
+        let settings: Self = serde_yaml::from_str(text).map_err(describe_yaml_error)?;
         settings.validate()?;
         Ok(settings)
     }
@@ -140,12 +208,73 @@ impl Settings {
         if !THEMES.contains(&self.theme.as_str()) {
             return Err(RedactError::Config(format!(
                 "unbekanntes Thema „{}“ — erlaubt sind {}",
-                self.theme,
+                redact_core::safe_text(&self.theme),
                 THEMES.join(" und ")
             )));
         }
+        // Ein Namenszusatz mit Pfadanteilen ist kein Zusatz, sondern ein
+        // Wegweiser aus dem Verzeichnis heraus. Geprüft wird hier, weil die
+        // Einstellungsdatei der Ort ist, an dem er üblicherweise steht —
+        // `plan_outputs` prüft ihn ein zweites Mal, dann für alle Wege.
+        redact_core::check_output_suffix(&self.output_suffix)?;
         Ok(())
     }
+}
+
+/// Baut aus einem `serde_yaml`-Fehler eine Meldung **ohne** Dateiinhalt.
+fn describe_yaml_error(error: serde_yaml::Error) -> RedactError {
+    let raw = error.to_string();
+    let kind = if raw.starts_with("unknown field") {
+        "unbekannter Schlüssel"
+    } else if raw.starts_with("missing field") {
+        "ein Schlüssel fehlt"
+    } else if raw.starts_with("duplicate") {
+        "ein Schlüssel steht doppelt"
+    } else if raw.starts_with("invalid type") || raw.starts_with("invalid value") {
+        "ein Wert hat die falsche Art"
+    } else {
+        "die Datei ist kein YAML dieser Form"
+    };
+
+    let mut message = String::from("Einstellungen nicht lesbar");
+    if let Some(location) = error.location() {
+        message.push_str(&format!(
+            " (Zeile {}, Spalte {})",
+            location.line(),
+            location.column()
+        ));
+    }
+    message.push_str(": ");
+    message.push_str(kind);
+    if let Some(key) = echoable_key(&raw) {
+        message.push_str(&format!(" `{key}`"));
+    }
+    message.push_str(&format!(
+        ". Erlaubt sind: {}. (Der Inhalt der Datei wird hier nicht \
+         wiedergegeben — {SETTINGS_ENV} und die Vorgabestelle können auf eine \
+         beliebige fremde Datei zeigen.)",
+        KEYS.join(", ")
+    ));
+    RedactError::Config(message)
+}
+
+/// Der beanstandete Schlüssel — aber nur, wenn er einer sein könnte.
+///
+/// `serde` setzt ihn in Rückwärts-Anführungszeichen. Wiedergegeben wird er nur,
+/// wenn er aussieht wie ein Schlüssel dieser Datei: höchstens 32 Zeichen, ASCII,
+/// beginnend mit Buchstabe oder `_`, danach Buchstaben, Ziffern, `_` und `-`.
+/// `output_sufix` besteht die Prüfung, `root:*:20501:0:99999:7::` nicht — und
+/// eine Zeile, die sie besteht, trägt nichts, was ein Angreifer irgendwo
+/// hinbekommen wollte.
+fn echoable_key(raw: &str) -> Option<&str> {
+    let rest = raw.split_once('`')?.1;
+    let key = rest.split_once('`')?.0;
+    let mut chars = key.chars();
+    let first = chars.next()?;
+    let ok = key.len() <= 32
+        && (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    ok.then_some(key)
 }
 
 /// Pfad der Einstellungsdatei, oder `None`, wenn sich kein Heimatverzeichnis
@@ -211,6 +340,123 @@ mod tests {
             .expect_err("Tippfehler muss auffallen")
             .to_string();
         assert!(error.contains("output_sufix"), "{error}");
+        // Und die Meldung sagt, was stattdessen erlaubt wäre.
+        for key in KEYS {
+            assert!(error.contains(key), "{key} fehlt in: {error}");
+        }
+    }
+
+    /// Die aufgezählten Schlüssel sind wirklich die der Struktur.
+    ///
+    /// [`KEYS`] steht von Hand da; ohne diese Gegenprobe zeigte die Meldung
+    /// nach einem neuen Feld auf eine veraltete Liste.
+    #[test]
+    fn the_listed_keys_are_the_real_ones() {
+        for key in KEYS {
+            let text = format!("{key}: nix\n");
+            let error = Settings::from_yaml(&text)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(
+                !error.contains("unbekannter Schlüssel"),
+                "{key} steht in KEYS, ist aber keiner: {error}"
+            );
+        }
+        // Gegenprobe: ein erfundener Schlüssel fällt auf.
+        let error = Settings::from_yaml("gibt_es_nicht: 1\n")
+            .expect_err("unbekannter Schlüssel")
+            .to_string();
+        assert!(error.contains("unbekannter Schlüssel"), "{error}");
+    }
+
+    // ------------------------------------------ Befund 7: fremder Inhalt
+
+    /// **Die Auflage:** die Meldung gibt keine Zeile der Datei wieder.
+    ///
+    /// Gemessen an dem, was der Befund benutzt hat: `REDACT_RS_CONFIG` auf
+    /// `/etc/shadow` (bzw. hier eine Datei desselben Aufbaus). Vorher stand
+    /// die erste Zeile wörtlich in der Meldung.
+    #[test]
+    fn the_message_does_not_quote_the_contents_of_a_foreign_file() {
+        const SHADOW: &str = "root:*:20501:0:99999:7::\n\
+                              nutzer:$6$abcdefgh$SEHRGEHEIM:20501:0:99999:7:::\n";
+        const PASSWD: &str = "root:x:0:0:root:/root:/bin/bash\n";
+        const PRIVATE_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+                                   b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n";
+
+        for content in [SHADOW, PASSWD, PRIVATE_KEY] {
+            let error = Settings::from_yaml(content)
+                .expect_err("eine fremde Datei ist keine Einstellungsdatei")
+                .to_string();
+            for line in content.lines().filter(|l| !l.trim().is_empty()) {
+                assert!(
+                    !error.contains(line.trim()),
+                    "die Meldung gibt eine Zeile der Datei wieder:\n  Zeile: {line}\n  Meldung: {error}"
+                );
+            }
+            // Auch nicht in Stücken: die auffälligen Teile fehlen ebenso.
+            for secret in ["20501", "SEHRGEHEIM", "/bin/bash", "b3BlbnNzaC1r"] {
+                assert!(!error.contains(secret), "{secret} steht in: {error}");
+            }
+            // Die Meldung bleibt trotzdem brauchbar: sie sagt, wo es klemmt.
+            assert!(error.contains("Zeile"), "{error}");
+        }
+    }
+
+    /// Auch ein Schlüssel, der *fast* wie einer aussieht, wird nicht
+    /// wiedergegeben, sobald er Zeichen enthält, die in keinem Schlüssel
+    /// dieser Datei vorkommen.
+    #[test]
+    fn only_key_shaped_names_are_echoed() {
+        assert_eq!(
+            echoable_key("unknown field `output_sufix`, expected"),
+            Some("output_sufix")
+        );
+        assert_eq!(
+            echoable_key("unknown field `root:*:20501:0:99999:7::`, e"),
+            None
+        );
+        assert_eq!(echoable_key("unknown field `-----BEGIN OPENSSH`, e"), None);
+        assert_eq!(echoable_key("unknown field `/etc/passwd`, e"), None);
+        // Zu lang, also eher eine Datenzeile als ein Schlüssel.
+        assert_eq!(
+            echoable_key("unknown field `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, e"),
+            None
+        );
+        assert_eq!(echoable_key("kein Zitat darin"), None);
+    }
+
+    // -------------------------------- Befund 5: Zusatz mit Pfadanteilen
+
+    /// Ein Namenszusatz mit Pfadanteilen wird schon beim Lesen der Datei
+    /// abgelehnt — nicht erst, wenn drei Ergebnisse übereinander liegen.
+    #[test]
+    fn a_suffix_with_a_path_component_is_refused_in_the_settings_file() {
+        let error = Settings::from_yaml("output_suffix: \"/../../ziel/alle\"\n")
+            .expect_err("ein Zusatz mit Pfadtrenner muss auffallen")
+            .to_string();
+        assert!(error.contains("Namenszusatz"), "{error}");
+        assert!(error.contains("Pfadtrenner"), "{error}");
+        // Der gewöhnliche Fall bleibt erlaubt.
+        assert!(Settings::from_yaml("output_suffix: _anonym\n").is_ok());
+    }
+
+    // ------------------------------------- Befund 4, kleiner Bruder davon
+
+    /// Eine riesige „Einstellungsdatei“ wird nicht in den Speicher gelesen.
+    #[test]
+    fn an_oversized_settings_file_is_refused_before_it_is_read() {
+        let dir =
+            std::env::temp_dir().join(format!("redact-settings-gross-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.yaml");
+        std::fs::write(&path, vec![b'#'; MAX_SETTINGS_BYTES as usize + 1]).unwrap();
+        let error = Settings::load_from(&path)
+            .expect_err("zu groß muss auffallen")
+            .to_string();
+        assert!(error.contains("zu groß"), "{error}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
