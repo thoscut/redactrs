@@ -107,6 +107,16 @@ fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
         });
     });
 
+    // Ein unbrauchbarer Zusatz (Pfadtrenner, `..`, Steuerzeichen) wird beim
+    // Export ohnehin abgelehnt. Ihn erst dort zu melden hiesse: der Vorschlag
+    // darunter zeigt einen entschärften Namen, alles sieht in Ordnung aus, und
+    // der Fehler kommt erst nach dem Klick. Deshalb sofort, an Ort und Stelle.
+    if let Err(e) = redact_core::check_output_suffix(&state.config.output_suffix) {
+        let colour = ui.visuals().error_fg_color;
+        ui.label(RichText::new(e.to_string()).small().color(colour));
+        return;
+    }
+
     let suggestion = state
         .suggested_output_path()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))

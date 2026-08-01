@@ -547,7 +547,11 @@ impl AppState {
     /// Lädt ein PDF von der Platte, extrahiert die Text-Runs und setzt Seite
     /// und Auswahl zurück.
     pub fn load_document(&mut self, path: &Path) -> Result<()> {
-        let bytes = std::fs::read(path)?;
+        // Über `read_input` statt `std::fs::read`: sonst gälte die
+        // Größengrenze der Eingabedatei nur auf der Kommandozeile. Eine
+        // Sparse-Datei mit scheinbar 6 GB kostete hier 6 149 MB, bevor
+        // überhaupt feststand, ob es ein PDF ist.
+        let bytes = redact_pipeline::read_input(path, self.config.max_input_bytes)?;
         self.load_bytes(&bytes, Some(path.to_path_buf()))
             .map_err(|e| match e {
                 RedactError::Pdf(msg) => RedactError::Pdf(format!("{}: {msg}", path.display())),
