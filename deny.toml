@@ -35,38 +35,9 @@ feature-depth = 1
 yanked = "deny"
 unmaintained = "workspace"
 
-ignore = [
-    # ------------------------------------------------------------------
-    # BEFRISTET. Nicht dauerhaft stehen lassen.
-    #
-    # RUSTSEC-2026-0187 - lopdf 0.34: Stack Overflow (Absturz) beim Parsen
-    # tief verschachtelter PDF-Objektstrukturen. Da redact-rs genau das tut,
-    # was die Meldung beschreibt - fremde, potenziell praeparierte PDFs
-    # einlesen - ist das relevant und nicht bloss theoretisch.
-    #
-    # STAND: reproduziert (400-kB-Datei mit 200 000 offenen "[", Exit 134),
-    # und zwar in allen drei Varianten: als gewoehnliches Objekt, versteckt
-    # in einem Flate-komprimierten Objekt-Stream und im Seiteninhalt.
-    #
-    # ENTSCHAERFT, NICHT BEHOBEN. redact_pdf::document::prescan prueft die
-    # Rohbytes *vor* dem Parsen auf Klammertiefe - auch in ausgepackten
-    # Streams - und lehnt solche Dateien mit einer Meldung ab. Die
-    # Schwachstelle in lopdf selbst besteht weiter; die Vorpruefung nimmt ihr
-    # nur die Reichweite. Siehe SECURITY.md, Abschnitt "Restrisiken".
-    #
-    # WARUM KEIN UPDATE: lopdf 0.42 loest die Meldung, verlangt aber
-    # Anpassungen in crates/redact-pdf/src/audit_bytes.rs (Dictionary::type_is
-    # entfaellt, Stream::filters() liefert Vec<&[u8]> statt Vec<String>) und
-    # in crates/redact-pdf/src/document.rs (Object::type_name() liefert
-    # &[u8]). lopdf 0.44 verlangt zusaetzlich Anpassungen in content.rs,
-    # ops.rs und redact.rs (Document::get_page_content() liefert Vec<u8>
-    # statt Result). Ausserdem aendert 0.42 das Verhalten bei inkrementellen
-    # Updates (has_incremental_history) und bei eingebetteten Bildern - beides
-    # ist zu pruefen, bevor umgestellt wird.
-    #
-    # Beim Anheben von lopdf auf >= 0.42 diesen Eintrag ersatzlos loeschen.
-    { id = "RUSTSEC-2026-0187", reason = "lopdf 0.34: Stack Overflow bei tief verschachtelten PDFs. Durch die Vorpruefung in redact_pdf::document::prescan entschaerft (siehe SECURITY.md). Behoben ab lopdf 0.42; das Update braucht Anpassungen in audit_bytes.rs und document.rs. Diesen Eintrag beim lopdf-Update ersatzlos entfernen." },
-]
+# Keine Ausnahmen. Eine Meldung, die hier steht, ist eine Meldung, die
+# niemand mehr liest - deshalb bleibt die Liste leer, solange es geht.
+ignore = []
 
 # ---------------------------------------------------------------------------
 # Lizenzen

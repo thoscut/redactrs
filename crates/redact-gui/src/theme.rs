@@ -23,6 +23,18 @@ pub enum Theme {
 }
 
 impl Theme {
+    /// Das Thema zum Namen aus der Einstellungsdatei (`hell`, `dunkel`).
+    ///
+    /// Unbekannte Namen kommen hier nicht an — `Settings::from_yaml` lehnt sie
+    /// beim Lesen der Datei ab, mit einer Meldung, die die erlaubten Werte
+    /// nennt. Hier bleibt deshalb nur der Rückfall auf das helle Thema.
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "dunkel" => Theme::Dark,
+            _ => Theme::Light,
+        }
+    }
+
     /// Das jeweils andere Thema.
     pub fn toggled(self) -> Self {
         match self {
@@ -97,6 +109,18 @@ mod tests {
         for theme in THEMES {
             assert_ne!(theme.toggled(), theme);
             assert_eq!(theme.toggled().toggled(), theme);
+        }
+    }
+
+    /// Der Name aus der Einstellungsdatei kommt am richtigen Thema an.
+    #[test]
+    fn the_name_from_the_settings_file_picks_the_theme() {
+        assert_eq!(Theme::from_name("hell"), Theme::Light);
+        assert_eq!(Theme::from_name("dunkel"), Theme::Dark);
+        // Beide erlaubten Werte der Einstellungsdatei sind hier bekannt —
+        // sonst hieße „dunkel“ in der Datei am Ende doch „hell“ im Fenster.
+        for name in redact_pipeline::settings::THEMES {
+            assert_eq!(Theme::from_name(name).label().to_lowercase(), name);
         }
     }
 

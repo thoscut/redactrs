@@ -20,9 +20,8 @@ use redact_core::{
     Rect, RedactError, Redaction, Region, Result, ReviewFile, ReviewInput, Source, TextRun,
     AUDIT_SUFFIX, REVIEW_SUFFIX,
 };
-use redact_pdf::document::load_from_bytes_with_limits;
 use redact_pdf::{page_boxes, PdfExtractor};
-use redact_pipeline::{sha256_bytes, Config, Outcome, ReviewIdentity};
+use redact_pipeline::{sha256_bytes, Config, Outcome, ReviewIdentity, Secret};
 
 use crate::history::History;
 use crate::viewer::{normalize_rotation, PageView};
@@ -340,6 +339,26 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     sha256_bytes(bytes)
 }
 
+/// Ein Dokument, das auf ein Passwort wartet.
+///
+/// Die Bytes werden gehalten statt der Pfad: abgelegte Dateien (Ziehen und
+/// Ablegen im Web-Build) haben gar keinen Pfad, und eine Datei zwischen zwei
+/// Versuchen erneut zu lesen hieße, womöglich eine *andere* Datei zu öffnen.
+pub struct PendingDocument {
+    bytes: Vec<u8>,
+    path: Option<PathBuf>,
+}
+
+/// `Debug` von Hand: die Rohbytes eines PDFs gehören in keine Meldung.
+impl std::fmt::Debug for PendingDocument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingDocument")
+            .field("bytes", &format!("{} Byte", self.bytes.len()))
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
 /// Der gesamte Zustand der Anwendung.
 #[derive(Debug)]
 pub struct AppState {
@@ -388,6 +407,10 @@ pub struct AppState {
     pub warnings: Vec<String>,
     /// Schnappschüsse für Rückgängig/Wiederholen.
     pub history: History,
+    /// Ein verschlüsseltes Dokument, das auf sein Passwort wartet.
+    ///
+    /// Solange das gesetzt ist, zeigt [`crate::app`] die Passwortabfrage.
+    pending: Option<PendingDocument>,
 }
 
 impl Default for AppState {
@@ -408,6 +431,7 @@ impl Default for AppState {
             extract_warnings: Vec::new(),
             warnings: Vec::new(),
             history: History::new(),
+            pending: None,
         }
     }
 }
@@ -448,7 +472,25 @@ impl AppState {
     /// nicht sieht. Wer das nicht erfährt, hält eine Datei mit „0 Treffer“ für
     /// sauber — die Oberfläche hat diese Warnungen bisher weggeworfen.
     pub fn load_bytes(&mut self, bytes: &[u8], path: Option<PathBuf>) -> Result<()> {
-        let doc = load_from_bytes_with_limits(bytes, &self.config.limits)?;
+        // `load_document` statt `load_from_bytes_with_limits`: **dieselbe**
+        // Ladefunktion wie in `redact_pipeline::run`, damit ein Passwort aus
+        // `Config` hier genauso wirkt wie auf der Kommandozeile.
+        let doc = match redact_pipeline::load_document(bytes, &self.config) {
+            Ok(doc) => doc,
+            Err(e) => {
+                // Verschlüsselt und (noch) kein passendes Passwort: das
+                // Dokument wartet, statt verloren zu gehen — die Oberfläche
+                // fragt danach und ruft dann `unlock`.
+                if redact_pipeline::password_required(&e) {
+                    self.pending = Some(PendingDocument {
+                        bytes: bytes.to_vec(),
+                        path,
+                    });
+                }
+                return Err(e);
+            }
+        };
+        self.pending = None;
         let (runs, warnings) = PdfExtractor::new().extract_with_warnings(&doc)?;
         self.page_boxes = page_boxes(&doc);
         self.rotations = page_rotations(&doc);
@@ -472,6 +514,48 @@ impl AppState {
             self.runs.len()
         );
         Ok(())
+    }
+
+    /// Wartet ein Dokument auf sein Passwort?
+    pub fn needs_password(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Name des wartenden Dokuments — für die Frage im Fenster.
+    pub fn pending_name(&self) -> String {
+        match self.pending.as_ref().and_then(|p| p.path.as_ref()) {
+            Some(path) => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+            None => "Das Dokument".to_string(),
+        }
+    }
+
+    /// Zweiter Anlauf mit dem eingegebenen Passwort.
+    ///
+    /// Passt es nicht, wartet dasselbe Dokument weiter (die Abfrage bleibt
+    /// stehen) und das falsche Passwort wird **nicht** behalten — sonst
+    /// scheiterte auch der nächste Versuch daran.
+    pub fn unlock(&mut self, password: &str) -> Result<()> {
+        let Some(pending) = self.pending.take() else {
+            return Err(RedactError::Config(
+                "Kein Dokument wartet auf ein Passwort".into(),
+            ));
+        };
+        self.config.password = Some(Secret::new(password));
+        let result = self.load_bytes(&pending.bytes, pending.path);
+        if result.is_err() {
+            self.config.password = None;
+        }
+        result
+    }
+
+    /// Die Passwortabfrage abbrechen: das Dokument bleibt ungeöffnet.
+    pub fn cancel_password(&mut self) {
+        self.pending = None;
+        self.config.password = None;
+        self.status = "Verschlüsseltes Dokument nicht geöffnet".to_string();
     }
 
     pub fn is_loaded(&self) -> bool {
@@ -1267,6 +1351,86 @@ mod tests {
             )
             .expect("Demo-PDF ladbar");
         state
+    }
+
+    // ------------------------------------------------------ Verschlüsselung
+
+    use redact_pipeline::testing::{ENCRYPTED_PDF, ENCRYPTED_PDF_IBAN, ENCRYPTED_PDF_PASSWORD};
+
+    /// Ein verschlüsseltes Dokument geht nicht verloren, es wartet.
+    #[test]
+    fn an_encrypted_document_waits_for_its_password() {
+        let mut state = AppState::with_config(iban_only());
+        let error = state
+            .load_bytes(ENCRYPTED_PDF, Some(PathBuf::from("auszug.pdf")))
+            .expect_err("ohne Passwort darf nicht geladen werden");
+        assert!(error.to_string().contains("verschlüsselt"), "{error}");
+        assert!(state.needs_password(), "die Abfrage kommt gar nicht");
+        assert!(!state.is_loaded());
+        assert_eq!(state.pending_name(), "auszug.pdf");
+    }
+
+    /// Mit dem richtigen Passwort ist das Dokument wirklich da — Seiten, Text
+    /// und Treffer inbegriffen.
+    #[test]
+    fn the_right_password_opens_the_waiting_document() {
+        let mut state = AppState::with_config(iban_only());
+        let _ = state.load_bytes(ENCRYPTED_PDF, Some(PathBuf::from("auszug.pdf")));
+
+        state
+            .unlock(ENCRYPTED_PDF_PASSWORD)
+            .expect("richtiges Passwort");
+        assert!(!state.needs_password());
+        assert!(state.is_loaded());
+        assert_eq!(state.page_count(), 1);
+        let text: String = state.runs.iter().map(|r| r.text.clone()).collect();
+        assert!(text.contains(ENCRYPTED_PDF_IBAN), "kein Text: {text:?}");
+        assert_eq!(state.analyze().unwrap(), 1);
+    }
+
+    /// Ein falsches Passwort lässt die Frage stehen — und wird nicht behalten,
+    /// sonst scheiterte auch der nächste Versuch daran.
+    #[test]
+    fn a_wrong_password_keeps_the_question_open_and_is_forgotten() {
+        let mut state = AppState::with_config(iban_only());
+        let _ = state.load_bytes(ENCRYPTED_PDF, None);
+
+        let error = state.unlock("falsch").expect_err("falsches Passwort");
+        assert!(!error.to_string().contains("falsch"), "{error}");
+        assert!(state.needs_password(), "die Abfrage ist zugefallen");
+        assert!(
+            state.config.password.is_none(),
+            "das falsche Passwort blieb hängen"
+        );
+
+        // Und der zweite Versuch geht durch.
+        state
+            .unlock(ENCRYPTED_PDF_PASSWORD)
+            .expect("zweiter Versuch");
+        assert!(state.is_loaded());
+    }
+
+    #[test]
+    fn cancelling_the_question_leaves_the_document_closed() {
+        let mut state = AppState::with_config(iban_only());
+        let _ = state.load_bytes(ENCRYPTED_PDF, None);
+        state.cancel_password();
+        assert!(!state.needs_password());
+        assert!(!state.is_loaded());
+        assert!(state.config.password.is_none());
+        assert!(state.unlock("egal").is_err(), "ohne Wartendes kein Versuch");
+    }
+
+    /// Das Passwort steht in keinem Text, den irgendetwas ausgeben könnte —
+    /// der Zustand leitet `Debug` ab, und das reicht für einen Panik-Text.
+    #[test]
+    fn the_state_never_prints_the_password() {
+        let mut state = AppState::with_config(iban_only());
+        let _ = state.load_bytes(ENCRYPTED_PDF, Some(PathBuf::from("auszug.pdf")));
+        state.unlock(ENCRYPTED_PDF_PASSWORD).unwrap();
+        let dump = format!("{state:?}");
+        assert!(!dump.contains(ENCRYPTED_PDF_PASSWORD), "{dump}");
+        assert!(!state.status.contains(ENCRYPTED_PDF_PASSWORD));
     }
 
     #[test]

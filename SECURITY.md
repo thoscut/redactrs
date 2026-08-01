@@ -22,9 +22,13 @@ existiert wegen dieser Annahme.
 
 **Vertrauenswürdig — was der Nutzer selbst mitbringt.**
 Musterkonfiguration (`--patterns-config`), Buchungsliste (`--booking-list`),
-manuelle Regionen (`--manual-regions`) und Review-Dateien (`--apply-review`)
-kommen vom Bedienenden. Sie werden auf Plausibilität geprüft, aber nicht als
-Angriffsfläche behandelt. Wer eine fremde Musterdatei einspielt, spielt eine
+manuelle Regionen (`--manual-regions`), Review-Dateien (`--apply-review`) und
+die Einstellungsdatei (`~/.config/redact-rs/settings.yaml`) kommen vom
+Bedienenden. Sie werden auf Plausibilität geprüft, aber nicht als
+Angriffsfläche behandelt. Eine fehlerhafte Einstellungsdatei beendet den Lauf
+mit einer Meldung, statt stillschweigend auf die Vorgaben zurückzufallen —
+sonst arbeitete das Werkzeug mit anderen Werten als der Nutzer meint,
+eingestellt zu haben. Wer eine fremde Musterdatei einspielt, spielt eine
 fremde Konfiguration ein — dieselbe Vertrauensstufe wie ein Kommandozeilen-
 Argument.
 
@@ -73,6 +77,86 @@ laufenden Prozess. Gegen den hilft kein Anwendungsprogramm.
     stehen die *gefundenen* Geheimnisse im Klartext.
 * **Die Schreibziele werden geprüft, bevor gerechnet wird.** Ein Lauf, dessen
   Audit-Log-Ziel nicht taugt, schreibt auch kein PDF.
+* **Das Passwort eines verschlüsselten PDFs steht in keiner erzeugten Datei.**
+  Weder in der Ausgabe-PDF noch im Audit-Log noch in der Review-Datei, und in
+  keiner Fehlermeldung. Siehe den eigenen Abschnitt unten.
+
+---
+
+## Passwörter verschlüsselter PDFs
+
+Ohne Passwort lehnt redact-rs ein verschlüsseltes PDF ab — daran hat sich
+nichts geändert, und das ist die richtige Vorgabe. Mit `--password`,
+`REDACT_RS_PASSWORD` oder der Abfrage in der Oberfläche wird die Datei
+entschlüsselt und wie jede andere verarbeitet.
+
+### Ein Passwort auf der Kommandozeile ist lesbar
+
+`redact-rs auszug.pdf --password geheim` schreibt das Passwort
+
+* in die **Prozessliste** — auf den meisten Systemen kann jedes Konto
+  `ps aux` lesen, und `/proc/<pid>/cmdline` ist unter Linux für alle lesbar,
+* in die **Shell-Historie** (`~/.bash_history`, `~/.zsh_history`), wo es dauerhaft
+  bleibt.
+
+Deshalb gibt es zwei Wege, die das vermeiden, und der Hilfetext nennt sie:
+
+```sh
+# Umgebungsvariable — nicht in der Prozessliste, nicht in der Historie
+# (das führende Leerzeichen hält die Zeile aus der Historie, wenn
+#  HISTCONTROL=ignorespace gesetzt ist)
+ REDACT_RS_PASSWORD=geheim redact-rs auszug.pdf
+
+# Oder ganz ohne Tippen: die Oberfläche fragt in einem Fenster mit
+# verdeckter Eingabe
+redact-rs --gui auszug.pdf
+```
+
+Rangfolge: `--password` schlägt `REDACT_RS_PASSWORD`. Ohne beides bleibt es bei
+der Ablehnung.
+
+### Wohin das Passwort **nicht** gelangt
+
+Das Passwort liegt in `redact_pipeline::Secret`. Der Typ gibt den Klartext nur
+über `reveal()` heraus — und das ruft genau eine Stelle auf, die
+Entschlüsselung selbst. `Debug` und `Display` zeigen Sterne, und `Serialize`
+ist absichtlich **nicht** abgeleitet: es kann also weder über ein `{:?}`
+irgendwo im Programm noch über einen JSON-Export hinausrutschen. Die
+Fehlermeldung bei falschem Passwort ist ein fester Satz ohne den eingegebenen
+Wert.
+
+Gemessen wird das, nicht behauptet:
+`crates/redact-cli/tests/password.rs::the_password_appears_in_no_file_the_run_produces`
+lässt einen vollständigen Lauf über ein wirklich verschlüsseltes PDF laufen und
+durchsucht Ausgabe-PDF, Audit-Log und Review-Datei — die PDF mit
+`redact_pdf::leaks`, also auf allen Ebenen inklusive entpackter Streams — sowie
+stdout und stderr.
+
+### Was dabei ungeprüft bleibt
+
+**Die Vorprüfung greift bei verschlüsselten Dateien kaum.** `prescan` läuft über
+die Rohbytes und kann verschlüsselte Streams nicht auspacken; die Grenze
+`--max-decompressed-mb` misst dort also nichts. Was nach der Entschlüsselung
+aus den Streams wird, ist vorher nicht bekannt. Die Tiefengrenze der Rohbytes
+und alle Grenzen *nach* dem Laden (Bildbudget, Trefferkandidaten) gelten
+weiterhin. Wer ein verschlüsseltes PDF öffnet, gibt ihm also ausdrücklich mehr
+Vertrauen als einem unverschlüsselten — was insofern zusammenpasst, als man
+sein Passwort kennt.
+
+**Das Passwort im Arbeitsspeicher wird nicht überschrieben.** Es steht als
+gewöhnlicher `String` im Prozess und wird beim Freigeben nicht genullt; ein
+Kernabbild oder eine Auslagerungsdatei kann es enthalten. Dagegen hülfe nur
+gesperrter Speicher, und das ist eine Abhängigkeit und eine Zusicherung, die
+dieses Werkzeug nicht gibt.
+
+**Nicht jede Verschlüsselung ist lesbar.** Was `lopdf` beherrscht, wird
+geöffnet; alles andere (etwa zertifikatsbasierte Sicherheitshandler) endet mit
+derselben Meldung wie ein falsches Passwort.
+
+**Berechtigungen werden nicht durchgesetzt.** Ein PDF kann „Kopieren verboten“
+oder „Drucken verboten“ signalisieren. redact-rs wertet diese Angaben nicht
+aus — sie sind ohnehin keine Zugriffskontrolle, sondern eine Bitte an die
+anzeigende Software. Wer die Datei öffnen darf, kann sie hier schwärzen.
 
 ---
 

@@ -1,9 +1,14 @@
 //! Kommandozeilen-Definition.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Parser, ValueEnum};
-use redact_pipeline::Config;
+use redact_pipeline::{Config, Secret, Settings};
+
+/// Umgebungsvariable für das Passwort verschlüsselter PDFs.
+///
+/// Der Weg an der Prozessliste vorbei — siehe [`Cli::password`].
+pub const PASSWORD_ENV: &str = "REDACT_RS_PASSWORD";
 
 /// Lokales Schwärzen sensibler Daten in PDF-Dokumenten.
 ///
@@ -14,20 +19,45 @@ use redact_pipeline::Config;
     version,
     about = "Schwärzt sensible Daten in PDFs – lokal, ohne Cloud.",
     long_about = None,
-    after_help = EXAMPLES,
+    after_help = examples(),
 )]
 pub struct Cli {
-    /// Eingabe-PDF.
-    pub input: Option<PathBuf>,
+    /// Eingabe-PDFs oder Verzeichnisse.
+    ///
+    /// Mehrere Angaben und Verzeichnisse werden als Stapel abgearbeitet: je
+    /// Datei ein Ergebnis neben der Eingabe, am Ende eine Zusammenfassung.
+    /// Eine Datei, die scheitert, beendet den Stapel nicht — sie wird gemeldet,
+    /// der Rest läuft weiter, und der Rückgabewert sagt, ob alles gut ging.
+    /// Aus einem Verzeichnis werden die `*.pdf` der obersten Ebene genommen,
+    /// ohne die bereits geschwärzten (Namenszusatz).
+    #[arg(value_name = "PDF")]
+    pub inputs: Vec<PathBuf>,
 
     /// Ausgabe-PDF. Ohne Angabe wird neben der Eingabedatei gespeichert,
     /// mit dem Zusatz aus `--output-suffix` im Dateinamen.
+    ///
+    /// Im Stapelbetrieb nicht erlaubt — ein Name für viele Dateien hieße,
+    /// dass jedes Ergebnis das vorige überschreibt.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
     /// Namenszusatz für die Ausgabedatei, wenn `-o` fehlt.
-    #[arg(long, value_name = "TEXT", default_value = redact_core::DEFAULT_OUTPUT_SUFFIX)]
-    pub output_suffix: String,
+    ///
+    /// Ohne Angabe gilt der Wert aus der Einstellungsdatei, sonst
+    /// `_geschwaerzt`.
+    #[arg(long, value_name = "TEXT")]
+    pub output_suffix: Option<String>,
+
+    /// Passwort eines verschlüsselten PDFs.
+    ///
+    /// **Vorsicht:** ein Passwort auf der Kommandozeile steht in der
+    /// Prozessliste (`ps`) und in der Shell-Historie und ist damit für andere
+    /// Konten auf derselben Maschine lesbar. Ohne diesen Schalter geht es
+    /// über die Umgebungsvariable `REDACT_RS_PASSWORD`, die keinen der beiden
+    /// Wege nimmt; in der Oberfläche fragt ein Fenster danach. Ohne jedes
+    /// Passwort bleibt es bei der Ablehnung verschlüsselter Dateien.
+    #[arg(long, value_name = "PW")]
+    pub password: Option<String>,
 
     /// Vorhandene Ausgabedateien überschreiben.
     #[arg(short, long)]
@@ -46,7 +76,8 @@ pub struct Cli {
     #[arg(long, value_name = "DATEI")]
     pub patterns_config: Option<PathBuf>,
 
-    /// Mindestvertrauen eines Treffers (0.0 … 1.0). Ohne Angabe 0.5.
+    /// Mindestvertrauen eines Treffers (0.0 … 1.0). Ohne Angabe gilt der Wert
+    /// aus der Einstellungsdatei, sonst 0.5.
     ///
     /// Ein Pattern mit einer Gruppe `context` bewertet denselben Treffer je
     /// nach Umfeld unterschiedlich: „Kto. 532013000“ ist eine Kontonummer,
@@ -99,8 +130,10 @@ pub struct Cli {
     pub replace_with: String,
 
     /// Zusätzlicher Rand um jede Schwärzung, in Punkt.
-    #[arg(long, default_value_t = redact_pipeline::DEFAULT_PADDING)]
-    pub padding: f64,
+    ///
+    /// Ohne Angabe gilt der Wert aus der Einstellungsdatei, sonst 1.0.
+    #[arg(long)]
+    pub padding: Option<f64>,
 
     /// Bilder, die sich nicht dekodieren lassen, durchgehen lassen.
     ///
@@ -153,7 +186,14 @@ pub struct Cli {
     pub max_candidates: usize,
 
     /// Grafische Oberfläche starten.
-    #[arg(long)]
+    ///
+    /// `hide` in einer Fassung ohne das Feature `gui` (Aufgabe #61): der
+    /// musl-Build entsteht mit `--no-default-features` und *hat* keine
+    /// Oberfläche — ein Schalter im Hilfetext, der nur mit einer
+    /// Fehlermeldung enden kann, ist eine Falle. Der Schalter selbst bleibt
+    /// erhalten, damit `--gui` dort weiterhin mit Rückgabewert 2 und einem
+    /// erklärenden Satz endet statt mit „unknown argument“.
+    #[arg(long, hide = !cfg!(feature = "gui"))]
     pub gui: bool,
 
     /// Verfügbare Patterns auflisten und beenden.
@@ -194,6 +234,19 @@ impl Cli {
         }
     }
 
+    /// Das Passwort dieses Aufrufs.
+    ///
+    /// Rangfolge: `--password` schlägt `REDACT_RS_PASSWORD`. Der Schalter ist
+    /// der bequeme, die Variable der unauffällige Weg — beide sind hier, weil
+    /// die Kommandozeile in der Prozessliste steht und die Umgebung nicht.
+    fn password(&self) -> Option<Secret> {
+        self.password
+            .clone()
+            .or_else(|| std::env::var(PASSWORD_ENV).ok())
+            .filter(|pw| !pw.is_empty())
+            .map(Secret::new)
+    }
+
     /// Die Einstellungen dieses Aufrufs als [`Config`] der Verarbeitungskette.
     ///
     /// **Ein** Bauplatz für beide Programme: `redact-rs auszug.pdf …` und
@@ -202,18 +255,32 @@ impl Cli {
     /// `--manual-regions` und `--padding` auch in der Oberfläche. Vorher kannte
     /// sie nichts davon und polsterte fest mit 1,0.
     ///
+    /// **Und der einzige Ort, an dem die Rangfolge gilt**: Kommandozeile
+    /// schlägt Einstellungsdatei schlägt Vorgabe. Die betroffenen Schalter
+    /// sind deshalb `Option` bzw. eine leere Liste — `None` heißt „nicht
+    /// angegeben“, und nur dann kommt der Wert aus `settings`. Ein
+    /// `default_value` in der clap-Definition würde genau diese Unterscheidung
+    /// zerstören.
+    ///
     /// Ohne Eingabedatei (nur die Oberfläche kommt so weit) bleibt
     /// [`Config::input`] leer und wird beim Öffnen eines Dokuments gesetzt.
-    pub fn config(&self) -> Config {
+    pub fn config(&self, settings: &Settings) -> Config {
         Config {
-            input: self.input.clone().unwrap_or_default(),
+            input: self.inputs.first().cloned().unwrap_or_default(),
             output: self.output.clone(),
-            output_suffix: self.output_suffix.clone(),
+            output_suffix: self
+                .output_suffix
+                .clone()
+                .unwrap_or_else(|| settings.output_suffix.clone()),
             force: self.force,
-            patterns: self.patterns.clone(),
+            patterns: if self.patterns.is_empty() {
+                settings.patterns.clone()
+            } else {
+                self.patterns.clone()
+            },
             no_patterns: self.no_patterns,
             patterns_config: self.patterns_config.clone(),
-            min_confidence: self.min_confidence,
+            min_confidence: self.min_confidence.or(settings.min_confidence),
             booking_list: self.booking_list.clone(),
             manual_regions: self.manual_regions.clone(),
             review: self.review,
@@ -222,11 +289,21 @@ impl Cli {
             allow_unverified_review: self.allow_unverified_review,
             audit_log: self.audit_log.clone(),
             action: self.action.to_action(&self.replace_with),
-            padding: self.padding,
+            padding: self.padding.unwrap_or(settings.padding),
             allow_undecodable_images: self.allow_undecodable_images,
             max_decoded_image_bytes: self.max_image_mb.saturating_mul(1024 * 1024),
             limits: self.limits(),
             max_candidates: self.max_candidates,
+            password: self.password(),
+            theme: settings.theme.clone(),
+        }
+    }
+
+    /// Wie [`Cli::config`], aber für eine bestimmte Datei des Stapels.
+    pub fn config_for(&self, settings: &Settings, input: &Path) -> Config {
+        Config {
+            input: input.to_path_buf(),
+            ..self.config(settings)
         }
     }
 }
@@ -241,7 +318,26 @@ impl ActionArg {
     }
 }
 
-const EXAMPLES: &str = "\
+/// Der Abschnitt zur Oberfläche — nur in einer Fassung, die eine hat.
+///
+/// Aufgabe #61: der musl-Build entsteht mit `--no-default-features`; dort darf
+/// die Oberfläche weder im Beispielteil noch bei den Schaltern auftauchen.
+#[cfg(feature = "gui")]
+const GUI_EXAMPLE: &str = "\
+  # Grafische Oberfläche
+  redact-rs --gui kontoauszug.pdf
+
+";
+#[cfg(not(feature = "gui"))]
+const GUI_EXAMPLE: &str = "\
+  # (Diese Fassung wurde ohne grafische Oberfläche gebaut.)
+
+";
+
+/// Der Text unter dem Hilfetext.
+pub fn examples() -> String {
+    format!(
+        "\
 Beispiele:
   # Automatisch schwärzen (Standard-Patterns)
   redact-rs kontoauszug.pdf -o geschwaerzt.pdf
@@ -252,17 +348,30 @@ Beispiele:
   # Mit Buchungsliste (Positiv-/Negativliste)
   redact-rs kontoauszug.pdf -o geschwaerzt.pdf --booking-list buchungen.csv
 
+  # Ganzes Verzeichnis als Stapel — je Datei ein Ergebnis daneben
+  redact-rs auszuege/
+
+  # Verschlüsseltes PDF; das Passwort über die Umgebung statt über die
+  # Kommandozeile, denn die steht in der Prozessliste und in der Historie
+  REDACT_RS_PASSWORD=geheim redact-rs kontoauszug.pdf
+
   # Zwei Schritte: erst prüfen, dann anwenden
   redact-rs kontoauszug.pdf --review --review-out review.json
   redact-rs kontoauszug.pdf -o geschwaerzt.pdf --apply-review review.json \\
       --audit-log audit.json
 
-  # Grafische Oberfläche
-  redact-rs --gui kontoauszug.pdf
-
+{GUI_EXAMPLE}\
   # Beispieldatei zum Ausprobieren erzeugen
   redact-rs --write-demo beispiel.pdf
-";
+
+Einstellungsdatei — Namenszusatz, Muster, Mindestvertrauen, Polsterung, Thema:
+  ~/.config/redact-rs/settings.yaml   bzw.   %APPDATA%\\redact-rs\\settings.yaml
+  {} zeigt auf eine andere Datei.
+  Rangfolge: Kommandozeile schlägt Datei schlägt Vorgabe.
+",
+        redact_pipeline::settings::SETTINGS_ENV
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -289,6 +398,125 @@ mod tests {
     }
 
     #[test]
+    fn several_input_files_are_accepted() {
+        let cli = Cli::parse_from(["redact-rs", "a.pdf", "b.pdf", "auszuege"]);
+        assert_eq!(
+            cli.inputs,
+            vec![
+                PathBuf::from("a.pdf"),
+                PathBuf::from("b.pdf"),
+                PathBuf::from("auszuege")
+            ]
+        );
+    }
+
+    // ------------------------------------------------------------ Rangfolge
+
+    /// Die Einstellungen, die eine Datei setzen könnte.
+    fn file_settings() -> Settings {
+        Settings {
+            output_suffix: "_ausDatei".into(),
+            patterns: vec!["bic".into()],
+            min_confidence: Some(0.25),
+            padding: 7.5,
+            theme: "dunkel".into(),
+        }
+    }
+
+    /// Ohne Datei und ohne Schalter gilt die eingebaute Vorgabe.
+    #[test]
+    fn the_built_in_default_applies_without_a_file_and_without_switches() {
+        let config = Cli::parse_from(["redact-rs", "in.pdf"]).config(&Settings::default());
+        assert_eq!(config.output_suffix, redact_core::DEFAULT_OUTPUT_SUFFIX);
+        assert_eq!(config.padding, redact_pipeline::DEFAULT_PADDING);
+        assert_eq!(config.min_confidence, None);
+        assert!(config.patterns.is_empty());
+        assert_eq!(config.theme, "hell");
+    }
+
+    /// Die Datei schlägt die Vorgabe.
+    #[test]
+    fn the_settings_file_beats_the_built_in_default() {
+        let config = Cli::parse_from(["redact-rs", "in.pdf"]).config(&file_settings());
+        assert_eq!(config.output_suffix, "_ausDatei");
+        assert_eq!(config.padding, 7.5);
+        assert_eq!(config.min_confidence, Some(0.25));
+        assert_eq!(config.patterns, vec!["bic"]);
+        assert_eq!(config.theme, "dunkel");
+    }
+
+    /// Und die Kommandozeile schlägt die Datei — jeder Wert einzeln.
+    #[test]
+    fn the_command_line_beats_the_settings_file() {
+        let config = Cli::parse_from([
+            "redact-rs",
+            "in.pdf",
+            "--output-suffix",
+            "_vonHand",
+            "--padding",
+            "0.5",
+            "--min-confidence",
+            "0.9",
+            "--patterns",
+            "iban_de",
+        ])
+        .config(&file_settings());
+        assert_eq!(config.output_suffix, "_vonHand");
+        assert_eq!(config.padding, 0.5);
+        assert_eq!(config.min_confidence, Some(0.9));
+        assert_eq!(config.patterns, vec!["iban_de"]);
+    }
+
+    /// Gegenprobe: ein Schalter, der *nicht* angegeben wurde, darf den Wert
+    /// aus der Datei nicht überschreiben. Genau das täte ein `default_value`
+    /// in der clap-Definition — und niemand würde es merken.
+    #[test]
+    fn an_unused_switch_does_not_overwrite_the_file() {
+        let cli = Cli::parse_from(["redact-rs", "in.pdf", "--padding", "0.5"]);
+        assert_eq!(
+            cli.output_suffix, None,
+            "der Schalter braucht keine Vorgabe"
+        );
+        let config = cli.config(&file_settings());
+        assert_eq!(config.padding, 0.5, "die Kommandozeile gilt");
+        assert_eq!(config.output_suffix, "_ausDatei", "die Datei gilt weiter");
+    }
+
+    /// Der Stapel baut je Datei dieselbe Konfiguration, nur mit anderer Eingabe.
+    #[test]
+    fn config_for_only_changes_the_input() {
+        let cli = Cli::parse_from(["redact-rs", "a.pdf", "b.pdf", "--padding", "2"]);
+        let settings = Settings::default();
+        let a = cli.config_for(&settings, Path::new("a.pdf"));
+        let b = cli.config_for(&settings, Path::new("b.pdf"));
+        assert_eq!(a.input, PathBuf::from("a.pdf"));
+        assert_eq!(b.input, PathBuf::from("b.pdf"));
+        assert_eq!(a.padding, b.padding);
+        assert_eq!(a.output_suffix, b.output_suffix);
+    }
+
+    // ------------------------------------------------------------- Passwort
+
+    #[test]
+    fn the_password_switch_reaches_the_configuration_without_becoming_readable() {
+        let config = Cli::parse_from(["redact-rs", "in.pdf", "--password", "geheim"])
+            .config(&Settings::default());
+        assert_eq!(config.password.as_ref().map(|s| s.reveal()), Some("geheim"));
+        // Und es steht in keinem Text, den irgendjemand ausgeben könnte.
+        assert!(!format!("{config:?}").contains("geheim"));
+    }
+
+    #[test]
+    fn without_a_password_nothing_is_set() {
+        // Die Umgebungsvariable ist in dieser Prüfung nicht gesetzt (sie wird
+        // nirgends im Prozess gesetzt); ohne beides bleibt es bei `None`.
+        if std::env::var_os(PASSWORD_ENV).is_none() {
+            let config = Cli::parse_from(["redact-rs", "in.pdf"]).config(&Settings::default());
+            assert!(config.password.is_none());
+        }
+    }
+
+    #[test]
     fn review_and_apply_review_are_mutually_exclusive() {
         let r = Cli::try_parse_from([
             "redact-rs",
@@ -311,6 +539,21 @@ mod tests {
     #[test]
     fn no_arguments_is_allowed_gui_mode() {
         let cli = Cli::parse_from(["redact-rs"]);
-        assert!(cli.input.is_none());
+        assert!(cli.inputs.is_empty());
+    }
+
+    /// Aufgabe #61: der Schalter für die Oberfläche steht nur im Hilfetext
+    /// einer Fassung, die eine Oberfläche hat.
+    #[test]
+    fn the_gui_switch_appears_in_the_help_only_when_there_is_a_gui() {
+        let help = Cli::command().render_long_help().to_string();
+        assert_eq!(
+            help.contains("--gui"),
+            cfg!(feature = "gui"),
+            "Hilfetext und Fassung passen nicht zusammen:\n{help}"
+        );
+        // Aufrufbar bleibt er in beiden Fassungen — sonst käme statt der
+        // erklärenden Meldung ein „unexpected argument“.
+        assert!(Cli::try_parse_from(["redact-rs", "--gui"]).is_ok());
     }
 }

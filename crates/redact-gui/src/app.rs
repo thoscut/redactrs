@@ -431,6 +431,12 @@ pub struct RedactApp {
     /// Ein `rfd`-Dialog blockiert und braucht ein Fenster; im Test gibt es
     /// beides nicht.
     ask_before_discarding: bool,
+    /// Eingabefeld der Passwortabfrage.
+    ///
+    /// Steht hier und nicht im [`AppState`]: es ist der halb getippte Text
+    /// eines Eingabefelds, kein Zustand des Dokuments. Nach jedem Versuch wird
+    /// es geleert, damit das Passwort nicht länger im Speicher steht als nötig.
+    password_input: String,
 }
 
 impl Default for RedactApp {
@@ -447,6 +453,9 @@ impl RedactApp {
     /// Nahtstelle nur die Muster-IDs durch, und der Rest der Kommandozeile
     /// endete an der Fenstergrenze.
     pub fn new(config: Config) -> Self {
+        // Das Thema kommt aus derselben `Config` wie alles andere; dort hat es
+        // die Einstellungsdatei hineingelegt.
+        let theme = Theme::from_name(&config.theme);
         Self {
             state: AppState::with_config(config),
             selector: RectangleSelector::new(),
@@ -454,11 +463,12 @@ impl RedactApp {
             error: None,
             central_rect: None,
             pages: PageCache::new(),
-            theme: Theme::default(),
+            theme,
             applied_theme: None,
             shown_page: None,
             close_confirmed: false,
             ask_before_discarding: true,
+            password_input: String::new(),
         }
     }
 
@@ -469,6 +479,12 @@ impl RedactApp {
             ask_before_discarding: false,
             ..Self::new(config)
         }
+    }
+
+    /// Was gerade im Passwortfeld steht (nur für Tests).
+    #[cfg(test)]
+    fn set_password_input(&mut self, password: &str) {
+        self.password_input = password.to_string();
     }
 
     /// Darf Handarbeit weggeworfen werden?
@@ -555,6 +571,25 @@ impl RedactApp {
         self.close_confirmed = false;
         let analyzed = self.state.analyze().map(|_| ());
         self.report(analyzed);
+    }
+
+    /// Versucht, das wartende Dokument mit dem eingegebenen Passwort zu öffnen.
+    ///
+    /// Ohne egui, damit der Ablauf ohne Bildschirm prüfbar ist: das
+    /// Eingabefeld wird in jedem Fall geleert (auch bei falschem Passwort —
+    /// es soll nicht stehen bleiben), und geglückt geht es denselben Weg wie
+    /// jedes andere Öffnen, also samt Rasterizer und Analyse.
+    pub fn submit_password(&mut self) {
+        let password = std::mem::take(&mut self.password_input);
+        let unlocked = self.state.unlock(&password);
+        self.after_loading(unlocked);
+    }
+
+    /// Die Passwortabfrage abbrechen.
+    pub fn cancel_password(&mut self) {
+        self.password_input.clear();
+        self.state.cancel_password();
+        self.error = None;
     }
 
     /// Führt die Entscheidung aus, die [`classify_drop`] getroffen hat.
@@ -824,6 +859,71 @@ impl RedactApp {
             }
         }
         self.report(result);
+    }
+
+    /// Die Passwortabfrage für ein verschlüsseltes Dokument.
+    ///
+    /// Bewusst ein eigenes Fenster und kein `rfd`-Dialog: `rfd` kann keine
+    /// verdeckte Eingabe, das Passwort stünde also im Klartext auf dem Schirm.
+    ///
+    /// Die Entscheidungen stecken in [`RedactApp::submit_password`] und
+    /// [`RedactApp::cancel_password`] — hier steht nur das Fenster, damit der
+    /// Ablauf ohne Bildschirm geprüft werden kann.
+    fn password_dialog(&mut self, ctx: &egui::Context) {
+        if !self.state.needs_password() {
+            return;
+        }
+        let name = self.state.pending_name();
+        let error = self.error.clone();
+        // Herausnehmen und zurücklegen: sonst wäre `self` zweimal geliehen.
+        let mut input = std::mem::take(&mut self.password_input);
+        let (mut submit, mut cancel) = (false, false);
+
+        egui::Window::new("Passwort erforderlich")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(format!("„{name}“ ist verschlüsselt."));
+                ui.label(
+                    RichText::new(
+                        "Das Passwort dient nur zum Öffnen. Es wird nirgends \
+                         gespeichert und steht in keiner Ausgabedatei, in \
+                         keinem Audit-Log und in keiner Meldung.",
+                    )
+                    .weak(),
+                );
+                ui.add_space(BAR_PADDING);
+
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut input)
+                        .password(true)
+                        .hint_text("Passwort"),
+                );
+                // Nur greifen, wenn gerade nichts anderes den Fokus hat —
+                // sonst risse das Feld ihn den Knöpfen bei jedem Bild weg.
+                if ui.memory(|m| m.focused().is_none()) {
+                    field.request_focus();
+                }
+                submit = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+
+                ui.add_space(BAR_PADDING);
+                ui.horizontal(|ui| {
+                    submit |= ui.button("Öffnen").clicked();
+                    cancel = ui.button("Abbrechen").clicked();
+                });
+
+                if let Some(message) = &error {
+                    ui.label(RichText::new(message).color(Color32::from_rgb(220, 60, 60)));
+                }
+            });
+
+        self.password_input = input;
+        if submit {
+            self.submit_password();
+        } else if cancel {
+            self.cancel_password();
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -1321,6 +1421,11 @@ impl eframe::App for RedactApp {
                 empty_state(ui);
             }
         });
+
+        // Die Passwortabfrage liegt über den Panels und vor der Tastatur: sie
+        // hat ein Textfeld, und solange sie offen ist, gehören alle Tasten
+        // dorthin.
+        self.password_dialog(ctx);
 
         // Tasten erst **nach** den Panels: vorher weiß egui noch nicht, ob der
         // Fokus in einem Textfeld liegt, und genau davon hängt ab, ob die
@@ -2063,6 +2168,65 @@ mod tests {
         doc.save_to(&mut bytes).unwrap();
         assert_ne!(bytes, redact_pdf::testing::demo_statement());
         bytes
+    }
+
+    // ---------------------------------------------------------- Passwort
+
+    /// Das Passwort geht denselben Weg wie jedes Öffnen — samt Analyse.
+    #[test]
+    fn submitting_the_password_opens_and_analyses_the_document() {
+        use redact_pipeline::testing::{ENCRYPTED_PDF, ENCRYPTED_PDF_PASSWORD};
+
+        let mut app = RedactApp::silent(iban_only());
+        app.open_bytes_and_analyze(ENCRYPTED_PDF, "auszug.pdf");
+        assert!(app.state.needs_password(), "die Abfrage kommt nicht");
+        assert!(!app.state.is_loaded());
+
+        app.set_password_input(ENCRYPTED_PDF_PASSWORD);
+        app.submit_password();
+
+        assert!(!app.state.needs_password());
+        assert!(app.state.is_loaded());
+        assert_eq!(app.state.regions.len(), 1, "es wurde nicht analysiert");
+        assert!(app.error.is_none(), "{:?}", app.error);
+        // Das Eingabefeld ist leer, das Passwort steht nirgends im Zustand.
+        assert!(app.password_input.is_empty());
+        assert!(!format!("{:?}", app.state).contains(ENCRYPTED_PDF_PASSWORD));
+    }
+
+    /// Nach einem falschen Passwort bleibt die Frage stehen, das Feld ist leer
+    /// und die Meldung nennt das Passwort nicht.
+    #[test]
+    fn a_wrong_password_leaves_the_question_open() {
+        use redact_pipeline::testing::ENCRYPTED_PDF;
+
+        let mut app = RedactApp::silent(iban_only());
+        app.open_bytes_and_analyze(ENCRYPTED_PDF, "auszug.pdf");
+        app.set_password_input("falsch-4711");
+        app.submit_password();
+
+        assert!(app.state.needs_password(), "die Abfrage ist zugefallen");
+        assert!(app.password_input.is_empty());
+        let message = app.error.clone().expect("eine Meldung muss erscheinen");
+        assert!(!message.contains("falsch-4711"), "{message}");
+
+        // Abbrechen schließt sie und lässt nichts stehen.
+        app.cancel_password();
+        assert!(!app.state.needs_password());
+        assert!(app.error.is_none());
+    }
+
+    /// Das Thema kommt aus der `Config` — dort hat es die Einstellungsdatei
+    /// hineingelegt.
+    #[test]
+    fn the_theme_comes_from_the_configuration() {
+        for (name, expected) in [("hell", Theme::Light), ("dunkel", Theme::Dark)] {
+            let app = RedactApp::new(Config {
+                theme: name.to_string(),
+                ..Config::default()
+            });
+            assert_eq!(app.theme, expected, "Thema „{name}“");
+        }
     }
 
     // ------------------------------------------------------------ Statuszeile

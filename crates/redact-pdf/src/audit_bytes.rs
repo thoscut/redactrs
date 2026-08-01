@@ -330,7 +330,7 @@ fn scan_stream(stream: &Stream, path: &str, needle: &Needle, report: &mut Report
 
     // Objekt-Streams sind komprimierte Container: die enthaltenen Objekte
     // stehen nirgends im Klartext und entgehen jeder Rohbyte-Suche.
-    if stream.dict.type_is(b"ObjStm") {
+    if stream.dict.has_type(b"ObjStm") {
         let mut copy = stream.clone();
         if let Ok(object_stream) = ObjectStream::new(&mut copy) {
             for (id, object) in &object_stream.objects {
@@ -355,19 +355,26 @@ fn stream_payloads(stream: &Stream) -> Vec<(String, Vec<u8>)> {
     if let Ok(decoded) = stream.decompressed_content() {
         out.push(("lopdf-dekodiert".to_string(), decoded));
     } else if let Some(decoded) = manual_decode(&stream.content, &filters) {
-        out.push((format!("dekodiert: {}", filters.join("+")), decoded));
+        let names: Vec<String> = filters
+            .iter()
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect();
+        out.push((format!("dekodiert: {}", names.join("+")), decoded));
     }
     out
 }
 
-fn manual_decode(content: &[u8], filters: &[String]) -> Option<Vec<u8>> {
+/// Filternamen kommen seit lopdf 0.42 als Rohbytes (`Vec<&[u8]>`) statt als
+/// `String` — ein Filtername ist im PDF ein Name-Objekt und muss kein
+/// gültiges UTF-8 sein. Der Vergleich läuft deshalb byteweise.
+fn manual_decode(content: &[u8], filters: &[&[u8]]) -> Option<Vec<u8>> {
     let mut data = content.to_vec();
     let mut decoded_any = false;
     for filter in filters {
-        let next = match filter.as_str() {
-            "FlateDecode" | "Fl" => inflate(&data),
-            "ASCIIHexDecode" | "AHx" => Some(ascii_hex_decode(&data)),
-            "RunLengthDecode" | "RL" => Some(run_length_decode(&data)),
+        let next = match *filter {
+            b"FlateDecode" | b"Fl" => inflate(&data),
+            b"ASCIIHexDecode" | b"AHx" => Some(ascii_hex_decode(&data)),
+            b"RunLengthDecode" | b"RL" => Some(run_length_decode(&data)),
             // LZW und ASCII85 deckt lopdf ab; alles andere ist unbekannt und
             // fällt auf die Rohbytes zurück.
             _ => None,

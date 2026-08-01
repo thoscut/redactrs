@@ -2,20 +2,21 @@
 
 #![forbid(unsafe_code)]
 
+mod batch;
 mod cli;
 
 use std::process::ExitCode;
 
 use clap::Parser;
 use redact_core::{RedactError, Result};
-use redact_pipeline::Outcome;
+use redact_pipeline::{Outcome, Settings};
 
 use crate::cli::Cli;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match dispatch(cli) {
-        Ok(()) => ExitCode::SUCCESS,
+    match dispatch(&cli) {
+        Ok(code) => code,
         Err(e) => {
             eprintln!("Fehler: {e}");
             if let RedactError::Config(_) = e {
@@ -26,9 +27,10 @@ fn main() -> ExitCode {
     }
 }
 
-fn dispatch(cli: Cli) -> Result<()> {
+fn dispatch(cli: &Cli) -> Result<ExitCode> {
     if cli.list_patterns {
-        return list_patterns();
+        list_patterns()?;
+        return Ok(ExitCode::SUCCESS);
     }
 
     if let Some(path) = &cli.write_demo {
@@ -41,28 +43,40 @@ fn dispatch(cli: Cli) -> Result<()> {
             &redact_pdf::document::WriteOptions::new().force(cli.force),
         )?;
         println!("Beispiel-PDF geschrieben: {}", path.display());
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
+
+    // Die Einstellungsdatei — die Schicht zwischen Vorgabe und Kommandozeile.
+    // Eine fehlerhafte Datei ist ein Fehler und wird nicht übergangen.
+    let settings = Settings::load()?;
 
     // Ohne Eingabedatei oder mit --gui: grafische Oberfläche.
-    if cli.gui || (cli.input.is_none() && cli.output.is_none()) {
-        return start_gui(&cli);
+    if cli.gui || (cli.inputs.is_empty() && cli.output.is_none()) {
+        return start_gui(cli, &settings).map(|()| ExitCode::SUCCESS);
     }
 
-    if cli.input.is_none() {
+    if cli.inputs.is_empty() {
         return Err(RedactError::Config(
             "keine Eingabedatei angegeben (`redact-rs --help` zeigt Beispiele)".into(),
         ));
     }
 
-    let outcome = redact_pipeline::run(&cli.config())?;
+    let inputs = batch::gather_inputs(&cli.inputs, &cli.config(&settings).output_suffix)?;
 
-    if cli.json {
-        println!("{}", serde_json::to_string_pretty(&outcome)?);
-    } else if !cli.quiet {
-        report(&outcome);
+    // Eine Datei bleibt eine Datei: derselbe Ablauf und dieselben
+    // Rückgabewerte wie bisher — ein Fehler wandert nach oben und wird dort
+    // nach Art unterschieden (Konfiguration ⇒ 2, sonst 1).
+    if let [input] = inputs.as_slice() {
+        let outcome = redact_pipeline::run(&cli.config_for(&settings, input))?;
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        } else if !cli.quiet {
+            report(&outcome);
+        }
+        return Ok(ExitCode::SUCCESS);
     }
-    Ok(())
+
+    batch::run(cli, &settings, &inputs)
 }
 
 fn report(outcome: &Outcome) {
@@ -171,14 +185,21 @@ fn list_patterns() -> Result<()> {
 }
 
 #[cfg(feature = "gui")]
-fn start_gui(cli: &Cli) -> Result<()> {
+fn start_gui(cli: &Cli, settings: &Settings) -> Result<()> {
+    if cli.inputs.len() > 1 {
+        return Err(RedactError::Config(
+            "Die Oberfläche zeigt ein Dokument. Für mehrere Dateien den Stapel \
+             ohne --gui benutzen."
+                .into(),
+        ));
+    }
     // Dieselbe Konfiguration wie ein Lauf auf der Kommandozeile — die
     // Oberfläche analysiert und exportiert damit über dieselbe Kette.
-    redact_gui::run(cli.config())
+    redact_gui::run(cli.config(settings))
 }
 
 #[cfg(not(feature = "gui"))]
-fn start_gui(_cli: &Cli) -> Result<()> {
+fn start_gui(_cli: &Cli, _settings: &Settings) -> Result<()> {
     Err(RedactError::Config(
         "Diese Fassung wurde ohne grafische Oberfläche gebaut \
          (Feature `gui` deaktiviert). Bitte Eingabe- und Ausgabedatei angeben."

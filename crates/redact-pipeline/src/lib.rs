@@ -32,10 +32,12 @@
 #![forbid(unsafe_code)]
 
 pub mod audit;
+pub mod settings;
+pub mod testing;
 
 use std::path::{Path, PathBuf};
 
-use lopdf::Document;
+use lopdf::{Document, LoadOptions};
 use redact_booking::{BookingMatcher, CsvBookingLoader};
 use redact_core::{
     output_path_with_suffix, resolve_conflicts, sibling_path, Action, BlockedRegion, RedactError,
@@ -43,19 +45,55 @@ use redact_core::{
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::document::{
-    check_target, load_from_bytes_with_limits, write_file, Limits, WriteOptions,
+    check_target, load_from_bytes_with_limits, validate, write_file, Limits, WriteOptions,
 };
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
 pub use crate::audit::{
     effect_warnings, sha256_bytes, sha256_file, Applied, AuditLog, EntryEffect,
 };
+pub use crate::settings::Settings;
 
 /// Vorgabe für `--padding`, in Punkt.
 pub const DEFAULT_PADDING: f64 = 1.0;
 
 /// Vorgabe für `--max-candidates`, siehe [`Config::max_candidates`].
 pub const DEFAULT_MAX_CANDIDATES: usize = 100_000;
+
+/// Ein Passwort, das sich nicht versehentlich ausplaudern lässt.
+///
+/// Der einzige Weg an den Klartext ist [`Secret::reveal`] — und den ruft genau
+/// eine Stelle auf: [`load_document`], für `lopdf::Document::decrypt`. `Debug`
+/// und `Display` zeigen Sterne, damit ein `{:?}` irgendwo im Programm (die
+/// Oberfläche hält die [`Config`] in ihrem Zustand, und der leitet `Debug` ab)
+/// das Passwort nicht in eine Meldung, ein Protokoll oder einen Panik-Text
+/// schreibt. Absichtlich **nicht** `Serialize`: so kann es auch nicht
+/// versehentlich in einer JSON-Datei landen.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(password: impl Into<String>) -> Self {
+        Self(password.into())
+    }
+
+    /// Der Klartext. Nur für die Entschlüsselung.
+    pub fn reveal(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
+    }
+}
+
+impl std::fmt::Display for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("***")
+    }
+}
 
 /// Alle Einstellungen eines Laufs.
 #[derive(Debug, Clone)]
@@ -98,6 +136,19 @@ pub struct Config {
     pub limits: Limits,
     /// Obergrenze für die Zahl der Trefferkandidaten (Zeitbremse).
     pub max_candidates: usize,
+    /// Passwort eines verschlüsselten Dokuments.
+    ///
+    /// Ohne Passwort bleibt es bei der Ablehnung aus `redact-pdf`: ein
+    /// verschlüsseltes PDF wird nicht verarbeitet. Siehe [`load_document`].
+    pub password: Option<Secret>,
+    /// Thema der Oberfläche (`hell` oder `dunkel`).
+    ///
+    /// Steht hier, weil [`Config`] die *eine* Einstellungsstruktur beider
+    /// Programme ist: die Einstellungsdatei hat damit genau einen Weg in die
+    /// Kommandozeile **und** in die Oberfläche, und es gibt keine zweite
+    /// Stelle, an der beide auseinanderlaufen könnten. Auf das Ergebnis der
+    /// Schwärzung hat der Wert keinen Einfluss.
+    pub theme: String,
 }
 
 impl Default for Config {
@@ -124,6 +175,8 @@ impl Default for Config {
             max_decoded_image_bytes: redact_pdf::image::DEFAULT_MAX_DECODED_IMAGE_BYTES,
             limits: Limits::default(),
             max_candidates: DEFAULT_MAX_CANDIDATES,
+            password: None,
+            theme: settings::THEMES[0].to_string(),
         }
     }
 }
@@ -163,6 +216,66 @@ pub struct Outcome {
     pub warnings: Vec<String>,
 }
 
+// -------------------------------------------------------- Verschlüsselung
+
+/// Meldung, wenn das angegebene Passwort nicht passt.
+///
+/// Bewusst **ohne** den Fehler aus `lopdf` und selbstverständlich ohne das
+/// Passwort: eine Fehlermeldung landet in Protokollen, auf Bildschirmfotos und
+/// in Fehlerberichten.
+const WRONG_PASSWORD: &str = "Das Dokument ließ sich mit diesem Passwort nicht \
+     entschlüsseln. Passt das Passwort, oder benutzt die Datei ein \
+     Verschlüsselungsverfahren, das redact-rs nicht beherrscht?";
+
+/// Erkennt die Ablehnungen, gegen die ein Passwort hilft.
+///
+/// Zwei Fälle: „ist verschlüsselt, kein Passwort da“ (aus
+/// `redact_pdf::document::validate`) und „Passwort passt nicht“ (von hier).
+/// Die Oberfläche fragt danach, ob sie das Passwortfenster zeigt; der Test
+/// `an_encrypted_document_asks_for_a_password` hält beide Fälle fest, damit
+/// eine geänderte Meldung nicht stillschweigend zu „gar keine Abfrage mehr“
+/// wird.
+pub fn password_required(error: &RedactError) -> bool {
+    match error {
+        RedactError::Pdf(msg) => msg.contains("verschlüsselt") || msg.contains(WRONG_PASSWORD),
+        _ => false,
+    }
+}
+
+/// Lädt ein PDF aus dem Speicher — mit Passwort auch ein verschlüsseltes.
+///
+/// **Ohne** Passwort ändert sich nichts: `redact-pdf` lehnt verschlüsselte
+/// Dateien ab, und das bleibt richtig so. Ein Passwort ist die ausdrückliche
+/// Ansage „ich darf das öffnen“ und gibt genau *dieser* einen Ablehnung einen
+/// zweiten Anlauf. Jede andere Ablehnung — kein PDF, zu tief verschachtelt,
+/// Dekompressionsbombe, kaputter Katalog — bleibt bestehen; ein Passwort soll
+/// keinen fremden Fehler übertünchen.
+///
+/// Der erste Anlauf hat die Vorprüfung der Rohbytes bereits bestanden (sonst
+/// wäre es nicht die Verschlüsselungs-Ablehnung geworden), deshalb läuft sie
+/// nicht ein zweites Mal. **Grenze:** was `prescan` an einem verschlüsselten
+/// Dokument messen kann, ist wenig — die Streams lassen sich vor der
+/// Entschlüsselung nicht auspacken, `--max-decompressed-mb` greift dort also
+/// nicht. Siehe `SECURITY.md`.
+pub fn load_document(bytes: &[u8], config: &Config) -> Result<Document> {
+    let rejected = match load_from_bytes_with_limits(bytes, &config.limits) {
+        Ok(doc) => return Ok(doc),
+        Err(e) => e,
+    };
+    let Some(password) = config
+        .password
+        .as_ref()
+        .filter(|_| password_required(&rejected))
+    else {
+        return Err(rejected);
+    };
+
+    let doc = Document::load_mem_with_options(bytes, LoadOptions::with_password(password.reveal()))
+        .map_err(|_| RedactError::Pdf(WRONG_PASSWORD.to_string()))?;
+    validate(&doc)?;
+    Ok(doc)
+}
+
 /// Führt einen kompletten Lauf aus.
 pub fn run(config: &Config) -> Result<Outcome> {
     let mut outcome = Outcome {
@@ -184,7 +297,7 @@ pub fn run(config: &Config) -> Result<Outcome> {
     // Datei. Die Oberfläche macht es genauso (`AppState::load_bytes`).
     let bytes = std::fs::read(&config.input)?;
     outcome.input_sha256 = sha256_bytes(&bytes);
-    let mut doc = load_from_bytes_with_limits(&bytes, &config.limits).map_err(|e| match e {
+    let mut doc = load_document(&bytes, config).map_err(|e| match e {
         RedactError::Pdf(msg) => RedactError::Pdf(format!("{}: {msg}", config.input.display())),
         other => other,
     })?;
@@ -702,6 +815,79 @@ mod tests {
             check_review_identity(&review_with(&document), &document, false).unwrap(),
             ReviewIdentity::Matches
         );
+    }
+
+    // ------------------------------------------------------ Verschlüsselung
+
+    fn encrypted_config(password: Option<&str>) -> Config {
+        Config {
+            password: password.map(Secret::new),
+            ..Config::default()
+        }
+    }
+
+    /// Ohne Passwort bleibt es bei der klaren Ablehnung — und die Oberfläche
+    /// erkennt sie als „hier fehlt ein Passwort“.
+    #[test]
+    fn an_encrypted_document_asks_for_a_password() {
+        let error = load_document(testing::ENCRYPTED_PDF, &encrypted_config(None))
+            .expect_err("ohne Passwort muss abgelehnt werden");
+        assert!(error.to_string().contains("verschlüsselt"), "{error}");
+        assert!(
+            password_required(&error),
+            "die Oberfläche würde gar nicht erst fragen: {error}"
+        );
+
+        // Und das falsche Passwort führt zur zweiten Abfrage, nicht zum Ende.
+        let wrong = load_document(testing::ENCRYPTED_PDF, &encrypted_config(Some("falsch")))
+            .expect_err("falsches Passwort muss abgelehnt werden");
+        assert!(password_required(&wrong), "{wrong}");
+    }
+
+    /// Mit dem richtigen Passwort ist der Text wirklich lesbar — sonst hätte
+    /// die Entschlüsselung nur nicht gemeckert.
+    #[test]
+    fn the_right_password_opens_the_document_and_the_text_is_readable() {
+        let config = encrypted_config(Some(testing::ENCRYPTED_PDF_PASSWORD));
+        let doc = load_document(testing::ENCRYPTED_PDF, &config).expect("Passwort passt");
+        assert_eq!(redact_pdf::page_count(&doc), 1);
+        let text = PdfExtractor::new()
+            .extract(&doc)
+            .unwrap()
+            .iter()
+            .map(|run| run.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains(testing::ENCRYPTED_PDF_IBAN),
+            "entschlüsselt, aber kein Text: {text:?}"
+        );
+    }
+
+    /// Ein Passwort darf keinen anderen Fehler übertünchen.
+    #[test]
+    fn a_password_does_not_excuse_a_broken_file() {
+        let error = load_document(b"keine PDF-Datei", &encrypted_config(Some("egal")))
+            .expect_err("kaputte Datei bleibt kaputt")
+            .to_string();
+        assert!(error.contains("%PDF-"), "{error}");
+    }
+
+    /// Das Passwort darf in keiner Meldung und in keiner Ausgabe auftauchen —
+    /// auch nicht über `Debug`, denn die Oberfläche hält die `Config` in einem
+    /// Zustand, der `Debug` ableitet.
+    #[test]
+    fn the_password_never_shows_up_in_text() {
+        const PW: &str = "streng-geheim-4711";
+        let config = encrypted_config(Some(PW));
+        assert!(!format!("{config:?}").contains(PW));
+        assert!(!format!("{:?}", config.password).contains(PW));
+        assert!(!format!("{}", config.password.as_ref().unwrap()).contains(PW));
+
+        let error = load_document(testing::ENCRYPTED_PDF, &config)
+            .expect_err("falsches Passwort")
+            .to_string();
+        assert!(!error.contains(PW), "{error}");
     }
 
     #[test]

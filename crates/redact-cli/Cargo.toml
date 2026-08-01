@@ -34,6 +34,9 @@ redact-gui = { workspace = true, optional = true }
 rfd = { version = "0.15", optional = true }
 
 clap.workspace = true
+# Für die Zusammenfassung eines Stapels als JSON (`--json` mit mehreren
+# Dateien). Steht bereits im Baum, es kommt keine Abhängigkeit hinzu.
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

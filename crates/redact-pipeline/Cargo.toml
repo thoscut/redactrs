@@ -16,5 +16,9 @@ redact-booking.workspace = true
 lopdf.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Format der Einstellungsdatei. Steht bereits im Baum (`--patterns-config`
+# liest YAML), es kommt also keine Abhängigkeit hinzu — und YAML erlaubt in
+# einer von Hand gepflegten Datei Kommentare.
+serde_yaml.workspace = true
 sha2.workspace = true
 chrono.workspace = true

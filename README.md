@@ -28,6 +28,9 @@ Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
 1. [Schnellstart](#schnellstart)
 2. [Installation](#installation)
 3. [Kommandozeile](#kommandozeile)
+   * [Verschlüsselte PDFs](#verschluesselte-pdfs)
+   * [Mehrere Dateien auf einmal](#stapel)
+   * [Einstellungsdatei](#einstellungsdatei)
 4. [Buchungsliste](#buchungsliste)
 5. [Manuelle Regionen](#manuelle-regionen)
 6. [Eigene Patterns](#eigene-patterns)
@@ -122,16 +125,19 @@ sudo apt-get install libgtk-3-dev libxkbcommon-dev libwayland-dev
 
 Ohne `-o` wird **neben der Eingabedatei** gespeichert: aus `kontoauszug.pdf`
 wird `kontoauszug_geschwaerzt.pdf`. Der Zusatz lässt sich mit
-`--output-suffix` ändern. Eine vorhandene Datei wird nur mit `--force`
+`--output-suffix` ändern — oder dauerhaft in der
+[Einstellungsdatei](#einstellungsdatei). Eine vorhandene Datei wird nur mit `--force`
 überschrieben — ein zweiter Lauf soll ein bereits geprüftes Ergebnis nicht
 unbemerkt ersetzen. Für `--review` gilt dasselbe Schema
 (`kontoauszug_review.json`).
 
 ```text
-redact-rs [EINGABE.pdf] [OPTIONEN]
+redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
 
   -o, --output <PDF>          Ausgabedatei (Standard: neben der Eingabe)
       --output-suffix <TEXT>  Namenszusatz (Standard: _geschwaerzt)
+      --password <PW>         Passwort eines verschlüsselten PDFs
+                              (besser: REDACT_RS_PASSWORD — siehe unten)
   -f, --force                 vorhandene Ausgabedatei überschreiben
       --patterns <IDs>        Muster, kommagetrennt (z.B. iban_de,bic)
       --no-patterns           gar keine Muster anwenden
@@ -166,7 +172,110 @@ grafische Oberfläche lädt mit den fest eingebauten Vorgaben.
 `--allow-undecodable-images` ist der einzige Schalter, der die Sicherheit
 *senkt*: siehe [Bilder werden wirklich geschwärzt](#bilder).
 
-Rückgabewerte: `0` Erfolg, `1` Verarbeitungsfehler, `2` Bedienfehler.
+Rückgabewerte: `0` Erfolg, `1` Verarbeitungsfehler, `2` Bedienfehler. Im
+Stapelbetrieb heißt `1`: mindestens eine Datei ist gescheitert.
+
+<a id="verschluesselte-pdfs"></a>
+### Verschlüsselte PDFs
+
+Ohne Passwort werden sie abgelehnt — das bleibt so. Mit Passwort werden sie
+entschlüsselt und wie jede andere Datei verarbeitet:
+
+```bash
+# Bequem, aber lesbar: die Kommandozeile steht in der Prozessliste (ps)
+# und in der Shell-Historie
+redact-rs auszug.pdf --password geheim
+
+# Besser: über die Umgebung — nimmt keinen der beiden Wege
+ REDACT_RS_PASSWORD=geheim redact-rs auszug.pdf
+
+# Oder ohne Tippen: die Oberfläche fragt in einem Fenster mit verdeckter
+# Eingabe, sobald ein verschlüsseltes Dokument geöffnet wird
+redact-rs --gui auszug.pdf
+```
+
+Das Passwort landet **in keiner erzeugten Datei** — nicht in der Ausgabe-PDF,
+nicht im Audit-Log, nicht in der Review-Datei — und in keiner Fehlermeldung.
+Was dabei ungeprüft bleibt (die Vorprüfung kann verschlüsselte Streams nicht
+auspacken; der Arbeitsspeicher wird nicht überschrieben), steht in
+[`SECURITY.md`](SECURITY.md#passwörter-verschlüsselter-pdfs).
+
+<a id="stapel"></a>
+### Mehrere Dateien auf einmal
+
+Mehrere Eingabedateien oder ein Verzeichnis ergeben einen Stapel. Je Datei
+entsteht ein Ergebnis **neben der Eingabe**, am Ende steht eine
+Zusammenfassung:
+
+```bash
+# Alle PDFs eines Verzeichnisses (oberste Ebene, nicht rekursiv)
+redact-rs auszuege/
+
+# Oder einzeln benannt
+redact-rs januar/auszug.pdf februar/auszug.pdf
+```
+
+```text
+januar/auszug.pdf → januar/auszug_geschwaerzt.pdf (4 Schwärzung(en))
+februar/auszug.pdf → februar/auszug_geschwaerzt.pdf (3 Schwärzung(en))
+
+2 Datei(en): 2 verarbeitet, 0 fehlgeschlagen.
+```
+
+Drei Eigenschaften, auf die es dabei ankommt:
+
+* **Eine kaputte Datei bricht den Stapel nicht ab.** Sie wird auf stderr
+  gemeldet (auch mit `--quiet`), der Rest läuft weiter, und der Rückgabewert
+  ist am Ende `1`.
+* **Kein Ergebnis überschreibt ein anderes.** Weil die Ausgabe neben ihrer
+  Eingabe entsteht, kommen sich zwei gleichnamige Dateien aus verschiedenen
+  Verzeichnissen nicht ins Gehege. Deshalb sind die Schalter mit *einem*
+  festen Ziel im Stapelbetrieb verboten: `-o`, `--review-out`, `--audit-log`
+  und `--apply-review`.
+* **Ein zweiter Lauf über dasselbe Verzeichnis kaskadiert nicht.** Beim
+  Auflösen eines Verzeichnisses werden Dateien mit dem Namenszusatz
+  übergangen — `auszug_geschwaerzt.pdf` wird nicht zu
+  `auszug_geschwaerzt_geschwaerzt.pdf`. Ausdrücklich genannte Dateien werden
+  nie übergangen.
+
+Mit `--json` kommt statt der Zusammenfassung eine Liste, in der auch die
+gescheiterten Dateien mit ihrem Fehler stehen.
+
+<a id="einstellungsdatei"></a>
+### Einstellungsdatei
+
+Was man nicht bei jedem Aufruf tippen will, steht in einer kleinen YAML-Datei:
+
+| System | Pfad |
+|---|---|
+| Linux, BSD | `$XDG_CONFIG_HOME/redact-rs/settings.yaml`, sonst `~/.config/redact-rs/settings.yaml` |
+| macOS | `~/.config/redact-rs/settings.yaml` |
+| Windows | `%APPDATA%\redact-rs\settings.yaml` |
+
+`REDACT_RS_CONFIG` zeigt auf eine andere Datei und schlägt alles davon.
+
+```yaml
+# Alle Schlüssel sind freiwillig; was fehlt, behält seine Vorgabe.
+output_suffix: _anonym        # Namenszusatz          (Vorgabe: _geschwaerzt)
+patterns: [iban_de, bic]      # Standard-Muster       (Vorgabe: die eingebaute Auswahl)
+min_confidence: 0.4           # Mindestvertrauen      (Vorgabe: 0.5)
+padding: 2.0                  # Polsterung in Punkt   (Vorgabe: 1.0)
+theme: dunkel                 # Thema der Oberfläche  (hell | dunkel)
+```
+
+**Rangfolge: Kommandozeile schlägt Datei schlägt Vorgabe.** Ein Schalter, der
+nicht angegeben wurde, überschreibt die Datei nicht — das ist der Grund, warum
+`--output-suffix`, `--padding` und `--min-confidence` in der Hilfe keinen
+Standardwert mehr anzeigen. Geprüft wird die Reihenfolge in
+`crates/redact-cli/tests/settings.rs`.
+
+Ein unbekannter Schlüssel (Tippfehler) und ein unbekanntes Thema beenden den
+Lauf mit einer Meldung. Eine Einstellung, die stillschweigend nicht wirkt, wäre
+das schlechtere Verhalten. Eine **fehlende** Datei ist dagegen kein Fehler.
+
+Die Datei gilt für beide Programme: sie wird beim Bauen von
+`redact_pipeline::Config` angewendet, und dieselbe `Config` bekommt die
+grafische Oberfläche.
 
 ### Eingebaute Muster
 
@@ -762,10 +871,16 @@ der ohne `#[ignore]` läuft und rot wird, sobald das Leck verschwindet.
 
 ### Verarbeitung
 
-* **Verschlüsselte PDFs** werden abgelehnt, nicht entschlüsselt.
+* **Verschlüsselte PDFs** werden ohne Passwort abgelehnt. Mit `--password` bzw.
+  `REDACT_RS_PASSWORD` werden sie entschlüsselt und normal verarbeitet — was
+  dabei ungeprüft bleibt, steht in
+  [`SECURITY.md`](SECURITY.md#passwörter-verschlüsselter-pdfs). Nicht jedes
+  Verfahren ist lesbar; was `lopdf` nicht beherrscht, endet mit derselben
+  Meldung wie ein falsches Passwort.
 * **Strukturell defekte PDFs** werden abgelehnt, nicht repariert — eine
   „reparierte“ Datei könnte Inhalte enthalten, die der Analyse entgehen.
-* **Keine Stapelverarbeitung**, kein Plugin-System.
+* **Kein Plugin-System.** Die Stapelverarbeitung gibt es inzwischen
+  ([siehe oben](#stapel)), sie steigt aber **nicht** in Unterverzeichnisse ab.
 * **Keine unbegrenzte Größe.** Sehr viele Treffer in einer Datei lassen die
   Konfliktauflösung quadratisch wachsen; der Lauf bricht ab `--max-candidates`
   (Vorgabe 100 000) mit Exit 2 ab. Details und Messwerte in
@@ -803,6 +918,15 @@ Die GUI (egui/eframe, ein einziges Binary ohne zusätzliche Laufzeit) zeigt die
 Seiten mit allen gefundenen Treffern als farbige Rahmen:
 🔵 Muster · 🟢 Positivliste · 🔴 Negativliste (blockiert) · 🟠 manuell.
 Neue Bereiche zieht man mit der Maus, Treffer schaltet man per Checkbox ab.
+
+Ist das geöffnete Dokument **verschlüsselt**, erscheint ein Fenster mit
+verdeckter Eingabe. Das ist zugleich der bequemste Weg, ein Passwort *nicht*
+über die Kommandozeile zu geben. Passt es nicht, bleibt die Frage stehen; das
+falsche Passwort wird nicht behalten und steht in keiner Meldung.
+
+Ob die Oberfläche hell oder dunkel startet, sagt `theme` in der
+[Einstellungsdatei](#einstellungsdatei); umschalten lässt es sich jederzeit in
+der Leiste oben.
 
 ### GUI und CLI teilen sich inzwischen die Verarbeitungskette
 
@@ -928,8 +1052,10 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   zur Ausgabedatei, damit nie eine halb geschriebene Datei sichtbar wird. In
   `/tmp` landet nichts.
 * Gleiche Eingabe + gleiche Konfiguration ⇒ byteweise gleiche Ausgabe.
-* Verschlüsselte oder strukturell defekte PDFs werden **abgelehnt**, nicht
-  repariert.
+* Verschlüsselte PDFs werden ohne Passwort **abgelehnt**; strukturell defekte
+  werden abgelehnt, nicht repariert. Das Passwort steht in keiner erzeugten
+  Datei und in keiner Meldung
+  ([`SECURITY.md`](SECURITY.md#passwörter-verschlüsselter-pdfs)).
 * Review-Datei und Audit-Log entstehen unter Unix mit Modus `0600` — das gilt
   für die Kommandozeile; die Oberfläche schreibt beide anders
   ([siehe oben](#grafische-oberfläche)).
@@ -968,8 +1094,10 @@ Alle Abweichungen sind bewusst:
 | GUI-Binary unter 30 MB | erfüllt (für die gemessene Datei) | Windows 7,4 MB nachgemessen (`dist/redact-rs.exe`, 7 395 328 Byte) — das ist die **Konsolenfassung**. `redact-rs-gui.exe` ist seitdem als zweite Datei dazugekommen und hier **nicht** nachgemessen; der Linux-Wert (13 MB) stammt ebenfalls aus einer früheren Messung. |
 | Export der GUI identisch zur CLI | **nicht end-to-end nachgewiesen** | Beide Programme gehen inzwischen durch dasselbe Crate `redact-pipeline`, und die früher dokumentierten Abweichungen sind geschlossen ([siehe oben](#grafische-oberfläche)). Es gibt aber weiterhin keinen Test, der beide *Programme* startet und die Ausgabedateien byteweise vergleicht. |
 
-Nicht umgesetzt (laut Konzept §11 außerhalb des MVP): OCR für gescannte PDFs,
-Entschlüsseln passwortgeschützter PDFs, Batch-Verarbeitung, Plugin-System.
+Von dem, was das Konzept in §11 außerhalb des MVP führt, sind das
+[Entschlüsseln passwortgeschützter PDFs](#verschluesselte-pdfs) und die
+[Stapelverarbeitung](#stapel) inzwischen umgesetzt. Nicht umgesetzt: OCR für
+gescannte PDFs und ein Plugin-System.
 
 ## Entwicklung
 

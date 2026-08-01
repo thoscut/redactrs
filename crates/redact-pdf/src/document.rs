@@ -32,9 +32,22 @@ use redact_core::{Rect, RedactError, Result};
 pub struct Limits {
     /// Maximale Verschachtelungstiefe von `[` bzw. `<<` in den Rohbytes.
     ///
-    /// `lopdf` parst rekursiv; ab einigen hundert Ebenen (Debug-Build) bzw.
-    /// einigen tausend (Release) läuft der Stack über und der Prozess bricht
-    /// mit SIGABRT ab — siehe RUSTSEC-2026-0187.
+    /// Historisch war das die Notbremse gegen RUSTSEC-2026-0187: `lopdf` 0.34
+    /// parste unbegrenzt rekursiv, lief ab einigen hundert Ebenen (Debug) bzw.
+    /// einigen tausend (Release) über den Stack und beendete den Prozess mit
+    /// SIGABRT. Seit `lopdf` 0.42 begrenzt die Bibliothek sich selbst
+    /// (`lopdf::reader::MAX_NESTING_DEPTH`, derzeit 100) und stürzt nicht
+    /// mehr ab.
+    ///
+    /// Die Grenze bleibt trotzdem, und sie liegt jetzt **gleichauf** mit der
+    /// von `lopdf`. Der Grund ist ein anderer als früher: `lopdf` parst
+    /// nachsichtig. Ein Objekt, das seine Tiefengrenze reißt, wird nicht
+    /// gemeldet, sondern **stillschweigend weggelassen** — das Dokument lädt,
+    /// eine Referenz darauf zeigt danach ins Leere, und die Ausgabe wäre
+    /// unauffällig kaputt. Für ein Werkzeug, das Kontoauszüge verarbeitet, ist
+    /// eine Ablehnung mit Meldung die richtige Antwort darauf. Gemessen:
+    /// `lopdf` 0.42 nimmt Tiefe 100 an und lässt das Objekt ab Tiefe 101
+    /// fallen; genau dort greift auch diese Prüfung.
     pub max_nesting_depth: usize,
     /// Summe der **entpackten** Bytes über alle Streams der Datei.
     pub max_decompressed_bytes: u64,
@@ -51,7 +64,12 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_nesting_depth: 128,
+            // Gleichauf mit `lopdf::reader::MAX_NESTING_DEPTH` (dort 100, aber
+            // nicht öffentlich re-exportiert, deshalb hier als Zahl). Der Test
+            // `the_depth_limit_is_exactly_what_lopdf_still_parses` misst die
+            // Grenze am Verhalten der Bibliothek nach; zieht ein lopdf-Update
+            // sie um, fällt der Test auf.
+            max_nesting_depth: 100,
             max_decompressed_bytes: 1024 * 1024 * 1024,
             max_parsed_bytes: 16 * 1024 * 1024,
         }
@@ -90,12 +108,13 @@ pub fn load_from_bytes_with_limits(bytes: &[u8], limits: &Limits) -> Result<Docu
         }
     }
 
-    // Vorprüfung der Rohbytes — muss *vor* `load_mem` laufen, denn dort läuft
-    // der Stack über, bevor irgendein Rückgabewert entsteht.
+    // Vorprüfung der Rohbytes — muss *vor* `load_mem` laufen: was dort
+    // durchfällt, soll den Parser gar nicht erst erreichen.
     prescan(bytes, limits)?;
 
-    let doc = Document::load_mem(bytes)
+    let mut doc = Document::load_mem(bytes)
         .map_err(|e| RedactError::Pdf(format!("Datei nicht lesbar: {e}")))?;
+    restore_revision_markers(bytes, &mut doc);
 
     validate(&doc)?;
     Ok(doc)
@@ -121,24 +140,34 @@ const BINARY_RATIO: f64 = 0.10;
 ///
 /// Belegt: über einen 6,2-MB-Stream aus gleichverteilten Zufallsbytes kommt
 /// die Zählung auf Tiefe 61; echte Schriften, Bilder und Farbprofile blieben
-/// im Test unter 30. `lopdf` läuft (Debug-Build) erst oberhalb von 500 Ebenen
-/// über den Stack — 256 liegt zwischen beidem.
+/// im Test unter 30. 256 liegt weit genug darüber, dass Nutzlast keinen
+/// Fehlalarm auslöst.
+///
+/// Dass dieser Wert über [`Limits::max_nesting_depth`] liegt, ist kein
+/// Versehen: Nutzlast wird von `lopdf` nicht als PDF-Syntax gelesen. Käme es
+/// doch dazu, bliebe das Schlimmste, dass `lopdf` das Objekt fallen lässt —
+/// abstürzen kann es seit 0.42 nicht mehr.
 const MAX_BINARY_NESTING_DEPTH: usize = 256;
 
 /// Prüft die Rohbytes einer Datei, *bevor* `lopdf` sie zu sehen bekommt.
 ///
 /// Zwei Dinge werden gemessen:
 ///
-/// 1. **Verschachtelungstiefe.** `lopdf` parst rekursiv. Ein PDF mit 200 000
-///    offenen `[` beendet den Prozess mit SIGABRT, bevor irgendein Fehlerwert
-///    entstehen kann (RUSTSEC-2026-0187). Ein Fehler nach dem Absturz nützt
-///    niemandem — die Prüfung muss davor laufen.
+/// 1. **Verschachtelungstiefe.** Bis `lopdf` 0.34 war das die Notbremse gegen
+///    RUSTSEC-2026-0187: ein PDF mit 200 000 offenen `[` beendete den Prozess
+///    mit SIGABRT, bevor irgendein Fehlerwert entstehen konnte. Seit 0.42
+///    begrenzt `lopdf` seine Rekursion selbst, und der Absturz ist weg.
+///    Geblieben ist ein anderer Grund: `lopdf` meldet ein zu tiefes Objekt
+///    nicht, sondern lässt es **stillschweigend weg**. Diese Prüfung macht
+///    daraus eine Ablehnung mit Meldung — siehe [`Limits::max_nesting_depth`].
 /// 2. **Entpackte Gesamtgröße.** Ein 400-kB-PDF, dessen Content-Stream sich
-///    auf 200 MB aufbläht, belegt beim Parsen zweistellige Gigabytes.
+///    auf 200 MB aufbläht, belegt beim Parsen zweistellige Gigabytes. Dagegen
+///    hat `lopdf` nach wie vor nichts — diese Buchhaltung ist die einzige
+///    Grenze, und sie ist der Grund, warum die Vorprüfung bleibt.
 ///
-/// Untersucht werden auch die *ausgepackten* Streams — die Verschachtelung
-/// lässt sich sonst trivial in einem komprimierten Objekt- oder Content-Stream
-/// verstecken.
+/// Untersucht werden auch die *ausgepackten* Streams — beides, Verschachtelung
+/// wie Größe, lässt sich sonst trivial in einem komprimierten Objekt- oder
+/// Content-Stream verstecken.
 pub fn prescan(bytes: &[u8], limits: &Limits) -> Result<()> {
     let mut scan = Prescan {
         limits,
@@ -152,9 +181,9 @@ fn check_depth(depth: usize, limit: usize) -> Result<()> {
     if depth > limit {
         return Err(RedactError::Pdf(format!(
             "Verschachtelungstiefe über {limit} — die Datei wird abgelehnt. \
-             Tief verschachtelte Objektstrukturen bringen den PDF-Parser zum \
-             Stapelüberlauf (RUSTSEC-2026-0187); eine solche Datei ist kein \
-             normales Dokument."
+             So tief verschachtelte Objektstrukturen liest der PDF-Parser nicht \
+             mehr vollständig ein; er ließe das betroffene Objekt kommentarlos \
+             weg. Eine solche Datei ist kein normales Dokument."
         )));
     }
     Ok(())
@@ -680,10 +709,82 @@ const MAX_DIRECT_DEPTH: usize = 64;
 
 /// Meldet, ob das Dokument aus mehreren inkrementellen Revisionen besteht.
 ///
-/// `lopdf` behält den Trailer der jüngsten Revision; ein `/Prev` darin ist der
-/// Zeiger auf die vorige XRef-Sektion — also der Beleg für eine Vorgeschichte.
+/// Der Trailer der jüngsten Revision trägt in diesem Fall ein `/Prev` (Zeiger
+/// auf die vorige XRef-Sektion) bzw. ein `/XRefStm` — das ist der Beleg für
+/// eine Vorgeschichte. Damit er im geladenen Dokument auch wirklich steht,
+/// siehe `restore_revision_markers` weiter unten.
 pub fn has_incremental_history(doc: &Document) -> bool {
     doc.trailer.get(b"Prev").is_ok() || doc.trailer.get(b"XRefStm").is_ok()
+}
+
+/// Trägt `/Prev` und `/XRefStm` wieder in den Trailer ein.
+///
+/// ## Warum das nötig ist
+///
+/// Bis `lopdf` 0.34 blieb `/Prev` im geladenen Trailer stehen. Seit 0.42
+/// **verbraucht** der Leser den Schlüssel beim Ablaufen der XRef-Kette
+/// (`trailer.remove(b"Prev")` in `reader.rs`), und das geladene Dokument sieht
+/// danach aus wie eine Datei ohne Vorgeschichte. Der Hinweis „diese Datei
+/// besteht aus mehreren Revisionen“ in [`crate::PdfRedactor`] wäre damit
+/// stillschweigend verschwunden — und das ist genau die Art Warnung, deren
+/// Fehlen niemandem auffällt.
+///
+/// Deshalb wird der Marker aus den Rohbytes zurückgeholt. Er beschreibt einen
+/// Offset in der *Eingabedatei* und darf in keiner Ausgabe landen;
+/// [`save_to_bytes`] entfernt ihn vor dem Schreiben wieder.
+fn restore_revision_markers(bytes: &[u8], doc: &mut Document) {
+    let Some(trailer) = newest_trailer_area(bytes) else {
+        return;
+    };
+    for key in [&b"/Prev"[..], &b"/XRefStm"[..]] {
+        let name = &key[1..];
+        if doc.trailer.get(name).is_ok() {
+            continue;
+        }
+        if let Some(offset) = integer_after(trailer, key) {
+            doc.trailer.set(name, Object::Integer(offset));
+        }
+    }
+}
+
+/// Der Bytebereich, in dem der Trailer der jüngsten Revision steht.
+///
+/// `startxref` am Dateiende nennt den Offset der jüngsten XRef-Sektion. Dort
+/// steht entweder eine klassische Tabelle (`xref … trailer << … >>`, die
+/// Einträge dazwischen sind reine Ziffern) oder das Dictionary eines
+/// XRef-Stroms. Im zweiten Fall endet der interessante Bereich am
+/// Schlüsselwort `stream` — was dahinter liegt, ist Nutzlast und könnte
+/// zufällig `/Prev` enthalten.
+fn newest_trailer_area(bytes: &[u8]) -> Option<&[u8]> {
+    let key = b"startxref";
+    let pos = bytes
+        .windows(key.len())
+        .enumerate()
+        .rfind(|(_, w)| *w == key)
+        .map(|(i, _)| i)?;
+    let start = usize::try_from(integer_after(&bytes[pos..], key)?).ok()?;
+    if start >= bytes.len() {
+        return None;
+    }
+    let rest = &bytes[start..];
+    let end = [&b"%%EOF"[..], &b"stream"[..]]
+        .iter()
+        .filter_map(|needle| find_from(rest, needle, 0))
+        .min()
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+/// Liest die Ganzzahl, die (nach Leerraum) hinter `key` steht.
+fn integer_after(bytes: &[u8], key: &[u8]) -> Option<i64> {
+    let pos = find_from(bytes, key, 0)? + key.len();
+    let digits: Vec<u8> = bytes[pos..]
+        .iter()
+        .skip_while(|b| is_whitespace(**b))
+        .take_while(|b| b.is_ascii_digit())
+        .copied()
+        .collect();
+    std::str::from_utf8(&digits).ok()?.parse().ok()
 }
 
 /// Sammelt alle vom Trailer aus erreichbaren Objekte.
@@ -1307,7 +1408,7 @@ mod tests {
     fn is_file_structure(object: &Object) -> bool {
         matches!(
             object.type_name().ok(),
-            Some("XRef") | Some("ObjStm") | Some("Linearized")
+            Some(b"XRef") | Some(b"ObjStm") | Some(b"Linearized")
         )
     }
 
@@ -1595,5 +1696,32 @@ mod tests {
         let bytes = incremental_with_orphaned_content(SECRET, "XXXX XXXX XXXX");
         let doc = load_from_bytes(&bytes).unwrap();
         assert_eq!(save_to_bytes(&doc).unwrap(), save_to_bytes(&doc).unwrap());
+    }
+
+    /// `lopdf` verbraucht `/Prev` seit 0.42 beim Laden. Ohne
+    /// `restore_revision_markers` verschwände der Hinweis auf die
+    /// Vorgeschichte spurlos — deshalb wird hier beides gemessen: der Marker
+    /// ist wieder da, **und** eine gewöhnliche Datei bekommt keinen.
+    #[test]
+    fn the_revision_marker_survives_loading() {
+        let bytes = incremental_with_orphaned_content(SECRET, "XXXX XXXX XXXX");
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("/Prev"),
+            "Testdaten taugen nicht: die Eingabe hat gar keine Vorgeschichte"
+        );
+
+        let raw = Document::load_mem(&bytes).expect("ladbar");
+        let doc = load_from_bytes(&bytes).expect("ladbar");
+        assert!(
+            has_incremental_history(&doc),
+            "der /Prev-Marker ist beim Laden verlorengegangen (lopdf-Rohladung: \
+             {:?})",
+            raw.trailer.get(b"Prev").is_ok()
+        );
+
+        // Gegenprobe: eine Datei aus einer einzigen Revision wird nicht
+        // fälschlich als Mehrfachrevision gemeldet.
+        let single = load_from_bytes(&crate::testing::minimal_pdf("Hallo")).unwrap();
+        assert!(!has_incremental_history(&single));
     }
 }
