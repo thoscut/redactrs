@@ -19,25 +19,30 @@ name: Publish Release
 # Frueher stand hier `branches: ["**"]`. Damit legte *jeder* Push auf
 # *irgendeinen* Branch, der .release-version beruehrt, einen Tag an und
 # veroeffentlichte einen oeffentlichen Release - auch aus einem Arbeitsbranch
-# mit halbfertigem Stand. Die Umgehung oben braucht aber nur *einen*
-# erlaubten Branch, nicht alle. Es bleiben deshalb:
+# mit halbfertigem Stand.
 #
-#   * der Default-Branch  - der regulaere Weg
-#   * claude/**           - die Arbeitsbranches der Sandbox, damit die
-#                           Umgehung weiter funktioniert
+# Danach stand hier zusaetzlich `claude/**`, weil der Arbeitsbranch der
+# Sandbox damals selbst der Default-Branch war und es sonst gar keinen Weg
+# zu einem regulaeren Release gegeben haette.
 #
-# Der `branches`-Filter ist die erste Schranke; die `if`-Bedingungen an den
-# Jobs sind die zweite und pruefen zusaetzlich gegen den *tatsaechlichen*
-# Default-Branch des Repositories (der Filter kann das nicht). Releases
-# ausserhalb des Default-Branches werden ausserdem als Vorabversion
-# gekennzeichnet.
+# BEIDES IST VORBEI, und der Eintrag war nicht nur ueberfluessig, sondern
+# schaedlich: v0.3.0 wurde auf denselben Commit zweimal ausgeloest - einmal
+# ueber den Arbeitsbranch, einmal ueber `main`. Der Lauf des Arbeitsbranches
+# war 14 Sekunden schneller, hat den Release als *Vorabversion* angelegt
+# (er ist ja nicht der Default-Branch), und der Lauf von `main` scheiterte
+# danach am bereits vorhandenen Tag. Ein Wettlauf, den man nicht sieht,
+# solange man nicht beide Laeufe nebeneinander legt.
+#
+# Es bleibt deshalb der Default-Branch, und nur er. Der `branches`-Filter
+# ist die erste Schranke; die `if`-Bedingungen an den Jobs sind die zweite
+# und pruefen gegen den *tatsaechlichen* Default-Branch des Repositories
+# (der Filter kann das nicht, er kennt nur Namen).
 
 on:
   push:
     branches:
       - main
       - master
-      - "claude/**"
     paths:
       - ".release-version"
 
@@ -51,9 +56,7 @@ concurrency:
 jobs:
   version:
     name: Version einlesen
-    if: >-
-      github.ref_name == github.event.repository.default_branch
-      || startsWith(github.ref_name, 'claude/')
+    if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.read.outputs.tag }}
@@ -104,9 +107,7 @@ jobs:
   release:
     name: Bauen und veroeffentlichen
     needs: version
-    if: >-
-      github.ref_name == github.event.repository.default_branch
-      || startsWith(github.ref_name, 'claude/')
+    if: github.ref_name == github.event.repository.default_branch
     permissions:
       contents: write
       id-token: write
