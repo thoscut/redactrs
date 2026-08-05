@@ -10,6 +10,84 @@ use redact_pipeline::{Config, Secret, Settings};
 /// Der Weg an der Prozessliste vorbei — siehe [`Cli::password`].
 pub const PASSWORD_ENV: &str = "REDACT_RS_PASSWORD";
 
+/// Schalter, die mit `--check-leaks` nicht zusammengehen.
+///
+/// ## Warum eine Liste und kein Übergehen
+///
+/// `--check-leaks` **liest** eine fertige Datei und schreibt nichts. Jeder
+/// Schalter hier gehört zum Schwärzen — er bestimmt, was gefunden (`--patterns`,
+/// `--min-confidence`, `--booking-list`), was daraus gemacht (`--action`,
+/// `--padding`) und wohin es geschrieben wird (`-o`, `--audit-log`,
+/// `--review`). Bei einer Nachprüfung hat keiner davon eine Wirkung.
+///
+/// Sie stillschweigend zu übergehen wäre die schlechtere Wahl: wer
+/// `--check-leaks "DE89 …" --patterns iban_de` schreibt, meint erkennbar „such
+/// nur nach IBANs“ — und bekäme eine Prüfung, die etwas anderes tut, als er
+/// gelesen hat. Dasselbe bei `-o`: die Erwartung wäre „schwärzen **und**
+/// nachprüfen“, und das Ergebnis wäre eine Datei, die nie geschrieben wurde.
+/// Das Werkzeug lehnt deshalb ab und sagt es (Rückgabewert 2), wie schon bei
+/// einem unbekannten Namen hinter `--disable-pattern`.
+///
+/// Zwei Schritte statt eines: erst `redact-rs auszug.pdf -o out.pdf`, dann
+/// `redact-rs out.pdf --check-leaks "…"`. Der zweite Aufruf prüft damit
+/// nachweislich *die geschriebene Datei* und nicht einen Zwischenstand im
+/// Speicher — was eine Kontrolle erst zu einer macht.
+///
+/// **Nicht in dieser Liste** und deshalb erlaubt: `--quiet` (weniger Ausgabe,
+/// Funde bleiben) und die drei Grenzen `--max-input-mb`,
+/// `--max-decompressed-mb` und `--max-parsed-mb`. Die greifen beim Lesen und
+/// Vorprüfen jeder fremden Datei, also auch hier. `--max-image-mb` steht
+/// dagegen in der Liste: es begrenzt die *dekodierten* Bildbytes, und beim
+/// Nachprüfen wird kein Bild dekodiert.
+///
+/// ## Auch die Schalter mit Vorgabewert
+///
+/// `--action`, `--replace-with`, `--padding` und `--max-image-mb`
+/// tragen ein `default_value`; clap zählt eine Vorgabe nicht als „angegeben“
+/// und schlägt deshalb nur an, wenn der Schalter wirklich auf der
+/// Kommandozeile stand. Der Test
+/// `check_leaks_alone_survives_the_defaults` hält das fest — liefe es anders,
+/// wäre `--check-leaks` allein nicht mehr aufrufbar.
+const CHECK_LEAKS_CONFLICTS: [&str; 26] = [
+    // Es wird nichts geschrieben.
+    "output",
+    "output_suffix",
+    "force",
+    "audit_log",
+    // Es wird nichts analysiert und nichts geschwärzt.
+    "review",
+    "review_out",
+    "apply_review",
+    "allow_unverified_review",
+    "patterns",
+    "no_patterns",
+    "disable_pattern",
+    "patterns_config",
+    "min_confidence",
+    "booking_list",
+    "manual_regions",
+    "allow_undecodable_images",
+    "max_candidates",
+    // Begrenzt die *dekodierten* Bildbytes — hier wird kein Bild dekodiert.
+    "max_image_mb",
+    "action",
+    "replace_with",
+    "padding",
+    // Verschlüsselte Dateien lehnt die Prüfung ab (eine Bytesuche fände darin
+    // nichts) — ein Passwort hilft ihr also nicht, und stillschweigend
+    // ignoriert sähe es aus, als täte es das.
+    "password",
+    // `--json` gibt die Zusammenfassung eines Schwärzungslaufs aus; die gibt
+    // es hier nicht. Ein zweites Ausgabeformat für die Prüfung wäre eine
+    // zweite Wahrheit neben der ersten — die Schnittstelle für ein Skript ist
+    // der Rückgabewert (0 sauber, 3 Fund, sonst Fehler).
+    "json",
+    // Andere Betriebsarten.
+    "gui",
+    "write_demo",
+    "list_patterns",
+];
+
 /// Lokales Schwärzen sensibler Daten in PDF-Dokumenten.
 ///
 /// Ohne Eingabedatei (oder mit `--gui`) startet die grafische Oberfläche.
@@ -240,6 +318,41 @@ pub struct Cli {
     #[arg(long)]
     pub list_patterns: bool,
 
+    /// **Nachprüfen statt schwärzen:** steht dieser Text noch in der Datei?
+    ///
+    /// Mehrfach angebbar — je Angabe ein Suchbegriff. Gesucht wird mit
+    /// `redact_pdf::leaks` auf allen Ebenen, auf denen ein Geheimnis
+    /// überleben kann: rohe Dateibytes, jeder `stream … endstream`-Block (auch
+    /// Flate-dekomprimiert, also inklusive Altrevisionen), jedes Stream-Objekt
+    /// dekodiert, die Objekte in `/ObjStm`-Containern und jedes
+    /// Zeichenketten-Objekt unter jedem Schlüssel — jeweils in UTF-8,
+    /// Latin-1/PDFDoc, UTF-16BE und als Hex-String. `pdftotext … | grep …`
+    /// sieht davon einen Bruchteil und gibt an der eigenen Demo-Ausgabe
+    /// falsche Entwarnung.
+    ///
+    /// **`-` liest die Begriffe zeilenweise von der Standardeingabe.** Ein
+    /// Suchbegriff ist ein Geheimnis; auf der Kommandozeile steht er in der
+    /// Prozessliste (`ps`) und in der Shell-Historie — genau wie ein Passwort.
+    /// `redact-rs geschwaerzt.pdf --check-leaks - < begriffe.txt` nimmt keinen
+    /// der beiden Wege.
+    ///
+    /// **Kein Komma-Trenner:** eine Angabe ist ein Begriff, ganz.
+    /// „Mustermann, Max“ ist ein Name und nicht zwei.
+    ///
+    /// Rückgabewert: `0`, wenn keiner der Begriffe gefunden wurde, `3`, wenn
+    /// mindestens einer noch dasteht. Ein Fund ist kein Verarbeitungsfehler —
+    /// der Lauf ist gelungen, das *Ergebnis* ist es nicht.
+    ///
+    /// **Nichts gefunden ist kein Freibrief:** geprüft ist damit genau diese
+    /// Liste und sonst nichts.
+    #[arg(
+        long = "check-leaks",
+        value_name = "TEXT",
+        action = ArgAction::Append,
+        conflicts_with_all = CHECK_LEAKS_CONFLICTS,
+    )]
+    pub check_leaks: Vec<String>,
+
     /// Beispiel-PDF (Kontoauszug) schreiben und beenden.
     #[arg(long, value_name = "PDF")]
     pub write_demo: Option<PathBuf>,
@@ -417,6 +530,13 @@ Beispiele:
   # Beispieldatei zum Ausprobieren erzeugen
   redact-rs --write-demo beispiel.pdf
 
+  # Nachprüfen: steht das Geheimnis noch in der fertigen Datei?
+  redact-rs geschwaerzt.pdf --check-leaks \"DE89 3704 0044 0532 0130 00\" \\
+      --check-leaks \"Max Mustermann\"
+
+  # Dasselbe, ohne die Begriffe in Prozessliste und Shell-Historie zu schreiben
+  redact-rs geschwaerzt.pdf --check-leaks - < begriffe.txt
+
 Einstellungsdatei — Namenszusatz, Muster, Mindestvertrauen, Polsterung, Thema:
   ~/.config/redact-rs/settings.yaml   bzw.   %APPDATA%\\redact-rs\\settings.yaml
   {} zeigt auf eine andere Datei.
@@ -424,19 +544,27 @@ Einstellungsdatei — Namenszusatz, Muster, Mindestvertrauen, Polsterung, Thema:
 
 Rückgabewerte:
   {EXIT_OK}  Fertig. Das Dokument wurde vollständig durchsucht.
+     Bei --check-leaks: keiner der angegebenen Begriffe steht noch in der
+     Datei. Das ist kein Freibrief — geprüft wurde genau diese Liste.
   {EXIT_ERROR}  Fehlgeschlagen — keine (oder keine brauchbare) Ausgabe. Im Stapel:
      mindestens eine Datei ist gescheitert; die übrigen wurden bearbeitet.
   {EXIT_USAGE}  Bedienfehler: ein Schalter, die Einstellungsdatei oder eine mitgegebene
      Datei passt nicht (z.B. eine Review-Datei zu einem anderen Dokument).
-  {EXIT_INCOMPLETE}  Verarbeitet, aber nicht vollständig geprüft. Die Ausgabe ist
-     geschrieben und was gefunden wurde, ist geschwärzt — für einen Teil des
-     Dokuments konnte die Analyse aber nicht einstehen: ein Font ohne
-     /ToUnicode, ein zu tief verschachteltes Form-XObject, ein Kachelmuster
-     mit Text, eine Annotation ohne Erscheinungsstrom, ein Bild, das sich
-     nicht dekodieren ließ. Dort kann etwas stehen geblieben sein.
-     Diese Ausgabe gehört von Hand geprüft. Die betroffenen Stellen stehen
-     auf stderr und im Audit-Log; im Stapel weist die Zusammenfassung solche
-     Dateien getrennt aus, sie zählen nicht als „verarbeitet“.
+  {EXIT_INCOMPLETE}  Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.
+     Zwei Fälle:
+     • Verarbeitet, aber nicht vollständig geprüft. Die Ausgabe ist
+       geschrieben und was gefunden wurde, ist geschwärzt — für einen Teil des
+       Dokuments konnte die Analyse aber nicht einstehen: ein Font ohne
+       /ToUnicode, ein zu tief verschachteltes Form-XObject, ein Kachelmuster
+       mit Text, eine Annotation ohne Erscheinungsstrom, ein Bild, das sich
+       nicht dekodieren ließ. Dort kann etwas stehen geblieben sein.
+       Diese Ausgabe gehört von Hand geprüft. Die betroffenen Stellen stehen
+       auf stderr und im Audit-Log; im Stapel weist die Zusammenfassung solche
+       Dateien getrennt aus, sie zählen nicht als „verarbeitet“.
+     • --check-leaks hat mindestens einen Begriff in der Datei gefunden.
+       Ein Fund ist kein Verarbeitungsfehler (das wäre 1) und kein
+       Bedienfehler (das wäre 2): die Suche lief vollständig, die Antwort
+       lautet „ja, es steht noch drin“.
 ",
         redact_pipeline::settings::SETTINGS_ENV,
         EXIT_OK = crate::EXIT_OK,
@@ -703,6 +831,54 @@ mod tests {
         ])
         .config(&Settings::default());
         assert_eq!(config.action, redact_core::Action::Replace("[IBAN]".into()));
+    }
+
+    // ---------------------------------------------------------- Nachprüfung
+
+    /// **Die Falle, die diese Liste stellen könnte.** `--action`,
+    /// `--replace-with` und `--padding` stehen in
+    /// [`CHECK_LEAKS_CONFLICTS`] und tragen zugleich einen `default_value`.
+    /// Zählte clap eine Vorgabe als „angegeben“, wäre `--check-leaks` allein
+    /// nicht mehr aufrufbar — der Schalter wäre tot, und zwar sofort und für
+    /// jeden Aufruf.
+    #[test]
+    fn check_leaks_alone_survives_the_defaults() {
+        let cli = Cli::try_parse_from(["redact-rs", "out.pdf", "--check-leaks", "DE89"])
+            .expect("--check-leaks muss allein aufrufbar sein");
+        assert_eq!(cli.check_leaks, vec!["DE89".to_string()]);
+    }
+
+    /// Mehrfach angeben sammelt; ein Komma trennt nicht.
+    #[test]
+    fn every_occurrence_is_one_needle() {
+        let cli = Cli::parse_from([
+            "redact-rs",
+            "out.pdf",
+            "--check-leaks",
+            "Mustermann, Max",
+            "--check-leaks",
+            "DE89 3704",
+        ]);
+        assert_eq!(cli.check_leaks, vec!["Mustermann, Max", "DE89 3704"]);
+    }
+
+    /// Und die Gegenprobe zur Liste: ein Schalter des Schwärzens wird
+    /// abgelehnt, statt wirkungslos mitzulaufen.
+    #[test]
+    fn a_redaction_switch_next_to_check_leaks_is_refused() {
+        for extra in [
+            vec!["-o", "egal.pdf"],
+            vec!["--review"],
+            vec!["--patterns", "iban_de"],
+            vec!["--json"],
+        ] {
+            let mut args = vec!["redact-rs", "out.pdf", "--check-leaks", "DE89"];
+            args.extend(extra.iter().copied());
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "{extra:?} müsste mit --check-leaks kollidieren"
+            );
+        }
     }
 
     #[test]

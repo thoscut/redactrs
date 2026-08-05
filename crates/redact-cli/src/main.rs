@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod batch;
+mod check;
 mod cli;
 
 use std::process::ExitCode;
@@ -46,6 +47,22 @@ pub const EXIT_USAGE: u8 = 2;
 /// zweiten Datei weggedrückt. Er gilt deshalb **nur** für Deckungslücken;
 /// welche Warnung das ist und welche nicht, entscheidet
 /// [`redact_pipeline::coverage`] — mit Begründung je Ausnahme.
+///
+/// ## Der zweite Fall: `--check-leaks` hat etwas gefunden
+///
+/// Dieselbe Zahl, dieselbe Nachricht: **der Lauf ist gelungen, das Ergebnis
+/// ist nicht in Ordnung — sieh hin.** Die drei anderen Werte passen nicht:
+///
+/// * `0` wäre falsch und gefährlich. `redact-rs out.pdf --check-leaks "$IBAN"
+///   && versenden out.pdf` verschickte die Datei mit der IBAN darin.
+/// * `1` heißt „fehlgeschlagen, keine brauchbare Ausgabe“. Ein Fund ist kein
+///   Verarbeitungsfehler: die Datei wurde gelesen, die Suche lief vollständig,
+///   die Antwort steht fest. Sie lautet nur „ja, es steht noch drin“.
+/// * `2` heißt „mach es anders“ und ist an den Aufrufenden gerichtet. An dem
+///   Aufruf war nichts falsch.
+///
+/// Ein Skript unterscheidet damit drei Fälle, ohne die Ausgabe zu lesen:
+/// `0` sauber (im Rahmen der geprüften Liste), `3` Fund, alles andere Fehler.
 pub const EXIT_INCOMPLETE: u8 = 3;
 
 fn main() -> ExitCode {
@@ -83,6 +100,20 @@ fn dispatch(cli: &Cli) -> Result<ExitCode> {
         )?;
         println!("Beispiel-PDF geschrieben: {}", path.display());
         return Ok(ExitCode::SUCCESS);
+    }
+
+    // Die Nachprüfung — vor der Einstellungsdatei und vor der Oberfläche.
+    //
+    // Vor der Einstellungsdatei, weil sie nichts daraus braucht: kein
+    // Namenszusatz, keine Muster, keine Polsterung. Eine kaputte
+    // `settings.yaml` soll nicht ausgerechnet die Kontrolle verhindern, mit
+    // der jemand nachsieht, ob seine Datei sauber ist.
+    //
+    // Vor der Oberfläche, weil `redact-rs --check-leaks …` ohne Eingabedatei
+    // sonst in den GUI-Zweig liefe (`inputs.is_empty() && output.is_none()`)
+    // und ein Fenster öffnete, statt den Bedienfehler zu nennen.
+    if !cli.check_leaks.is_empty() {
+        return check::run(cli);
     }
 
     // Die Einstellungsdatei — die Schicht zwischen Vorgabe und Kommandozeile.

@@ -25,6 +25,96 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 ---
 
+## Unveröffentlicht
+
+Bereich: wird beim Release eingetragen (`git log v0.4.0..<neuer Tag>`).
+
+### Neu
+
+* **Die Nachprüfung steckt jetzt im ausgelieferten Binary:
+  `--check-leaks <TEXT>`.** Der Schalter beantwortet die Frage, um die es bei
+  einer Schwärzung am Ende geht — *steht dieser Text noch in der Datei?* — und
+  sucht dafür auf allen Ebenen, auf denen ein Geheimnis überleben kann: rohe
+  Dateibytes, jeder `stream … endstream`-Block (auch Flate-dekomprimiert),
+  jedes Stream-Objekt dekodiert, die Objekte in `/ObjStm`-Containern, jedes
+  Zeichenketten-Objekt unter jedem Schlüssel — in UTF-8, Latin-1/PDFDoc,
+  UTF-16BE und als Hex-String.
+
+  **Neu ist nicht die Suche, sondern ihre Erreichbarkeit.** `redact_pdf::leaks`
+  gab es schon; der Schalter reicht sie durch und baut nichts nach. Bis
+  einschließlich 0.4.0 war sie aber nur als Bibliotheksfunktion zu haben, und
+  die README verwies dafür auf `cargo add --path …/crates/redact-pdf`. **Im
+  Release-Archiv liegt kein Quelltext** (nachgesehen:
+  `tar -tzf … | grep -c crates/` ⇒ 0), das Binary hatte kein entsprechendes
+  Unterkommando, und der Verweis in der ausgelieferten README zeigte ins
+  Leere. Wer nur das Release hatte — also die Zielgruppe —, konnte die
+  wichtigste Kontrolle dieses Werkzeugs nicht ausführen, es sei denn mit
+  Rust-Toolchain, Netzzugang zu crates.io und einem Klon eines privaten
+  Repositories. Für ein Werkzeug, dessen erstes Versprechen „keine Cloud, keine
+  Netzverbindung“ lautet, war das ein Bruch.
+
+  Drei Festlegungen dazu:
+
+  * **Rückgabewert `3` für einen Fund**, `0` für „keiner der Begriffe steht
+    noch darin“. Ein Fund ist weder ein Verarbeitungsfehler (`1`) noch ein
+    Bedienfehler (`2`): der Lauf ist gelungen, das *Ergebnis* ist es nicht.
+    `0` wäre gefährlich — `redact-rs out.pdf --check-leaks "$IBAN" && versenden`
+    verschickte die Datei mit der IBAN darin.
+  * **Die Suchbegriffe sind Geheimnisse.** Auf der Kommandozeile stehen sie in
+    der Prozessliste und in der Shell-Historie; `--check-leaks -` liest sie
+    zeilenweise von der Standardeingabe
+    (`redact-rs out.pdf --check-leaks - < begriffe.txt`) und nimmt keinen der
+    beiden Wege. Nachgemessen mit `ps -o args=` während des Laufs.
+  * **„Nichts gefunden“ wird nicht zur neuen falschen Entwarnung.** Jeder
+    saubere Lauf sagt auf stdout dazu, dass damit genau diese Liste geprüft ist
+    und sonst nichts.
+
+  Ein Schalter des Schwärzens neben `--check-leaks` (`-o`, `--review`,
+  `--patterns`, `--audit-log`, `--action` …) wird abgelehnt (`2`), statt
+  wirkungslos mitzulaufen. Eine **verschlüsselte** Datei wird abgelehnt statt
+  durchsucht: darin stehen die Zeichenketten verschlüsselt, eine Bytesuche
+  fände auch dann nichts, wenn das Geheimnis noch darin steht. Die Eingabedatei
+  geht durch dieselbe Typ- und Größenprüfung wie jede andere — eine benannte
+  Pipe hält den Lauf nicht an.
+
+### Behoben
+
+* **Sieben relative Verweise in der ausgelieferten README zeigten ins Leere**,
+  darunter der auf `crates/redact-pdf/src/audit_bytes.rs` — also genau der auf
+  die Funktion, die den Abschnitt „Prüfen, ob die Schwärzung gewirkt hat“
+  tragen sollte. Betroffen waren außerdem `crates/redact-pdf/tests/known_leaks.rs`,
+  `crates/redact-pdf/tests/marked_content.rs`,
+  `crates/redact-cli/tests/cli_and_gui_agree.rs`,
+  `.github/workflows/release.yml`, `.github/workflows/ci.yml` und die Anleitung
+  `cargo add --path /pfad/zu/redactrs/crates/redact-pdf`.
+
+  Die Dateien sind weiterhin beim Namen genannt, aber nicht mehr verlinkt; der
+  Abschnitt „Prüfen, ob die Schwärzung gewirkt hat“ ist neu geschrieben und
+  **allein mit dem Release durchführbar**. Dass im Archiv kein Quelltext liegt,
+  steht jetzt bei den Archivinhalten.
+
+* **Die Aussage zu `--remap-path-prefix` im Eintrag zu 0.4.0 war zu weit
+  gefasst.** Im ausgelieferten glibc-Binary stehen weiterhin drei Pfade des
+  Build-Rechners — Build-Skript-Ausgaben unter `OUT_DIR`, die der Schalter
+  nicht erfasst. musl und beide Windows-Artefakte sind sauber. Die Zahlen und
+  die Erklärung stehen dort; die Behebung im Bauweg steht aus
+  (`.github/workflows/`, z. B. `RUSTFLAGS` um ein zweites
+  `--remap-path-prefix` für `$CARGO_TARGET_DIR` ergänzen oder die
+  Debug-Informationen des Release-Baus abschalten).
+
+### Geändert
+
+* **Die Binärgrößen stehen nicht mehr als Zahlenreihe in der README.** Sie
+  waren als v0.3.0-Messung ausgewiesen — ehrlich, aber mit v0.4.0 überholt.
+  Die Akzeptanztabelle nennt jetzt nur noch das größte Artefakt und die
+  Grenze; die Zahlen der Fassung, die jemand tatsächlich heruntergeladen hat,
+  misst eine Zeile (`stat -c '%s %n' redact-rs`). Für v0.4.0 nachgemessen und
+  gegen `SHA256SUMS-BINARIES` geprüft: `redact-rs.exe` 10 766 336,
+  `redact-rs-gui.exe` 9 999 360, Linux/glibc 15 041 568, Linux/musl
+  5 055 416 Byte — alle vier gewachsen, alle vier weit unter 30 MB.
+
+---
+
 ## 0.4.0 — 2026-08-05
 
 Bereich: `git log 9aa4808..v0.4.0`.
@@ -163,11 +253,46 @@ nicht geschätzt.
 * **Vorabversionen erkennt der Release an der Versionsnummer.** `v0.4.0-rc.1`
   wird als Vorabversion gekennzeichnet, auch auf dem Tag-Weg, auf dem der
   bisherige Schalter leer blieb.
-* Der Pfad des Build-Rechners steht nicht mehr in den ausgelieferten Binaries
-  (`--remap-path-prefix`). Was die Prüfsummen in `SHA256SUMS-BINARIES` belegen
-  und was nicht, sagen die Release-Notizen jetzt ausdrücklich; die frühere
-  Formulierung („Wer nachbauen will, vergleicht diesen Hash") war eine Zusage
-  ohne Deckung.
+* Der Pfad des Build-Rechners steht nicht mehr in dem Teil der ausgelieferten
+  Binaries, den `--remap-path-prefix` erfasst — das ist der übersetzte
+  Quelltext aller Crates. **Nicht erfasst sind die Ausgaben der Build-Skripte
+  (`OUT_DIR`)**, und dort steht er weiterhin.
+
+  Nachgemessen an den ausgelieferten v0.4.0-Artefakten
+  (`strings -a -n 8 <binary> | grep -c /home/runner`):
+
+  | Artefakt | Fundstellen |
+  |---|---|
+  | Linux/glibc `redact-rs` | **3** |
+  | Linux/musl `redact-rs` | 0 |
+  | `redact-rs.exe` | 0 |
+  | `redact-rs-gui.exe` | 0 |
+
+  Alle drei liegen unter
+  `/home/runner/work/redactrs/redactrs/target/x86_64-unknown-linux-gnu/release/build/`
+  und heißen `glutin_glx_sys-…/out/glx_extra_bindings.rs`,
+  `glutin_glx_sys-…/out/glx_bindings.rs` und
+  `glutin_egl_sys-…/out/egl_bindings.rs` — Dateien, die die Build-Skripte von
+  `glutin_glx_sys` bzw. `glutin_egl_sys` (über `gl_generator`) zur Bauzeit in
+  `OUT_DIR` erzeugen. `--remap-path-prefix` wirkt auf die Pfade, mit denen
+  *Cargo* `rustc` aufruft, nicht auf einen absoluten Pfad, den ein Build-Skript
+  selbst in `OUT_DIR` hineinschreibt. musl und beide Windows-Artefakte sind
+  sauber, weil sie ohne Oberfläche (`--no-default-features`) bzw. ohne die
+  X11-/EGL-Anbindung gebaut werden.
+
+  **Was das heißt und was nicht:** preisgegeben ist der Pfad eines
+  GitHub-Runners (`/home/runner/work/redactrs/redactrs`) — kein Geheimnis,
+  aber auch nicht das, was der Eintrag zugesagt hat. Wer aus einem privaten
+  Arbeitsbaum selbst baut, trägt seinen eigenen Pfad in dieses Artefakt.
+
+  **Hier stand: „steht nicht mehr in den ausgelieferten Binaries“** — das war
+  für das glibc-Artefakt falsch. Korrigiert am 2026-08-05, nachdem es an den
+  Artefakten nachgemessen wurde; die Behebung selbst gehört in den Bauweg
+  (siehe „Unveröffentlicht“).
+
+  Was die Prüfsummen in `SHA256SUMS-BINARIES` belegen und was nicht, sagen die
+  Release-Notizen jetzt ausdrücklich; die frühere Formulierung („Wer nachbauen
+  will, vergleicht diesen Hash") war eine Zusage ohne Deckung.
 * Es gibt diesen Änderungsverlauf. Bis einschließlich v0.3.0 stand
   ausschließlich in `git log`, was sich zwischen zwei Fassungen geändert hat.
 

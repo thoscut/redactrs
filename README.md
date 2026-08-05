@@ -12,6 +12,9 @@ Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
   betroffenen **Pixel überschrieben**, nicht überdeckt. Gescannte Seiten lassen
   sich damit ohne OCR sicher schwärzen — die Rechtecke zieht man von Hand
   ([Details](#bilder))
+* **Nachprüfbar**: `--check-leaks "DE89 …"` sagt, ob ein Text noch irgendwo in
+  der fertigen Datei steht — auch in komprimierten Objektströmen, in
+  Altrevisionen und in UTF-16 ([Details](#pruefen))
 * **Keine Cloud**, keine Netzverbindung, deterministische Ausgabe
 
 > **Vor dem ersten Einsatz bitte zwei Abschnitte lesen:**
@@ -19,7 +22,9 @@ Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
 > [Was dieses Werkzeug nicht leistet](#grenzen).
 > Ein Werkzeug für Bankunterlagen ist nur so viel wert wie die Kontrolle
 > dahinter — und die verbreitete Kontrolle (`pdftotext … | grep …`) gibt
-> nachweislich falsche Entwarnung.
+> nachweislich falsche Entwarnung. Die Kontrolle, die stattdessen gemeint ist,
+> steckt im Programm selbst (`--check-leaks`) und braucht weder Quelltext noch
+> Netzzugang.
 
 > **Wer von einer älteren Fassung kommt, liest zuerst
 > [`CHANGELOG.md`](CHANGELOG.md).** Zwischen den Fassungen dieses Werkzeugs
@@ -137,6 +142,16 @@ Dazu liegt in **jedem** der drei Archive (nachgesehen in
   (die eingebetteten Schriften stehen unter der SIL Open Font License),
 * das Verzeichnis `examples/`.
 
+**Quelltext liegt in keinem der Archive** (nachgesehen: `tar -tzf … | grep -c
+crates/` ⇒ 0). Deshalb sind Dateien aus dem Quellbaum in diesem Text zwar beim
+Namen genannt — `crates/redact-pdf/src/audit_bytes.rs`,
+`.github/workflows/release.yml` —, aber **nicht verlinkt**: ein relativer
+Verweis zeigte aus dem Archiv heraus ins Leere. Und alles, was dieser Text zum
+Bedienen des Werkzeugs anleitet, kommt ohne Quelltext, ohne Rust-Toolchain und
+ohne Netzzugang aus. Das gilt ausdrücklich für
+[Prüfen, ob die Schwärzung gewirkt hat](#pruefen): dort stand bis 0.4.0 eine
+Anleitung, die beides verlangte — heute ist es ein Schalter des Programms.
+
 **Die SHA-256-Prüfsummen liegen *nicht* im Archiv.** Sie sind eigene
 Release-Dateien und müssen getrennt heruntergeladen werden — was auch der
 einzige Weg ist, auf dem sie etwas beweisen: eine Prüfsumme im geprüften
@@ -241,6 +256,10 @@ redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
       --max-image-mb <MB>         gleichzeitig gehaltene dekodierte Bildbytes (256)
       --max-input-mb <MB>         Obergrenze für die Eingabedatei selbst (512)
       --max-candidates <N>        Obergrenze für Trefferkandidaten (100000)
+      --check-leaks <TEXT>    NACHPRÜFEN statt schwärzen: steht dieser Text
+                              noch in der Datei? Mehrfach angebbar; „-“ liest
+                              die Begriffe zeilenweise von stdin. Rückgabewert
+                              3 bei einem Fund (siehe Prüfen)
       --gui                   grafische Oberfläche starten
       --list-patterns         eingebaute Muster auflisten
       --write-demo <PDF>      Beispieldatei erzeugen
@@ -275,11 +294,16 @@ Rückgabewerte:
 | `0` | Erfolg — und nichts blieb ungeprüft |
 | `1` | Verarbeitungsfehler. Im Stapelbetrieb: mindestens eine Datei ist gescheitert |
 | `2` | Bedienfehler (Argumente, Einstellungsdatei, Prüfsummen, `--max-candidates`) |
-| `3` | **Verarbeitet, aber nicht vollständig geprüft.** Es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. |
+| `3` | **Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.** Beim Schwärzen: es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. Bei [`--check-leaks`](#pruefen): mindestens einer der Suchbegriffe steht noch in der Datei. |
 
 `3` ist kein Fehler und kein „alles gut“ — es ist die Aufforderung, genau diese
 Stellen anzusehen. In einem Skript gehört er behandelt wie ein Fehler, solange
 niemand hingeschaut hat.
+
+Beide Fälle senden dieselbe Nachricht, und das ist der Grund für dieselbe Zahl:
+*die Datei ist nicht abgenommen.* Ein Fund unter `--check-leaks` ist ausdrücklich
+**kein** `1` — die Datei wurde gelesen, die Suche lief vollständig durch, die
+Antwort steht fest. Sie lautet nur „ja, es steht noch drin“.
 
 Ein gewöhnliches `Warnung:` setzt den Rückgabewert **nicht**. Ein Rasterbild
 auf der Seite ist eine bekannte Grenze des Verfahrens und der Normalfall bei
@@ -1105,7 +1129,7 @@ Zwei getrennte Fehler stecken darin:
    dieselbe Zeichenkette an mehreren Stellen tragen, die dabei nicht vorkommen.
    Nachgemessen mit `poppler 24.02.0` an je einer winzigen Datei pro Versteck:
 
-   | Geheimnis versteckt in … | `pdftotext` | `strings` | `redact_pdf::leaks` |
+   | Geheimnis versteckt in … | `pdftotext` | `strings` | `--check-leaks` |
    |---|---|---|---|
    | `/ActualText` eines Struktur-Elements | **nicht gefunden** | gefunden | gefunden |
    | `/ActualText` als Marked-Content im Seiteninhalt | gefunden | gefunden | gefunden |
@@ -1123,102 +1147,211 @@ Zwei getrennte Fehler stecken darin:
    schwärzt. Beide `/ActualText`-Zeilen werden inzwischen mitgeschwärzt, siehe
    [Der Textspiegel im Seiteninhalt](#der-textspiegel-im-seiteninhalt).
 
-### Die Prüfung, die das Werkzeug mitbringt
+### `--check-leaks`: die Prüfung steckt im Programm
 
-`redact_pdf::leaks(bytes, needle)` (in
-[`crates/redact-pdf/src/audit_bytes.rs`](crates/redact-pdf/src/audit_bytes.rs))
-sucht auf allen Ebenen, auf denen ein Geheimnis überleben kann: rohe
+**Ein Aufruf, kein zweites Werkzeug, kein Netzzugang.** Der Schalter nimmt die
+Datei und die Texte, von denen niemand mehr etwas sehen soll:
+
+```console
+$ redact-rs kontoauszug_geschwaerzt.pdf \
+      --check-leaks "DE89 3704 0044 0532 0130 00" \
+      --check-leaks "Max Mustermann" \
+      --check-leaks "532013000"
+Geprüft: kontoauszug_geschwaerzt.pdf (1304 Byte)
+  nicht gefunden: DE89 3704 0044 0532 0130 00
+  GEFUNDEN (6 Fundstelle(n)): Max Mustermann
+      Rohdaten-Stream @0x1e7 (inflate) [Inhalt, UTF-8/ASCII]: …2 750 Tm.(Kontoinhaber: Max Mustermann) Tj./F1 10 Tf.1 0 0 1 7…
+      Rohdaten-Stream @0x1e7 (inflate) [Zeichenketten-Verkettung]: …ontoauszugKontoinhaber: Max MustermannIBAN:BIC:Kontonummer: 53…
+      Objekt 11 0 <Stream, lopdf-dekodiert> [Inhalt, UTF-8/ASCII]: …2 750 Tm.(Kontoinhaber: Max Mustermann) Tj./F1 10 Tf.1 0 0 1 7…
+      …
+  GEFUNDEN (4 Fundstelle(n)): 532013000
+      Rohdaten-Stream @0x1e7 (inflate) [Inhalt, UTF-8/ASCII]: …72 705 Tm.(Kontonummer: 532013000) Tj./F1 10 Tf.1 0 0 1 7…
+      …
+
+Ergebnis: 2 von 3 Suchbegriffen stehen noch in der Datei. Diese Datei ist nicht geschwärzt — sie darf so nicht weitergegeben werden. (Rückgabewert 3.)
+$ echo $?
+3
+```
+
+Gesucht wird auf allen Ebenen, auf denen ein Geheimnis überleben kann: rohe
 Dateibytes, jeder roh gefundene `stream … endstream`-Block (auch
 Flate-dekomprimiert, also inklusive Altrevisionen), jedes Stream-Objekt des
 Objektgraphen dekodiert, die Objekte in `/ObjStm`-Containern und **jedes**
 Zeichenketten-Objekt unter jedem Schlüssel — jeweils in UTF-8, Latin-1/PDFDoc,
-UTF-16BE und als Hex-String. Im Zweifel meldet es zu viel.
+UTF-16BE und als Hex-String. Im Zweifel meldet die Prüfung zu viel: dieselbe
+Fundstelle erscheint einmal je Sichtweise. Ein Fehlalarm wird untersucht, ein
+übersehenes Leck wird ausgeliefert.
 
-Eine eigene Unterkommando-Schnittstelle dafür gibt es (noch) nicht; `leaks` ist
-eine Bibliotheksfunktion. So wird sie benutzt:
+Die Suche selbst ist dieselbe Funktion, die die Tests von `redact-pdf` als
+Messgerät benutzen (`redact_pdf::leaks`, in
+`crates/redact-pdf/src/audit_bytes.rs`); der Schalter reicht sie durch und baut
+nichts nach.
+
+#### Der Rückgabewert
+
+| Wert | heißt |
+|---|---|
+| `0` | Keiner der Begriffe steht noch in der Datei. **Kein Freibrief** — siehe unten. |
+| `3` | Mindestens einer steht noch darin. Der Lauf ist gelungen, das *Ergebnis* nicht. |
+| `1` | Verarbeitungsfehler: die Datei ist keine PDF-Datei, nicht lesbar, zu groß oder verschlüsselt. |
+| `2` | Bedienfehler: kein Suchbegriff, mehr als eine Datei, oder ein Schalter, der nicht dazugehört. |
+
+Ein Fund ist bewusst **kein** `1`: die Datei wurde gelesen, die Suche lief
+vollständig durch, die Antwort steht fest — sie lautet nur „ja, es steht noch
+drin“. Ein Skript unterscheidet damit drei Fälle, ohne die Ausgabe zu lesen:
 
 ```bash
-cargo new --bin pdf-leck-pruefen && cd pdf-leck-pruefen
-cargo add --path /pfad/zu/redactrs/crates/redact-pdf
+redact-rs out.pdf --check-leaks "$IBAN"
+case $? in
+  0) echo "im Rahmen der geprüften Liste sauber" ;;
+  3) echo "LECK — Datei zurückhalten"; exit 1 ;;
+  *) echo "Prüfung ist gar nicht gelaufen"; exit 1 ;;
+esac
 ```
 
-```rust
-// src/main.rs
-fn main() -> std::io::Result<()> {
-    let mut args = std::env::args().skip(1);
-    let pdf = args.next().expect("Aufruf: pdf-leck-pruefen <ausgabe.pdf> <text>…");
-    let bytes = std::fs::read(&pdf)?;
-    let mut leck = false;
-    for needle in args {
-        let hits = redact_pdf::leaks(&bytes, &needle);
-        if hits.is_empty() {
-            println!("sauber: {needle}");
-        } else {
-            leck = true;
-            println!("LECK ({}x): {needle}", hits.len());
-            for h in &hits {
-                println!("    {h}");
-            }
-        }
-    }
-    std::process::exit(if leck { 1 } else { 0 });
-}
+#### Die Suchbegriffe sind Geheimnisse
+
+Auf der Kommandozeile stehen sie in der Prozessliste (`ps`) und in der
+Shell-Historie und sind damit für andere Konten auf derselben Maschine lesbar —
+dasselbe Problem wie beim Passwort, und dieselbe Antwort: **`-` liest sie
+zeilenweise von der Standardeingabe.**
+
+```bash
+redact-rs geschwaerzt.pdf --check-leaks - < begriffe.txt
+printf '%s\n' "$IBAN" "$NAME" | redact-rs geschwaerzt.pdf --check-leaks -
 ```
 
-Nachgemessen an der Ausgabe aus dem [Schnellstart](#schnellstart), die mit
-`--patterns iban_de,bic,email` entstanden ist:
+Nachgemessen: während des zweiten Laufs zeigt `ps -o args=` genau
+`redact-rs geschwaerzt.pdf --check-leaks -` und keinen der Begriffe. Leere
+Zeilen werden übergangen, Windows-Zeilenenden auch; ein Komma trennt **nicht**
+(„Mustermann, Max“ ist ein Begriff, nicht zwei).
+
+**Die Ausgabe der Prüfung ist dagegen nicht geheimnisfrei zu bekommen** und
+gehört behandelt wie das Original: die geprüfte Liste steht darin (sonst ließe
+sich das Ergebnis nicht nachprüfen), und jeder Fund zeigt seine Umgebung aus
+der Datei (sonst wäre er nicht zu finden).
+
+#### Was `--check-leaks` nicht tut
+
+Es schwärzt nicht und schreibt nichts. Deshalb lehnt es jeden Schalter des
+Schwärzens ab, statt ihn wirkungslos mitlaufen zu lassen — `-o`, `--review`,
+`--audit-log`, `--patterns`, `--action`, `--padding` und die übrigen enden mit
+Rückgabewert `2`. Der Weg ist **zwei Aufrufe**, und das ist kein Umweg:
+
+```bash
+redact-rs auszug.pdf -o geschwaerzt.pdf
+redact-rs geschwaerzt.pdf --check-leaks - < begriffe.txt
+```
+
+So prüft der zweite Aufruf nachweislich *die geschriebene Datei* und nicht
+einen Zwischenstand im Speicher — was eine Kontrolle erst zu einer macht.
+
+Erlaubt bleiben `--quiet` (ein sauberer Lauf schweigt dann ganz — nur der
+Rückgabewert antwortet; **ein Fund wird trotzdem gemeldet**, denn er ist die
+Nachricht, wegen der dieser Schalter existiert) und die Grenzen
+`--max-input-mb`, `--max-decompressed-mb`, `--max-parsed-mb`; die greifen beim
+Lesen und Vorprüfen jeder fremden Datei. Eine **verschlüsselte** Datei wird
+abgelehnt statt durchsucht: darin stehen die Zeichenketten verschlüsselt, eine
+Bytesuche fände auch dann nichts, wenn das Geheimnis noch darin steht — und
+„nichts gefunden“ wäre hier die falscheste aller Antworten.
+
+### Die Gegenprobe
+
+**Erst sie gibt dem Ergebnis seinen Wert.** Dieselbe Demo, diesmal ohne
+`--patterns`, also mit den Vorgabemustern — geprüft gegen alle fünf Werte:
 
 ```console
-$ cargo run --release -- ../kontoauszug_geschwaerzt.pdf \
-      "DE89 3704 0044 0532 0130 00" "Max Mustermann" "532013000"
-sauber: DE89 3704 0044 0532 0130 00
-LECK (6x): Max Mustermann
-    Rohdaten-Stream @0x1e7 (inflate) [Inhalt, UTF-8/ASCII]: …(Kontoinhaber: Max Mustermann) Tj…
-    Objekt 11 0 <Stream, lopdf-dekodiert> [Zeichenketten-Verkettung]: …Kontoinhaber: Max Mustermann…
-    …
-LECK (4x): 532013000
-    …
+$ redact-rs kontoauszug.pdf -o std.pdf
+$ redact-rs std.pdf \
+      --check-leaks "DE89 3704 0044 0532 0130 00" \
+      --check-leaks "532013000" \
+      --check-leaks "+49 30 123456789" \
+      --check-leaks "12345678901" \
+      --check-leaks "Max Mustermann"
+Geprüft: std.pdf (1332 Byte)
+  nicht gefunden: DE89 3704 0044 0532 0130 00
+  nicht gefunden: 532013000
+  nicht gefunden: +49 30 123456789
+  nicht gefunden: 12345678901
+  GEFUNDEN (6 Fundstelle(n)): Max Mustermann
+      …
+
+Ergebnis: 1 von 5 Suchbegriffen steht noch in der Datei. …
 $ echo $?
-1
-```
-
-Der Rückgabewert ist `1`, sobald irgendetwas gefunden wurde, und `0` sonst
-(beides nachgemessen) — das Programm eignet sich damit als Kontrollschritt in
-einem Skript.
-
-**Und die Gegenprobe**, die dem Ergebnis erst seinen Wert gibt: dieselbe Datei
-ohne `--patterns`, also mit den Vorgabemustern, gegen alle fünf Werte geprüft:
-
-```console
-$ cargo run --release -- ../std.pdf \
-      "DE89 3704 0044 0532 0130 00" "532013000" "+49 30 123456789" \
-      "12345678901" "Max Mustermann"
-sauber: DE89 3704 0044 0532 0130 00
-sauber: 532013000
-sauber: +49 30 123456789
-sauber: 12345678901
-LECK (6x): Max Mustermann
+3
 ```
 
 IBAN, Kontonummer, Telefonnummer und Steuer-ID sind restlos weg — auf allen
-Ebenen, auf denen `leaks` sucht, nicht nur dort, wo `pdftotext` hinsieht. Übrig
+Ebenen, auf denen gesucht wird, nicht nur dort, wo `pdftotext` hinsieht. Übrig
 ist der **Name**, und zwar genau so oft wie vorher: für Namen gibt es kein
 Muster, und niemand hat ihn markiert. Das ist keine Schwäche der Prüfung,
 sondern ihr Ergebnis.
 
+**Und die Gegenprobe zur Gegenprobe** — der Fall, in dem `pdftotext` *und*
+`strings` *und* `grep` auf der Rohdatei übereinstimmend Entwarnung geben: eine
+IBAN in einem Flate-komprimierten Objektstrom (nachgemessen an einer 767 Byte
+großen Datei, poppler 24.02.0):
+
+```console
+$ pdftotext objstm.pdf - | grep -F "DE89 3704 0044 0532 0130 00" ; echo $?
+1
+$ strings -a objstm.pdf | grep -F "DE89 3704 0044 0532 0130 00" ; echo $?
+1
+$ grep -c -F "DE89 3704 0044 0532 0130 00" objstm.pdf ; echo $?
+0
+1
+$ redact-rs objstm.pdf --check-leaks "DE89 3704 0044 0532 0130 00" ; echo $?
+Geprüft: objstm.pdf (767 Byte)
+  GEFUNDEN (10 Fundstelle(n)): DE89 3704 0044 0532 0130 00
+      Rohdaten-Stream @0x1e8 (inflate) [Inhalt, UTF-8/ASCII]: …6 0 (DE89 3704 0044 0532 0130 00)…
+      Objekt 6 0 [Zeichenkette, literal]: …DE89 3704 0044 0532 0130 00…
+      Objekt 7 0 <ObjStm> → Objekt 6 0 [Zeichenkette, literal]: …DE89 3704 0044 0532 0130 00…
+      …
+
+Ergebnis: der Suchbegriff steht noch in der Datei. Diese Datei ist nicht geschwärzt — sie darf so nicht weitergegeben werden. (Rückgabewert 3.)
+3
+```
+
+Dieser Fall steht als Test im Baum
+(`a_secret_in_a_compressed_object_stream_is_found` in
+`crates/redact-cli/tests/check_leaks.rs`) — samt der Zusicherung, dass das
+Geheimnis wirklich nicht im Klartext in der Datei steht.
+
 ### Und wogegen prüft man?
 
-`leaks` beantwortet die Frage „steht *dieser* Text noch in der Datei?“. Die
-Liste der Suchbegriffe muss also von Hand entstehen: die Werte aus dem Original,
-die nicht nach draußen dürfen. Zwei brauchbare Quellen dafür:
+`--check-leaks` beantwortet die Frage „steht *dieser* Text noch in der Datei?“.
+Die Liste der Suchbegriffe muss also von Hand entstehen: die Werte aus dem
+Original, die nicht nach draußen dürfen. Zwei brauchbare Quellen dafür:
 
 * das Feld `text` jedes Eintrags in `review.json` (dort steht genau das, was das
   Werkzeug gefunden hat) — und dazu die Werte, die dort **fehlen**;
 * eine Sichtprüfung der Originalseiten.
 
-Das ersetzt die Sichtprüfung des Ergebnisses nicht. `leaks` beweist, dass eine
-bekannte Zeichenkette weg ist. Dass nichts *Unbekanntes* stehen geblieben ist,
-kann es nicht beweisen.
+**„Nichts gefunden“ ist deshalb kein Freibrief**, und das Werkzeug sagt es nach
+jedem sauberen Lauf selbst:
+
+```console
+$ redact-rs std.pdf --check-leaks "DE89 3704 0044 0532 0130 00"
+Geprüft: std.pdf (1332 Byte)
+  nicht gefunden: DE89 3704 0044 0532 0130 00
+
+Ergebnis: der Suchbegriff steht nicht mehr in der Datei.
+Das heißt NICHT, dass in der Datei nichts mehr steht. Geprüft wurde genau diese
+Liste. Was nicht darin steht — ein zweiter Name, eine weitere Kontonummer, eine
+Schreibweise mit anderen Leerzeichen, Text in einem Rasterbild —, ist damit
+nicht geprüft. Die Liste zu schreiben bleibt Handarbeit, und die Sichtprüfung
+des Ergebnisses ersetzt sie nicht.
+$ echo $?
+0
+```
+
+Der Satz steht auf **stdout** und nicht auf stderr, damit
+`redact-rs … --check-leaks … > bericht.txt` nicht genau die Hälfte behält, die
+wie eine Freigabe aussieht.
+
+Das ersetzt die Sichtprüfung des Ergebnisses nicht. Die Prüfung beweist, dass
+eine bekannte Zeichenkette weg ist. Dass nichts *Unbekanntes* stehen geblieben
+ist, kann sie nicht beweisen.
 
 ### „0 Schwärzungen“ ist kein Freibrief
 
@@ -1359,10 +1492,10 @@ Dazu diese Grenzen, für die es keinen Testfall gibt:
   also nicht auf Inhalte geprüft, sondern samt Inhalt gelöscht.
 * **Type3-Fonts** liefern kein Fontprogramm und werden nur genähert behandelt.
 
-Der eine offene Testfall steht in
-[`crates/redact-pdf/tests/known_leaks.rs`](crates/redact-pdf/tests/known_leaks.rs)
+Der eine offene Testfall steht in `crates/redact-pdf/tests/known_leaks.rs`
 und trägt ein `#[ignore]` mit Aufgabennummer, damit die Suite grün bleibt und
-der Defekt trotzdem dokumentiert ist. Nachstellen:
+der Defekt trotzdem dokumentiert ist. Nachstellen (im Quellbaum — im
+Release-Archiv liegt kein Quelltext):
 
 ```bash
 cargo test -p redact-pdf --no-default-features -- --ignored
@@ -1384,7 +1517,7 @@ der ohne `#[ignore]` läuft und rot wird, sobald das Leck verschwindet.
 | verwaiste Objekte werden mitgeschrieben | `objects_unpacked_from_an_object_stream_are_not_carried_over` |
 | inkrementelle Vorversionen bleiben erhalten | `incremental_history_is_dropped_when_the_file_is_rewritten` |
 | `/ActualText` eines Struktur-Elements spiegelt den geschwärzten Text | `struct_elem_actual_text_does_not_mirror_the_redacted_text` |
-| **Textspiegel im Seiteninhalt** (`/ActualText`, `/Alt`, `/E` an einem Marked-Content-Abschnitt) überleben die Schwärzung | 9 Fälle in [`crates/redact-pdf/tests/marked_content.rs`](crates/redact-pdf/tests/marked_content.rs) — siehe unten |
+| **Textspiegel im Seiteninhalt** (`/ActualText`, `/Alt`, `/E` an einem Marked-Content-Abschnitt) überleben die Schwärzung | 9 Fälle in `crates/redact-pdf/tests/marked_content.rs` — siehe unten |
 
 #### Der Textspiegel im Seiteninhalt
 
@@ -1641,7 +1774,7 @@ Review-Datei und Audit-Log gehen über `redact_pipeline::write_review_file`,
 also über den einen Schreibpfad mit Modus `0600`).
 
 **Den End-to-End-Vergleich gibt es inzwischen.**
-[`crates/redact-cli/tests/cli_and_gui_agree.rs`](crates/redact-cli/tests/cli_and_gui_agree.rs)
+`crates/redact-cli/tests/cli_and_gui_agree.rs`
 startet das gebaute `redact-rs`-Binary als eigenen Prozess und daneben
 `AppState` (laden → analysieren → exportieren) mit denselben Einstellungen und
 vergleicht die Ausgabedatei **byteweise** sowie das Audit-Log Feld für Feld
@@ -1823,8 +1956,31 @@ Alle Abweichungen sind bewusst:
 | Review-Datei wirkt nur auf ihr eigenes Dokument | erfüllt, auch hinter `--manual-regions` | `review_file_from_another_document_is_rejected`, `a_foreign_review_file_behind_manual_regions_is_refused_too` |
 | Metadaten im Ausgabe-PDF entfernt | erfüllt | `metadata_is_stripped`, `names_tree_is_removed_as_the_module_documentation_promises` |
 | GUI: Rechtecke ziehen, Treffer abwählen, Export | umgesetzt, darüber hinaus | dazu Eckgriffe, Rückgängig/Wiederholen, Miniaturansichten, Zoom 0,25×–4×, Tastaturbedienung, Drag & Drop und die Schwärzungsart je Treffer ([Details](#grafische-oberfläche)). Alle Rechnungen und Zustandsübergänge liegen als reine Funktionen in `state.rs`, `selector.rs`, `viewer.rs`, `history.rs`, `focus.rs` und sind ohne Fenster getestet; das Fensterverhalten selbst ist nicht automatisiert prüfbar |
-| GUI-Binary unter 30 MB | erfüllt, alle vier Artefakte | An den **ausgelieferten** Binaries von v0.3.0 nachgemessen (heruntergeladen und gegen `SHA256SUMS-BINARIES` geprüft): `redact-rs.exe` 10,6 MB (10 586 624 Byte), `redact-rs-gui.exe` 9,8 MB (9 827 840 Byte), Linux/glibc `redact-rs` 14,9 MB (14 900 000 Byte), Linux/musl `redact-rs` 4,9 MB (4 944 824 Byte). Der größte Wert liegt bei der Hälfte der Grenze. Hier stand früher „Windows 7,4 MB (7 395 328 Byte)“ und „Linux 13 MB“ — beides aus einer früheren Fassung und an keinem ausgelieferten Artefakt nachgemessen. |
+| GUI-Binary unter 30 MB | erfüllt, alle vier Artefakte — mit reichlich Abstand | Das größte Artefakt ist Linux/glibc mit **14,3 MB**, also unter der Hälfte der Grenze. Eine genaue Zahl je Artefakt steht hier bewusst nicht mehr: sie veraltet mit jeder Fassung, und die Zusage ist die Grenze, nicht der Messwert. Wer die Zahlen der Fassung braucht, die er heruntergeladen hat, misst sie in einer Zeile — siehe darunter. |
 | Export der GUI identisch zur CLI | erfüllt | `cli_and_gui_agree.rs` startet das gebaute Binary als eigenen Prozess und daneben `AppState` (laden → analysieren → exportieren) und vergleicht Ausgabedatei **byteweise** sowie das Audit-Log Feld für Feld — inzwischen **sieben** Fälle: Vorgabe-Aktion, `--action replace`, `--disable-pattern`, `--no-patterns`, die Review-Datei in beiden Varianten und die Gegenprobe `a_deviating_window_would_be_caught`, die die früher bestandene Abweichung nachstellt und anschlagen muss (Tabelle unter [Grafische Oberfläche](#grafische-oberfläche)). Nachgemessen: `test result: ok. 7 passed`. |
+
+**Die Binärgrößen selbst nachmessen** — zwei Zeilen, nichts wird gebaut:
+
+```bash
+tar -xzf redact-rs-<version>-x86_64-linux.tar.gz  && stat -c '%s %n' redact-rs
+unzip -oq redact-rs-<version>-x86_64-windows.zip  && stat -c '%s %n' redact-rs*.exe
+```
+
+An v0.4.0 ergibt das (heruntergeladen und gegen `SHA256SUMS-BINARIES` geprüft,
+`sha256sum -c` meldet 4× OK):
+
+| Artefakt | Byte | ≈ |
+|---|---:|---:|
+| `redact-rs.exe` | 10 766 336 | 10,3 MB |
+| `redact-rs-gui.exe` | 9 999 360 | 9,5 MB |
+| Linux/glibc `redact-rs` | 15 041 568 | 14,3 MB |
+| Linux/musl `redact-rs` | 5 055 416 | 4,8 MB |
+
+Gegenüber den für v0.3.0 festgehaltenen Werten sind alle vier gewachsen, am
+stärksten Linux/glibc (14 900 000 → 15 041 568 Byte); die v0.3.0-Zahlen sind
+hier nicht neu nachgemessen, sie stammen aus dem Eintrag im Änderungsverlauf.
+Diese Zahlen gelten für **diese** Fassung und für keine andere — das ist der
+Grund, warum in der Tabelle darüber nur noch die Grenze steht.
 
 Von dem, was das Konzept in §11 außerhalb des MVP führt, sind das
 [Entschlüsseln passwortgeschützter PDFs](#verschluesselte-pdfs) und die
@@ -1846,14 +2002,14 @@ cargo run --release -p redact-pdf --example gen10 -- gross.pdf 10
 ## Release bauen
 
 **Zwei Vorbedingungen, an denen kein Weg vorbeiführt** (`verify` in
-[`.github/workflows/release.yml`](.github/workflows/release.yml)):
+`.github/workflows/release.yml`):
 
 1. **Der Commit muss auf dem Default-Branch liegen.** Geprüft mit
    `git merge-base --is-ancestor` gegen den Branch, den die GitHub-API als
    Default meldet. Ein Arbeitsbranch veröffentlicht nichts — auch nicht über
    einen Tag, auch nicht über `workflow_dispatch` mit eigenem `ref`.
 2. **Die vollständige CI muss grün sein.** `release.yml` ruft
-   [`ci.yml`](.github/workflows/ci.yml) als wiederverwendbaren Workflow auf
+   `.github/workflows/ci.yml` als wiederverwendbaren Workflow auf
    (Job `ci`) und macht ihn zur Vorbedingung von `build` und `release` — es ist
    dieselbe Datei wie bei jedem Push, keine Kopie. Vorher gab es in diesem
    Ablauf keinen einzigen Test-, Clippy-, fmt- oder `cargo deny`-Schritt: aus
