@@ -33,6 +33,10 @@
 # ausser dem Rechner, auf dem sie entstanden sind.
 .claude/settings.local.json
 
+# Bytecode von scripts/check-preview.py. Entsteht, sobald jemand das Skript
+# importiert statt ausfuehrt - einmal passiert, einmal beinahe mitcommittet.
+__pycache__/
+
 # Reste eines Merge/Rebase. Enthalten den kompletten Gegenstand des
 # Konflikts und werden gern uebersehen.
 *.orig

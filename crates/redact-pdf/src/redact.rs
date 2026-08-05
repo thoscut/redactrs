@@ -792,12 +792,21 @@ impl RectIndex {
 /// die Kante ausschlösse, könnte ein solches Zeichen übergehen — ein stiller
 /// Fehler genau in der Richtung, die wehtut.
 ///
-/// Umgekehrt ist das hier auch der **Torwächter gegen NaN**: `f64::min` und
-/// `f64::max` liefern bei einem NaN-Operanden den anderen zurück, weshalb
-/// `Rect::intersection_area` gegen ein NaN-Rechteck die volle Fläche des
-/// Zeichens ausweist — ein Bereich mit unbrauchbaren Koordinaten träfe damit
-/// **alles**. Jeder Vergleich mit NaN ist dagegen falsch, dieser Test also
-/// auch: ein solcher Bereich kommt gar nicht erst zur genauen Prüfung.
+/// # Kein Ersatz für [`Rect::is_usable`]
+///
+/// Über NaN entscheidet diese Zeile nebenbei richtig — jeder Vergleich mit NaN
+/// ist falsch, ein NaN-Rechteck berührt hier also nichts. Über ±∞ **nicht**:
+/// `Rect { ll: (-∞, -∞), ur: (+∞, +∞) }` besteht alle vier Vergleiche und ist
+/// trotzdem unbrauchbar (gemessen mit allen fünf Bauarten aus
+/// `redact-pdf/tests/unbrauchbares_deckrechteck.rs`; nur diese eine kommt
+/// durch).
+///
+/// Das ist kein Loch, sondern die Arbeitsteilung: hier steht eine **billige
+/// Vorauswahl**, die Regel steht in [`Rect::is_usable`] und wird von der
+/// genauen Prüfung zwei Zeilen weiter angewandt — [`Rect::covered_fraction`]
+/// und [`Rect::contains`] fragen beide danach und lehnen auch die ∞-Form ab.
+/// Wer diese Zeile für den Torwächter hält, verlässt sich auf eine Prüfung, die
+/// eine der fünf Bauarten durchlässt.
 fn touches(a: &Rect, b: &Rect) -> bool {
     a.ll.x <= b.ur.x && b.ll.x <= a.ur.x && a.ll.y <= b.ur.y && b.ll.y <= a.ur.y
 }

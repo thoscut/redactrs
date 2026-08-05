@@ -64,6 +64,22 @@ const A4: Rect = redact_pdf::document::A4;
 
 /// Harte Obergrenze für eine Bildkante, egal was die Optionen sagen.
 const MAX_EDGE_LIMIT: u32 = 20_000;
+
+/// Wie viel Speicher die gehaltenen Clip-Masken zusammen belegen dürfen.
+///
+/// Eine Maske ist immer so groß wie das Bild — bei den Vorgabeoptionen
+/// 1000 × 1415 Byte = 1,35 MB —, also sind das 47 Masken nebeneinander. Zum
+/// Vergleich: das Korpus in `redact-render/tests` kommt über die Seiten
+/// hinweg auf **höchstens zwei** verschiedene Clip-Pfade; eine Seite, die
+/// diese Decke wirklich braucht, ist keine gewöhnliche mehr.
+///
+/// Warum eine Decke und nicht „nur die letzte behalten“: der zweite Fall
+/// zwänge ein Dokument, das zwischen zwei Beschnitten hin- und herwechselt
+/// (`q … Q` mit äußerem Clip — ganz gewöhnlich), zu einem Neubau je
+/// Operation. Gemessen kostet ein Neubau bei Vorgabegröße rund 1,8 ms; bei
+/// der Operationsdecke von einer Million wäre das eine halbe Stunde. Die
+/// Decke tauscht also nicht Speicher gegen Zeit, sondern begrenzt beides.
+const MAX_CLIP_MASK_BYTES: usize = 64 * 1024 * 1024;
 /// Unterhalb dieser Gerätebreite wird ein Strich zur Haarlinie.
 const HAIRLINE_BELOW: f64 = 0.85;
 
@@ -204,7 +220,7 @@ impl PageRenderer {
         opts: &RenderOptions,
     ) -> RenderedPage {
         let opts = opts.sanitized();
-        let mut warnings: Vec<String> = Vec::new();
+        let mut warnings = Warnings::default();
         let mut degraded = false;
 
         // --- 1. Zeichenoperationen holen ------------------------------------
@@ -212,15 +228,12 @@ impl PageRenderer {
         let ops = match collected {
             Ok(Ok(ops)) => Some(ops),
             Ok(Err(err)) => {
-                push_once(&mut warnings, format!("Seite nicht lesbar: {err}"));
+                warnings.push(format!("Seite nicht lesbar: {err}"));
                 degraded = true;
                 None
             }
             Err(_) => {
-                push_once(
-                    &mut warnings,
-                    "Seite nicht lesbar: Panik beim Auswerten abgefangen".to_string(),
-                );
+                warnings.push("Seite nicht lesbar: Panik beim Auswerten abgefangen".to_string());
                 degraded = true;
                 None
             }
@@ -237,11 +250,11 @@ impl PageRenderer {
         // --- 3. Leinwand ----------------------------------------------------
         let Some(mut pixmap) = Pixmap::new(geo.width, geo.height) else {
             // Kann nur bei absurden Größen passieren; dann eben ein Minimalbild.
-            push_once(
-                &mut warnings,
-                format!("Bildpuffer {}x{} nicht anlegbar", geo.width, geo.height),
-            );
-            return blank_page(&opts, media_box, rotate, warnings);
+            warnings.push(format!(
+                "Bildpuffer {}x{} nicht anlegbar",
+                geo.width, geo.height
+            ));
+            return blank_page(&opts, media_box, rotate, warnings.into_list());
         };
         pixmap.fill(background_color(opts.background));
 
@@ -249,7 +262,7 @@ impl PageRenderer {
         let mut drawn_ops = 0usize;
         if let Some(ops) = &ops {
             for note in &ops.notes {
-                push_once(&mut warnings, note.clone());
+                warnings.push(note.clone());
             }
             let slots = self.prepare_fonts(ops);
             let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -259,10 +272,11 @@ impl PageRenderer {
                     page: ops,
                     fonts: &mut self.fonts,
                     slots: &slots,
-                    clips: vec![None; ops.clips.len()],
+                    clips: Vec::new(),
+                    clip_room: mask_room(&geo),
                     images: vec![None; ops.images.len()],
                     warned_fonts: HashSet::new(),
-                    warnings: Vec::new(),
+                    warnings: Warnings::default(),
                     drawn: 0,
                     draw_text: opts.draw_text,
                 };
@@ -272,17 +286,14 @@ impl PageRenderer {
             match outcome {
                 Ok((drawn, notes)) => {
                     drawn_ops = drawn;
-                    for note in notes {
-                        push_once(&mut warnings, note);
+                    for note in notes.into_list() {
+                        warnings.push(note);
                     }
                 }
                 Err(_) => {
                     // Die Zeichenschleife sichert jede Operation einzeln ab;
                     // hier landet nur, was darüber hinaus schiefgeht.
-                    push_once(
-                        &mut warnings,
-                        "Zeichnen abgebrochen: Panik abgefangen".to_string(),
-                    );
+                    warnings.push("Zeichnen abgebrochen: Panik abgefangen".to_string());
                     degraded = true;
                 }
             }
@@ -294,7 +305,7 @@ impl PageRenderer {
             rgba: pixmap.take_demultiplied(),
             page_box: geo.page_box,
             rotate: geo.rotate,
-            warnings,
+            warnings: warnings.into_list(),
             drawn_ops,
             degraded,
         }
@@ -445,10 +456,10 @@ fn normalize_rotation(rotate: i64) -> i64 {
 /// `redact_pdf::page_boxes` an die **ungeprüfte** Angabe und hielt eine Seite
 /// mit `/MediaBox [0 0 0 0]` für 0 × 0 Punkt groß, während der Rasterizer sie
 /// gleich daneben auf A4 zeichnete.
-fn sane_box(raw: Rect, warnings: &mut Vec<String>) -> Rect {
+fn sane_box(raw: Rect, warnings: &mut Warnings) -> Rect {
     let checked = redact_pdf::document::sane_box(raw);
     if let Some(note) = checked.warning() {
-        push_once(warnings, note);
+        warnings.push(note);
     }
     checked.rect
 }
@@ -498,9 +509,33 @@ fn background_color(rgba: [u8; 4]) -> Color {
     Color::from_rgba8(rgba[0], rgba[1], rgba[2], rgba[3])
 }
 
-fn push_once(warnings: &mut Vec<String>, text: String) {
-    if !warnings.contains(&text) {
-        warnings.push(text);
+/// Die Warnungen einer Seite: die Liste in ihrer Reihenfolge, dazu dieselben
+/// Texte als **Menge**.
+///
+/// Entdoppelt wurde hier schon immer, aber mit `warnings.contains(…)` — also
+/// mit einem Durchlauf durch alle bisherigen Warnungen je neuer. Das ist
+/// quadratisch, und der Maler warnt je Zeichenoperation: eine Seite mit
+/// zehntausend unlesbaren Glyphen erzeugt zehntausend Aufrufe. Gemessen an
+/// derselben Bauart in `redact_pdf::content` (32 000 Warnungen): 3,592 s mit
+/// Liste gegen 0,444 s mit Menge.
+///
+/// Am Verhalten ändert sich nichts: dieselben Texte, dieselbe Reihenfolge,
+/// jeder genau einmal.
+#[derive(Default)]
+struct Warnings {
+    list: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl Warnings {
+    fn push(&mut self, text: String) {
+        if self.seen.insert(text.clone()) {
+            self.list.push(text);
+        }
+    }
+
+    fn into_list(self) -> Vec<String> {
+        self.list
     }
 }
 
@@ -587,12 +622,33 @@ struct Painter<'a> {
     page: &'a PageOps,
     fonts: &'a mut FontCache,
     slots: &'a [FontSlot],
-    /// Clip-Masken, beim ersten Gebrauch gebaut (`Some(None)` = nicht baubar).
-    clips: Vec<Option<Option<Mask>>>,
+    /// Die zuletzt gebrauchten Clip-Masken, jüngste zuerst — beim ersten
+    /// Gebrauch gebaut, `None` heißt „nicht baubar“.
+    ///
+    /// **Warum nicht mehr eine je Clip.** Eine Maske ist immer so groß wie das
+    /// ganze Bild, gleich wie klein der Pfad ist: bei den Vorgabeoptionen
+    /// 1000 × 1415 Byte = 1,35 MB. Vorher lag hier ein Platz je *verschiedenem*
+    /// Pfad, und der wurde bis zum Ende der Seite gehalten — ohne Decke.
+    /// Gemessen (Spitzenspeicher, zählender Allokator): 50 Clips aus einer
+    /// 2,8-kB-Datei 72,9 MB, 500 Clips aus 24 kB 680,5 MB, **1 000 Clips aus
+    /// 48 kB 1 355,6 MB**. Genau 1,35 MB je Pfad, linear, aus einer Datei, die
+    /// in eine E-Mail passt. Innerhalb der Operationsdecke von einer Million
+    /// (ein `re W n` sind drei Operationen) sind ~333 000 Pfade erlaubt — das
+    /// wären 450 GB.
+    ///
+    /// Jetzt hält [`Painter`] nur so viele Masken, wie unter
+    /// [`MAX_CLIP_MASK_BYTES`] passen, und zwar die zuletzt gebrauchten. Der
+    /// Fall, für den der Zwischenspeicher da ist, bleibt damit umsonst: ein
+    /// Beschnitt wird gesetzt und von den folgenden Operationen benutzt, und
+    /// auch das Wiederaufleben eines äußeren Beschnitts nach `Q` trifft noch.
+    clips: Vec<(usize, Option<Mask>)>,
+    /// Wie viele Masken nebeneinander gehalten werden dürfen — aus
+    /// [`MAX_CLIP_MASK_BYTES`] und der Bildgröße, mindestens eine.
+    clip_room: usize,
     /// Bilder als vormultiplizierte Pixmaps, ebenfalls verzögert.
     images: Vec<Option<Option<Pixmap>>>,
     warned_fonts: HashSet<usize>,
-    warnings: Vec<String>,
+    warnings: Warnings,
     drawn: usize,
     draw_text: bool,
 }
@@ -618,7 +674,7 @@ impl Painter<'_> {
     }
 
     fn warn(&mut self, text: String) {
-        push_once(&mut self.warnings, text);
+        self.warnings.push(text);
     }
 
     /// Zeichnet eine Operation; `true`, wenn wirklich etwas gemalt wurde.
@@ -935,8 +991,14 @@ impl Painter<'_> {
         }
     }
 
+    /// Holt die Maske nach vorn oder baut sie; über der Decke fällt die
+    /// älteste heraus.
     fn ensure_clip(&mut self, at: usize) {
-        if matches!(self.clips.get(at), None | Some(Some(_))) {
+        if let Some(pos) = self.clips.iter().position(|(i, _)| *i == at) {
+            if pos > 0 {
+                let entry = self.clips.remove(pos);
+                self.clips.insert(0, entry);
+            }
             return;
         }
         let segments = self.page.clips.get(at).map(Vec::as_slice).unwrap_or(&[]);
@@ -944,20 +1006,31 @@ impl Painter<'_> {
         if built.is_none() {
             self.warn("Clip nicht baubar: ohne Beschnitt gezeichnet".to_string());
         }
-        self.clips[at] = Some(built);
+        self.clips.insert(0, (at, built));
+        self.clips.truncate(self.clip_room);
     }
 }
 
 /// Maske zu einer Clip-Referenz; `None` heißt „ohne Beschnitt zeichnen“.
 ///
 /// Freie Funktion, damit nur `clips` ausgeliehen wird und die Pixmap daneben
-/// veränderbar bleibt. Setzt [`Painter::prepare_clip`] voraus.
-fn clip_mask(clips: &[Option<Option<Mask>>], clip: Option<ClipRef>) -> Option<&Mask> {
+/// veränderbar bleibt. Setzt [`Painter::prepare_clip`] voraus — danach steht
+/// der gesuchte Eintrag vorn.
+fn clip_mask(clips: &[(usize, Option<Mask>)], clip: Option<ClipRef>) -> Option<&Mask> {
     let ClipRef(at) = clip?;
     clips
-        .get(at)
-        .and_then(Option::as_ref)
-        .and_then(Option::as_ref)
+        .iter()
+        .find(|(i, _)| *i == at)
+        .and_then(|(_, mask)| mask.as_ref())
+}
+
+/// Wie viele Clip-Masken bei dieser Bildgröße unter [`MAX_CLIP_MASK_BYTES`]
+/// passen — mindestens eine, sonst käme kein Beschnitt mehr zustande.
+fn mask_room(geo: &Geometry) -> usize {
+    let je_maske = (geo.width as usize)
+        .saturating_mul(geo.height as usize)
+        .max(1);
+    (MAX_CLIP_MASK_BYTES / je_maske).max(1)
 }
 
 /// Baut die Clip-Maske; `None`, wenn der Pfad unbrauchbar ist — dann wird
@@ -1217,15 +1290,15 @@ mod tests {
 
     #[test]
     fn absurd_media_box_falls_back_to_a4() {
-        let mut warnings = Vec::new();
+        let mut warnings = Warnings::default();
         let fixed = sane_box(Rect::new(0.0, 0.0, 0.0, 0.0), &mut warnings);
         assert_eq!(fixed, A4);
-        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings.into_list().len(), 1);
 
-        let mut warnings = Vec::new();
+        let mut warnings = Warnings::default();
         let fixed = sane_box(Rect::new(0.0, 0.0, f64::NAN, 10.0), &mut warnings);
         assert_eq!(fixed, A4);
-        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings.into_list().len(), 1);
     }
 
     #[test]

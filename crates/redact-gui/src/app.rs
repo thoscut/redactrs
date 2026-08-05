@@ -973,17 +973,32 @@ impl RedactApp {
     fn export_to(&mut self, out: PathBuf) {
         let audit = self.state.audit_target(&out);
         let blocked = self.state.blocked_regions().len();
+        let summary = self.state.hit_summary();
         match self.state.export(&out, Some(&audit)) {
             Ok(outcome) => {
                 self.error = None;
                 self.state.warnings = outcome.warnings.clone();
-                self.state.status = export_status(
-                    outcome.drawn_rects,
-                    outcome.removed_glyphs,
-                    &out,
-                    &audit,
-                    blocked,
-                    outcome.warnings.first().map(String::as_str),
+                // Die Nachprüfung über die geschriebenen Bytes — der Weg, den
+                // die Kommandozeile als `--check-leaks` bekommen hat, hier
+                // ohne Konsole und ohne getippte Geheimnisse. Siehe
+                // [`AppState::check_export`].
+                let check = self.state.check_export(&out, &summary);
+                if check.found_leak() {
+                    // Ganz nach vorn: die Statuszeile zeigt nur die **erste**
+                    // Warnung, und keine andere ist wichtiger als diese.
+                    self.state.warnings.insert(0, check.sentence());
+                }
+                self.state.status = format!(
+                    "{}  ·  {}",
+                    export_status(
+                        outcome.drawn_rects,
+                        outcome.removed_glyphs,
+                        &out,
+                        &audit,
+                        blocked,
+                        outcome.warnings.first().map(String::as_str),
+                    ),
+                    check.sentence()
                 );
             }
             Err(e) => self.report(Err(e)),
@@ -1955,6 +1970,18 @@ mod rev5_tests;
 #[cfg(test)]
 #[path = "rev6_tests.rs"]
 mod rev6_tests;
+
+// Prüfrunde „Bedienung“ (Z4): die Tastaturwege aus v0.5.0/v0.6.0 und ihre
+// Zusammenspiele. Kindmodul von `app` aus demselben Grund wie die Runden davor.
+#[cfg(test)]
+#[path = "z4_tests.rs"]
+mod z4_tests;
+
+// Prüfrunde 8: die Nachprüfung nach dem Export und die drei Ungenauigkeiten,
+// die Z4 belegt hinterlassen hat.
+#[cfg(test)]
+#[path = "rev8_tests.rs"]
+mod rev8_tests;
 
 #[cfg(test)]
 mod tests {

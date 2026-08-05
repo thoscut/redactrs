@@ -51,13 +51,27 @@ pub struct Limits {
     pub max_nesting_depth: usize,
     /// Summe der **entpackten** Bytes über alle Streams der Datei.
     pub max_decompressed_bytes: u64,
-    /// Davon: die Streams, die anschließend als PDF-Syntax geparst werden
-    /// (Objekt-Streams und Content-Streams).
+    /// Alles, woraus PDF-**Syntax** wird — zwei Klassen:
     ///
-    /// Diese Streams sind der teure Teil: aus einem Byte Content-Stream werden
-    /// im Speicher rund 60 Byte `lopdf::content::Operation`. Deshalb hat diese
-    /// Klasse ein eigenes, sehr viel engeres Budget als der Rest (Bilder,
-    /// Schriften, eingebettete Dateien), der nur gespeichert wird.
+    /// 1. die Streams, die geparst werden (Objekt- und Content-Streams);
+    /// 2. der **Rumpf der Datei selbst**: Objektköpfe, Dictionaries, Arrays,
+    ///    Querverweistabelle, Trailer — alles, was nicht Stream-Nutzlast ist.
+    ///
+    /// Beides ist der teure Teil. Aus einem Byte Content-Stream werden im
+    /// Speicher rund 60 bis 100 Byte `lopdf::content::Operation`; aus einem
+    /// Dictionary-Eintrag von 5 Byte werden **197 Byte** `lopdf::Object` samt
+    /// Schlüssel und Tabellenreserve. Deshalb hat diese Klasse ein eigenes,
+    /// sehr viel engeres Budget als der Rest (Bilder, Schriften, eingebettete
+    /// Dateien), der nur gespeichert wird.
+    ///
+    /// **Klasse 2 fehlte früher.** Gezählt wurden nur Streams — eine
+    /// unkomprimierte Datei aus lauter Dictionaries sah das Budget also gar
+    /// nicht. Gemessen: 44,3 MB Quelle ergaben ein `Document` von 1 804 MB
+    /// (Faktor 40,7) und einen Lauf mit 3 756 MB Spitzenspeicher und
+    /// Rückgabewert 0. Dieselbe Bombe in einem Objekt-Stream wurde seit jeher
+    /// abgelehnt; der Unterschied war allein, ob sie komprimiert war. Die
+    /// Begründung im Langen steht in
+    /// `redact-pdf/tests/rumpf_im_parse_budget.rs`.
     pub max_parsed_bytes: u64,
 }
 
@@ -132,6 +146,21 @@ const MAX_LEGACY_STREAM_BYTES: usize = 16 * 1024 * 1024;
 /// Anteil nicht druckbarer Bytes, ab dem eine Nutzlast als Binärdaten gilt.
 const BINARY_RATIO: f64 = 0.10;
 
+/// Kann dieses Byte in PDF-**Syntax** außerhalb einer Zeichenkette vorkommen?
+///
+/// Zwischenraum (einschließlich NUL, das PDF ausdrücklich dazuzählt) und
+/// druckbares ASCII — mehr ist Syntax nicht. Steuerzeichen und Bytes über 126
+/// kommen nur in Zeichenketten, in Namen (dort als `#xx` oder, bei `lopdf`,
+/// auch roh) und in Stream-Nutzlast vor; Zeichenketten und Nutzlast überspringt
+/// [`Prescan::walk`] ohnehin, Namen behandelt es eigens.
+///
+/// Fast dieselbe Menge zählt [`looks_binary`] aus — dort gilt NUL allerdings
+/// als Binärzeichen. Das ist Absicht: eine Nutzlast voller Nullbytes ist keine
+/// Syntax, ein einzelnes NUL zwischen zwei Klammern aber sehr wohl.
+fn syntax_byte(b: u8) -> bool {
+    matches!(b, 0 | 9 | 10 | 12 | 13 | 32..=126)
+}
+
 /// Wie viele Bytes vom Anfang eines Streams für die Entscheidung
 /// „Nutzlast oder Syntax?“ betrachtet werden.
 ///
@@ -143,13 +172,44 @@ const BINARY_SAMPLE_BYTES: u64 = 64 * 1024;
 /// Tiefengrenze für Nutzlasten, die wie Binärdaten aussehen.
 ///
 /// Auch sie werden gezählt — sonst genügte es, einen Content-Stream mit
-/// Rauschen zu spicken, um die Prüfung zu umgehen. Weil in Binärdaten aber
-/// zufällig unpaarige `[`-Bytes vorkommen, ist die Grenze hier höher.
+/// Rauschen zu spicken, um die Prüfung zu umgehen.
 ///
-/// Belegt: über einen 6,2-MB-Stream aus gleichverteilten Zufallsbytes kommt
-/// die Zählung auf Tiefe 61; echte Schriften, Bilder und Farbprofile blieben
-/// im Test unter 30. 256 liegt weit genug darüber, dass Nutzlast keinen
-/// Fehlalarm auslöst.
+/// ## Was dort gezählt wird, und warum die reine Klammertiefe es nicht war
+///
+/// Bis v0.6.0 zählte hier **jedes** `[`-Byte. Das war keine Messung von
+/// Verschachtelung, sondern eine Irrfahrt: `]` senkt den Zähler nur bis null
+/// (`saturating_sub`), also läuft er in Rauschen nach oben davon, und sein
+/// Höchststand wächst mit der **Länge** der Nutzlast statt mit ihrer Struktur.
+/// Die Grenze war damit in Wahrheit eine Größengrenze — und eine, die nach
+/// Bytemustern ohne jede Bedeutung mal zuschlug und mal nicht.
+///
+/// Gemessen an dem Fall, der es aufdeckte: ein gewöhnlicher **Querverweis-
+/// Strom** (`/W [1 4 2]`, wie `lopdf` selbst ihn ab PDF 1.5 schreibt) besteht
+/// aus 7-Byte-Einträgen, in denen `[`- und `]`-Bytes rein zufällig vorkommen.
+/// Von 128 Dateigrößen zwischen 0,25 MB und 32 MB wurden abgelehnt:
+///
+/// | Einträge | Nutzlast | vorher | nachher |
+/// |---------:|---------:|-------:|--------:|
+/// |   20 000 |  140 kB  |   0    |    0    |
+/// |   50 000 |  350 kB  |   1    |    0    |
+/// |  100 000 |  700 kB  |  12    |    0    |
+/// |  200 000 |  1,4 MB  |  35    |    0    |
+///
+/// Ob eine gewöhnliche Datei durchkam, hing also daran, wo ihre Objekte
+/// zufällig lagen. Das ist ein Verfügbarkeitsfehler, kein Schutz.
+///
+/// Jetzt misst die Zählung in Nutzlast nur noch **zusammenhängende Syntax**:
+/// der Zähler fängt bei jedem Byte neu an, das in PDF-Syntax gar nicht
+/// vorkommt ([`syntax_byte`]) und auch nicht in einem Namen steht (dort lässt
+/// `lopdf` rohe Bytes über 126 zu). Mehr braucht es nicht, und mehr steht
+/// deshalb auch nicht da — eine Verschachtelung, die `lopdf` wirklich liest,
+/// ist ein zusammenhängender Lauf gültiger Syntax: nach jedem `[` muss ein
+/// Objekt folgen, sonst bricht der Parser ab und verschachtelt nichts.
+///
+/// Belegt in `z8_verschachtelung_in_nutzlast`: sieben Tarnungen (Rauschen
+/// davor, dahinter, Zahlen, Namen aus hohen Bytes, Nullbytes, Dictionaries)
+/// werden weiterhin abgelehnt; 6,2 MB Zufall, druckbares Rauschen und
+/// 560 gewöhnliche Querverweis-Ströme nicht mehr.
 ///
 /// Dass dieser Wert über [`Limits::max_nesting_depth`] liegt, ist kein
 /// Versehen, aber es hat einen Preis, und der ist gemessen: ein
@@ -188,7 +248,7 @@ pub fn prescan(bytes: &[u8], limits: &Limits) -> Result<()> {
         decompressed: 0,
         parsed: 0,
     };
-    scan.walk(bytes, true, limits.max_nesting_depth)
+    scan.walk(bytes, true, false)
 }
 
 fn check_depth(depth: usize, limit: usize) -> Result<()> {
@@ -217,18 +277,66 @@ impl Prescan<'_> {
     /// steuert, ob `stream … endstream` als Nutzlast behandelt wird; das gilt
     /// nur für die Datei selbst, nicht für bereits ausgepackte Streams.
     ///
-    /// `limit` ist die zulässige Tiefe — für Binärnutzlast höher, siehe
-    /// [`MAX_BINARY_NESTING_DEPTH`].
-    fn walk(&mut self, bytes: &[u8], streams: bool, limit: usize) -> Result<()> {
+    /// `binary` sagt, ob dieser Bereich wie Nutzlast aussieht; davon hängen die
+    /// zulässige Tiefe und die Frage ab, welche `[` überhaupt zählen — siehe
+    /// [`MAX_BINARY_NESTING_DEPTH`] und [`opens_object`].
+    ///
+    /// ## Der Rumpf zählt mit
+    ///
+    /// Beim Lauf über die **Datei selbst** (`streams == true`) wird am Ende
+    /// alles verbucht, was *keine* Stream-Nutzlast war: Objektköpfe,
+    /// Dictionaries, Arrays, die Querverweistabelle, der Trailer. Genau das
+    /// macht `lopdf` zu `Object`-Werten, und genau das fehlte dem Budget.
+    ///
+    /// **Warum das nötig ist — gemessen.** Ein Dictionary-Eintrag `/ab 0` kostet
+    /// 5 Byte in der Datei und 197 Byte im Speicher (`size_of::<lopdf::Object>()`
+    /// allein ist 120, dazu der Schlüssel als `Vec<u8>` und die Reserve der
+    /// `IndexMap`). Eine unkomprimierte 44,3-MB-Datei aus lauter solchen
+    /// Einträgen ergab ein `Document` von **1 804 MB — Faktor 40,7**, und zwar
+    /// **bevor** irgendein Scan lief. Vom Budget sah sie nichts: es zählte nur
+    /// Streams, und Streams hatte sie keine.
+    ///
+    /// Dieselbe Bombe in einem Objekt-Stream wurde dagegen seit jeher
+    /// abgelehnt — der Objekt-Stream wird ausgepackt und als Syntax verbucht.
+    /// Die Lücke war also nicht die Bauart der Bombe, sondern allein die Frage,
+    /// ob sie komprimiert war. Diese Unterscheidung sucht sich ein Angreifer
+    /// als Erstes aus.
+    fn walk(&mut self, bytes: &[u8], streams: bool, binary: bool) -> Result<()> {
+        let limit = if binary {
+            MAX_BINARY_NESTING_DEPTH
+        } else {
+            self.limits.max_nesting_depth
+        };
         let mut i = 0usize;
         let mut depth = 0usize;
         // Anfang des äußersten Dictionaries — das ist der Kopf des Streams,
         // der gleich folgen kann.
         let mut dict_start = 0usize;
         let mut dict_end = 0usize;
+        // Bytes, die als Stream-Nutzlast übersprungen wurden. Sie sind über
+        // [`Prescan::account`] schon verbucht und dürfen nicht doppelt zählen.
+        let mut nutzlast = 0u64;
+        // Steht dieses Byte in einem Namen (`/…`)? Dort sind auch Bytes über
+        // 126 zulässig — `lopdf` nimmt sie sogar roh an.
+        let mut in_name = false;
 
         while i < bytes.len() {
+            if binary {
+                in_name = match bytes[i] {
+                    b'/' => true,
+                    b if is_whitespace(b) || is_delimiter(b) => false,
+                    _ => in_name,
+                };
+            }
             match bytes[i] {
+                // In Nutzlast fängt die Zählung bei jedem Byte neu an, das in
+                // PDF-Syntax gar nicht vorkommen kann. Damit misst die Tiefe
+                // nur noch **zusammenhängende Syntax** — und genau daraus
+                // besteht eine Verschachtelung, die `lopdf` wirklich liest.
+                b if binary && !in_name && !syntax_byte(b) => {
+                    depth = 0;
+                    i += 1;
+                }
                 b'%' => i = skip_to_eol(bytes, i),
                 b'(' => i = skip_literal_string(bytes, i),
                 b'<' if bytes.get(i + 1) == Some(&b'<') => {
@@ -265,6 +373,7 @@ impl Prescan<'_> {
                         &[][..]
                     };
                     self.account(dict, &bytes[start..end.max(start)])?;
+                    nutzlast = nutzlast.saturating_add((end.max(start) - start) as u64);
                     i = end;
                 }
                 // Eingebettetes Bild in einem Content-Stream: zwischen `ID`
@@ -274,6 +383,18 @@ impl Prescan<'_> {
                 }
                 _ => i += 1,
             }
+        }
+        if streams {
+            // Erst hier, nicht laufend: der Lauf selbst belegt für den Rumpf
+            // keinen Speicher (er zählt nur Bytes), und die Ablehnung kommt
+            // immer noch vor `Document::load_mem` — also vor der einzigen
+            // Stelle, an der aus diesen Bytes wirklich Speicher wird.
+            let rumpf = (bytes.len() as u64).saturating_sub(nutzlast);
+            self.charge_parsed(
+                rumpf,
+                "die zu parsenden Teile der Datei (Objektköpfe, Dictionaries, \
+                 Querverweistabelle) zusammen mit den geparsten Streams",
+            )?;
         }
         Ok(())
     }
@@ -354,12 +475,7 @@ impl Prescan<'_> {
         // nicht mehr, und `Document::get_page_content` packt einen
         // Seiteninhalt mit `/Subtype /Image` ganz normal aus. Ein Dictionary
         // ist ohnehin kein Beleg — es gehört dem Angreifer.
-        let limit = if binary {
-            MAX_BINARY_NESTING_DEPTH
-        } else {
-            self.limits.max_nesting_depth
-        };
-        self.walk(data, false, limit)
+        self.walk(data, false, binary)
     }
 
     /// Packt einen Stream aus — speicherbegrenzt.
@@ -428,19 +544,31 @@ impl Prescan<'_> {
             )));
         }
         if syntax {
-            self.parsed = self.parsed.saturating_add(size);
-            if self.parsed > self.limits.max_parsed_bytes {
-                return Err(RedactError::Pdf(format!(
-                    "die zu parsenden Streams (Seiteninhalt, Objekt-Streams) \
-                     überschreiten das Budget von {} MB. Beim Parsen wird \
-                     daraus ein Vielfaches an Arbeitsspeicher. Ob ein Stream \
-                     hierher zählt, entscheidet sein Inhalt: sieht er wie \
-                     PDF-Syntax aus statt wie Nutzlast, gilt dieses engere \
-                     Budget. Ein wirklich so großes Dokument lässt sich mit \
-                     --max-parsed-mb durchlassen.",
-                    self.limits.max_parsed_bytes / (1024 * 1024)
-                )));
-            }
+            self.charge_parsed(
+                size,
+                "die zu parsenden Streams (Seiteninhalt, Objekt-Streams)",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Verbucht Bytes, aus denen `lopdf` PDF-Syntax macht.
+    ///
+    /// `woher` benennt die Klasse — sie steht in der Meldung, damit erkennbar
+    /// ist, welcher Teil der Datei das Budget aufgebraucht hat.
+    fn charge_parsed(&mut self, size: u64, woher: &str) -> Result<()> {
+        self.parsed = self.parsed.saturating_add(size);
+        if self.parsed > self.limits.max_parsed_bytes {
+            return Err(RedactError::Pdf(format!(
+                "{woher} überschreiten das Budget von {} MB. Beim Parsen wird \
+                 daraus ein Vielfaches an Arbeitsspeicher: gemessen 200 bis 270 \
+                 Byte je Dictionary-Eintrag, unabhängig davon, wie kurz er \
+                 geschrieben ist. Ob ein Stream hierher zählt, entscheidet sein \
+                 Inhalt: sieht er wie PDF-Syntax aus statt wie Nutzlast, gilt \
+                 dieses engere Budget. Ein wirklich so großes Dokument lässt \
+                 sich mit --max-parsed-mb durchlassen.",
+                self.limits.max_parsed_bytes / (1024 * 1024)
+            )));
         }
         Ok(())
     }

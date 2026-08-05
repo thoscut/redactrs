@@ -103,13 +103,22 @@ const MAX_GLYPHS_PER_SCAN: usize = 1_000_000;
 /// trägt einige hundert Operationen) und zugleich weit unter dem, was ohne
 /// Decke möglich wäre.
 ///
-/// Gezählt werden **nicht nur** Operationen: ein [`PlacedStream`] hält auch
-/// eine Kopie des aufgelösten `/Resources` (siehe [`stream_cost`]). Ein Strom
-/// mit *null* Operationen zählte sonst *null* und wäre damit gratis. Gemessen
-/// an Formularen mit leerem Rumpf und je 800 Ressourceneinträgen: der Scan
-/// legte 12,8 kB je Strom an — über das hinaus, was das Dokument selbst
-/// belegt —, und zwar linear ohne Ende (2 000 Ströme 25,5 MB, 5 000 Ströme
-/// 62,6 MB), während der Zähler die ganze Zeit „0“ ablas.
+/// Gezählt werden **nicht nur** Operationen: auch die
+/// `/Resources`-Verzeichnisse (siehe [`stream_cost`] und
+/// [`Budget::resource_dicts`]). Ein Strom mit *null* Operationen zählte sonst
+/// *null* und wäre damit gratis. Gemessen an Formularen mit leerem Rumpf und je
+/// 800 Ressourceneinträgen: der Scan legte 12,8 kB je Strom an — über das
+/// hinaus, was das Dokument selbst belegt —, und zwar linear ohne Ende
+/// (2 000 Ströme 25,5 MB, 5 000 Ströme 62,6 MB), während der Zähler die ganze
+/// Zeit „0“ ablas.
+///
+/// **Wo genau das anfällt, entscheidet, wie es zu zählen ist.** Ein
+/// Verzeichnis mit **eigener Objekt-Id** wird geteilt: *n* Formulare, die es
+/// erben, kosten es einmal, und es wiegt hier einmal. Ein direkt im Stromdict
+/// eingebettetes gehört genau einem Strom und wiegt bei dessen Eintrag. Wer
+/// beides gleich behandelte, zählte entweder dasselbe *n*-mal (falsche Zahl)
+/// oder eine echte *n*-fache Kopie einmal (die Lücke, aus der 1 037 MB aus
+/// einer 7,6-MB-Datei wurden).
 ///
 /// Wichtig: gerade der gefährliche Fall braucht kaum Platz. Ein
 /// Zwischenspeicher zahlt sich nur aus, wenn **derselbe** Strom mehrfach
@@ -153,6 +162,52 @@ const MAX_CACHED_OPERATIONS: usize = 100_000;
 /// sondern nur nichts mehr aufgenommen; was darüber liegt, wird je Platzierung
 /// neu geladen wie vor der Änderung.
 const MAX_CACHED_FONT_ENTRIES: usize = 400_000;
+
+/// Wie viele Schrift-Tabelleneinträge ein Seiten-Scan insgesamt aufmachen
+/// darf, bevor die Datei **abgelehnt** wird.
+///
+/// [`MAX_CACHED_FONT_ENTRIES`] ist eine weiche Decke: sie sagt nur, was
+/// *gemerkt* wird. Was ein Verzeichnis geladen hat, bleibt daneben trotzdem
+/// vollständig lebendig — [`load_font_map`](Budget::load_font_map) legt jede
+/// Schrift des Verzeichnisses in dieselbe [`FontMap`], und die hält der
+/// Interpreter, solange er in diesem Strom ist. Die weiche Decke sieht das
+/// nicht.
+///
+/// Gemessen (zählender Allokator, Release, je Schrift eine `/ToUnicode` über
+/// den vollen Bereich von 65 536 Einträgen, alle in **einem** `/Resources`;
+/// gesetzt wird nur mit der ersten):
+///
+/// | Schriften | Datei    | Spitze  |
+/// |----------:|---------:|--------:|
+/// |         1 |   0,9 kB |  4,0 MB |
+/// |        10 |   4,9 kB | 39,8 MB |
+/// |        50 |  22,5 kB | 198,9 MB |
+/// |       100 |  44,8 kB | 397,7 MB |
+///
+/// Linear, rund 4 MB je Schrift, bei rund 450 Byte Dateizuwachs je Schrift —
+/// **Faktor 9 000**, und ohne jede Decke. Eine Datei von einem Megabyte käme
+/// so auf neun Gigabyte.
+///
+/// Warum **ablehnen** und nicht stillschweigend weniger laden: eine Schrift,
+/// die nicht geladen ist, hat keine `/ToUnicode`-Zuordnung, und ihr Text wird
+/// dann falsch oder gar nicht dekodiert. Für ein Werkzeug, das Geheimnisse
+/// suchen soll, ist „ich habe den Text nicht gelesen“ kein zulässiges
+/// Zwischenergebnis — das ist dieselbe Begründung wie bei
+/// [`crate::document::Limits`].
+///
+/// Warum diese Zahl: sie muss über dem liegen, was ein ehrliches Dokument
+/// braucht, und darunter, was die Maschine umwirft. Eine Million Einträge sind
+/// nach der Abschätzung in [`FontInfo::weight`] rund 60 MB und entsprechen
+/// **fünfzehn** CJK-Schriften vollen Umfangs auf einer Seite. Eine Seite mit
+/// fünf bis zehn Schriften ist normal; fünfzehn *volle* CJK-Schriften ist es
+/// nicht. Der Test `rev4_interpreter_ceilings::die_schriftendecke_haelt`
+/// (sieben mal 65 536 = 458 752) liegt ausdrücklich darunter und läuft
+/// weiterhin durch.
+///
+/// Gezählt wird je **Schriftobjekt genau einmal** (siehe
+/// [`Budget::charged_fonts`]) — dieselbe Schrift unter zweihundert Namen oder
+/// in zwanzig Verzeichnissen kostet einmal.
+const MAX_FONT_ENTRIES_PER_SCAN: usize = 1_000_000;
 
 /// Schriften eines Ressourcenverzeichnisses: Ressourcenname → Metriken.
 ///
@@ -207,6 +262,14 @@ pub struct ScanEffort {
     /// Verzeichnis teilen, ergeben eine Durchsicht, nicht *n*. Siehe
     /// [`DeclarationKey`].
     pub declared_resources: usize,
+    /// Was der Zähler des Strom-Zwischenspeichers am Ende des Scans ablas —
+    /// die Zahl, die gegen [`MAX_CACHED_OPERATIONS`] steht.
+    ///
+    /// Hier steht sie, damit ein Test sie **lesen** kann: eine Decke, deren
+    /// Zähler nicht misst, was sie begrenzen soll, sieht von außen genauso aus
+    /// wie eine, die hält. Genau das war der Fehler, den diese Zahl sichtbar
+    /// macht — 50 000 Ströme lasen 50 000 ab und belegten 1 011 MB.
+    pub retained_weight: usize,
 }
 
 /// Woher ein `/Resources`-Verzeichnis stammt — der Schlüssel des
@@ -252,7 +315,21 @@ struct PlacedStream {
     has_tokens: bool,
     /// Das **eigene** `/Resources` des Stroms, bereits aufgelöst. `None`
     /// heißt: er bringt keins mit und erbt das des Aufrufers.
-    resources: Option<Dictionary>,
+    ///
+    /// Ein [`Rc`] und keine eigene Kopie: *n* Formulare, die per Referenz
+    /// dasselbe Verzeichnis erben, hielten sonst *n* vollständige Kopien
+    /// davon — siehe [`Budget::resource_dicts`]. Am Vererbungsverhalten
+    /// ändert das nichts: entschieden wird weiterhin allein daran, **ob**
+    /// hier etwas steht, und das steht genau dann, wenn der Strom ein eigenes
+    /// `/Resources` mitbringt.
+    resources: Option<Rc<Dictionary>>,
+    /// Steht [`PlacedStream::resources`] im geteilten Zwischenspeicher?
+    ///
+    /// `true` heißt: das Verzeichnis ist dort einmal abgelegt und einmal
+    /// verbucht; dieser Strom hält nur einen Zeiger darauf und kostet nichts
+    /// extra. `false` heißt: die Kopie gehört diesem [`PlacedStream`] allein
+    /// und wiegt deshalb bei [`stream_cost`] voll mit.
+    shared_resources: bool,
     /// Unter welchem Schlüssel die Schriften zu [`PlacedStream::resources`]
     /// im Zwischenspeicher stehen — belegt genau dann, wenn jenes belegt ist.
     ///
@@ -295,16 +372,39 @@ impl PlacedStream {
 
 /// Was ein gemerkter [`PlacedStream`] gegen [`MAX_CACHED_OPERATIONS`] zählt.
 ///
-/// Nicht nur die Operationen: der Eintrag hält auch eine **Kopie** des
-/// aufgelösten `/Resources`-Verzeichnisses, und die kann um Größenordnungen
-/// schwerer sein als der Rumpf. Ein Strom mit null Operationen zählte sonst
-/// null und käme unter jeder Decke durch, gleich wie fett sein Verzeichnis ist.
+/// Die Operationen — und das `/Resources`-Verzeichnis genau dann, wenn dieser
+/// Eintrag es **allein** hält. Steht es im geteilten Zwischenspeicher
+/// ([`Budget::resource_dicts`]), ist es dort schon einmal verbucht; es hier ein
+/// zweites Mal zu zählen wäre keine Vorsicht, sondern eine falsche Zahl: der
+/// Strom hält davon nur einen Zeiger.
 fn stream_cost(placed: &PlacedStream) -> usize {
-    let resources = placed.resources.as_ref().map_or(0, dictionary_objects);
+    let resources = match (&placed.resources, placed.shared_resources) {
+        (Some(dict), false) => dictionary_objects(dict),
+        _ => 0,
+    };
     placed.operations().len().saturating_add(resources)
 }
 
-/// Wie viele Objekte in einem Dictionary stecken, Verschachtelung mitgezählt.
+/// Wie schwer ein Dictionary wiegt, Verschachtelung mitgezählt.
+///
+/// Die Einheit ist der **Eintrag**: ein Dictionary- oder Array-Platz zählt
+/// eins, wie eine Zeichenoperation. Beide sind in derselben Größenordnung
+/// (`lopdf::Object` allein ist 120 Byte), und daran ist
+/// [`MAX_CACHED_OPERATIONS`] geeicht.
+///
+/// ## Warum Zeichenketten nach ihrer Länge zählen
+///
+/// Eine PDF-Zeichenkette ist der eine Wert, dessen Platzbedarf **nicht** an der
+/// Zahl der Einträge hängt: `/Junk (AAA…)` ist *ein* Eintrag und kann ein
+/// Megabyte wiegen. Gezählt wird deshalb ihre Länge in Byte — großzügig
+/// gerechnet (ein Byte zählt wie ein ganzer Eintrag), aber in der richtigen
+/// Richtung: eine Decke, die die schwerste Sorte Wert als „eins“ liest, ist
+/// keine. Dasselbe für den Rumpf eines Streams, falls einer direkt in einem
+/// Verzeichnis steht.
+///
+/// In einem echten `/Resources` kommen Zeichenketten praktisch nicht vor — es
+/// besteht aus Namen und Referenzen. Die großzügige Rechnung kostet also nichts
+/// und greift nur da, wo jemand sie ausnutzen wollte.
 ///
 /// Iterativ und nicht rekursiv: das Verzeichnis stammt aus der Datei, und eine
 /// Schachtelungstiefe daraus darf nicht zum Stapelüberlauf werden. Gezählt wird
@@ -325,6 +425,13 @@ fn dictionary_objects(dict: &Dictionary) -> usize {
             Object::Array(items) => {
                 count = count.saturating_add(items.len());
                 todo.extend(items.iter());
+            }
+            Object::String(bytes, _) => count = count.saturating_add(bytes.len()),
+            Object::Stream(stream) => {
+                count = count
+                    .saturating_add(stream.content.len())
+                    .saturating_add(stream.dict.len());
+                todo.extend(stream.dict.iter().map(|(_, value)| value));
             }
             _ => {}
         }
@@ -398,6 +505,33 @@ struct Budget {
     /// Einmal ausgepackte und zerlegte Ströme, je Objekt-Id — samt der
     /// Auskunft, ob der Strom schon Guthaben eingebracht hat.
     streams: HashMap<ObjectId, CachedStream>,
+    /// Einmal aufgelöste `/Resources`-Verzeichnisse, je **Ressourcenobjekt**.
+    ///
+    /// Das ist die Ebene, auf der der Platz wirklich anfällt. Vorher hielt
+    /// **jeder** [`PlacedStream`] eine vollständige eigene Kopie seines
+    /// aufgelösten Verzeichnisses — auch dann, wenn tausend Formulare per
+    /// Referenz dasselbe Objekt erben. Gemessen an 50 000 Formularen, die sich
+    /// ein Verzeichnis mit einer 16-kB-Zeichenkette teilen: **1 037 MB**
+    /// Spitzenspeicher aus einer Datei von 7,6 MB, Faktor 136 — bei einem
+    /// Zähler, der dabei 50 000 von 100 000 ablas. Die Decke sah den Platz
+    /// nicht, weil er gar nicht in ihrer Einheit anfiel.
+    ///
+    /// Geteilt wird nur, was eine **eigene Objekt-Id** hat: nur dort gibt es
+    /// die Vervielfachung (ein Objekt, viele Ströme). Ein direkt im Stromdict
+    /// eingebettetes `/Resources` gehört ohnehin genau einem Strom und wiegt
+    /// deshalb weiter bei [`stream_cost`] mit.
+    ///
+    /// Auch dieser Zwischenspeicher steht unter [`MAX_CACHED_OPERATIONS`];
+    /// was nicht mehr hineinpasst, wird wie vorher je Platzierung kopiert —
+    /// und der zugehörige Strom wird dann **nicht** gemerkt, sonst bliebe die
+    /// Kopie doch liegen. Damit ist zu jedem Zeitpunkt höchstens eine solche
+    /// Kopie je Schachtelungsebene am Leben.
+    ///
+    /// An der Vererbung ändert das nichts: der Schlüssel ist die Objekt-Id des
+    /// Verzeichnisses, nicht der Fundort und nicht der Ressourcenname. Zwei
+    /// Umgebungen mit verschiedenen Verzeichnissen haben verschiedene Ids und
+    /// bekommen weiterhin verschiedene Antworten.
+    resource_dicts: HashMap<ObjectId, Rc<Dictionary>>,
     /// Einmal geladene Schriftenverzeichnisse, je Ressourcenobjekt.
     fonts: HashMap<ResourceKey, Rc<FontMap>>,
     /// Einmal geparste Schriften, je **Schriftobjekt**.
@@ -417,6 +551,14 @@ struct Budget {
     /// Wie viele Schrift-Tabelleneinträge der Zwischenspeicher festhält — die
     /// Decke ist [`MAX_CACHED_FONT_ENTRIES`].
     cached_font_entries: usize,
+    /// Wie viele Tabelleneinträge dieser Scan **insgesamt** aufgemacht hat —
+    /// die harte Decke ist [`MAX_FONT_ENTRIES_PER_SCAN`].
+    seen_font_entries: usize,
+    /// Welche Schriftobjekte darauf schon gebucht sind. Ohne diese Menge
+    /// zählte ein Verzeichnis mit derselben Schrift unter zweihundert Namen
+    /// zweihundertmal — und über der weichen Decke zählte jede erneute
+    /// Ladung noch einmal.
+    charged_fonts: HashSet<ObjectId>,
     /// Die Vorarbeit, die wirklich anfiel — siehe [`ScanEffort`].
     effort: ScanEffort,
     /// Type3-Schriften, deren Glyphprozeduren schon untersucht wurden — je
@@ -437,11 +579,14 @@ impl Default for Budget {
             operations: BASE_OPERATIONS,
             glyphs: MAX_GLYPHS_PER_SCAN,
             streams: HashMap::new(),
+            resource_dicts: HashMap::new(),
             fonts: HashMap::new(),
             font_objects: HashMap::new(),
             declared_forms: HashSet::new(),
             cached_operations: 0,
             cached_font_entries: 0,
+            seen_font_entries: 0,
+            charged_fonts: HashSet::new(),
             effort: ScanEffort::default(),
             looked_at_type3: HashSet::new(),
             exceeded: None,
@@ -504,18 +649,22 @@ impl Budget {
         };
         // `/Resources` wird mitsamt seiner Objekt-Id aufgelöst: teilen sich
         // mehrere Ströme dasselbe Verzeichnis, teilen sie sich auch dessen
-        // Schriften.
-        let (resource_id, resources) = match stream
+        // Schriften — und seit [`Budget::resource_dicts`] auch das Verzeichnis
+        // selbst statt je Strom einer eigenen Kopie.
+        let (resource_id, resources, shared_resources) = match stream
             .dict
             .get(b"Resources")
             .ok()
             .and_then(|o| doc.dereference(o).ok())
         {
             Some((resource_id, object)) => match object.as_dict() {
-                Ok(dict) => (resource_id, Some(dict.clone())),
-                Err(_) => (None, None),
+                Ok(dict) => {
+                    let (rc, shared) = self.resource_dict(resource_id, dict);
+                    (resource_id, Some(rc), shared)
+                }
+                Err(_) => (None, None, false),
             },
-            None => (None, None),
+            None => (None, None, false),
         };
         let font_key = resources.as_ref().and(
             resource_id
@@ -526,8 +675,39 @@ impl Budget {
             content,
             has_tokens,
             resources,
+            shared_resources,
             font_key,
         }
+    }
+
+    /// Das aufgelöste `/Resources` eines Stroms — **einmal je Objekt-Id**.
+    ///
+    /// Der zweite Rückgabewert sagt, ob das Ergebnis geteilt ist. `false`
+    /// heißt: diese Kopie gehört dem Aufrufer allein und wiegt bei
+    /// [`stream_cost`] mit — entweder weil das Verzeichnis gar keine eigene
+    /// Objekt-Id hat (direkt im Stromdict eingebettet, dann gibt es nichts zu
+    /// teilen), oder weil [`MAX_CACHED_OPERATIONS`] voll ist.
+    ///
+    /// Der zweite Fall ist der wichtige: ist die Decke voll, wird der Strom
+    /// ohnehin nicht gemerkt, und die Kopie stirbt mit der Platzierung. So
+    /// bleibt auch ein Verzeichnis, das für sich allein schon über der Decke
+    /// liegt, harmlos — es wird je Platzierung neu kopiert (Laufzeit wie
+    /// vorher), aber nie *n*-mal gleichzeitig gehalten.
+    fn resource_dict(&mut self, id: Option<ObjectId>, dict: &Dictionary) -> (Rc<Dictionary>, bool) {
+        let Some(id) = id else {
+            return (Rc::new(dict.clone()), false);
+        };
+        if let Some(shared) = self.resource_dicts.get(&id) {
+            return (Rc::clone(shared), true);
+        }
+        let cost = dictionary_objects(dict);
+        if self.cached_operations.saturating_add(cost) > MAX_CACHED_OPERATIONS {
+            return (Rc::new(dict.clone()), false);
+        }
+        self.cached_operations += cost;
+        let shared = Rc::new(dict.clone());
+        self.resource_dicts.insert(id, Rc::clone(&shared));
+        (shared, true)
     }
 
     /// Die Schriften zum **eigenen** `/Resources` eines Stroms.
@@ -537,7 +717,7 @@ impl Budget {
     /// entschieden wird — und sie wird bei **jeder** Platzierung neu
     /// entschieden, nicht einmal beim Auspacken.
     fn fonts_of(&mut self, doc: &Document, placed: &PlacedStream) -> Option<Rc<FontMap>> {
-        let resources = placed.resources.as_ref()?;
+        let resources: &Dictionary = placed.resources.as_deref()?;
         Some(match placed.font_key {
             Some(key) => self.font_map(doc, key, resources),
             // Weder das Verzeichnis noch der Strom hat eine Objekt-Id: es
@@ -590,6 +770,12 @@ impl Budget {
             return (out, retained);
         };
         for (name, object) in font_dict.iter() {
+            // Über der harten Decke wird nicht weitergeladen: jede weitere
+            // Schrift bliebe bis zum Ende des Stroms lebendig, und das ist
+            // genau das, was die Decke verhindern soll.
+            if self.exceeded.is_some() {
+                break;
+            }
             let Ok((id, resolved)) = doc.dereference(object) else {
                 continue;
             };
@@ -630,6 +816,31 @@ impl Budget {
         self.effort.parsed_fonts += 1;
         let info = Rc::new(font_from_dict(doc, dict));
         let cost = info.weight();
+        // Die harte Decke: je Schriftobjekt einmal, über den ganzen Scan.
+        // Sie steht neben der weichen — was hier gebucht wird, bleibt in der
+        // [`FontMap`] des Verzeichnisses lebendig, gleich ob es der
+        // Zwischenspeicher unten annimmt oder nicht.
+        let erstmals = match id {
+            Some(id) => self.charged_fonts.insert(id),
+            // Ohne Objekt-Id gibt es nichts wiederzuerkennen; im Zweifel
+            // zählen, das ist die strengere Richtung.
+            None => true,
+        };
+        if erstmals {
+            self.seen_font_entries = self.seen_font_entries.saturating_add(cost);
+            if self.seen_font_entries > MAX_FONT_ENTRIES_PER_SCAN {
+                self.exceeded = Some(format!(
+                    "Eine Seite dieses Dokuments lädt mehr als \
+                     {MAX_FONT_ENTRIES_PER_SCAN} Schrift-Tabelleneinträge. Alle Schriften \
+                     eines Ressourcenverzeichnisses sind gleichzeitig im Speicher; \
+                     gemessen kostet eine Schrift mit voller `/ToUnicode`-Zuordnung rund \
+                     4 MB, hundert davon aus einer Datei von 45 kB also rund 400 MB. Eine \
+                     Seite trägt normalerweise eine Handvoll Schriften; diese Menge \
+                     entsteht nicht durch ein echtes Dokument. Die Datei wird abgelehnt, \
+                     statt den Text mit halb geladenen Schriften zu durchsuchen."
+                ));
+            }
+        }
         let room = self.cached_font_entries.saturating_add(cost) <= MAX_CACHED_FONT_ENTRIES;
         match id {
             Some(id) if room => {
@@ -914,6 +1125,22 @@ pub struct ScanResult {
     /// Abschnitte mit, und ein mehrfach platziertes Formular liefert sie
     /// mehrfach.
     seen_marked: HashSet<(StreamKey, usize)>,
+    /// Dasselbe für [`ScanResult::warnings`].
+    ///
+    /// Die Entdopplung war schon immer zugesagt; sie lief nur über
+    /// `warnings.contains(…)`, also über die ganze bisherige Liste je neuer
+    /// Warnung. Gemessen an derselben Datei, beide Fassungen abwechselnd:
+    ///
+    /// | Warnungen | mit Liste | mit Menge | Anteil |
+    /// |----------:|----------:|----------:|-------:|
+    /// |     2 000 |   0,028 s |   0,025 s |   11 % |
+    /// |     8 000 |   0,157 s |   0,108 s |   31 % |
+    /// |    32 000 |   3,592 s |   0,444 s |   88 % |
+    ///
+    /// Die rechte Spalte ist linear, die linke vervierfacht sich. Am
+    /// Verhalten ändert sich nichts: dieselben Warnungen, dieselbe
+    /// Reihenfolge, jede genau einmal.
+    seen_warnings: HashSet<String>,
 }
 
 impl ContentSink for ScanResult {
@@ -942,7 +1169,7 @@ impl ContentSink for ScanResult {
     }
 
     fn warn(&mut self, message: String) {
-        if !self.warnings.contains(&message) {
+        if self.seen_warnings.insert(message.clone()) {
             self.warnings.push(message);
         }
     }
@@ -1411,6 +1638,7 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
     scan_annotations(doc, page_id, resources.as_ref(), &mut budget, &mut result);
     budget.result()?;
     result.effort = budget.effort;
+    result.effort.retained_weight = budget.cached_operations;
     Ok(result)
 }
 
@@ -1875,16 +2103,16 @@ fn scan_appearance(
     // seiner schon geladenen Schriften; sonst die der Seite.
     let own_fonts = budget.fonts_of(doc, &appearance);
     let (resources, own_resources, fonts) = match (&appearance.resources, &own_fonts) {
-        (Some(own), Some(own_fonts)) => (Some(own.clone()), true, Some(&**own_fonts)),
+        (Some(own), Some(own_fonts)) => (Some(Rc::clone(own)), true, Some(&**own_fonts)),
         // Die Ressourcen der Seite hat der Seitenstrom schon angeboten.
-        _ => (page_resources.cloned(), false, None),
+        _ => (page_resources.map(|d| Rc::new(d.clone())), false, None),
     };
 
     scan_with_budget(
         doc,
         appearance.operations(),
         StreamKey::Form(id),
-        resources.as_ref(),
+        resources.as_deref(),
         own_resources,
         fonts,
         appearance_matrix(&matrix, bbox, rect),
@@ -2613,7 +2841,7 @@ fn scan_operations(
                         let own_fonts = budget.fonts_of(doc, &form);
                         let (form_resources, form_own, form_fonts) =
                             match (&form.resources, &own_fonts) {
-                                (Some(own), Some(own_fonts)) => (Some(own), true, &**own_fonts),
+                                (Some(own), Some(own_fonts)) => (Some(&**own), true, &**own_fonts),
                                 _ => (resources, false, fonts),
                             };
                         scan_operations(
@@ -2778,7 +3006,7 @@ fn scan_soft_mask(
     // bereits geladenen Schriften.
     let own_fonts = budget.fonts_of(doc, &group);
     let (group_resources, group_own, group_fonts) = match (&group.resources, &own_fonts) {
-        (Some(own), Some(own_fonts)) => (Some(own), true, &**own_fonts),
+        (Some(own), Some(own_fonts)) => (Some(&**own), true, &**own_fonts),
         _ => (resources, false, fonts),
     };
     // Die Maske ist ein platzierter Strom wie ein Formular; sie muss auch so
@@ -3080,7 +3308,7 @@ fn scan_tiling_pattern(
     // bereits geladenen Schriften.
     let own_fonts = budget.fonts_of(doc, &pattern);
     let (pattern_resources, pattern_own, pattern_fonts) = match (&pattern.resources, &own_fonts) {
-        (Some(own), Some(own_fonts)) => (Some(own), true, &**own_fonts),
+        (Some(own), Some(own_fonts)) => (Some(&**own), true, &**own_fonts),
         _ => (resources, false, fonts),
     };
     scan_operations(

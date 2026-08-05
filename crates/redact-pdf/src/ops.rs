@@ -26,7 +26,7 @@
 //! * **`LZWDecode`/`CCITTFaxDecode`/`JPXDecode`** werden nicht dekodiert,
 //!   sondern durch einen Platzhalter ersetzt (siehe [`PageOps::notes`]).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
@@ -316,6 +316,8 @@ pub fn page_ops(doc: &Document, page_index: usize) -> Result<PageOps> {
         out: PageOps::empty(page_index, media_box, rotate),
         fonts: HashMap::new(),
         images: HashMap::new(),
+        clips: HashMap::new(),
+        seen_notes: HashSet::new(),
     };
     interpret(
         doc,
@@ -370,15 +372,71 @@ enum FontKey {
     Local(StreamKey, Vec<u8>),
 }
 
+/// Schlüssel eines Clip-Pfads: die Bitmuster seiner Koordinaten.
+///
+/// [`PathSeg`] trägt `f64` und hat deshalb weder `Eq` noch `Hash`. Bitgleiche
+/// Pfade sind aber genau die, aus denen dieselbe Maske entsteht — als
+/// Schlüssel taugen die Rohbits also, und sie umgehen dabei die zwei
+/// Eigenheiten von `==` auf Fließkomma:
+///
+/// * `NaN == NaN` ist **falsch**. Ein Pfad mit NaN-Koordinate wäre bei der
+///   alten Suche nie wiedererkannt worden — jedes `W n` hätte einen neuen
+///   Eintrag und im Rasterizer eine neue Maske erzeugt.
+/// * `0.0 == -0.0` ist **wahr**. Solche Pfade stehen jetzt doppelt in der
+///   Liste: ein Eintrag zu viel, aber kein falsches Bild.
+type ClipKey = Vec<u64>;
+
+fn clip_key(segments: &[PathSeg]) -> ClipKey {
+    let mut key = Vec::with_capacity(segments.len() * 3);
+    let mut push = |tag: u64, points: &[Point]| {
+        key.push(tag);
+        for p in points {
+            key.push(p.x.to_bits());
+            key.push(p.y.to_bits());
+        }
+    };
+    for seg in segments {
+        match seg {
+            PathSeg::MoveTo(p) => push(0, &[*p]),
+            PathSeg::LineTo(p) => push(1, &[*p]),
+            PathSeg::CubicTo(a, b, c) => push(2, &[*a, *b, *c]),
+            PathSeg::Close => push(3, &[]),
+        }
+    }
+    key
+}
+
 struct OpsCollector {
     out: PageOps,
     fonts: HashMap<FontKey, usize>,
     images: HashMap<ObjectId, usize>,
+    /// Schon abgelegte Clip-Pfade — **als Menge**, nicht durch Durchsuchen der
+    /// Liste.
+    ///
+    /// Vorher stand hier `clips.iter().position(…)`, also eine Suche über alle
+    /// bisherigen Pfade je neuem Pfad: quadratisch. Gemessen (Debug, beide
+    /// Fassungen abwechselnd auf derselben Datei, je ein `re W n` mit eigenem
+    /// Rechteck):
+    ///
+    /// | Clips  | Datei   | mit Liste | mit Menge |
+    /// |-------:|--------:|----------:|----------:|
+    /// |  8 000 |  382 kB |    1,07 s |    0,50 s |
+    /// | 16 000 |  769 kB |    3,78 s |    1,04 s |
+    /// | 32 000 |  1,5 MB |   14,65 s |    2,16 s |
+    /// | 64 000 |  3,1 MB |   59,73 s |    4,23 s |
+    ///
+    /// Links Faktor 3,5 bis 4,1 je Verdopplung, rechts 2,0. Die Nachbarn
+    /// [`OpsCollector::fonts`] und [`OpsCollector::images`] machen es seit
+    /// jeher so.
+    clips: HashMap<ClipKey, usize>,
+    /// Schon vergebene Hinweise — als Menge, aus demselben Grund wie
+    /// [`OpsCollector::clips`].
+    seen_notes: HashSet<String>,
 }
 
 impl OpsCollector {
     fn note(&mut self, text: String) {
-        if !self.out.notes.contains(&text) {
+        if self.seen_notes.insert(text.clone()) {
             self.out.notes.push(text);
         }
     }
@@ -444,11 +502,14 @@ impl ContentSink for OpsCollector {
     }
 
     fn clip(&mut self, _cx: &SinkContext, segments: &[PathSeg], _even_odd: bool) -> Option<usize> {
-        if let Some(index) = self.out.clips.iter().position(|c| c == segments) {
-            return Some(index);
+        let key = clip_key(segments);
+        if let Some(index) = self.clips.get(&key) {
+            return Some(*index);
         }
+        let index = self.out.clips.len();
         self.out.clips.push(segments.to_vec());
-        Some(self.out.clips.len() - 1)
+        self.clips.insert(key, index);
+        Some(index)
     }
 
     fn image(&mut self, cx: &SinkContext, event: &ImageEvent) {
@@ -2440,10 +2501,23 @@ mod tests {
         );
     }
 
+    /// Ein Clip-Pfad wird **einmal** abgelegt, auch wenn er zweimal gesetzt
+    /// wird.
+    ///
+    /// Der zweite `W n` ist der Kern des Tests. Ohne ihn sagte er nur aus, dass
+    /// aus **einem** `W n` **ein** Eintrag wird — und das gilt mit und ohne
+    /// Entdopplung. Erst der zweite, gleiche Beschnitt unterscheidet die
+    /// beiden Fassungen: ohne Entdopplung stünde derselbe Pfad zweimal in
+    /// [`PageOps::clips`], und der Rasterizer baute für ihn eine zweite Maske
+    /// in voller Bildgröße.
     #[test]
     fn clip_is_stored_once_and_referenced_by_the_following_ops() {
-        let page = ops_of("q 0 0 10 10 re W n 1 1 2 2 re f 1 1 2 2 re f Q 1 1 2 2 re f");
-        assert_eq!(page.clips.len(), 1);
+        let page = ops_of(
+            "q 0 0 10 10 re W n 1 1 2 2 re f 1 1 2 2 re f Q \
+             q 0 0 10 10 re W n 1 1 2 2 re f Q \
+             1 1 2 2 re f",
+        );
+        assert_eq!(page.clips.len(), 1, "derselbe Pfad, zweimal gesetzt");
         assert_eq!(page.clips[0].len(), 5);
         let ops = paths(&page);
         assert!(matches!(
@@ -2454,7 +2528,19 @@ mod tests {
             }
         ));
         assert!(matches!(ops[1], DrawOp::Path { clip: Some(_), .. }));
-        assert!(matches!(ops[2], DrawOp::Path { clip: None, .. }));
+        // Der zweite Block muss auf **denselben** Eintrag zeigen.
+        assert!(
+            matches!(
+                ops[2],
+                DrawOp::Path {
+                    clip: Some(ClipRef(0)),
+                    ..
+                }
+            ),
+            "der zweite, gleiche Beschnitt zeigt nicht auf denselben Eintrag: {:?}",
+            ops[2]
+        );
+        assert!(matches!(ops[3], DrawOp::Path { clip: None, .. }));
     }
 
     #[test]

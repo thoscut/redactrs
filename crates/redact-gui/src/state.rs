@@ -47,18 +47,61 @@ pub const PROTECTION_OVERRIDDEN: &str =
     "Achtung: Dieser Treffer war durch Ihre Schutzliste gedeckt. Von Hand angepasst \
      überstimmt er sie und wird jetzt geschwärzt — Strg+Z nimmt es zurück.";
 
+/// Was der abgelehnte Anschlag hätte tun sollen.
+///
+/// Die Absage nannte früher fest „Nicht verschoben“ — auch dann, wenn
+/// Strg+Umschalt+Pfeil die **Größe** ändern sollte. Wer sie so liest, sucht den
+/// Fehler beim Verschieben und nicht bei der Auswahl.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NudgeKind {
+    /// Pfeiltasten mit Auswahl: das Rechteck schieben.
+    Move,
+    /// Strg+Pfeil: die obere rechte Ecke ziehen.
+    Resize,
+}
+
+impl NudgeKind {
+    /// Der Satzanfang der Absage — das Verb, um das es wirklich ging.
+    pub fn refusal(self) -> &'static str {
+        match self {
+            NudgeKind::Move => "Nicht verschoben",
+            NudgeKind::Resize => "Größe nicht geändert",
+        }
+    }
+}
+
 /// Statuszeile, wenn ein Pfeiltastendruck eine Region auf einer Seite träfe,
 /// die gerade niemand sieht.
 ///
 /// Siehe [`AppState::move_selected`] und [`AppState::resize_selected`]. Der
 /// Satz nennt beide Auswege — zu der Seite blättern oder die Auswahl aufheben
 /// —, weil sonst nur „es passiert nichts“ übrig bliebe. `page` ist 0-basiert.
-pub fn selection_on_other_page(page: usize) -> String {
+pub fn selection_on_other_page(page: usize, kind: NudgeKind) -> String {
     format!(
-        "Nicht verschoben — die ausgewählte Region liegt auf Seite {}, gezeigt wird \
+        "{} — die ausgewählte Region liegt auf Seite {}, gezeigt wird \
          eine andere. Zu ihr blättern, oder mit Esc die Auswahl aufheben (dann \
          blättern die Pfeiltasten wieder).",
+        kind.refusal(),
         page + 1
+    )
+}
+
+/// Dieselbe Absage für eine Seite, die es **gar nicht gibt**.
+///
+/// [`selection_on_other_page`] riet „zu ihr blättern“ — und schickte damit zu
+/// Seite 8 eines zweiseitigen Dokuments. Solche Zeilen bringt nur eine
+/// Review- oder Regionsdatei mit ([`HitOutcome::MissingPage`]); der Ausweg ist
+/// deshalb ein anderer, und er wird hier benannt statt verschwiegen.
+/// `page` ist 0-basiert, `pages` die Seitenzahl des Dokuments.
+pub fn selection_on_missing_page(page: usize, pages: usize, kind: NudgeKind) -> String {
+    format!(
+        "{} — die ausgewählte Region nennt Seite {}, die es in diesem Dokument \
+         nicht gibt (es hat {} Seite(n)). Dorthin lässt sich nicht blättern: die \
+         Zeile mit Entf löschen oder die Seitenzahl in der Review-Datei berichtigen \
+         — dort ist die erste Seite die 0.",
+        kind.refusal(),
+        page + 1,
+        pages
     )
 }
 
@@ -319,6 +362,107 @@ impl HitOutcome {
     }
 }
 
+/// Obergrenze für die Nachprüfung nach dem Export: so viele **verschiedene**
+/// Texte werden gesucht.
+///
+/// [`redact_pdf::leaks`] liest die Datei je Begriff einmal ganz durch — auf
+/// allen Ebenen, bis in Objektströme hinein. Das ist der Preis dafür, dass es
+/// das ehrliche Messgerät ist, und er ist linear in der Zahl der Begriffe.
+/// Ohne Decke bezahlte ihn die Oberfläche in einem hängenden Fenster: die
+/// Trefferliste darf bis `--max-candidates` (100 000) lang werden.
+///
+/// 200 ist derselbe Wert wie [`redact_pdf`]s Obergrenze für gemeldete
+/// Fundstellen und deckt jedes Dokument ab, das ein Mensch von Hand
+/// durchsieht. Was darüber liegt, wird **gesagt** und nicht verschwiegen —
+/// siehe [`ExportCheck::sentence`].
+pub const MAX_EXPORT_CHECK_NEEDLES: usize = 200;
+
+/// Ergebnis der Nachprüfung über die geschriebene Datei.
+///
+/// Siehe [`AppState::check_export`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExportCheck {
+    /// Die Ausgabe ließ sich nicht zurücklesen — dann gibt es keine Aussage.
+    pub unreadable: Option<String>,
+    /// Zahl der wirklich gesuchten (verschiedenen) Texte.
+    pub checked: usize,
+    /// Texte, die **noch** in der Ausgabe stehen.
+    pub leaking: Vec<String>,
+    /// Geschwärzte Zeilen ohne bekannten Text — von Hand gezogene Rechtecke.
+    pub without_text: usize,
+    /// Texte über [`MAX_EXPORT_CHECK_NEEDLES`] hinaus, die nicht gesucht wurden.
+    pub skipped: usize,
+}
+
+impl ExportCheck {
+    /// Hat die Prüfung etwas gefunden?
+    pub fn found_leak(&self) -> bool {
+        !self.leaking.is_empty()
+    }
+
+    /// Der Satz für die Statuszeile.
+    ///
+    /// Drei Dinge stehen darin, und zwar immer:
+    ///
+    /// 1. **das Ergebnis**;
+    /// 2. **der Vorbehalt** — derselbe wie in `redact-cli`s `NO_CLEAN_BILL`:
+    ///    geprüft ist *diese Liste*, nicht die Datei. Ohne ihn ersetzte die
+    ///    Anzeige bloß eine falsche Entwarnung durch eine genauer aussehende;
+    /// 3. **die Handregionen**. Ein selbst gezogenes Rechteck hat keinen
+    ///    bekannten Text; über es sagt die Prüfung nichts. Verschwiegen wäre
+    ///    das die gefährlichste Zeile der Oberfläche — „nichts gefunden“ an
+    ///    einem Dokument, dessen Schwärzungen sämtlich von Hand gezogen sind.
+    pub fn sentence(&self) -> String {
+        if let Some(error) = &self.unreadable {
+            return format!(
+                "Nachprüfung: die geschriebene Datei ließ sich nicht zurücklesen ({error}) \
+                 — es wurde nichts nachgeprüft.{}",
+                self.hand_made()
+            );
+        }
+        let head = if self.found_leak() {
+            format!(
+                "Nachprüfung: {} von {} gesuchten Text(en) steht NOCH in der Ausgabe \
+                 — diese Datei ist nicht geschwärzt und darf so nicht weitergegeben werden.",
+                self.leaking.len(),
+                self.checked
+            )
+        } else if self.checked == 0 {
+            "Nachprüfung: keine geschwärzte Zeile mit bekanntem Text — es wurde nichts \
+             nachgeprüft."
+                .to_string()
+        } else {
+            format!(
+                "Nachprüfung: {} gesuchte Text(e) stehen nicht mehr in der Ausgabe.",
+                self.checked
+            )
+        };
+        let skipped = if self.skipped > 0 {
+            format!(
+                " {} weitere Text(e) wurden nicht gesucht (Höchstzahl {}).",
+                self.skipped, MAX_EXPORT_CHECK_NEEDLES
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "{head}{skipped} Geprüft ist genau diese Liste, nicht die Datei.{}",
+            self.hand_made()
+        )
+    }
+
+    /// Der Satz über die Rechtecke, zu denen es nichts zu suchen gibt.
+    fn hand_made(&self) -> String {
+        if self.without_text == 0 {
+            return String::new();
+        }
+        format!(
+            " {} Rechteck(e) ohne bekannten Text — dafür bleibt die Sichtprüfung.",
+            self.without_text
+        )
+    }
+}
+
 /// Ergebnis einer Konfliktauflösung, aufbereitet für die Anzeige.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HitSummary {
@@ -520,6 +664,17 @@ impl AnnotatedRegion {
     /// Blockiert dieser Eintrag andere Treffer (Negativliste)?
     pub fn is_blocking(&self) -> bool {
         self.region.is_blocking()
+    }
+
+    /// Kann die Negativliste diesen Eintrag überhaupt verhindern?
+    ///
+    /// **Nein bei [`Source::Manual`]** — wer ein Rechteck selbst zieht,
+    /// überstimmt die Liste; so entscheidet es [`resolve_conflicts`], und so
+    /// muss es die Anzeige lesen. Siehe [`AppState::hit_summary`], wo sonst
+    /// eine deckungsgleiche Handregion den Platz des wirklich blockierten
+    /// Mustertreffers verbraucht.
+    pub fn is_blockable(&self) -> bool {
+        !matches!(self.region.source, Source::Manual { .. })
     }
 
     /// Hat die Nutzerin an diesem Eintrag etwas geändert?
@@ -1309,6 +1464,22 @@ impl AppState {
         Some(index)
     }
 
+    /// Die Absage, wenn die Auswahl nicht auf der gezeigten Seite liegt.
+    ///
+    /// Zwei Lagen, zwei Auswege — und derselbe Unterschied, den
+    /// [`AppState::hit_summary`] zwischen [`HitOutcome::OffPage`] und
+    /// [`HitOutcome::MissingPage`] macht: gibt es die Seite, hilft Blättern;
+    /// gibt es sie nicht, hilft nur die Zeile selbst. Geprüft wird deshalb mit
+    /// [`AppState::page_box`] und nicht mit einem Vergleich gegen
+    /// [`AppState::page_count`] — ohne geladenes Dokument gibt es *keine*
+    /// Seite, zu der man blättern könnte.
+    fn nudge_refused(&self, page: usize, kind: NudgeKind) -> String {
+        match self.page_box(page) {
+            Some(_) => selection_on_other_page(page, kind),
+            None => selection_on_missing_page(page, self.page_count(), kind),
+        }
+    }
+
     /// Ändert die Größe der ausgewählten Region: die **linke untere** Ecke
     /// bleibt stehen, die rechte obere wandert um `dx`/`dy`.
     ///
@@ -1338,7 +1509,7 @@ impl AppState {
             return false;
         };
         if entry.region.page != self.current_page {
-            self.status = selection_on_other_page(entry.region.page);
+            self.status = self.nudge_refused(entry.region.page, NudgeKind::Resize);
             return false;
         }
         let (id, page, rect) = (entry.id, entry.region.page, entry.region.rect.normalized());
@@ -1472,7 +1643,7 @@ impl AppState {
             return false;
         };
         if entry.region.page != self.current_page {
-            self.status = selection_on_other_page(entry.region.page);
+            self.status = self.nudge_refused(entry.region.page, NudgeKind::Move);
             return false;
         }
         let (id, page, rect) = (entry.id, entry.region.page, entry.region.rect);
@@ -1868,56 +2039,74 @@ impl AppState {
         let mut next_redact = 0usize;
         let mut next_blocked = 0usize;
 
-        let outcomes: Vec<HitOutcome> = self
-            .regions
-            .iter()
-            .map(|entry| {
-                if entry.is_blocking() {
-                    return HitOutcome::Protecting;
-                }
-                if !entry.enabled {
-                    return HitOutcome::Disabled;
-                }
-                // Vor der Suche im Ergebnis: neben dem Blatt liegende
-                // Rechtecke sind gar nicht erst hineingegangen und fielen
-                // sonst als „doppelt“ heraus — ein falscher Grund für das
-                // richtige Ergebnis.
-                //
-                // **Hinter** den beiden Prüfungen davor: ein Schutzeintrag
-                // bleibt ein Schutzeintrag (sonst zählte ihn `found` plötzlich
-                // als Fund), und ein abgewählter bleibt abgewählt — das ist
-                // die Entscheidung der Nutzerin und der nähere Grund.
-                if self.is_off_page(&entry.region) {
-                    // Zwei Gründe, dasselbe Ergebnis — aber verschiedene
-                    // Abhilfen: fehlt die Seite, ist die Seitenzahl falsch;
-                    // sonst die Koordinaten.
-                    return match self.page_box(entry.region.page) {
-                        Some(_) => HitOutcome::OffPage,
-                        None => HitOutcome::MissingPage,
-                    };
-                }
-                // Genau **ein** Vergleich, mit demselben Gleichheitsbegriff
-                // wie zuvor: der Platz, der dieser Zeile zusteht, ist der
-                // vorderste noch freie.
-                if resolution
-                    .redact
-                    .get(next_redact)
-                    .is_some_and(|r| *r == entry.region)
-                {
-                    next_redact += 1;
-                    return HitOutcome::Redacted;
-                }
-                if resolution
-                    .blocked
-                    .get(next_blocked)
-                    .is_some_and(|b| b.page == entry.region.page && b.rect == entry.region.rect)
-                {
-                    next_blocked += 1;
-                    return HitOutcome::Blocked;
-                }
-                HitOutcome::Duplicate
-            })
-            .collect();
+        let outcomes: Vec<HitOutcome> =
+            self.regions
+                .iter()
+                .map(|entry| {
+                    if entry.is_blocking() {
+                        return HitOutcome::Protecting;
+                    }
+                    if !entry.enabled {
+                        return HitOutcome::Disabled;
+                    }
+                    // Vor der Suche im Ergebnis: neben dem Blatt liegende
+                    // Rechtecke sind gar nicht erst hineingegangen und fielen
+                    // sonst als „doppelt“ heraus — ein falscher Grund für das
+                    // richtige Ergebnis.
+                    //
+                    // **Hinter** den beiden Prüfungen davor: ein Schutzeintrag
+                    // bleibt ein Schutzeintrag (sonst zählte ihn `found` plötzlich
+                    // als Fund), und ein abgewählter bleibt abgewählt — das ist
+                    // die Entscheidung der Nutzerin und der nähere Grund.
+                    if self.is_off_page(&entry.region) {
+                        // Zwei Gründe, dasselbe Ergebnis — aber verschiedene
+                        // Abhilfen: fehlt die Seite, ist die Seitenzahl falsch;
+                        // sonst die Koordinaten.
+                        return match self.page_box(entry.region.page) {
+                            Some(_) => HitOutcome::OffPage,
+                            None => HitOutcome::MissingPage,
+                        };
+                    }
+                    // Genau **ein** Vergleich, mit demselben Gleichheitsbegriff
+                    // wie zuvor: der Platz, der dieser Zeile zusteht, ist der
+                    // vorderste noch freie.
+                    if resolution
+                        .redact
+                        .get(next_redact)
+                        .is_some_and(|r| *r == entry.region)
+                    {
+                        next_redact += 1;
+                        return HitOutcome::Redacted;
+                    }
+                    // Dasselbe für die Blockade — mit **einer** zusätzlichen
+                    // Frage: kann diese Zeile überhaupt blockiert werden?
+                    //
+                    // [`BlockedRegion`] trägt nur Seite und Rechteck, nicht die
+                    // Herkunft. Zwei deckungsgleiche Zeilen verschiedener Herkunft
+                    // sind daran nicht zu unterscheiden — und genau das kam vor:
+                    // zweimal Strg+R legt zwei buchstäblich gleiche Handregionen
+                    // an; liegt dort ein von der Negativliste gedeckter
+                    // Mustertreffer derselben Fläche, dann verbrauchte die
+                    // Duplikatzeile dessen Platz. An einem selbst gezogenen
+                    // Rechteck stand „geschützt durch Ihre Liste“ — falsch, denn
+                    // manuelle Regionen überstimmen die Liste ([`resolve_conflicts`])
+                    // —, und der wirklich blockierte Mustertreffer hieß „doppelt“.
+                    //
+                    // `is_blockable` stellt dieselbe Frage wie `resolve_conflicts`
+                    // vor seiner Gittersuche. Sie ist nicht teurer als ein
+                    // Mustervergleich und schließt genau die Zeilen aus, die im
+                    // Ergebnis gar nicht unter `blocked` stehen können.
+                    if entry.is_blockable()
+                        && resolution.blocked.get(next_blocked).is_some_and(|b| {
+                            b.page == entry.region.page && b.rect == entry.region.rect
+                        })
+                    {
+                        next_blocked += 1;
+                        return HitOutcome::Blocked;
+                    }
+                    HitOutcome::Duplicate
+                })
+                .collect();
 
         let count = |wanted: HitOutcome| outcomes.iter().filter(|o| **o == wanted).count();
         let protecting = count(HitOutcome::Protecting);
@@ -2222,6 +2411,89 @@ impl AppState {
         redact_pipeline::apply(&mut copy, &redactions, &blocked, &config, &mut outcome)?;
         outcome.blocked_details = redact_pipeline::describe_blocked(&blocked);
         Ok(outcome)
+    }
+
+    // ---------------------------------------------------------- Nachprüfung
+
+    /// Liest die eben geschriebene Datei zurück und sucht darin die Texte, die
+    /// gerade geschwärzt wurden.
+    ///
+    /// ## Warum die Oberfläche das kann und die Kommandozeile nicht
+    ///
+    /// `redact-rs … --check-leaks "DE89 …"` verlangt vom Bedienenden, die
+    /// Suchbegriffe **einzutippen** — in der Prozessliste und der
+    /// Shell-Historie sichtbar, wenn er nicht `--check-leaks -` benutzt. Die
+    /// Oberfläche kennt sie schon: in jeder geschwärzten Zeile steht der
+    /// gefundene Text. Sie ist damit die stärkere Fassung desselben Wegs, und
+    /// zwar für die Zielgruppe, die per Doppelklick arbeitet und gar keine
+    /// Konsole öffnet.
+    ///
+    /// Gesucht wird mit [`redact_pdf::leaks`] über die **geschriebenen Bytes**
+    /// — nicht mit dem eigenen Extraktor. Wovor der blind ist, das wird nicht
+    /// geschwärzt und wäre für eine Nachprüfung mit ihm auch unsichtbar.
+    ///
+    /// ## Was sie nicht ist
+    ///
+    /// Kein Freibrief (siehe [`ExportCheck::sentence`]) und keine Aussage über
+    /// selbst gezogene Rechtecke: die haben keinen bekannten Text, und dafür
+    /// kann diese Prüfung nichts sagen. Beides steht im Satz, den der Nutzer
+    /// liest — verschwiegen wäre die Anzeige selbst eine falsche Entwarnung.
+    pub fn check_export(&self, out: &Path, summary: &HitSummary) -> ExportCheck {
+        let mut needles: Vec<String> = Vec::new();
+        let mut without_text = 0usize;
+        let mut skipped = 0usize;
+
+        for (index, entry) in self.regions.iter().enumerate() {
+            if !summary.outcome(index).is_redacted() {
+                continue;
+            }
+            match entry
+                .region
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                Some(text) => {
+                    if needles.iter().any(|n| n == text) {
+                        continue;
+                    }
+                    if needles.len() == MAX_EXPORT_CHECK_NEEDLES {
+                        skipped += 1;
+                    } else {
+                        needles.push(text.to_string());
+                    }
+                }
+                None => without_text += 1,
+            }
+        }
+
+        let bytes = match std::fs::read(out) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return ExportCheck {
+                    unreadable: Some(error.to_string()),
+                    checked: 0,
+                    leaking: Vec::new(),
+                    without_text,
+                    skipped: skipped + needles.len(),
+                }
+            }
+        };
+
+        let leaking = needles
+            .iter()
+            .filter(|needle| !redact_pdf::leaks(&bytes, needle).is_empty())
+            .cloned()
+            .collect();
+
+        ExportCheck {
+            unreadable: None,
+            checked: needles.len(),
+            leaking,
+            without_text,
+            skipped,
+        }
     }
 
     // ---------------------------------------------------------------- Review

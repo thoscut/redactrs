@@ -24,10 +24,26 @@ pub struct Rect {
 
 impl Rect {
     /// Erzeugt ein normalisiertes Rechteck aus zwei beliebigen Eckpunkten.
+    ///
+    /// **Unbrauchbar hinein heißt unbrauchbar heraus.** `f64::min` und
+    /// `f64::max` schlucken einen NaN-Operanden: aus `Rect::new(NaN, 0, 10, 10)`
+    /// würde damit `ll.x == ur.x == 10`, also ein Punkt — und `--padding 1`
+    /// machte daraus ein 2 x 2 Punkt großes Deck-Rechteck an einer Stelle, von
+    /// der die Hälfte der Angabe unbrauchbar war. Das wäre eine stillschweigend
+    /// **falsch platzierte** Schwärzung, gemeldet als „gezeichnet“.
+    ///
+    /// Deshalb bleibt NaN hier stehen und [`Rect::is_empty`] fängt das ganze
+    /// Rechteck.
+    ///
+    /// Der Unterschied zu [`Rect::union`], die einen unbrauchbaren Operanden
+    /// bewusst übergeht: dort ist die Hülle über **viele** Zeichen gemeint, und
+    /// ein Zeichen unbekannter Lage darf die bekannten nicht mitreißen. Hier
+    /// sind es die **zwei Ecken desselben** Rechtecks — ist eine davon
+    /// unbrauchbar, ist es das Rechteck.
     pub fn from_corners(a: Point, b: Point) -> Self {
         Self {
-            ll: Point::new(a.x.min(b.x), a.y.min(b.y)),
-            ur: Point::new(a.x.max(b.x), a.y.max(b.y)),
+            ll: Point::new(kleineres(a.x, b.x), kleineres(a.y, b.y)),
+            ur: Point::new(groesseres(a.x, b.x), groesseres(a.y, b.y)),
         }
     }
 
@@ -48,8 +64,44 @@ impl Rect {
         self.ur.y - self.ll.y
     }
 
+    /// Sind alle vier Koordinaten endlich?
+    ///
+    /// Ein Rechteck, für das das nicht gilt, bezeichnet **keinen Bereich der
+    /// Ebene**: NaN vergleicht sich mit nichts, und ±∞ hat keine ausrechenbare
+    /// Breite (`inf - inf` ist NaN). Alles, was dieser Typ über Lage und Größe
+    /// aussagt, ist für ein solches Rechteck gegenstandslos — siehe die Regel
+    /// am Modulkopf von `redact-core/tests/unbrauchbare_koordinaten.rs`.
+    ///
+    /// Solche Koordinaten sind nicht theoretisch. Sie entstehen aus fremden
+    /// PDFs (eine `cm`-Matrix mit einem Wert jenseits von `f32` wird beim
+    /// Multiplizieren zu ∞ und mit einem Faktor 0 zu NaN), aus Review-Dateien
+    /// und aus jedem `f64`, den der Aufrufende hereingibt — `--padding nan`
+    /// genügt, und [`Rect::expanded`] macht daraus ein NaN-Rechteck.
+    pub fn is_usable(&self) -> bool {
+        self.ll.x.is_finite()
+            && self.ll.y.is_finite()
+            && self.ur.x.is_finite()
+            && self.ur.y.is_finite()
+    }
+
+    /// Hat dieses Rechteck keine auswertbare Fläche?
+    ///
+    /// Das ist der Entartungsfilter: wer hier hängen bleibt, wird nicht
+    /// gezeichnet (`redact_pdf::PdfRedactor`), bekommt keine Bildzone
+    /// (`redact_pdf::image`) und gilt als wirkungslos
+    /// (`redact_pipeline::EntryEffect::Degenerate`).
+    ///
+    /// **Unbrauchbare Koordinaten gehören ausdrücklich dazu.** Geschrieben als
+    /// `width() <= 0.0` kamen sie durch, weil jeder Vergleich mit NaN falsch
+    /// ist — ein Bereich mit NaN-Koordinaten galt damit als gültig, wurde als
+    /// `NaN NaN NaN NaN re` in den Content-Stream geschrieben (kein Betrachter
+    /// zeichnet das) und in der Zusammenfassung als „Deck-Rechteck gezeichnet“
+    /// gemeldet. Hier wird die *Sicherheits*frage entschieden, die
+    /// [`Rect::covered_fraction`] nicht entscheiden kann: was sich nicht
+    /// auswerten lässt, wird nicht ausgewertet und auch nicht als Erfolg
+    /// verbucht.
     pub fn is_empty(&self) -> bool {
-        self.width() <= 0.0 || self.height() <= 0.0
+        !self.is_usable() || self.width() <= 0.0 || self.height() <= 0.0
     }
 
     pub fn center(&self) -> Point {
@@ -57,6 +109,15 @@ impl Rect {
     }
 
     /// Kleinstes Rechteck, das beide Rechtecke enthält.
+    ///
+    /// **Ein unbrauchbarer Operand wird stillschweigend übergangen** —
+    /// `f64::min`/`max` schlucken NaN, die Hülle bleibt also die des anderen.
+    /// Das ist hier die richtige Richtung und bleibt so: [`bounding_box`] und
+    /// [`GlyphCursor`] bauen daraus die Hülle über *Zeichen*, und ein Zeichen,
+    /// dessen Lage unbekannt ist, ließe sich ohnehin nicht überdecken. Würde
+    /// die Unbrauchbarkeit stattdessen weitergereicht, wäre die Hülle über die
+    /// ganze Zeile unbrauchbar — dann bliebe auch der Text stehen, dessen Lage
+    /// bekannt ist.
     pub fn union(&self, other: &Rect) -> Rect {
         Rect {
             ll: Point::new(self.ll.x.min(other.ll.x), self.ll.y.min(other.ll.y)),
@@ -72,30 +133,91 @@ impl Rect {
         }
     }
 
+    /// Liegt `p` in diesem Rechteck (Rand eingeschlossen)?
+    ///
+    /// Für ein Rechteck ohne brauchbare Koordinaten immer `false`. Bei NaN kam
+    /// das schon vorher heraus (jeder Vergleich mit NaN ist falsch); ±∞
+    /// enthielte sonst jeden Punkt.
     pub fn contains(&self, p: Point) -> bool {
-        p.x >= self.ll.x && p.x <= self.ur.x && p.y >= self.ll.y && p.y <= self.ur.y
+        self.is_usable()
+            && p.x >= self.ll.x
+            && p.x <= self.ur.x
+            && p.y >= self.ll.y
+            && p.y <= self.ur.y
     }
 
     /// Überlappen sich die beiden Rechtecke (Berührung zählt nicht)?
+    ///
+    /// Ein Rechteck ohne brauchbare Koordinaten überlappt nichts.
     pub fn intersects(&self, other: &Rect) -> bool {
-        self.ll.x < other.ur.x
+        self.is_usable()
+            && other.is_usable()
+            && self.ll.x < other.ur.x
             && other.ll.x < self.ur.x
             && self.ll.y < other.ur.y
             && other.ll.y < self.ur.y
     }
 
+    /// Fläche — `0.0` für alles, was [`Rect::is_empty`] als leer ansieht.
     pub fn area(&self) -> f64 {
+        if !self.is_usable() {
+            return 0.0;
+        }
         (self.width().max(0.0)) * (self.height().max(0.0))
     }
 
     /// Fläche der Schnittmenge.
+    ///
+    /// # Warum die Prüfung ganz vorn steht
+    ///
+    /// `f64::min` und `f64::max` **schlucken** einen NaN-Operanden und liefern
+    /// den anderen zurück. Ohne die Prüfung wird aus
+    /// `self.ur.x.min(NaN) - self.ll.x.max(NaN)` genau `self.width()`, und die
+    /// Rechnung meldet als Schnittfläche die **volle Fläche von `self`** —
+    /// ein Rechteck mit unbrauchbaren Koordinaten schnitte damit alles.
     pub fn intersection_area(&self, other: &Rect) -> f64 {
+        if !self.is_usable() || !other.is_usable() {
+            return 0.0;
+        }
         let w = (self.ur.x.min(other.ur.x) - self.ll.x.max(other.ll.x)).max(0.0);
         let h = (self.ur.y.min(other.ur.y) - self.ll.y.max(other.ll.y)).max(0.0);
         w * h
     }
 
     /// Anteil von `self`, der von `other` überdeckt wird (0.0 … 1.0).
+    ///
+    /// # Unbrauchbare Koordinaten sind `0.0`
+    ///
+    /// Nicht, weil das die sicherere Antwort wäre — das ist es nicht überall.
+    /// Die Aufrufer ziehen in verschiedene Richtungen: in
+    /// [`crate::resolve_conflicts`] blockiert „überdeckt alles“ eine Schwärzung
+    /// (ein **Leck**), in `redact_pdf::hidden_flags` entfernte es den Text der
+    /// ganzen Seite (**Datenverlust**). Eine Zahl kann diesen Streit nicht
+    /// schlichten, und sie soll es auch nicht: hier wird **gemessen**, nicht
+    /// entschieden.
+    ///
+    /// Gemessen ist `0.0` die richtige Antwort. Ein Rechteck ohne brauchbare
+    /// Koordinaten bezeichnet keinen Bereich der Ebene, und die leere Menge
+    /// überdeckt 0 % von allem. Die frühere `1.0` war kein Sicherheitsurteil,
+    /// sondern ein Rechenfehler (siehe [`Rect::intersection_area`]).
+    ///
+    /// Entschieden wird die Sicherheitsfrage eine Ebene höher, von
+    /// [`Rect::is_empty`]: was sich nicht auswerten lässt, wird gar nicht erst
+    /// ausgewertet, nicht gezeichnet und als wirkungslos gemeldet.
+    ///
+    /// # Geprüft wird das Ergebnis, nicht die Eingabe
+    ///
+    /// Eine Prüfung auf unbrauchbare Eingaben stünde hier vergeblich:
+    /// [`Rect::area`] und [`Rect::intersection_area`] beantworten sie bereits,
+    /// und beide sind darauf geprüft. Was sie **nicht** abfangen, ist der
+    /// Überlauf: ein Rechteck mit endlichen Koordinaten kann eine unendliche
+    /// Fläche haben (Kantenlänge 1e308), und `∞ / ∞` ist NaN. Dann käme aus
+    /// einer Funktion, die „0.0 … 1.0“ verspricht, eine Zahl, die weder größer
+    /// noch kleiner als irgendeine Schwelle ist.
+    ///
+    /// Deshalb steht die Prüfung am Ergebnis. Sie fängt beide Wege dorthin —
+    /// den über die Eingabe und den über die Rechnung — und ist die einzige,
+    /// die sich nicht auf eine Zusicherung einer anderen Funktion verlässt.
     pub fn covered_fraction(&self, other: &Rect) -> f64 {
         let a = self.area();
         if a <= f64::EPSILON {
@@ -106,7 +228,12 @@ impl Rect {
                 0.0
             };
         }
-        self.intersection_area(other) / a
+        let anteil = self.intersection_area(other) / a;
+        if anteil.is_finite() {
+            anteil
+        } else {
+            0.0
+        }
     }
 }
 
@@ -244,6 +371,24 @@ impl GlyphCursor<'_> {
             self.index += 1;
         }
         acc
+    }
+}
+
+/// `f64::min`, aber ohne NaN zu schlucken — siehe [`Rect::from_corners`].
+fn kleineres(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.min(b)
+    }
+}
+
+/// `f64::max`, aber ohne NaN zu schlucken — siehe [`Rect::from_corners`].
+fn groesseres(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
     }
 }
 

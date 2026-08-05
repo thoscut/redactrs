@@ -29,10 +29,24 @@ use std::process::ExitCode;
 mod dumpable;
 
 fn main() -> ExitCode {
-    // Ohne Konsole sieht eine Warnung hier niemand; der Rückgabewert bleibt.
-    // Das Abschalten selbst gehört trotzdem an dieselbe Stelle: vor allem,
-    // was den Klartext in den Speicher holt.
-    let _ = dumpable::deny_core_dumps();
+    // Das Abschalten gehört an dieselbe Stelle wie in der Konsolenfassung:
+    // vor allem, was den Klartext in den Speicher holt.
+    //
+    // Ausdrücklich abgehandelt statt weggeworfen — `let _ =` hätte hier
+    // gereicht, aber dann stünde nirgends, warum diese Fassung schweigt, wo
+    // die Konsolenfassung warnt.
+    match dumpable::deny_core_dumps() {
+        // Abgeschaltet, oder das System kennt nichts dergleichen (Windows —
+        // wohin dieses Binärziel gehört). Beides ist keine Nachricht an den
+        // Benutzer: das eine ist der Normalfall, das andere unabänderlich
+        // und steht in SECURITY.md.
+        dumpable::CoreDumps::Disabled | dumpable::CoreDumps::Unavailable => {}
+        // Ein Fenster aufzumachen, bevor das Programm überhaupt sichtbar
+        // ist, hiesse den Start mit einer Meldung zu beginnen, auf die
+        // niemand reagieren kann. Wer den Hinweis braucht, startet die
+        // Konsolenfassung — die sagt es.
+        dumpable::CoreDumps::Failed => {}
+    }
 
     // Ein Argument, das nicht mit `-` beginnt: die zu öffnende Datei.
     let pdf: Option<PathBuf> = std::env::args_os()

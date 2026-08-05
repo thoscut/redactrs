@@ -289,3 +289,74 @@ jobs:
       # Echte Schwachstellen lassen `cargo audit` ohnehin fehlschlagen.
       - name: cargo audit
         run: cargo audit
+
+  # -------------------------------------------------------------------------
+  # Die Belege in docs/ (Standbilder, Animationen, Mitschnitte).
+  #
+  # WAS HIER GEPRUEFT WIRD UND WAS NICHT
+  #
+  # Nicht geprueft wird Bytegleichheit. Der naheliegende Weg waere,
+  # `make-preview.sh` laufen zu lassen und `git diff --exit-code` zu
+  # verlangen. Auf einer Maschine haelt das auch - mehrere vollstaendige
+  # Laeufe liefern hier bitgleiche Dateien. Ueber Maschinengrenzen laesst es
+  # sich nicht zusagen: `tiny-skia` rastert mit SIMD (SSE auf x86_64, NEON auf
+  # aarch64), Fliesskomma-Codegen darf sich zwischen rustc-Fassungen aendern,
+  # und die PNG-Kompression haengt an flate2/miniz_oxide aus Cargo.lock. Eine
+  # Pruefung, die daran gelegentlich scheitert, wird abgeschaltet - und ist
+  # dann schlechter als keine.
+  #
+  # Geprueft wird deshalb zweierlei, beides zusagbar:
+  #
+  #   1. Die Belege lassen sich ueberhaupt neu erzeugen (das Skript laeuft
+  #      durch), und das Erzeugte besteht die Formpruefung.
+  #   2. Die Belege, die im Repository liegen, bestehen dieselbe Pruefung.
+  #      Ein leeres, verrutschtes oder abgeschnittenes Bild faellt damit auf,
+  #      auch wenn es jemand von Hand hineingelegt hat.
+  #
+  # Was das NICHT leistet: es merkt nicht, wenn die eingecheckten Bilder
+  # veralten. Dagegen hilft nur `./scripts/make-preview.sh` und ein Blick auf
+  # `git status` - so steht es in docs/vorher-nachher.md.
+  # -------------------------------------------------------------------------
+  belege:
+    name: Belege in docs/ (Bilder und Animationen)
+    needs: toolchain
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Rust-Toolchain installieren
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master @ 2026-07-16
+        with:
+          toolchain: ${{ needs.toolchain.outputs.channel }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+        with:
+          key: belege
+
+      # Kein apt-Paket noetig: erzeugt werden die Belege von redact-cli und
+      # den Beispielen in redact-render - beide ohne GUI-Abhaengigkeiten.
+      # `pdftotext` ist auf dem Runner vorhanden; fehlt es, laesst das Skript
+      # den Gegenprobe-Abschnitt weg und sagt das in pruefung.txt.
+      - name: Die eingecheckten Belege pruefen
+        run: python3 scripts/check-preview.py docs
+
+      - name: Belege neu erzeugen (in ein Wegwerfverzeichnis)
+        run: ./scripts/make-preview.sh "$RUNNER_TEMP/belege"
+
+      - name: Das frisch Erzeugte pruefen
+        run: python3 scripts/check-preview.py "$RUNNER_TEMP/belege"
+
+      # Zum Nachsehen, wenn die Pruefung oben rot ist: was ist tatsaechlich
+      # entstanden? Ein Bild anzusehen sagt mehr als jede Zahl.
+      - name: Erzeugte Belege als Artefakt anhaengen
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: belege-neu-erzeugt
+          path: ${{ runner.temp }}/belege
+          if-no-files-found: warn
+          retention-days: 7

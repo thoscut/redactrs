@@ -74,7 +74,11 @@ fn main() -> ExitCode {
     // Als Allererstes, noch vor dem Lesen der Kommandozeile: alles danach
     // hielte den Klartext des Dokuments — und ein Absturz dort schriebe ihn
     // in einen Kernabzug. Siehe `dumpable`.
-    if !dumpable::deny_core_dumps() {
+    if dumpable::deny_core_dumps() == dumpable::CoreDumps::Failed {
+        // Nur bei `Failed`. `Unavailable` (Windows) wäre eine Warnung, die
+        // bei jedem Lauf erschiene und die niemand befolgen kann — sie
+        // trainierte bloss an, Warnungen zu überlesen. Dieses Restrisiko
+        // steht in SECURITY.md, nicht in der Konsole.
         eprintln!(
             "Warnung: Kernabzüge liessen sich nicht abschalten. Stürzt dieser Lauf ab, \
              kann der Abzug den Inhalt des Dokuments und ein eingegebenes Passwort \

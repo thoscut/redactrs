@@ -177,11 +177,7 @@ impl PdfExtractor {
         // Quantisierung des Zeilenabstands fängt kleine
         // Grundlinien-Schwankungen ab.
         let tol = BASELINE_TOLERANCE.max(0.1);
-        glyphs.sort_by(|(_, a), (_, b)| {
-            sort_key(a, tol)
-                .partial_cmp(&sort_key(b, tol))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        glyphs.sort_by(|(_, a), (_, b)| key_cmp(&sort_key(a, tol), &sort_key(b, tol)));
 
         let mut lines: Vec<Vec<(usize, GlyphItem)>> = Vec::new();
         let mut current: Vec<(usize, GlyphItem)> = Vec::new();
@@ -564,13 +560,7 @@ fn split_layers(line: Vec<(usize, GlyphItem)>) -> Vec<Vec<GlyphItem>> {
     // Text, der links von ihr beginnt. Wer sie in dieser Reihenfolge einfüllt,
     // erklärt den Zeilenanfang zur zweiten Schicht.
     let mut order: Vec<usize> = spans.keys().copied().collect();
-    order.sort_by(|a, b| {
-        spans[a]
-            .0
-            .partial_cmp(&spans[b].0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.cmp(b))
-    });
+    order.sort_by(|a, b| spans[a].0.total_cmp(&spans[b].0).then(a.cmp(b)));
 
     // Belegte Schichten: (erreichter Stand, Länge der zuletzt eingefügten
     // Folge, deren Leerzeichenmaß).
@@ -590,7 +580,7 @@ fn split_layers(line: Vec<(usize, GlyphItem)>) -> Vec<Vec<GlyphItem>> {
             chosen = layers
                 .iter()
                 .enumerate()
-                .min_by(|(_, a), (_, b)| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0))
                 .map(|(index, _)| index);
         }
         match chosen {
@@ -646,7 +636,7 @@ fn line_pitch(extras: &[f64], space_width: f64) -> f64 {
         return 0.0;
     }
     let mut sorted: Vec<f64> = extras.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let median = sorted[sorted.len() / 2];
     if median <= 0.0 || median >= space_width * MAX_PITCH_IN_SPACES {
         return 0.0;
@@ -688,6 +678,42 @@ fn direction_bucket(g: &GlyphItem) -> i64 {
 
 /// Sortierschlüssel: erst nach Schreibrichtung, dann Zeile für Zeile in
 /// Vorschubrichtung, innerhalb der Zeile in Schreibrichtung.
+/// Vergleicht zwei Sortierschlüssel — mit einer **totalen** Ordnung.
+///
+/// ## Warum nicht `partial_cmp(..).unwrap_or(Equal)`
+///
+/// Weil das mit `NaN` keine Ordnung ist, sondern nur so aussieht. Gegenbeispiel
+/// mit drei Werten: `a = 5,0`, `n = NaN`, `b = 1,0` ergibt `a < n` (Equal aus
+/// dem `unwrap_or`), `n < b` (ebenso) — und trotzdem `a > b`. Aus `a ≤ n ≤ b`
+/// folgt dann nicht `a ≤ b`, die Transitivität ist verletzt.
+///
+/// Seit Rust 1.81 darf `slice::sort_by` das bemerken und den Prozess mit
+/// „user-provided comparison function does not correctly implement a total
+/// order" **abbrechen**. In einem Werkzeug, dem man fremde Dateien vorwirft,
+/// ist ein Abbruch kein Schönheitsfehler: er ist ein Weg, den Lauf von außen
+/// zu beenden. Isoliert nachgemessen tritt er ab **21 Elementen** auf (darunter
+/// benutzt `sort_by` Einfügesortierung und prüft nicht).
+///
+/// `total_cmp` bildet die Ordnung der IEEE-754-Bitmuster ab: sie ist total,
+/// braucht keinen Sonderfall und sortiert `NaN` ans Ende statt mittendrin.
+///
+/// ## Was hier **nicht** behauptet wird
+///
+/// Dass eine PDF-Datei diesen Abbruch auslösen *kann*, ist an dieser Stelle
+/// nicht belegt. Zwei Versuche mit präparierten Dateien (verkettete
+/// `cm`-Überläufe ins Unendliche, danach `0 0 0 0 0 0 cm`, jeweils mit 30
+/// Glyphen) haben hier kein `NaN` erzeugt — die Koordinatenprüfungen
+/// stromaufwärts fangen offenbar vorher ab. Die Korrektur steht trotzdem,
+/// aus dem Grund, der diesem Durchgang seinen Namen gegeben hat: eine
+/// Zusicherung, die an ihrer Ursprungsstelle gilt, wird an der nächsten gern
+/// stillschweigend mitgenommen. Hier auf „kein Aufrufer kann `NaN` liefern"
+/// zu bauen, wäre genau das.
+fn key_cmp(a: &(i64, f64, f64), b: &(i64, f64, f64)) -> std::cmp::Ordering {
+    a.0.cmp(&b.0)
+        .then(a.1.total_cmp(&b.1))
+        .then(a.2.total_cmp(&b.2))
+}
+
 fn sort_key(g: &GlyphItem, tol: f64) -> (i64, f64, f64) {
     (
         direction_bucket(g),
@@ -1110,6 +1136,58 @@ mod tests {
             lines.len(),
             1,
             "eine leichte Überschneidung darf die Zeile nicht zerlegen: {lines:?}"
+        );
+    }
+
+    /// Die Glyphensortierung bricht auch mit `NaN` nicht ab.
+    ///
+    /// `slice::sort_by` prüft ab **21 Elementen**, ob der Vergleicher eine
+    /// totale Ordnung liefert, und beendet den Prozess sonst mit
+    /// „user-provided comparison function does not correctly implement a
+    /// total order". Ein Abbruch ist in einem Werkzeug, dem man fremde
+    /// Dateien vorwirft, ein Weg, den Lauf von aussen zu beenden — deshalb
+    /// steht hier eine Zahl über der Schwelle, nicht darunter.
+    #[test]
+    fn die_glyphensortierung_ist_eine_totale_ordnung() {
+        // 25 Schlüssel, jeder dritte mit NaN in der Querlage.
+        let mut keys: Vec<(i64, f64, f64)> = (0..25)
+            .map(|i| {
+                let across = if i % 3 == 0 {
+                    f64::NAN
+                } else {
+                    f64::from(25 - i)
+                };
+                (0, across, f64::from(i))
+            })
+            .collect();
+
+        keys.sort_by(key_cmp);
+
+        // Kein Element geht verloren, und die Folge ist nach dem eigenen
+        // Vergleicher aufsteigend — mehr ist bei NaN nicht zu verlangen und
+        // weniger wäre keine Ordnung.
+        assert_eq!(keys.len(), 25);
+        assert!(
+            keys.windows(2)
+                .all(|w| key_cmp(&w[0], &w[1]) != std::cmp::Ordering::Greater),
+            "nach dem Sortieren nicht aufsteigend: {keys:?}"
+        );
+        assert_eq!(
+            keys.iter().filter(|k| k.1.is_nan()).count(),
+            9,
+            "die NaN-Schlüssel sind verschwunden"
+        );
+    }
+
+    /// Gegenprobe: gewöhnliche Schlüssel ordnen wie vorher — Zeilenband vor
+    /// Lage in der Zeile, Vorschubrichtung zuerst.
+    #[test]
+    fn gewoehnliche_schluessel_ordnen_unveraendert() {
+        let mut keys = vec![(0, 2.0, 5.0), (1, 0.0, 0.0), (0, 1.0, 9.0), (0, 1.0, 3.0)];
+        keys.sort_by(key_cmp);
+        assert_eq!(
+            keys,
+            vec![(0, 1.0, 3.0), (0, 1.0, 9.0), (0, 2.0, 5.0), (1, 0.0, 0.0)]
         );
     }
 }

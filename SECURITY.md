@@ -59,10 +59,15 @@ laufenden Prozess. Gegen den hilft kein Anwendungsprogramm.
 * **Kein PDF-JavaScript.** `/JavaScript`, `/AA`, `/OpenAction` und Ähnliches
   werden nicht ausgeführt — es gibt keinen Interpreter dafür. Gelesen wird nur
   Struktur, Text und Grafikzustand.
-* **`#![forbid(unsafe_code)]` in allen acht eigenen Crates** (`redact-core`,
-  `redact-pdf`, `redact-patterns`, `redact-booking`, `redact-pipeline`,
-  `redact-render`, `redact-gui`, `redact-cli`) — und in jedem der drei
-  Binärziele. Der Compiler setzt das durch; es ist keine Absichtserklärung.
+* **`#![forbid(unsafe_code)]` in sieben der acht eigenen Crates**
+  (`redact-core`, `redact-pdf`, `redact-patterns`, `redact-booking`,
+  `redact-pipeline`, `redact-render`, `redact-gui`). Der achte, `redact-cli`,
+  steht unter `#![deny(unsafe_code)]` — mit **einer** benannten und begründeten
+  Ausnahme, siehe [Kein Kernabzug](#kein-kernabzug-dieses-prozesses). Der
+  Compiler setzt beides durch; es ist keine Absichtserklärung.
+
+  **Bis 0.6.0 standen alle acht unter `forbid`.** Wer diese Zusage aus einer
+  älteren Fassung kennt, liest hier die Änderung und nicht den alten Satz.
 
   ```bash
   $ grep -rl 'forbid(unsafe_code)' crates/*/src/lib.rs crates/*/src/main.rs \
@@ -74,10 +79,26 @@ laufenden Prozess. Gegen den hilft kein Anwendungsprogramm.
   crates/redact-pdf/src/lib.rs
   crates/redact-pipeline/src/lib.rs
   crates/redact-render/src/lib.rs
-  crates/redact-cli/src/main.rs          # redact-cli hat keine lib.rs
   crates/redact-gui/src/main.rs
-  crates/redact-cli/src/bin/redact-rs-gui.rs
   ```
+
+  Acht Dateien — sieben Crates plus das zweite Binärziel von `redact-gui`.
+  `redact-cli` fehlt in dieser Liste, und genau deshalb steht daneben die
+  zweite Frage, die die Ausnahme **beziffert** statt sie zu behaupten:
+
+  ```bash
+  $ grep -rn '\bunsafe {' crates/*/src --include='*.rs'
+  crates/redact-cli/src/dumpable.rs:78:        let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+  crates/redact-cli/src/dumpable.rs:107:            let state = unsafe { libc::prctl(libc::PR_GET_DUMPABLE) };
+  ```
+
+  **Zwei** Fundstellen, und die Zahl gehört genau so hingeschrieben: die erste
+  ist die Ausnahme im ausgelieferten Programm, die zweite steht in deren
+  `#[cfg(test)]`-Modul und liest zurück, ob der Kernel den Zustand wirklich
+  übernommen hat. Beide tragen ein einzelnes `#[allow(unsafe_code)]` an der
+  Stelle — nicht an der Datei und nicht am Crate. Wächst diese Ausgabe, ist die
+  Zusage verletzt, und das ist dann an einer Zahl abzulesen und nicht an einer
+  Meinung.
 * **Kontrollierter Abbruch statt Speicherfehler.** Übersteigt eine Eingabe die
   unten genannten Grenzen, endet der Lauf mit einer Meldung und einem
   Rückgabewert — nicht mit SIGABRT und nicht mit einer gescheiterten
@@ -165,6 +186,52 @@ lässt einen vollständigen Lauf über ein wirklich verschlüsseltes PDF laufen 
 durchsucht Ausgabe-PDF, Audit-Log und Review-Datei — die PDF mit
 `redact_pdf::leaks`, also auf allen Ebenen inklusive entpackter Streams — sowie
 stdout und stderr.
+
+### Kein Kernabzug dieses Prozesses
+
+Alles oben schützt das Passwort auf dem Weg *aus* dem Programm heraus. Es
+schützt nicht davor, dass der **Kernel den ganzen Arbeitsspeicher wegschreibt**,
+wenn der Prozess abstürzt — und darin steht dann der Klartext des Dokuments
+und, bei einer verschlüsselten Datei, das Passwort. Ein Kernabzug liegt dort,
+wohin `kernel.core_pattern` zeigt: unter systemd im Journal, sonst im
+Arbeitsverzeichnis. Er ist länger lesbar, als der Prozess lief.
+
+Seit dieser Fassung schaltet `redact-rs` das als **allererste** Anweisung in
+`main` ab (`prctl(PR_SET_DUMPABLE, 0)`, `crates/redact-cli/src/dumpable.rs`);
+scheitert der Aufruf, sagt der Lauf es auf stderr, statt den Schutz nur
+anzunehmen. Die Begründung samt Messreihe steht im Modulkommentar dort.
+
+Nachgemessen am **gebauten Binary** (`core_pattern = core`,
+`ulimit -c unlimited`, derselbe Shell-Aufruf für beide Zeilen; der Prozess
+wird mit `SIGABRT` beendet):
+
+| Prozess | Abzugsdatei |
+|---|---|
+| `sleep` (Kontrolle — die Umgebung schreibt also wirklich Abzüge) | `core`, 454 656 Byte |
+| `redact-rs … --check-leaks -` | **keine** |
+
+Die Shell meldet dabei nur noch `Aborted` statt `Aborted (core dumped)`, und
+der Rückgabewert bleibt 134 — der Prozess wurde also wirklich von `SIGABRT`
+getötet und ist nicht etwa vorher sauber ausgestiegen.
+
+**Was das nicht abdeckt — bitte genau lesen:**
+
+* **Windows: gar nichts.** Es gibt dort kein Gegenstück; ein Prozess kann sich
+  dem Abbild nicht entziehen, weil `MiniDumpWriteDump` beim *Aufrufer* liegt
+  und nicht beim Ziel. Das ist ausgerechnet die Plattform der Zielgruppe.
+* **macOS und die übrigen Nicht-Linux-Systeme: ebenfalls nichts.** Die
+  Funktion ist `#[cfg(target_os = "linux")]`; sonst tut sie nichts und liefert
+  `true`. Der Rückgabewert heißt dort also „nichts zu tun“ und nicht
+  „geschützt“.
+* **Ein Abzug, den ein *anderes* Programm zieht**, etwa ein Debugger mit
+  `root`-Rechten.
+
+Und der **Nebeneffekt**, den man kennen muss: der Prozess ist danach auch für
+`ptrace` durch denselben Benutzer unerreichbar, und `/proc/<pid>/` gehört
+`root`. Für ein Werkzeug, das Kontoauszüge im Speicher hält, ist das die
+richtige Richtung — ein anderes Programm desselben Benutzers kann den Klartext
+nicht mehr mitlesen. Wer mit `gdb` oder `strace` an einem Fehler arbeitet,
+braucht dafür `root` oder einen eigenen Bau ohne diese Zeile.
 
 ### Die Grenzen gelten auch hinter der Entschlüsselung
 
@@ -493,6 +560,32 @@ Kontonummer unberührt stand. Zählt die mittlere Zahl über null und ist keine
 Datei gescheitert, endet der Lauf mit Rückgabewert 3 statt 0
 (`crates/redact-cli/src/batch.rs`, `exit_code`); eine gescheiterte Datei
 schlägt das mit 1.
+
+#### Rückgabewert 3 hat **zwei** Bedeutungen
+
+Das ist die Stelle, an der ein Skript falsch gebaut wird. Wer den Absatz
+darüber allein liest, hält 3 für „verarbeitet, aber nicht vollständig geprüft“
+— und deutet dann einen **Leckfund** als eine bloß unvollständige Prüfung. Der
+`--help`-Text des Binaries nennt seit 0.4.0 beide Fälle; hier standen sie
+bisher nicht.
+
+```console
+$ redact-rs --help | sed -n '/^  3  /,$p'
+  3  Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.
+     Zwei Fälle:
+     • Verarbeitet, aber nicht vollständig geprüft. …
+     • --check-leaks hat mindestens einen Begriff in der Datei gefunden.
+       Ein Fund ist kein Verarbeitungsfehler (das wäre 1) und kein
+       Bedienfehler (das wäre 2): die Suche lief vollständig, die Antwort
+       lautet „ja, es steht noch drin“.
+```
+
+Beide Fälle heißen „sieh hin“, und beide dürfen nicht als Erfolg durchgehen.
+Wer sie im Skript **unterscheiden** muss, unterscheidet sie am Aufruf und nicht
+am Rückgabewert: `--check-leaks` schwärzt nicht und schließt jeden
+Schwärzungsschalter aus, ein schwärzender Lauf prüft keine Begriffe. Ein
+Aufruf, eine Frage, eine Antwort. Zum Schalter selbst siehe
+[`--check-leaks`: die Nachprüfung ohne Quelltext](#--check-leaks-die-nachprüfung-ohne-quelltext).
 
 ### Fremde Zeichen auf dem Terminal
 
@@ -1226,7 +1319,12 @@ nennt keine Herkunft und behauptet auch keine. Es ist das Format für von Hand
 geschriebene Koordinaten; wer es benutzt, wählt die Seitenzahlen selbst. Was
 jede einzelne Region bewirkt hat, steht danach im Audit-Log (`effect` je
 Eintrag) — eine Region auf einer nicht vorhandenen Seite wird als
-`missing_page` geführt und nicht als Schwärzung verbucht.
+`missing_page` geführt und nicht als Schwärzung verbucht, eine Region neben dem
+Blatt seit 0.6.0 als `off_page`. **Beide gehören in die Nachrechnung**:
+`applied + covered + degenerate + missing_page + off_page = requested`. Wer die
+vierteilige Fassung aus 0.5.0 weiterbenutzt, kommt bei einem Log mit
+`off_page > 0` auf eine zu kleine Summe und übersieht genau die Regionen, die
+nichts bewirkt haben.
 
 ### Die Restlücke bei der Symlink-Prüfung
 
@@ -1279,6 +1377,50 @@ unbegrenzter Rekursion und nicht vor unbegrenztem Speicherverbrauch.
 
 ---
 
+## `--check-leaks`: die Nachprüfung ohne Quelltext
+
+Der Abschnitt „Sicherheitslücken melden“ am Ende dieser Datei nennt
+`redact_pdf::leaks` als verbindliches Messgerät. Das ist eine
+**Bibliotheksfunktion** — sie setzt eine Rust-Toolchain, Netzzugang zu
+crates.io und einen Klon des Repositories voraus. Im Release-Archiv liegt kein
+Quelltext. Für ein Werkzeug, dessen erstes Versprechen „keine Cloud, keine
+Netzverbindung“ lautet, war die Kontrolle damit ausgerechnet für die Gruppe
+unerreichbar, für die sie gedacht ist.
+
+Seit 0.4.0 steckt dieselbe Funktion im ausgelieferten Binary:
+
+```console
+$ redact-rs geschwaerzt.pdf --check-leaks "DE89 3704 0044 0532 0130 00"
+Geprüft: geschwaerzt.pdf (1332 Byte)
+  nicht gefunden: DE89 3704 0044 0532 0130 00
+
+Ergebnis: der Suchbegriff steht nicht mehr in der Datei.
+Das heißt NICHT, dass in der Datei nichts mehr steht. Geprüft wurde genau diese
+Liste. …
+$ echo $?
+0
+```
+
+Drei Punkte, die zur Aussage gehören:
+
+* **Die Suchbegriffe sind Geheimnisse.** Auf der Kommandozeile stehen sie in
+  der Prozessliste (`ps`) und in der Shell-Historie — dasselbe Problem wie beim
+  Passwort. `--check-leaks -` liest sie zeilenweise von der Standardeingabe:
+  `redact-rs geschwaerzt.pdf --check-leaks - < begriffe.txt`.
+* **Ein Fund ist Rückgabewert 3**, siehe oben.
+* **Kein Freibrief.** Geprüft ist die angegebene Liste, nicht die Datei. Ein
+  zweiter Name, eine weitere Kontonummer, eine Schreibweise mit anderen
+  Leerzeichen, Text in einem Rasterbild — nichts davon ist damit geprüft.
+
+Die Oberfläche macht dieselbe Prüfung seit 0.6.0 nach jedem Export von selbst:
+sie kennt die Suchbegriffe bereits (in jeder geschwärzten Zeile steht der
+gefundene Text) und muss sie deshalb weder tippen lassen noch in eine
+Prozessliste schreiben. Sie nennt denselben Vorbehalt und sagt zusätzlich, wie
+viele Rechtecke **ohne** bekannten Text dabei waren — für die kann sie nichts
+sagen, und dort bleibt es bei der Sichtprüfung.
+
+---
+
 ## „0 Schwärzungen" ist kein Freibrief
 
 `0 Schwärzungen` ist kein Freibrief, sondern ein Befund, der Prüfung verlangt.
@@ -1312,15 +1454,20 @@ Hilfreich sind:
 
 Besonders willkommen sind zwei Sorten Fund: **eine Datei, die den Prozess
 abstürzen lässt oder den Rechner belegt**, und **eine geschwärzte Ausgabe, in
-der der geschwärzte Text noch zu finden ist**. Für die zweite Sorte reicht oft
-schon `redact_pdf::leaks` bzw. `strings`.
+der der geschwärzte Text noch zu finden ist**. Für die zweite Sorte reicht
+`redact-rs <datei> --check-leaks "<text>"` — der Schalter des ausgelieferten
+Binaries, kein Quelltext und keine Toolchain nötig (siehe
+[oben](#--check-leaks-die-nachprüfung-ohne-quelltext)).
 
 Nachtrag: `strings` ist dafür nur die schnelle Vorstufe und darf nicht als
 Entwarnung gelesen werden — ein Flate-komprimierter Objektstrom (`/ObjStm`) ist
 für eine reine Rohbyte-Suche unsichtbar, ebenso eine Zeichenkette in UTF-16BE
 oder als Hex-String. `pdftotext` taugt erst recht nicht als Nachweis; die
 Messung dazu steht im README unter „Prüfen, ob die Schwärzung gewirkt hat“.
-Verbindlich ist `redact_pdf::leaks`.
+Verbindlich ist `redact_pdf::leaks` — und **genau die** Funktion steckt hinter
+`--check-leaks` und hinter der Nachprüfung der Oberfläche. Wer keine
+Rust-Toolchain hat, nimmt den Schalter; der Bibliotheksaufruf ist derselbe
+Maßstab, nur für den, der das Repository ohnehin gebaut hat.
 
 Es gibt keine Prämie und keine zugesicherte Frist — dies ist ein kleines
 Projekt. Eingehende Meldungen werden aber beantwortet.

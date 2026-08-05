@@ -232,7 +232,12 @@ pub struct Cli {
     /// Zusätzlicher Rand um jede Schwärzung, in Punkt.
     ///
     /// Ohne Angabe gilt der Wert aus der Einstellungsdatei, sonst 1.0.
-    #[arg(long)]
+    ///
+    /// Geprüft wird an der Grenze: `f64` allein nimmt `nan`, `inf` und `1e400`
+    /// an, und jeder dieser Werte macht **jede** Schwärzung wirkungslos. Die
+    /// Regel steht in [`redact_pipeline::check_padding`] — dieselbe, die für
+    /// den Schlüssel `padding` der Einstellungsdatei gilt.
+    #[arg(long, value_parser = parse_padding)]
     pub padding: Option<f64>,
 
     /// Bilder, die sich nicht dekodieren lassen, durchgehen lassen.
@@ -472,6 +477,28 @@ impl Cli {
             ..self.config(settings)
         }
     }
+}
+
+/// Wertet `--padding` aus und lehnt ab, was keine Länge ist.
+///
+/// **Warum ein `value_parser` und nicht eine Prüfung in [`Cli::config`]:** clap
+/// beendet den Aufruf bei einem abgelehnten Wert selbst, mit Rückgabewert 2
+/// (Benutzungsfehler) und der Meldung unter dem beanstandeten Schalter — also
+/// bevor eine Datei gelesen wird. Eine Prüfung in [`Cli::config`] müsste
+/// dagegen deren Signatur auf `Result` umstellen, und die ruft auch die
+/// Oberfläche.
+///
+/// Die Regel selbst steht **nicht hier**, sondern in
+/// [`redact_pipeline::check_padding`]: den Wert kann auch die
+/// Einstellungsdatei liefern, und zwei Fassungen derselben Grenze wären zwei
+/// Gelegenheiten, dass sie auseinanderlaufen.
+fn parse_padding(raw: &str) -> Result<f64, String> {
+    let value: f64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("„{raw}“ ist keine Zahl"))?;
+    redact_pipeline::check_padding(value).map_err(|e| e.to_string())?;
+    Ok(value)
 }
 
 impl ActionArg {

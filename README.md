@@ -976,6 +976,7 @@ es nennt keine Herkunft und behauptet auch keine.
   "effect": {
     "padding": 1.0, "pages": 2, "requested": 4,
     "applied": 4, "covered": 0, "degenerate": 0, "missing_page": 0,
+    "off_page": 0,
     "removed_glyphs": 66, "drawn_rects": 4, "removed_annotations": 0,
     "redacted_images": 0, "copied_images": 0
   },
@@ -1005,7 +1006,7 @@ Menschen.
 
 `"effect"` an einem Eintrag ist **gemessen**, nicht aus dem Rechteck
 geschlossen. `removed_glyphs` daneben nennt die Zeichen, die genau diese Region
-aus dem Content-Stream entfernt hat. Vier Befunde sind möglich:
+aus dem Content-Stream entfernt hat. **Fünf** Befunde sind möglich:
 
 | Befund | Was geschah | Ist das in Ordnung? |
 |---|---|---|
@@ -1013,46 +1014,89 @@ aus dem Content-Stream entfernt hat. Vier Befunde sind möglich:
 | `covered` | Deck-Rechteck gezeichnet, aber kein Zeichen getroffen. | **Kommt darauf an.** Über einer Grafik oder einem Rasterbild steht kein Text; die Bildpunkte werden trotzdem überschrieben. Liegen die Koordinaten dagegen daneben, bleibt der Text darunter lesbar. |
 | `degenerate` | Rechteck ist nach `--padding` leer, die Region wurde übersprungen. | Nein. Ein negatives `--padding` verkleinert jeden Bereich. |
 | `missing_page` | Die genannte Seite gibt es im Dokument nicht. Es geschah **gar nichts**. | Nein. Fast immer die verwechselte Zählweise — siehe unten. |
+| `off_page` | Die Seite gibt es, das Rechteck liegt aber **vollständig neben dem Blatt**. Kein Zeichen kann darunter liegen, und was außerhalb der MediaBox gezeichnet wird, sieht kein Betrachter. | Nein. Fast immer Koordinaten aus einer Review- oder Regionsdatei, die zu einem anders großen Blatt gehören. |
+
+`off_page` gibt es seit **0.6.0**. Bis dahin kannte ihn nur die Oberfläche
+(`HitOutcome::OffPage`); im Audit-Log lief derselbe Fall als `covered` mit —
+also unter dem Befund, der auch „über einer Grafik steht eben kein Text“
+bedeutet und deshalb häufig harmlos ist. Wer ein Log aus 0.5.0 oder älter
+liest, findet das Feld nicht; wer eines aus 0.6.0 liest, muss es in seine
+Rechnung aufnehmen.
 
 Die Summen dazu stehen unter `effect`: `requested` ist die Zahl der geplanten
-Regionen, und `applied + covered + degenerate + missing_page` ergibt sie
-wieder. `pages` nennt die Seitenzahl des Dokuments, damit sich `missing_page`
+Regionen, und
+
+```
+applied + covered + degenerate + missing_page + off_page = requested
+```
+
+ergibt sie wieder. **An dieser Gleichung rechnet ein Prüfer nach, ob er alle
+wirkungslosen Regionen gesehen hat** — mit der alten, vierteiligen Fassung
+fehlte je `off_page` einer, und zwar unbemerkt: die Summe war dann kleiner als
+`requested`, ohne dass irgendetwas gefehlt hätte.
+
+`pages` nennt die Seitenzahl des Dokuments, damit sich `missing_page`
 nachprüfen lässt; `missing_pages` listet die angesprochenen Seiten (0-basiert)
-und steht nur dann im Log, wenn es welche gab.
+und steht nur dann im Log, wenn es welche gab. Dasselbe leistet
+`off_page_pages` für `off_page`.
 
 Jeder Befund außer `applied` steht auch in der Zusammenfassung auf der Konsole
 und als Warnung auf stderr — ein Lauf, der nichts entfernt hat, endet nicht
 mehr wortlos mit „Schwärzungen: 3“.
 
-Nachgemessen an einem dreiseitigen Dokument mit drei Regionen, von denen eine
-`"page": 3` nennt:
+Nachgemessen an der Demo (`--write-demo`, zwei Seiten) mit drei manuellen
+Regionen: eine über dem Kontoinhaber, eine bei `[3000 3000 3100 3100]` neben
+dem Blatt, eine auf `"page": 9`.
 
 ```console
-$ redact-rs drei.pdf -o out.pdf --no-patterns --manual-regions regionen.json
-Seiten:             3
-Textzeilen:         3
+$ redact-rs demo.pdf -o out.pdf --no-patterns --manual-regions regionen.json \
+    --audit-log audit.json
+Seiten:             2
+Textzeilen:         15
 Treffer gesamt:     3
 Automatische Erkennung: abgeschaltet (--no-patterns). …
 Schwärzungen:       3
-  davon wirksam:      2 (Zeichen entfernt)
+  davon wirksam:      1 (Zeichen entfernt)
   davon wirkungslos:  1 (Seite gibt es in diesem Dokument nicht)
-Entfernte Zeichen:  82
+  davon wirkungslos:  1 (Rechteck liegt neben der Seite)
+Entfernte Zeichen:  28
 Deck-Rechtecke:     2
 …
 Warnung: 1 von 3 Schwärzung(en) liegen auf einer Seite, die es in diesem
-Dokument nicht gibt (Seite 4; das Dokument hat 3 Seite(n)). Dort wurde nichts
+Dokument nicht gibt (Seite 10; das Dokument hat 2 Seite(n)). Dort wurde nichts
 entfernt und nichts überdeckt — der Text steht unverändert in der Ausgabe.
 Häufigste Ursache ist die Zählweise: in JSON ist die erste Seite „page“: 0, die
-letzte also 2.
+letzte also 1.
+Warnung: 1 von 3 Schwärzung(en) liegen vollständig neben der Seite, auf der sie
+stehen sollen (Seite 1). Dort kann kein Zeichen liegen und kein Deck-Rechteck
+sichtbar werden — der Text der Seite steht unverändert in der Ausgabe.
+Häufigste Ursache sind Koordinaten aus einer Review- oder Regionsdatei, die zu
+einem anders großen Blatt gehören.
 $ echo $?
 0
 ```
 
+Und dasselbe im Log — hier steht die Gleichung ausgerechnet da:
+
+```json
+"effect": {
+  "padding": 1.0, "pages": 2, "requested": 3,
+  "applied": 1, "covered": 0, "degenerate": 0,
+  "missing_page": 1, "missing_pages": [9],
+  "off_page": 1, "off_page_pages": [0],
+  "removed_glyphs": 28, "drawn_rects": 2, "removed_annotations": 0,
+  "redacted_images": 0, "copied_images": 0
+}
+```
+
+`1 + 0 + 0 + 1 + 1 = 3`. Ohne `off_page` in der Rechnung käme 2 heraus, und
+genau eine wirkungslose Region wäre unbemerkt geblieben.
+
 Der Rückgabewert bleibt hier **`0`**: die Analyse hat das Dokument vollständig
 gelesen: eine Region, die ins Leere zeigt, ist ein Fehler in der *Eingabe* des
 Nutzers und keine Stelle, die das Werkzeug nicht durchsuchen konnte. Genau
-deshalb steht der Befund in der Zusammenfassung, auf stderr **und** als
-`missing_page` im Audit-Log.
+deshalb stehen beide Befunde in der Zusammenfassung, auf stderr **und** als
+`missing_page` bzw. `off_page` im Audit-Log.
 
 ### `page` zählt überall gleich
 
@@ -1595,6 +1639,53 @@ cargo test -p redact-pdf --test marked_content
   wirklich anfällt, und wächst mit dem Inhalt, den die Datei *mitbringt* —
   nicht mit dem, was sie daraus macht. Ist es leer, wird die Datei abgelehnt.
 
+  Zwei weitere Decken haben **keinen** Schalter, weil es an ihnen nichts
+  einzustellen gibt — sie begrenzen, was eine Datei über den Umweg ihrer
+  Schriften belegen kann:
+
+  | Was | Grenze | Was geschieht darüber |
+  |---|---|---|
+  | Eine `/ToUnicode`-Zuordnung (Platzbedarf, `MAX_TO_UNICODE_BYTES`) | 32 MB | Die Zuordnung wird **verworfen**, nicht abgeschnitten: der Font gilt als einer ohne `/ToUnicode`. Bei einem Type0-Font ist das eine Deckungslücke — sie steht auf stderr und im Audit-Log, und der Lauf endet mit Rückgabewert 3. |
+  | Zwischenspeicher für Schriftmetriken (Tabelleneinträge, `MAX_CACHED_FONT_ENTRIES`) | 400 000 | Nichts wird verdrängt, es wird nur nichts mehr aufgenommen. Das **Ergebnis bleibt gleich**; die betroffene Schrift wird je Platzierung neu geladen. |
+
+  Nachgemessen am gebauten Binary (0.6.0). Eine 1 064 Byte kleine Datei mit
+  einem Type0-Font, dessen `/ToUnicode` drei `bfrange`-Blöcke über je 65 536
+  Codes aufspannt (rund 50 MB Platzbedarf), reißt die erste Decke:
+
+  ```console
+  $ redact-rs tou_gross.pdf -o g.pdf --no-patterns
+  …
+  NICHT GEPRÜFT: Font „Test“ hat kein /ToUnicode; sein Text lässt sich nicht
+  dekodieren. Muster können darin nicht erkannt werden — diese Seite wurde
+  möglicherweise nicht vollständig geschwärzt.
+  $ echo $?
+  3
+  ```
+
+  Dieselbe Datei mit **einem** solchen Block (rund 16,8 MB) läuft mit
+  Rückgabewert 0 durch und dekodiert ihren Text. Für die zweite Decke: eine
+  5 235 Byte kleine Datei mit acht solchen Schriften auf einer Seite (zusammen
+  524 288 Tabelleneinträge, also über der Decke) belegt in der Debug-Fassung
+  67 MB Spitzenspeicher, dekodiert alle acht Textzeilen und endet mit 0.
+
+  **Eine unbrauchbare `/MediaBox`** — nicht endlich oder mit einer Kante
+  außerhalb des zulässigen Bereichs, etwa `[0 0 0 0]` — führt nicht zur
+  Ablehnung der Seite, sondern wird durch **A4 ersetzt** (`sane_box` in
+  `crates/redact-pdf/src/document.rs`; der Rasterizer nennt das „Unbrauchbare
+  MediaBox (0 x 0), A4 angenommen“). Sonst gäbe es kein Blatt, auf dem sich ein
+  Rechteck beschneiden oder zeichnen ließe.
+
+  **Die Oberfläche sagt es beim Laden** — nachgemessen an einem zweiseitigen
+  Dokument, dessen zweite Seite `/MediaBox [0 0 0 0]` trägt: „Seite 2 nennt
+  eine unbrauchbare Seitengröße; gerechnet und gezeichnet wird mit A4. Prüfen
+  Sie dort besonders genau, ob die Rechtecke sitzen.“
+
+  Die **Kommandozeile schweigt dazu** — nachgemessen an einer einseitigen
+  Datei mit `/MediaBox [0 0 0 0]`: sie findet die IBAN, schwärzt sie (28
+  Zeichen entfernt), endet mit Rückgabewert 0 und gibt keine Warnung aus. Wer
+  dort mit eigenen Koordinaten arbeitet, rechnet also unbemerkt gegen A4. Das
+  ist eine Divergenz zwischen den beiden Programmen und gehört geschlossen.
+
   **Auch die Hilfsdateien haben eine Grenze**, und die ist *fest* — es gibt
   keinen Schalter dafür:
 
@@ -1662,9 +1753,18 @@ falsche Passwort wird nicht behalten und steht in keiner Meldung.
 
 ### Rechtecke ziehen, verschieben und an den Ecken nachziehen
 
-Ein neuer Bereich entsteht durch Aufziehen mit der Maus — sichtbar **ab dem
-Bild des Drucks** und beginnend **am Druckpunkt**, nicht erst dort, wo egui den
-Zug bemerkt. Ein Klick wählt ein vorhandenes Rechteck aus.
+Ein neuer Bereich entsteht auf **zwei** Wegen. Mit der Maus durch Aufziehen —
+sichtbar **ab dem Bild des Drucks** und beginnend **am Druckpunkt**, nicht erst
+dort, wo egui den Zug bemerkt. Ein Klick wählt ein vorhandenes Rechteck aus.
+
+**Ohne Maus** geht es seit v0.5.0 genauso: der Knopf „🔲 Rechteck“ in der
+Leiste oder **Strg+R** legt eines in der Mitte der gezeigten Seite an
+(200 × 40 pt, `NEW_REGION_SIZE` in `crates/redact-gui/src/state.rs`) und wählt
+es aus. Danach schieben die **Pfeiltasten** (1 pt, mit Umschalt 10 pt), und
+**Strg+Pfeil** ändert die Größe: die linke untere Ecke bleibt stehen, die
+rechte obere wandert. Für den Nutzer, für den dieser Weg gebaut wurde, ist das
+der ganze Weg — Aufziehen mit der Maus ist die *andere* Möglichkeit, nicht die
+einzige.
 
 Ein ausgewähltes Rechteck trägt **vier Eckgriffe** (`Handle::TopLeft` …
 `BottomRight` in `crates/redact-gui/src/selector.rs`). Daran lässt es sich
@@ -1687,8 +1787,32 @@ heraus. Eine neue Änderung nach einem Rückgängig macht den
 Wiederholen-Stapel ungültig. Beim Öffnen eines anderen Dokuments wird der
 Verlauf verworfen — er gehört zum Inhalt, nicht zum Fenster.
 
-Erfasst sind alle Änderungen an der Trefferliste: Anlegen, Löschen,
-Verschieben, Nachziehen, An- und Abwählen, das Übernehmen einer Review-Datei.
+Erfasst sind alle Änderungen an der Trefferliste. Es sind zehn, und die Liste
+ist vollständig — sie steht hier, weil eine zu kurze Aufzählung schlimmer ist
+als gar keine: wer „Analysieren“ darin nicht findet, drückt den Knopf ohne die
+Zuversicht, ihn zurücknehmen zu können.
+
+| Änderung | wo |
+|---|---|
+| Rechteck anlegen (Maus, Knopf „🔲 Rechteck“, Strg+R) | `add_manual_region` |
+| Rechteck löschen (Entf) | `delete_selected` |
+| Verschieben mit den Pfeiltasten | `move_selected` |
+| **Größe ändern** mit Strg+Pfeil | `resize_selected` |
+| Verschieben und Nachziehen mit der Maus | `begin_manual_edit` |
+| An- und Abwählen | `set_enabled` |
+| **Schwärzungsart** (Balken / weiß / Ersetzen) | `set_action` |
+| **Ersatztext** ändern | `edit_replacement` |
+| Review-Datei übernehmen | `apply_review_file` |
+| **Analysieren** | `analyze` |
+
+Der letzte ist der, den die frühere Aufzählung verschwieg, und der, bei dem es
+am meisten kostet: **Analysieren tauscht die Trefferliste aus.** Selbst
+gezogene Rechtecke trägt es ausdrücklich hinüber — die Entscheidungen an den
+**Mustertreffern** dagegen nicht: abgewählt, andere Schwärzungsart, eigener
+Ersatztext sind danach weg, weil deren Zeilen neu entstehen. Genau deshalb ist
+es ein Verlaufsschritt, und ein Strg+Z holt den alten Stand vollständig zurück
+(`r7_analysieren_ist_ein_verlaufsschritt` in
+`crates/redact-gui/src/rev8_tests.rs`).
 
 ### Miniaturansichten und Zoom
 
@@ -1711,11 +1835,21 @@ Vorschau ein und zeigt wenigstens die Lage des Textes.
 |---|---|
 | Strg+O | PDF öffnen |
 | Strg+S | Geschwärztes PDF exportieren |
+| Strg+R | Rechteck in der Mitte der gezeigten Seite anlegen und auswählen (wie der Knopf „🔲 Rechteck“) |
 | Strg+Z / Strg+Y | Rückgängig / Wiederholen |
 | Bild auf/ab, Pos1/Ende | blättern |
 | Pfeiltasten | mit Auswahl: das Rechteck um 1 pt verschieben (mit Umschalt 10 pt) — ohne Auswahl: blättern |
+| Strg+Pfeil | mit Auswahl: die Größe um 1 pt ändern (mit Umschalt 10 pt); die linke untere Ecke bleibt stehen. Ohne Auswahl: nichts — dafür genügt der Pfeil allein |
 | Entf | ausgewähltes Rechteck löschen |
 | Esc | Auswahl aufheben |
+| Tabulator / Umschalt+Tab | von Knopf zu Knopf durch die Leiste, vorwärts bzw. rückwärts. Ausgegraute Knöpfe werden übersprungen — in beiden Richtungen |
+
+Liegt die Auswahl auf einer Seite, die gerade nicht gezeigt wird, tun
+Pfeiltasten und Strg+Pfeil **nichts** und sagen es in der Statuszeile — mit dem
+Verb, um das es ging („Nicht verschoben …“ bzw. „Größe nicht geändert …“) und
+mit dem Ausweg. Gibt es die genannte Seite im Dokument gar nicht (das kann nur
+eine Review- oder Regionsdatei mitbringen), nennt die Absage einen anderen
+Ausweg: dorthin lässt sich nicht blättern.
 
 Unter macOS tritt die Befehlstaste an die Stelle von Strg. **Liegt der Fokus in
 einem Textfeld, gehören alle Tasten dorthin** und nirgendwo sonst hin — sonst
@@ -1911,6 +2045,14 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   werden abgelehnt, nicht repariert. Das Passwort steht in keiner erzeugten
   Datei und in keiner Meldung
   ([`SECURITY.md`](SECURITY.md#passwörter-verschlüsselter-pdfs)).
+* **Kein Kernabzug: unter Linux.** Stürzt der Prozess ab, schriebe der Kernel
+  sonst den ganzen Arbeitsspeicher weg — samt Klartext des Dokuments und
+  eingegebenem Passwort. `redact-rs` schaltet das als erste Anweisung in `main`
+  ab. **Unter Windows gibt es dafür kein Gegenstück, unter macOS tut der Aufruf
+  nichts**; die Einschränkung gehört zur Zusage dazu und steht ausgeschrieben in
+  [`SECURITY.md`](SECURITY.md#kein-kernabzug-dieses-prozesses). Dort steht auch
+  der Nebeneffekt: der Prozess ist danach für `ptrace` durch denselben Benutzer
+  unerreichbar.
 * Review-Datei und Audit-Log entstehen unter Unix mit Modus `0600` — **in
   beiden Programmen**. Sie gehen durch denselben Schreibpfad
   (`redact_pipeline::write_review_file` bzw. `AuditLog::write`, beide über

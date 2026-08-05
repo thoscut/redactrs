@@ -451,7 +451,39 @@ jobs:
       # es NICHT: cargo 1.94.1 - die hier gepinnte Toolchain - lehnt sie ab
       # ("feature `trim-paths` is required ... not stabilized in this version
       # of Cargo"). Sobald sie stabil ist, gehoert sie nach Cargo.toml und
-      # diese drei Zeilen koennen weg.
+      # diese Zeilen koennen weg - `trim-paths` deckt beide Faelle mit ab.
+      #
+      # ZWEI Prefixe, nicht einer. Der erste erfasst den uebersetzten
+      # Quelltext aller Crates aus der Registry. Er erfasst NICHT, was ein
+      # Build-Skript zur Bauzeit nach `OUT_DIR` schreibt und die Kiste per
+      # `include!(concat!(env!("OUT_DIR"), …))` einzieht - dieser Pfad liegt
+      # unterhalb des Target-Verzeichnisses und ist absolut. Im
+      # glibc-Artefakt von v0.4.0 und v0.5.0 blieben dadurch drei Pfade des
+      # Build-Rechners stehen:
+      #
+      #   …/target/x86_64-unknown-linux-gnu/release/build/glutin_egl_sys-…/out/egl_bindings.rs
+      #   …/glutin_glx_sys-…/out/glx_bindings.rs
+      #   …/glutin_glx_sys-…/out/glx_extra_bindings.rs
+      #
+      # (musl und Windows sind davon nicht betroffen: musl baut ohne
+      # Oberflaeche, Windows ohne die X11-/EGL-Anbindung.)
+      #
+      # NACHGEMESSEN, bevor diese Zeile hier stand - mit einem auffaelligen
+      # Ersatzpfad, damit das Ergebnis nicht zu verwechseln ist:
+      #
+      #   RUSTFLAGS="… --remap-path-prefix=$PWD/target=/ZWEITER-PREFIX" \
+      #     cargo build --release --locked -p redact-cli
+      #   strings -a target/release/redact-rs | grep -c /home/user/redactrs   -> 0
+      #   strings -a target/release/redact-rs | grep ZWEITER-PREFIX
+      #     /ZWEITER-PREFIX/release/build/glutin_egl_sys-…/out/egl_bindings.rs
+      #     /ZWEITER-PREFIX/release/build/glutin_glx_sys-…/out/glx_bindings.rs
+      #     /ZWEITER-PREFIX/release/build/glutin_glx_sys-…/out/glx_extra_bindings.rs
+      #
+      # Vorher standen dort dieselben drei Zeilen mit dem echten Pfad.
+      #
+      # `${CARGO_TARGET_DIR:-$PWD/target}`, weil cargo genau so entscheidet.
+      # Der Schritt laeuft ohne `working-directory`, also ist `$PWD` die Wurzel
+      # des Arbeitsbaums.
       #
       # Vorsicht beim Aendern: `RUSTFLAGS` in der Umgebung *ersetzt*
       # `target.<triple>.rustflags` aus .cargo/config.toml, es wird nicht
@@ -463,7 +495,8 @@ jobs:
         run: |
           set -euo pipefail
           CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
-          export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME_DIR}/registry/src=/cargo-registry"
+          TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
+          export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME_DIR}/registry/src=/cargo-registry --remap-path-prefix=${TARGET_DIR}=/cargo-target"
           echo "RUSTFLAGS=$RUSTFLAGS"
           cargo build --release --locked \
             --target "${{ matrix.target }}" \

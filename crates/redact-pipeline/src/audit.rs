@@ -281,7 +281,34 @@ impl EntryEffect {
 /// oder verkleinert die Fläche, verschiebt sie aber nicht auf die Seite. Ein
 /// Rechteck, das erst durch eine großzügige Polsterung das Blatt berührt,
 /// träfe dort ohnehin keinen Text, den die Analyse gefunden hätte.
+///
+/// # Unbrauchbare Koordinaten sind `true`
+///
+/// `f64::max` und `f64::min` **schlucken** einen NaN-Operanden und liefern den
+/// anderen zurück. Ohne die Prüfung wird aus `rect.ll.x.max(NaN)` genau
+/// `rect.ll.x` und aus `rect.ur.x.min(NaN)` genau `rect.ur.x` — die Rechnung
+/// findet eine Überschneidung, die es nicht gibt, und ein Rechteck ohne
+/// brauchbare Koordinaten galt als „auf dem Blatt“ (gemessen: `false` für alle
+/// fünf Bauarten, siehe `ein_unbrauchbares_rechteck_liegt_neben_dem_blatt`).
+///
+/// `true` ist die richtige Antwort, und zwar aus beiden Richtungen: ein solches
+/// Rechteck bezeichnet die leere Menge ([`Rect::is_usable`]), und die
+/// überschneidet das Blatt nicht — und beim einzigen Aufrufer
+/// ([`EntryEffect::of`]) führt `false` weiter zu [`EntryEffect::Applied`] oder
+/// [`EntryEffect::Covered`], also zu „Deck-Rechteck gezeichnet“ für ein
+/// Rechteck, das nirgends liegt. `true` führt auf „wirkungslos“.
+///
+/// Erreicht wird der Fall heute nicht: [`EntryEffect::of`] fragt eine Zeile
+/// vorher [`Rect::is_empty`], und die fängt unbrauchbare Koordinaten bereits ab
+/// (Nachweis:
+/// `ein_unbrauchbares_rechteck_bleibt_entartet_und_wird_nicht_off_page`). Die
+/// Prüfung steht hier trotzdem: sie hängt an *dieser* Funktion, nicht an der
+/// Reihenfolge ihres Aufrufers, und die Reihenfolge dort ist ein Argument über
+/// Erklärungsgüte, keine Sicherheitsschranke.
 fn beside_the_sheet(rect: &Rect, sheet: &Rect) -> bool {
+    if !rect.is_usable() {
+        return true;
+    }
     let rect = rect.normalized();
     let sheet = sheet.normalized();
     let (x0, x1) = (rect.ll.x.max(sheet.ll.x), rect.ur.x.min(sheet.ur.x));
@@ -1123,6 +1150,105 @@ mod tests {
         let effects = Effects::measure(&[region], 1.0, &sheets(1), &report_with(&[0]));
         assert_eq!(effects.per_entry, vec![EntryEffect::MissingPage]);
         assert_eq!(effects.off_page, 0);
+    }
+
+    /// **Der Befund N-2.** [`beside_the_sheet`] rechnet mit `f64::max` und
+    /// `f64::min`, und die **schlucken** einen NaN-Operanden: aus
+    /// `rect.ll.x.max(NaN)` wird `rect.ll.x`, aus `rect.ur.x.min(NaN)` wird
+    /// `rect.ur.x`. Für ein Rechteck ohne brauchbare Koordinaten kam damit
+    /// `x1 > x0 && y1 > y0` heraus — die Funktion meldete „auf dem Blatt“.
+    ///
+    /// Gemessen vor der Korrektur: `false` für jede der fünf Bauarten. Nach der
+    /// Korrektur `true`.
+    ///
+    /// # Warum `true` und nicht `false`
+    ///
+    /// Zwei Gründe, beide vom einzigen Aufrufer her:
+    ///
+    /// * **Wahr.** Ein Rechteck ohne brauchbare Koordinaten bezeichnet die
+    ///   leere Menge (siehe [`Rect::is_usable`]), und die leere Menge
+    ///   überschneidet das Blatt nicht. „Liegt vollständig neben dem Blatt“ ist
+    ///   für sie zutreffend.
+    /// * **Sicher.** Das `false` fiel in [`EntryEffect::of`] durch bis zu
+    ///   [`EntryEffect::Applied`] oder [`EntryEffect::Covered`] — beides
+    ///   bedeutet „Deck-Rechteck gezeichnet“. Für ein Rechteck, das nirgends
+    ///   liegt, wäre das eine gemeldete Schwärzung, die es nicht gibt. `true`
+    ///   führt auf [`EntryEffect::OffPage`], also auf „wirkungslos“
+    ///   ([`Effects::ineffective`]) — die Richtung, in der ein Irrtum eine
+    ///   Warnung zu viel erzeugt statt einer Entwarnung zu viel.
+    #[test]
+    fn ein_unbrauchbares_rechteck_liegt_neben_dem_blatt() {
+        let blatt = sheets(1)[0];
+        let n = f64::NAN;
+        let p = f64::INFINITY;
+        let m = f64::NEG_INFINITY;
+        for (name, kaputt) in [
+            ("alles NaN", Rect::new(n, n, n, n)),
+            ("nur ll.x NaN", Rect::new(n, 100.0, 200.0, 120.0)),
+            ("nur ur.y NaN", Rect::new(100.0, 100.0, 200.0, n)),
+            ("unendlich gross", Rect::new(m, m, p, p)),
+            ("beide Kanten +inf", Rect::new(p, p, p, p)),
+        ] {
+            assert!(
+                beside_the_sheet(&kaputt, &blatt),
+                "{name}: gilt als „auf dem Blatt“"
+            );
+        }
+    }
+
+    /// Gegenprobe zum Test darüber: gewöhnliche Rechtecke behalten ihre
+    /// Antwort. Ohne diese Zeilen wäre er auch dann grün, wenn die Funktion
+    /// pauschal `true` lieferte — und dann gälte **jede** Schwärzung als neben
+    /// dem Blatt.
+    #[test]
+    fn brauchbare_rechtecke_antworten_wie_vorher() {
+        let blatt = sheets(1)[0];
+        assert!(
+            !beside_the_sheet(&Rect::new(100.0, 100.0, 200.0, 120.0), &blatt),
+            "ein Rechteck mitten auf dem Blatt gilt als daneben"
+        );
+        assert!(
+            !beside_the_sheet(&Rect::new(594.0, 100.0, 650.0, 120.0), &blatt),
+            "ein Rechteck, das die Kante überlappt, gilt als daneben"
+        );
+        assert!(
+            beside_the_sheet(&Rect::new(595.0, 100.0, 650.0, 120.0), &blatt),
+            "ein Rechteck jenseits der Kante gilt als auf dem Blatt"
+        );
+    }
+
+    /// **Die Reihenfolge bleibt, wie sie ist.** Ein unbrauchbares Rechteck
+    /// erreicht [`beside_the_sheet`] heute gar nicht: `expanded(padding)` ist
+    /// dann ebenfalls unbrauchbar, und [`Rect::is_empty`] fängt es eine Zeile
+    /// vorher als [`EntryEffect::Degenerate`].
+    ///
+    /// Das ist der Grund, warum N-2 kein Loch war, sondern eine zweite
+    /// Verteidigungslinie. Der Test hält beides fest: dass die erste Linie hält
+    /// **und** dass die Korrektur an [`beside_the_sheet`] die Einordnung nach
+    /// außen nicht verschiebt.
+    #[test]
+    fn ein_unbrauchbares_rechteck_bleibt_entartet_und_wird_nicht_off_page() {
+        let n = f64::NAN;
+        for (name, kaputt) in [
+            ("alles NaN", Rect::new(n, n, n, n)),
+            ("nur ll.x NaN", Rect::new(n, 100.0, 200.0, 120.0)),
+            (
+                "unendlich gross",
+                Rect::new(f64::NEG_INFINITY, f64::NEG_INFINITY, 1.0, 1.0),
+            ),
+        ] {
+            let mut region = iban_redaction();
+            region.region.rect = kaputt;
+            let effects = Effects::measure(&[region], 1.0, &sheets(1), &report_with(&[0]));
+            assert_eq!(
+                effects.per_entry,
+                vec![EntryEffect::Degenerate],
+                "{name}: nicht mehr als entartet eingeordnet"
+            );
+            assert_eq!(effects.off_page, 0, "{name}");
+            assert_eq!(effects.applied, 0, "{name}");
+            assert_eq!(effects.covered, 0, "{name}");
+        }
     }
 
     /// Und `--padding`, das ein Rechteck leert, schlägt beides: dort wird

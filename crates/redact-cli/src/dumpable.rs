@@ -41,13 +41,19 @@
 //! oder `strace` an einem Fehler arbeitet, muss dafür `root` sein oder diese
 //! Zeile für seinen Bau auskommentieren.
 //!
-//! ## Und die Plattform, auf der die Zielgruppe ist
+//! ## Was auf welchem System wirklich passiert
 //!
-//! **Unter Windows gibt es kein Gegenstück.** Ein Prozess kann sich dort dem
-//! Abbild nicht entziehen; `MiniDumpWriteDump` liegt beim Aufrufer, nicht beim
-//! Ziel. Diese Absicherung schützt also Linux und macOS-artige Systeme, nicht
-//! Windows. Das Restrisiko steht in `SECURITY.md`; hier steht es, damit
-//! niemand die Datei liest und mehr Schutz annimmt, als sie leistet.
+//! | System | Mittel | Wie fest |
+//! |---|---|---|
+//! | Linux | `prctl(PR_SET_DUMPABLE, 0)` | Der Kernel schreibt gar nichts, `root` eingeschlossen. |
+//! | macOS, BSD, übrige Unix | `setrlimit(RLIMIT_CORE, 0)` | Schwächer: eine Grenze, kein Verbot. Wer den Prozess mit angehobener Grenze startet, ändert daran nichts — sie wird hier gesetzt, nicht geerbt —, aber ein `core_pattern`, das an ein Programm weiterreicht, kann sie je nach System übergehen. |
+//! | Windows | **keins** | Ein Prozess kann sich dem Abbild nicht entziehen; `MiniDumpWriteDump` liegt beim Aufrufer, nicht beim Ziel. |
+//!
+//! Die Windows-Zeile ist die unangenehme: dort sitzt die Zielgruppe dieses
+//! Werkzeugs. Deshalb sagt [`CoreDumps::Unavailable`] das auch aus, statt
+//! Erfolg zu melden — eine Funktion, die auf drei Systemen `true` liefert und
+//! nur auf einem etwas tut, wäre genau die Sorte Zusage, gegen die dieses
+//! Projekt arbeitet. Das Restrisiko steht ausgeschrieben in `SECURITY.md`.
 //!
 //! ## Die eine Ausnahme von `unsafe`
 //!
@@ -71,18 +77,65 @@
 //! Die zweite Liste nennt **nur diese Datei**, mit zwei Zeilen: den Aufruf
 //! unten und die Gegenprobe in ihrem Test.
 
+/// Was der Versuch ergeben hat, Kernabzüge abzuschalten.
+///
+/// Drei Fälle statt `bool`, weil „ging nicht" und „gibt es hier nicht" zwei
+/// verschiedene Nachrichten sind: die eine ist ein Fehler, den man melden
+/// kann, die andere eine Eigenschaft des Systems, an der niemand etwas
+/// ändert. Sie unter `false` zusammenzufassen hieße, auf Windows bei jedem
+/// Lauf eine Warnung zu drucken, die niemand befolgen kann — und unter `true`
+/// hieße es, Schutz zu behaupten, den es dort nicht gibt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreDumps {
+    /// Abgeschaltet. Der Klartext des Dokuments landet bei einem Absturz
+    /// nicht auf der Platte.
+    Disabled,
+    /// Dieses System bietet kein Mittel dagegen. Zwei Fälle: Windows kennt
+    /// von vornherein keines, und ein Unix-Kern kann die Option abgelehnt
+    /// haben (`EINVAL`/`ENOSYS` — etwa unter einem Filter, der `prctl`
+    /// beschneidet).
+    ///
+    /// Getrennt von [`CoreDumps::Failed`], weil es zwei verschiedene
+    /// Nachrichten sind: hier ist nichts kaputt, es gibt nur nichts zu
+    /// holen. Eine Warnung wäre an dieser Stelle ein Ratschlag, den niemand
+    /// befolgen kann.
+    Unavailable,
+    /// Das Mittel gibt es, der Aufruf schlug fehl. Der Schutz ist **nicht**
+    /// aktiv, und das gehört gesagt.
+    Failed,
+}
+
+/// Deutet den Rückgabewert eines der beiden Systemaufrufe.
+///
+/// `EINVAL` und `ENOSYS` heißen „diesen Aufruf gibt es hier nicht" — ein Kern
+/// ohne die Option, oder ein Filter (seccomp, gehärtete Container), der sie
+/// abschneidet. Das ist [`CoreDumps::Unavailable`] und keine Störung. Jeder
+/// andere Fehler ist einer.
+///
+/// Der Fehlercode kommt über [`std::io::Error::last_os_error`] — die sichere
+/// Fassung; `errno` selbst zu lesen bräuchte ein zweites `unsafe`, für
+/// dieselbe Zahl.
+#[cfg(unix)]
+fn outcome(rc: libc::c_int) -> CoreDumps {
+    if rc == 0 {
+        return CoreDumps::Disabled;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EINVAL) | Some(libc::ENOSYS) => CoreDumps::Unavailable,
+        _ => CoreDumps::Failed,
+    }
+}
+
 /// Verbietet dem Kernel, von diesem Prozess einen Abzug zu schreiben.
 ///
-/// Rückgabe: `false`, wenn der Aufruf fehlschlug — dann ist der Schutz
-/// **nicht** aktiv. Auf allen Nicht-Linux-Systemen `true`, ohne etwas zu tun;
-/// dort gibt es nichts Gleichwertiges (siehe Modulkommentar).
-///
+/// Was auf welchem System geschieht, steht in der Tabelle im Modulkommentar.
 /// Ein Aufruf genügt, und er gehört an den Anfang von `main`: alles davor
 /// liefe ungeschützt.
-pub fn deny_core_dumps() -> bool {
+pub fn deny_core_dumps() -> CoreDumps {
     #[cfg(target_os = "linux")]
     {
-        // Die einzige `unsafe`-Stelle im ganzen Baum.
+        // Eine der beiden `unsafe`-Stellen im ganzen Baum (die andere ist die
+        // Gegenprobe im Test darunter).
         //
         // `prctl` ist variadisch; die Argumente nach `PR_SET_DUMPABLE` sind
         // für diese Option als 0 vorgeschrieben (`man 2 prctl`). Der Aufruf
@@ -91,11 +144,27 @@ pub fn deny_core_dumps() -> bool {
         // Richtung ändern, die hier gewollt ist.
         #[allow(unsafe_code)]
         let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
-        rc == 0
+        outcome(rc)
     }
-    #[cfg(not(target_os = "linux"))]
+
+    // macOS, BSD und übrige Unix: `prctl` gibt es dort nicht, `RLIMIT_CORE`
+    // schon. Das ist das schwächere Mittel (eine Grenze, kein Verbot), aber
+    // es ist eines — und „gar nichts tun und `true` melden" wäre die
+    // schlechteste der drei Möglichkeiten.
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
-        true
+        let limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        #[allow(unsafe_code)]
+        let rc = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) };
+        outcome(rc)
+    }
+
+    #[cfg(not(unix))]
+    {
+        CoreDumps::Unavailable
     }
 }
 
@@ -105,15 +174,15 @@ mod tests {
 
     /// Der Aufruf gelingt — und er ist danach **nachweisbar** wirksam.
     ///
-    /// Die Rückgabe allein wäre kein Beleg: `deny_core_dumps` könnte auch
-    /// `true` liefern, ohne etwas zu tun (genau das tut sie außerhalb von
-    /// Linux). Unter Linux wird deshalb der Zustand gegengelesen, den der
-    /// Kernel selbst führt.
+    /// Die Rückgabe allein wäre kein Beleg: eine Funktion kann `Disabled`
+    /// melden, ohne etwas getan zu haben. Unter Linux wird deshalb der
+    /// Zustand gegengelesen, den der Kernel selbst führt.
     #[test]
     fn the_process_is_no_longer_dumpable() {
-        assert!(
+        assert_eq!(
             deny_core_dumps(),
-            "prctl(PR_SET_DUMPABLE, 0) fehlgeschlagen"
+            CoreDumps::Disabled,
+            "Kernabzüge liessen sich nicht abschalten"
         );
 
         #[cfg(target_os = "linux")]
