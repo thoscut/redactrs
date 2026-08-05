@@ -96,6 +96,31 @@ pub const NOT_A_COVERAGE_GAP: &[(&str, &str)] = &[
          dieser Datei — sie träfe fast jeden eingescannten Auszug und machte den \
          Rückgabewert damit wertlos",
     ),
+    // --- Eine Anweisung des Nutzers, kein Befund an dieser Datei ---
+    //
+    // Der zweite Grenzfall, und er ist es genauso wert, ausgeschrieben zu
+    // werden. Wörtlich **ist** eine abgeschaltete Mustererkennung ein Loch in
+    // der Prüfung: wonach nicht gesucht wurde, kann nicht gefunden worden sein.
+    //
+    // Der Unterschied zu einer Deckungslücke liegt darin, wer es entschieden
+    // hat. Die Analyse hat das Dokument **vollständig gelesen** — sie hat auf
+    // ausdrückliche Anweisung nach weniger gesucht. Das ist derselbe Vorgang
+    // wie `--patterns iban_de` oder eine angehobene `--min-confidence`, und
+    // für die springt der Rückgabewert seit jeher nicht an. Täte er es hier,
+    // liefe jeder Lauf mit `--no-patterns` — der übliche Weg für rein
+    // manuelles Schwärzen, siehe README — auf Rückgabewert 3, und der Wert
+    // wäre für die Fälle wertlos, für die es ihn gibt.
+    //
+    // Verschwiegen wird deshalb nichts: der Satz steht in der Zusammenfassung,
+    // in der Statuszeile der Oberfläche und als eigenes Feld `patterns` im
+    // Audit-Log (siehe `crate::audit::PatternRecord`). Nur der Rückgabewert
+    // bleibt der Frage „hat das Werkzeug alles gesehen?“ vorbehalten.
+    (
+        crate::DETECTION_NOTICE,
+        "eine ausdrückliche Anweisung des Aufrufenden, keine Eigenschaft dieser \
+         Datei — die Analyse hat alles gelesen und auf Geheiß nach weniger \
+         gesucht; gesagt wird es in Zusammenfassung, Oberfläche und Audit-Log",
+    ),
     // --- Mitteilungen über die Wirkung angeforderter Schwärzungen ---
     //
     // Diese drei sagen etwas über *Regionen, die der Nutzer angefordert hat*,
@@ -266,6 +291,31 @@ mod tests {
                 "falsch einsortiert (erwartet Deckungslücke = {lücke}): {text}"
             );
         }
+    }
+
+    /// Die Meldung über abgeschaltete Erkennung wird **hier** erzeugt und
+    /// nicht abgeschrieben: beide Sätze aus [`crate::detection_notice`] müssen
+    /// unter die Ausnahme fallen, sonst liefe jeder Lauf mit `--no-patterns`
+    /// auf Rückgabewert 3.
+    #[test]
+    fn a_switched_off_detection_is_not_a_coverage_gap() {
+        let aus = crate::Config {
+            no_patterns: true,
+            ..crate::Config::default()
+        };
+        let einzeln = crate::Config {
+            disabled_patterns: vec!["date_de".into()],
+            ..crate::Config::default()
+        };
+        for config in [&aus, &einzeln] {
+            let text = crate::detection_notice(config).expect("es ist etwas abgeschaltet");
+            assert!(
+                !is_coverage_gap(&text),
+                "abgeschaltete Erkennung ist eine Anweisung, keine Lücke: {text}"
+            );
+        }
+        // Gegenprobe: ohne Abschaltung gibt es die Meldung gar nicht.
+        assert_eq!(crate::detection_notice(&crate::Config::default()), None);
     }
 
     /// Die Voreinstellung ist „Lücke“ — eine unbekannte Warnung darf nicht

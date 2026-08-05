@@ -14,6 +14,47 @@ use crate::{PatternDef, Validator, CONTEXT_GROUP, TARGET_GROUP};
 /// Konfidenz, auf die ein erfolgreich geprüfter Treffer mindestens angehoben wird.
 const VALIDATED_CONFIDENCE: f32 = 0.99;
 
+/// Obergrenze für eine Pattern-Konfigurationsdatei: 1 MB.
+///
+/// ## Warum nicht [`redact_core::MAX_AUX_FILE_BYTES`] (16 MB)
+///
+/// Weil hier nicht die Byte-Zahl die teure Größe ist, sondern die Zahl der
+/// Muster. Gemessen am gebauten Binary, jeweils mit einer Konfiguration aus
+/// lauter kleinen Mustern:
+///
+/// | Datei | Muster | Spitzenspeicher | Laufzeit |
+/// |---|---|---|---|
+/// | 256 kB | 6 779 | 92 MB | 8,7 s |
+/// | 1 MB | 26 117 | 306 MB | 43,8 s |
+/// | 4 MB | 102 710 | 1 155 MB | 5:59 min |
+///
+/// Rund 12 kB Arbeitsspeicher je kompiliertem Muster — bei 16 MB wären das
+/// mehrere Gigabyte und eine halbe Stunde. Die Grenze muss deshalb zu dem
+/// passen, was hinter ihr geschieht, und nicht zu dem, was in einer anderen
+/// Datei steht.
+///
+/// ## Warum 1 MB reicht
+///
+/// Ein Muster ist ein von Hand geschriebener regulärer Ausdruck mit Kennung,
+/// Beschreibung und Konfidenzwerten. Die zwei Dutzend eingebauten wiegen als
+/// YAML wenige Kilobyte, `examples/patterns.yaml` 1 155 Byte. 1 MB fasst über
+/// 26 000 Muster — das Tausendfache jeder gepflegten Konfiguration, und
+/// dieselbe Grenze, die `redact_pipeline::settings` für die Einstellungsdatei
+/// setzt.
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// Der Satz hinter der Meldung „zu groß": woher die Grenze kommt und was zu
+/// tun ist.
+///
+/// Der wahrscheinlichste Fall ist nicht die zu große Konfiguration, sondern
+/// der falsche Pfad hinter dem Schalter — und genau danach fragt der Satz.
+const LIMIT_HINT: &str = "Für eine Pattern-Konfiguration ist das eine feste Grenze und keine \
+     Einstellung: die zwei Dutzend eingebauten Muster wiegen als YAML wenige Kilobyte, \
+     `examples/patterns.yaml` gut ein Kilobyte, und 1 MB fasst über 26 000 Muster. Jedes \
+     kompilierte Muster kostet rund 12 kB Arbeitsspeicher — deshalb ist die Grenze hier \
+     enger als für eine Buchungsliste. Zeigt `--patterns-config` wirklich auf die \
+     Konfiguration?";
+
 /// Vorgabe für das Mindestvertrauen eines Treffers.
 ///
 /// Der Wert trennt die beiden Sorten von Treffern, die es gibt: solche, die
@@ -344,8 +385,33 @@ impl PatternMatcher {
     }
 
     /// Lädt eine Pattern-Konfiguration; Endung `.yaml`/`.yml` => YAML, sonst JSON.
+    ///
+    /// ## Erst fragen, dann lesen
+    ///
+    /// Gelesen wird über [`redact_core::read_limited`], also erst, wenn
+    /// feststeht, dass hier eine **gewöhnliche Datei** unterhalb von
+    /// [`MAX_CONFIG_BYTES`] liegt. Vorher stand hier ein
+    /// `std::fs::read_to_string`, und das legt einen Puffer in Dateigröße an:
+    /// eine dünn belegte Datei mit 2 GB Nennlänge (4 kB auf der Platte)
+    /// kostete 2 114 MB Arbeitsspeicher, eine mit 6 GB entsprechend mehr, und
+    /// eine benannte Pipe lieferte endlos weiter — alles, bevor auch nur
+    /// feststand, dass es keine Konfiguration ist.
+    ///
+    /// Die Meldung nennt außerdem die Datei beim Namen; `read_to_string` gab
+    /// nur „No such file or directory" zurück.
     pub fn from_config_file(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)?;
+        let bytes = redact_core::read_limited(path, MAX_CONFIG_BYTES, LIMIT_HINT)
+            .map_err(RedactError::Pattern)?;
+        // Eigene Meldung statt der von `String::from_utf8`: die nennt die
+        // Stelle im Dateiinhalt, und der Inhalt gehört hier nicht in die
+        // Ausgabe — der Pfad kommt von außen und kann auf eine fremde Datei
+        // zeigen.
+        let text = String::from_utf8(bytes).map_err(|_| {
+            RedactError::Pattern(format!(
+                "{}: keine UTF-8-Datei. Eine Pattern-Konfiguration ist Text (YAML oder JSON).",
+                redact_core::safe_path(path)
+            ))
+        })?;
         let is_yaml = path
             .extension()
             .and_then(|e| e.to_str())

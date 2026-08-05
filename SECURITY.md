@@ -32,6 +32,15 @@ eingestellt zu haben. Wer eine fremde Musterdatei einspielt, spielt eine
 fremde Konfiguration ein — dieselbe Vertrauensstufe wie ein Kommandozeilen-
 Argument.
 
+**Eine Einschränkung dazu, und sie ist keine Vertrauensfrage.** Ihr *Inhalt*
+wird nicht als feindselig behandelt, ihre *Größe* schon: alle vier gehen durch
+einen begrenzten Leser (16 MB, Musterkonfiguration 1 MB — siehe „Grenzen für
+Eingabedateien“). Ohne das bestimmte die Datei, wie viel Arbeitsspeicher der
+Lauf belegt, und der wahrscheinlichste Weg dorthin ist kein Angriff, sondern
+ein vertippter Pfad: `--manual-regions` auf den 700-MB-Scan statt auf die
+JSON-Datei. Vertrauen in die Absicht ist kein Grund, den eigenen Prozess einer
+Zahl aus einem Verzeichniseintrag auszuliefern.
+
 **Kein Bestandteil des Modells.**
 Ein Angreifer mit Schreibrechten im Arbeitsverzeichnis oder mit Zugriff auf den
 laufenden Prozess. Gegen den hilft kein Anwendungsprogramm.
@@ -231,12 +240,56 @@ anzeigende Software. Wer die Datei öffnen darf, kann sie hier schwärzen.
 | **Zeichen, die eine Seite setzen darf** | **1 000 000** | fest |
 | **Zeichenoperationen je Seiten-Scan** (Aufwandskonto) | **1 000 000 + 16× Inhalt** | fest |
 | Größe der Einstellungsdatei | 1 MB | fest |
+| **Buchungsliste** (`--booking-list`) | **16 MB** | **fest** |
+| **Review-Datei** (`--apply-review`) | **16 MB** | **fest** |
+| **Regionsliste** (`--manual-regions`) | **16 MB** | **fest** |
+| **Musterkonfiguration** (`--patterns-config`) | **1 MB** | **fest** |
 
-Alle Grenzen dieser Tabelle gelten für verschlüsselte Dateien genauso — siehe
-„Die Grenzen gelten auch hinter der Entschlüsselung“.
+Alle Grenzen, die dem **Eingabe-PDF** gelten, gelten für verschlüsselte Dateien
+genauso — siehe „Die Grenzen gelten auch hinter der Entschlüsselung“.
 
-Die letzten beiden Zeilen messen keine Bytes, und das ist ihr Zweck; sie stehen
-weiter unten unter „Wenn Bytes die falsche Größe sind“.
+Die Zeilen „Zeichen, die eine Seite setzen darf“ und „Zeichenoperationen je
+Seiten-Scan“ messen keine Bytes, und das ist ihr Zweck; sie stehen weiter unten
+unter „Wenn Bytes die falsche Größe sind“.
+
+### Die Hilfsdateien sind fest begrenzt, und zwar mit Absicht
+
+Die letzten fünf Zeilen — Einstellungsdatei, Buchungsliste, Review-Datei,
+Regionsliste, Musterkonfiguration — gelten **nicht** dem Eingabe-PDF, sondern
+den Dateien, die der Bedienende selbst mitbringt. Sie stehen hier trotzdem, weil
+eine Grenze nicht davon abhängen darf,
+ob eine Datei *böse gemeint* ist: `std::fs::read` legt einen Puffer in
+**Dateigröße** an, bevor irgendetwas geprüft wurde. Wie viel Arbeitsspeicher ein
+Lauf belegt, stand damit in der Datei und nicht in der Konfiguration — und der
+häufigste Weg dorthin ist kein Angriff, sondern ein vertippter Pfad:
+`--manual-regions` auf einen 700-MB-Scan statt auf die JSON-Datei. Gemessen
+steht das unter „Hilfsdateien ohne Grenze“.
+
+**Warum sie fest sind.** Ein Schalter dafür hätte als einzigen Zweck, diesen
+Schutz aufzuweichen. Für `--max-input-mb` gibt es einen Grund — ein 700-MB-Scan
+ist eine echte Eingabe —, für eine 700-MB-Buchungsliste keinen.
+
+**Warum 16 MB und nicht 512.** Bemessen an dem, was legitim vorkommt:
+`examples/booking_list.csv` braucht 134 Byte je Eintrag (941 Byte für sieben
+Einträge, nachgezählt), 16 MB fassen also über hunderttausend — mehr, als die
+Kette mit `--max-candidates` (100 000) überhaupt weiterreicht. Für die
+Review-Datei rechnet der Code mit rund 600 Byte je geprüfter Stelle, also gut
+25 000 Stellen; von Hand geprüft werden Dutzende bis Hunderte.
+
+**Warum die Musterkonfiguration enger liegt.** Dort ist nicht die Byte-Zahl die
+teure Größe, sondern die Zahl der übersetzten regulären Ausdrücke — rund 12 kB
+Arbeitsspeicher je Muster. 1 MB fasst über 26 000 Muster; `examples/patterns.yaml`
+wiegt 1 155 Byte (nachgemessen). Dieselbe Grenze gilt für die Einstellungsdatei.
+Die Begründungen im Einzelnen stehen bei den Konstanten selbst
+(`redact_core::MAX_AUX_FILE_BYTES`, `MAX_CONFIG_BYTES` in
+`crates/redact-patterns/src/matcher.rs`); die dort angegebenen
+Speicher-Messreihen sind hier **nicht** nachgemessen.
+
+**Geprüft wird in drei Schritten, und der erste ist nicht die Größe:**
+es muss eine *gewöhnliche Datei* sein (eine benannte Pipe meldet Länge 0 und
+liefert endlos), dann muss die Länge unter der Grenze liegen, und gelesen wird
+danach trotzdem über einen begrenzten Leser — zwischen Frage und Antwort kann
+eine Datei wachsen.
 
 Die Vorprüfung (`redact_pdf::document::prescan`) läuft über die **Rohbytes**,
 bevor `lopdf` die Datei zu sehen bekommt, und schließt die ausgepackten Streams
@@ -662,6 +715,67 @@ wird (stderr, weil `--json` seine Zusammenfassung nach stdout schreibt):
 FEHLGESCHLAGEN b3/riesig.pdf: PDF-Fehler: b3/riesig.pdf: 6144 MB groß,
 erlaubt sind 512 MB (--max-input-mb). …
 [3/3] b3/z.pdf
+```
+
+### Hilfsdateien ohne Grenze
+
+Derselbe Befund, eine Schalterreihe weiter. Die Grenze der vorigen Messung galt
+für die **Eingabe-PDF**; die vier Dateien, die der Bedienende daneben mitgibt —
+Buchungsliste, Review-Datei, Regionsliste, Musterkonfiguration —, gingen durch
+`std::fs::read`/`read_to_string` und hatten gar keine. Wieder eine dünn belegte
+Datei (`truncate -s 6G`): 6 442 450 944 Byte Nennlänge, 4 kB wirklich auf der
+Platte.
+
+**„vorher“ ist an einem Release-Binary des Standes gemessen, in dem der Schalter
+noch ungebremst las; „nachher“ am Binary desselben Arbeitsbaums, nachdem die
+Grenze stand.** Beide Läufe auf derselben Maschine, `/usr/bin/time -v` des
+Kindprozesses, dieselbe 6-GB-Datei, jeweils mit dem Demo-Kontoauszug als
+Eingabe.
+
+| Schalter | Grenze | vorher | nachher |
+|---|---|---|---|
+| `--manual-regions` | 16 MB | Exit 1 nach **24,0 s**, **6 150 MB** | Exit 1 nach **0,00 s**, **6,3 MB** |
+| `--apply-review` | 16 MB | — (nicht selbst gemessen) | Exit 1 nach **0,00 s**, **5,6 MB** |
+| `--booking-list` | 16 MB | — (nicht selbst gemessen) | Exit 1 nach **0,00 s**, **6,6 MB** |
+| `--patterns-config` | 1 MB | — (nicht selbst gemessen) | Exit 1 nach **0,00 s**, **6,5 MB** |
+| Gegenprobe: gesunder Lauf ohne Hilfsdatei | — | — | Exit 0 nach **0,01 s**, **8,8 MB** |
+
+Die Zeile `--manual-regions` ist die einzige, für die hier ein eigener
+Vorher-Wert steht — sie war beim Messen als letzte noch offen. Für die übrigen
+drei lag die Grenze bereits, als gemessen wurde; die Vorher-Werte, die in den
+Modulkommentaren von `crates/redact-core/src/read.rs` stehen, sind **nicht**
+nachgemessen worden und deshalb hier nicht wiedergegeben. Der Mechanismus ist in
+allen vier Fällen derselbe, und die 6 150 MB der ersten Zeile zeigen, was er
+kostet.
+
+Die Meldung nennt Nennlänge, Grenze und — das ist der eigentliche Zweck — die
+wahrscheinlichere Ursache:
+
+```console
+$ redact-rs k.pdf -o out.pdf --manual-regions gross.json --no-patterns
+Fehler: Parse-Fehler: gross.json: 6144 MB (6442450944 Byte) groß, erlaubt sind
+16 MB. Für eine Review-Datei oder eine Regionsliste ist das eine feste Grenze und
+keine Einstellung: gemessen sind rund 600 Byte je geprüfter Stelle, 16 MB fassen
+also gut 25 000 — von Hand geprüft werden Dutzende bis Hunderte. Zeigt
+`--apply-review` bzw. `--manual-regions` wirklich auf die JSON-Datei und nicht
+auf die PDF-Datei?
+$ echo $?
+1
+```
+
+**Die Größe ist nicht die erste Frage.** Eine benannte Pipe hat die Länge 0 und
+liefert trotzdem endlos; ein Zeichengerät ebenso. Beides wird abgelehnt, bevor
+eine Größe überhaupt zur Sprache kommt — nachgemessen an einer `mkfifo`-Pipe,
+aus der ein `yes` schrieb (Exit 1 nach **0,01 s**, **6,5 MB**), an `/dev/zero`
+hinter `--manual-regions` und an einem Verzeichnis hinter `--booking-list`:
+
+```console
+$ redact-rs k.pdf -o out.pdf --booking-list pipe.csv
+Fehler: Buchungslisten-Fehler: pipe.csv: keine gewöhnliche Datei. Gelesen werden
+nur Dateien — eine Pipe oder ein Gerät hätte keine Größe, an der sich eine Grenze
+festmachen ließe, und lieferte weiter, bis der Arbeitsspeicher voll ist.
+$ echo $?
+1
 ```
 
 ### Speicherbedarf der Bildschwärzung

@@ -40,16 +40,39 @@ pub fn dot_color(color: RegionColor) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+/// Eine gewünschte Umschaltung der automatischen Erkennung.
+///
+/// Die Seitenleiste ändert den Zustand **nicht selbst**: beim Umschalten wird
+/// die Trefferliste neu aufgebaut, und ob dabei Arbeit weggeworfen werden darf,
+/// entscheidet die Rückfrage in [`crate::app::RedactApp`]. Ein hier direkt
+/// gesetztes Kästchen ließe sich nach einem „Nein“ nicht mehr zurücknehmen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternToggle {
+    /// Automatische Erkennung ganz (`true` = an).
+    All(bool),
+    /// Ein einzelnes Muster.
+    One { id: String, on: bool },
+}
+
 /// Zeichnet die gesamte Seitenleiste.
 ///
 /// `summary` wird einmal je Bild von [`crate::app`] berechnet und
 /// hereingereicht — die Konfliktauflösung soll nicht je Trefferzeile laufen.
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
+///
+/// Rückgabe ist der Wunsch, die automatische Erkennung umzuschalten; ausgeführt
+/// wird er von [`crate::app::RedactApp::apply_pattern_toggle`].
+#[must_use]
+pub fn show(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    summary: &HitSummary,
+) -> Option<PatternToggle> {
     output_name(ui, state);
     ui.separator();
 
     ui.heading("Treffer");
     ui.label(RichText::new(summary.headline()).strong());
+    let toggle = detection(ui, state);
     legend(ui);
     padding_note(ui, state.config.padding);
     ui.separator();
@@ -77,6 +100,81 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     if !ui.memory(|m| m.has_focus(crate::focus::id(crate::focus::REPLACEMENT))) {
         state.end_replacement_edit();
     }
+
+    toggle
+}
+
+/// Sprechblase am Schalter für die automatische Erkennung.
+pub const DETECTION_HINT: &str = "Aus heißt: kein einziger automatischer Treffer — \
+     geschwärzt wird nur, was Sie selbst ziehen (oder was aus einer Buchungsliste kommt). \
+     Entspricht --no-patterns auf der Kommandozeile und steht so auch im Protokoll.";
+
+/// Überschrift der aufklappbaren Musterliste.
+pub const PATTERN_LIST_TITLE: &str = "Muster einzeln";
+
+/// Der Schalter für die automatische Erkennung — ganz und je Muster.
+///
+/// ## Warum er hier steht und nicht in der oberen Leiste
+///
+/// Er gehört zu den Treffern: er entscheidet, welche Zeilen darunter überhaupt
+/// entstehen. Und er muss **an derselben Stelle sichtbar sein wie die Zahl, die
+/// er erklärt** — „0 Treffer“ heißt mit abgeschalteter Erkennung nicht „nichts
+/// gefunden“, sondern „nicht gesucht“. Deshalb steht die Ansage aus
+/// [`AppState::detection_notice`] unmittelbar unter der Kopfzeile, in
+/// Warnfarbe, und nicht bloß als Häkchenzustand.
+fn detection(ui: &mut egui::Ui, state: &AppState) -> Option<PatternToggle> {
+    let mut wish = None;
+
+    let mut on = state.patterns_enabled();
+    if ui
+        .checkbox(&mut on, "Automatisch suchen")
+        .on_hover_text(DETECTION_HINT)
+        .changed()
+    {
+        wish = Some(PatternToggle::All(on));
+    }
+
+    // Der Zustand muss ohne Klick und ohne Sprechblase zu sehen sein: wer eine
+    // so entstandene Datei für vollständig geprüft hält, hat sie nicht geprüft.
+    if let Some(notice) = state.detection_notice() {
+        ui.label(RichText::new(notice).small().color(warning_color(ui)));
+    }
+
+    // Die Liste ist zugeklappt, solange nichts abgeschaltet ist — offen sonst:
+    // eine Abschaltung soll man sehen, ohne danach zu suchen.
+    egui::CollapsingHeader::new(PATTERN_LIST_TITLE)
+        .default_open(state.disabled_pattern_count() > 0)
+        .show(ui, |ui| {
+            // Bei „alles aus“ ändert ein einzelnes Häkchen nichts — es bleibt
+            // trotzdem stehen (nicht ausgeblendet), damit die gemerkte Auswahl
+            // sichtbar ist.
+            ui.add_enabled_ui(state.patterns_enabled(), |ui| {
+                for def in state.pattern_states() {
+                    let mut single = def.enabled;
+                    if ui
+                        .checkbox(&mut single, &def.id)
+                        .on_hover_text(&def.description)
+                        .changed()
+                    {
+                        wish = Some(PatternToggle::One {
+                            id: def.id.clone(),
+                            on: single,
+                        });
+                    }
+                }
+                if state.pattern_states().is_empty() {
+                    ui.label(RichText::new("— keine Muster in diesem Lauf —").weak());
+                }
+            });
+        });
+
+    wish
+}
+
+/// Die Farbe für „hier stimmt etwas nicht ganz“ — dieselbe wie in der
+/// Statuszeile für Warnungen.
+fn warning_color(ui: &egui::Ui) -> Color32 {
+    ui.visuals().warn_fg_color
 }
 
 /// Vertikale Luft um den Detailbereich.
@@ -356,6 +454,8 @@ pub fn action_label(action: &Action) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::DerefMut;
+
     use super::*;
 
     /// Jedes Ergebnis braucht eine Erklärung, und die muss auf Deutsch
@@ -385,6 +485,115 @@ mod tests {
         }
     }
 
+    // ------------------------- Abschaltbare automatische Funde (Aufgabe #81)
+
+    /// Aller Text, den ein Bild wirklich auf den Schirm gemalt hat.
+    ///
+    /// Über die gezeichneten Formen und nicht über den Zustand: die Frage
+    /// lautet „steht es da?“, und die beantwortet nur das, was gemalt wurde.
+    fn painted_text(output: &egui::FullOutput) -> String {
+        fn walk(shape: &egui::Shape, into: &mut String) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    into.push_str(text.galley.text());
+                    into.push('\n');
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut text);
+        }
+        text
+    }
+
+    /// Zeichnet die Seitenleiste und gibt zurück, was dabei zu lesen war.
+    fn draw(state: &mut AppState) -> String {
+        use std::cell::RefCell;
+
+        let ctx = egui::Context::default();
+        let state = RefCell::new(state);
+        let mut painted = String::new();
+        // Dreimal: egui braucht ein Bild, bis Panelmaße und aufklappbare
+        // Bereiche stehen.
+        for _ in 0..3 {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::SidePanel::left("sidebar").show(ctx, |ui| {
+                    let summary = state.borrow().hit_summary();
+                    let _ = show(ui, state.borrow_mut().deref_mut(), &summary);
+                });
+            });
+            painted = painted_text(&output);
+        }
+        painted
+    }
+
+    /// **Die Auflage (3): der Zustand muss an der Oberfläche zu sehen sein.**
+    ///
+    /// Nicht in einer Sprechblase, nicht erst nach einem Klick — als Text auf
+    /// dem Schirm, neben der Zahl, die er erklärt. „0 Treffer“ heißt mit
+    /// abgeschalteter Erkennung nicht „nichts gefunden“, sondern „nicht
+    /// gesucht“, und das ist der Unterschied zwischen einer geprüften und einer
+    /// ungeprüften Datei.
+    #[test]
+    fn a_switched_off_detection_is_written_on_the_screen() {
+        // Alles an: der Schalter ist da, eine Warnung nicht.
+        let mut state = AppState::new();
+        state
+            .load_bytes(&redact_pdf::testing::demo_statement(), None)
+            .unwrap();
+        let painted = draw(&mut state);
+        assert!(painted.contains("Automatisch suchen"), "{painted}");
+        assert!(
+            !painted.contains(redact_pipeline::DETECTION_NOTICE),
+            "ohne Abschaltung gehört da keine Warnung hin:\n{painted}"
+        );
+
+        // Ganz aus: der Satz steht da, wörtlich derselbe wie im Audit-Log.
+        state.set_patterns_enabled(false);
+        let painted = draw(&mut state);
+        let notice = state.detection_notice().expect("es ist etwas abgeschaltet");
+        assert!(
+            painted.contains(&notice),
+            "die Abschaltung steht nirgends auf dem Schirm:\n{painted}"
+        );
+        assert!(notice.contains("--no-patterns"), "{notice}");
+
+        // Einzeln aus: ebenso, mit dem Namen des Musters.
+        state.set_patterns_enabled(true);
+        state.set_pattern_enabled("bic", false);
+        let painted = draw(&mut state);
+        assert!(
+            painted.contains(&state.detection_notice().unwrap()),
+            "{painted}"
+        );
+        assert!(painted.contains("bic"), "{painted}");
+    }
+
+    /// Die Kästchen zeigen den **tatsächlichen** Zustand, nicht die Vorgabe.
+    #[test]
+    fn the_pattern_list_shows_the_state_of_this_run() {
+        let mut state = AppState::new();
+        state
+            .load_bytes(&redact_pdf::testing::demo_statement(), None)
+            .unwrap();
+        // Aufgeklappt ist die Liste nur, wenn etwas abgeschaltet ist — dann
+        // müssen die Namen zu sehen sein.
+        state.set_pattern_enabled("date_de", false);
+        let painted = draw(&mut state);
+        assert!(painted.contains(PATTERN_LIST_TITLE), "{painted}");
+        assert!(painted.contains("iban_de"), "{painted}");
+        assert!(painted.contains("date_de"), "{painted}");
+        assert!(state.pattern_enabled("iban_de"));
+        assert!(!state.pattern_enabled("date_de"));
+    }
+
     /// **Befund: mit `-o` war das Feld „Namenszusatz“ wirkungslos** — und sah
     /// aus wie jedes andere Eingabefeld. Hier am echten Kontext geprüft: das
     /// Feld ist abgeschaltet, und der Grund steht daneben.
@@ -401,7 +610,7 @@ mod tests {
                 let _ = ctx.run(egui::RawInput::default(), |ctx| {
                     egui::SidePanel::left("sidebar").show(ctx, |ui| {
                         let summary = state.borrow().hit_summary();
-                        show(ui, &mut state.borrow_mut(), &summary);
+                        let _ = show(ui, &mut state.borrow_mut(), &summary);
                     });
                 });
             }
@@ -463,7 +672,7 @@ mod tests {
         let empty = RefCell::new(AppState::new());
         egui::__run_test_ui(|ui| {
             let summary = empty.borrow().hit_summary();
-            show(ui, &mut empty.borrow_mut(), &summary);
+            let _ = show(ui, &mut empty.borrow_mut(), &summary);
         });
 
         let mut populated = AppState::new();
@@ -486,7 +695,7 @@ mod tests {
         let populated = RefCell::new(populated);
         egui::__run_test_ui(|ui| {
             let summary = populated.borrow().hit_summary();
-            show(ui, &mut populated.borrow_mut(), &summary);
+            let _ = show(ui, &mut populated.borrow_mut(), &summary);
         });
         // Der Negativ-Eintrag bleibt aus, egal wie oft gezeichnet wird.
         assert!(populated

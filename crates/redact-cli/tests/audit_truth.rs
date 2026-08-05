@@ -566,13 +566,25 @@ fn the_same_regions_with_zero_based_pages_are_all_applied() {
         assert_eq!(entry["effect"], serde_json::json!("applied"), "{entry}");
         assert!(entry["removed_glyphs"].as_u64().unwrap() > 0, "{entry}");
     }
+    // Keine Warnung über die *Wirkung* — jede Region hat getroffen.
+    //
+    // Nicht „gar keine Warnung“: dieser Lauf sagt selbst `--no-patterns`, und
+    // seit die automatische Erkennung abschaltbar ist, steht genau das als
+    // eigene Zeile im Log (`redact_pipeline::detection_notice`). Sie gehört
+    // dorthin — eine Datei, an der nur von Hand geschwärzt wurde, sieht sonst
+    // aus wie eine vollständig geprüfte. Geprüft wird deshalb schärfer als
+    // vorher: **diese eine** Warnung, und keine andere.
+    let warnings: Vec<String> = log["warnings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|w| w.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(warnings.len(), 1, "{log}");
     assert!(
-        log["warnings"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .is_empty(),
-        "{log}"
+        warnings[0].starts_with("Automatische Erkennung:"),
+        "eine Warnung über die Wirkung darf hier nicht stehen: {log}"
     );
     assert!(
         !stdout.contains("davon"),

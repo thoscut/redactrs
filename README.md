@@ -21,6 +21,13 @@ Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
 > dahinter — und die verbreitete Kontrolle (`pdftotext … | grep …`) gibt
 > nachweislich falsche Entwarnung.
 
+> **Wer von einer älteren Fassung kommt, liest zuerst
+> [`CHANGELOG.md`](CHANGELOG.md).** Zwischen den Fassungen dieses Werkzeugs
+> sind mehrfach Fälle geschlossen worden, in denen eine ältere Fassung
+> Geheimnisse in der Ausgabe stehen ließ und trotzdem Erfolg meldete. Die
+> betroffenen Einträge sind dort mit **⚠ Sicherheit** gekennzeichnet und nennen
+> jeweils, ob bereits erzeugte Ergebnisse nachzuprüfen sind.
+
 ---
 
 ## Inhalt
@@ -31,6 +38,7 @@ Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
    * [Verschlüsselte PDFs](#verschluesselte-pdfs)
    * [Mehrere Dateien auf einmal](#stapel)
    * [Einstellungsdatei](#einstellungsdatei)
+   * [Automatische Funde abschalten](#automatische-funde-abschalten)
 4. [Buchungsliste](#buchungsliste)
 5. [Manuelle Regionen](#manuelle-regionen)
 6. [Eigene Patterns](#eigene-patterns)
@@ -48,6 +56,12 @@ Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
 14. [Sicherheit — was zugesichert wird](#sicherheit)
 15. [Abweichungen vom Ursprungskonzept](#abweichungen-vom-ursprungskonzept)
 16. [Entwicklung](#entwicklung)
+17. [Release bauen](#release-bauen)
+
+Daneben: [`CHANGELOG.md`](CHANGELOG.md) — was sich zwischen zwei Fassungen
+geändert hat, und was davon sicherheitsrelevant war.
+[`SECURITY.md`](SECURITY.md) — Bedrohungsmodell, Grenzen für Eingabedateien,
+Messungen.
 
 ---
 
@@ -86,8 +100,17 @@ Wie man das feststellt, steht unter
 
 ## Installation
 
-Fertige Binaries für Windows und Linux liegen unter
-[Releases](https://github.com/thoscut/redactrs/releases).
+Fertige Binaries liegen unter
+[Releases](https://github.com/thoscut/redactrs/releases) — **drei Archive**:
+
+| Archiv | Inhalt | wofür |
+|---|---|---|
+| `redact-rs-<version>-x86_64-windows.zip` | `redact-rs.exe` + `redact-rs-gui.exe` | Windows, mit Oberfläche |
+| `redact-rs-<version>-x86_64-linux.tar.gz` | `redact-rs` (glibc) | Linux, mit Oberfläche |
+| `redact-rs-<version>-x86_64-linux-musl.tar.gz` | `redact-rs` (statisch, **ohne** Oberfläche) | Linux-Fassungen, auf denen der glibc-Bau nicht läuft — Debian 12, RHEL/Alma/Rocky 8 und 9, Ubuntu 22.04. Keine Systemvoraussetzungen. |
+
+Das musl-Archiv ist die reine Kommandozeile (`--no-default-features`): kein
+`--gui`, kein `redact-rs-gui`. Alles andere ist identisch.
 
 Das Windows-Archiv enthält **zwei Programme**:
 
@@ -101,10 +124,15 @@ das Konsolenfenster nur um den Preis *jeder* Ausgabe auf stdout/stderr abschalte
 (siehe `crates/redact-cli/src/bin/redact-rs-gui.rs`). Unter Linux gibt es diese
 Trennung nicht; dort startet `redact-rs` ohne Argumente die Oberfläche.
 
-Dazu liegt im Archiv (nachgesehen in `.github/workflows/release.yml`):
+Dazu liegt in **jedem** der drei Archive (nachgesehen in
+`.github/workflows/release.yml`):
 
 * dieser `README.md` und [`SECURITY.md`](SECURITY.md) — sonst liefen die
   Verweise in beiden Richtungen ins Leere,
+* [`CHANGELOG.md`](CHANGELOG.md) — wer eine ältere Fassung ersetzt, muss ohne
+  Netzzugang sehen können, welche Lecks dazwischen geschlossen wurden. **Ab der
+  nächsten Fassung**; die v0.3.0-Archive enthalten ihn noch nicht (nachgesehen
+  in den ausgelieferten Archiven).
 * die drei Lizenztexte `LICENSE-MIT`, `LICENSE-APACHE` und `LICENSE-OFL.txt`
   (die eingebetteten Schriften stehen unter der SIL Open Font License),
 * das Verzeichnis `examples/`.
@@ -192,6 +220,7 @@ redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
   -f, --force                 vorhandene Ausgabedatei überschreiben
       --patterns <IDs>        Muster, kommagetrennt (z.B. iban_de,bic)
       --no-patterns           gar keine Muster anwenden
+      --disable-pattern <ID>  einzelnes Muster abschalten (mehrfach möglich)
       --patterns-config <F>   eigene Musterkonfiguration (YAML oder JSON)
       --min-confidence <WERT> Mindestvertrauen eines Treffers (Standard: 0.5)
       --booking-list <CSV>    Buchungsliste (Positiv-/Negativliste)
@@ -319,12 +348,64 @@ redact-rs auszuege/
 redact-rs januar/auszug.pdf februar/auszug.pdf
 ```
 
-```text
-januar/auszug.pdf → januar/auszug_geschwaerzt.pdf (4 Schwärzung(en))
-februar/auszug.pdf → februar/auszug_geschwaerzt.pdf (3 Schwärzung(en))
+Nachgemessen an zwei Kopien des Demo-Kontoauszugs (`--write-demo`). **stdout**:
 
-2 Datei(en): 2 verarbeitet, 0 fehlgeschlagen.
+```text
+januar/auszug.pdf → januar/auszug_geschwaerzt.pdf (7 Schwärzung(en))
+februar/auszug.pdf → februar/auszug_geschwaerzt.pdf (7 Schwärzung(en))
+
+2 Datei(en): 2 vollständig geprüft, 0 verarbeitet (aber nicht vollständig geprüft), 0 fehlgeschlagen.
 ```
+
+Dazu **auf stderr**, und zwar jeweils **bevor** die Datei geöffnet wird — sonst
+hielte eine riesige Datei den Stapel auf, ohne dass ihr Name irgendwo stünde:
+
+```text
+[1/2] januar/auszug.pdf
+[2/2] februar/auszug.pdf
+```
+
+**Die Zusammenfassung nennt drei Zahlen, nicht zwei.** „Verarbeitet“ hieß früher
+auch für die Dateien, deren Text niemand gelesen hatte: wer zwanzig Auszüge
+laufen ließ, bekam „20 verarbeitet, 0 fehlgeschlagen“ und Rückgabewert 0,
+obwohl in einer davon eine Kontonummer unberührt stand. Die mittlere Zahl steht
+deshalb für sich — es sind die Dateien mit [Rückgabewert 3](#kommandozeile), und
+keine Datei zählt in zweien mit.
+
+So sieht ein Stapel aus, in dem eine Datei nur zum Teil geprüft werden konnte
+und eine gar nicht zu öffnen war (nachgemessen an drei Dateien in einem
+Verzeichnis). **stdout**:
+
+```text
+./a.pdf → ./a_geschwaerzt.pdf (7 Schwärzung(en))
+./b.pdf → ./b_geschwaerzt.pdf (0 Schwärzung(en))  ← nicht vollständig geprüft
+
+3 Datei(en): 1 vollständig geprüft, 1 verarbeitet (aber nicht vollständig geprüft), 1 fehlgeschlagen.
+
+Bei 1 Datei(en) blieb ein Teil des Dokuments ungelesen — was dort steht, kann nicht geschwärzt worden sein. Die Stellen stehen oben auf stderr; bitte diese Ergebnisse von Hand prüfen. (Rückgabewert 3.)
+```
+
+**stderr**:
+
+```text
+[1/3] ./a.pdf
+[2/3] ./b.pdf
+NICHT VOLLSTÄNDIG GEPRÜFT ./b.pdf: Das Form-XObject „Fm0“ (Objekt 6 0) steht in
+den Ressourcen, wird aber nirgends gezeichnet; sein Text wurde nicht durchsucht
+und kann deshalb nicht geschwärzt worden sein.
+[3/3] ./c.pdf
+FEHLGESCHLAGEN ./c.pdf: PDF-Fehler: ./c.pdf: keine PDF-Datei (Header %PDF- fehlt)
+```
+
+Mit `--quiet` bleiben von beiden Strömen genau die beiden Zeilen übrig, die
+etwas zu bedeuten haben — `NICHT VOLLSTÄNDIG GEPRÜFT` und `FEHLGESCHLAGEN`;
+stdout bleibt dann leer, und auch die Fortschrittszeilen entfallen
+(nachgemessen).
+
+Der Rückgabewert war hier **`1`**: eine gescheiterte Datei sticht die
+unvollständig geprüfte. Ohne die kaputte Datei ist er `3` (ebenfalls
+nachgemessen: `2 Datei(en): 1 vollständig geprüft, 1 verarbeitet (aber nicht
+vollständig geprüft), 0 fehlgeschlagen.`).
 
 Drei Eigenschaften, auf die es dabei ankommt:
 
@@ -362,10 +443,19 @@ Was man nicht bei jedem Aufruf tippen will, steht in einer kleinen YAML-Datei:
 # Alle Schlüssel sind freiwillig; was fehlt, behält seine Vorgabe.
 output_suffix: _anonym        # Namenszusatz          (Vorgabe: _geschwaerzt)
 patterns: [iban_de, bic]      # Standard-Muster       (Vorgabe: die eingebaute Auswahl)
+disabled_patterns: [date_de]  # dauerhaft abgeschaltet (Vorgabe: keines)
 min_confidence: 0.4           # Mindestvertrauen      (Vorgabe: 0.5)
 padding: 2.0                  # Polsterung in Punkt   (Vorgabe: 1.0)
 theme: dunkel                 # Thema der Oberfläche  (hell | dunkel)
 ```
+
+**`no_patterns` gibt es hier bewusst nicht.** „Alle automatischen Funde aus“ ist
+die weitreichendste Einstellung dieses Werkzeugs, und sie wäre aus einer Datei
+heraus **nicht mehr zu widerrufen**: `--no-patterns` ist ein Schalter ohne
+Gegenstück, es gibt kein `--patterns-an`. Stünde er in der Datei, liefe jeder
+Aufruf ohne Erkennung, und die Kommandozeile hätte kein Mittel dagegen.
+`disabled_patterns` ist etwas anderes: eine Liste auf der Kommandozeile
+**ersetzt** die aus der Datei, die Angabe bleibt also widerrufbar.
 
 **Rangfolge: Kommandozeile schlägt Datei schlägt Vorgabe.** Ein Schalter, der
 nicht angegeben wurde, überschreibt die Datei nicht — das ist der Grund, warum
@@ -436,6 +526,124 @@ Ausgeschaltete Muster lassen sich mit `--patterns amount_eur` gezielt aktivieren
 **Kein Muster erkennt Namen.** Für Kontoinhaber, Empfänger, Arbeitgeber und
 Ähnliches gibt es nur die [Buchungsliste](#buchungsliste), die
 [manuellen Regionen](#manuelle-regionen) oder die GUI.
+
+### Automatische Funde abschalten
+
+Manchmal will man die Vorschläge des Werkzeugs nicht. Ein Muster, das in *dieser*
+Aktenlage nur Fehltreffer erzeugt; ein Dokument, an dem allein von Hand
+geschwärzt werden soll. Beides geht — ganz und einzeln, auf der Kommandozeile
+und in der Oberfläche:
+
+```bash
+# Gar keine automatische Suche: geschwärzt wird nur, was von Hand
+# gezogen oder über die Buchungsliste angegeben ist.
+redact-rs auszug.pdf -o out.pdf --no-patterns --manual-regions regionen.json
+
+# Ein einzelnes Muster heraus, die übrigen laufen weiter.
+redact-rs auszug.pdf -o out.pdf --disable-pattern konto_nr
+
+# Mehrere, kommagetrennt oder mehrfach angegeben.
+redact-rs auszug.pdf -o out.pdf --disable-pattern konto_nr,phone_de
+```
+
+Gemeint sind die Muster, die der Lauf **wirklich anwendet** — also die Spalte
+„Standard: **an**“ der [Tabelle oben](#eingebaute-muster) bzw. das, was
+`--patterns` ausgewählt hat. Ein ohnehin ausgeschaltetes Muster (`date_de`,
+`amount_eur`, `iban_intl`) braucht kein `--disable-pattern`; abgelehnt wird es
+trotzdem nicht, denn ein bekannter Name ist ein bekannter Name.
+
+Wie sich die Schalter zueinander verhalten, am Demo-Kontoauszug nachgemessen
+(er ergibt mit den Vorgabemustern 7 Treffer):
+
+| Aufruf | Treffer | Ansage |
+|---|---|---|
+| `--disable-pattern konto_nr` | 6 | `… 1 Muster abgeschaltet (konto_nr).` |
+| `--disable-pattern konto_nr,phone_de` | 5 | `… 2 Muster abgeschaltet (konto_nr, phone_de).` |
+| `--disable-pattern date_de` (war ohnehin aus) | 7 | `… 1 Muster abgeschaltet (date_de).` |
+| `--patterns iban_de` | 2 | keine |
+| `--patterns iban_de --disable-pattern bic` | 2 | `… 1 Muster abgeschaltet (bic).` |
+| `--patterns iban_de --disable-pattern iban_de` | 0 | `… 1 Muster abgeschaltet (iban_de).` |
+| `--no-patterns --disable-pattern bic` | 0 | `… abgeschaltet (--no-patterns).` |
+| `--disable-pattern iban` | — | Abbruch, Rückgabewert 2 |
+
+Zwei Zeilen der Tabelle überraschen und sind deshalb Absicht:
+
+* **`--disable-pattern date_de`** ändert nichts an der Trefferzahl — das Muster
+  war ohnehin aus — und wird trotzdem angesagt. Die Ansage berichtet, was
+  *angeordnet* wurde, nicht was gewirkt hat; das ist die Aussage, die eine
+  Prüferin braucht.
+* **`--no-patterns` schlägt `--disable-pattern`.** Die Ansage nennt dann nur
+  noch das Gröbere: bei „alles aus“ ist die Zahl der einzeln abgeschalteten
+  Muster gegenstandslos.
+
+In der Oberfläche steht der Schalter über der Trefferliste: das Häkchen
+**„Automatisch suchen“** für alles, darunter aufklappbar **„Muster einzeln“**
+mit einem Kästchen je Muster dieses Laufs. Die Liste ist zugeklappt, solange
+nichts abgeschaltet ist, und offen, sobald etwas aus ist — eine Abschaltung
+soll man sehen, ohne danach zu suchen.
+
+Beim Umschalten wird die Trefferliste **neu gerechnet**. Das kostet: jede
+Abwahl, jede je Treffer gewählte Schwärzungsart und ein geladenes Review sind
+danach weg. Erhalten bleiben die selbst gezogenen Rechtecke und die
+Schutzmarken der Buchungsliste (die steht in der Konfiguration und wird nicht
+angefasst). Deshalb kommt vorher dieselbe Rückfrage wie bei „Analysieren“ — und
+sagt man dort „nein“, springt auch das Kästchen zurück: die Seitenleiste ändert
+nichts selbst, sie meldet nur den Wunsch.
+
+**Ein unbekannter Name ist ein Bedienfehler**, kein Achselzucken:
+
+```console
+$ redact-rs auszug.pdf -o out.pdf --disable-pattern iban
+Fehler: Konfigurationsfehler: --disable-pattern: „iban“ ist kein bekanntes
+Muster. Gültig sind: iban_de, iban_intl, glaeubiger_id, konto_nr, blz, bic,
+amount_eur, date_de, credit_card, steuer_id, email, phone_de.
+(`redact-rs --list-patterns` zeigt sie mit Beschreibung.) Es wurde nichts
+abgeschaltet und nichts geschwärzt: ein übergangener Name sähe aus wie eine
+Abschaltung und wäre keine.
+$ echo $?
+2
+```
+
+Der Lauf endet also **vor** der ersten Schwärzung; es entsteht keine
+Ausgabedatei. Ein stillschweigend übergangener Tippfehler ergäbe dagegen eine
+Datei, die anders ist als erwartet, und niemand erführe warum.
+
+#### Der Zustand ist sichtbar — das ist der Punkt
+
+Eine Datei, die mit abgeschalteter Erkennung entstanden ist, sieht in jeder
+Zahl aus wie eine vollständig geprüfte: „0 Treffer“ heißt dort nicht „nichts
+gefunden“, sondern „nicht gesucht“. Deshalb steht die Abschaltung an **drei**
+Stellen, und alle drei speisen sich aus derselben Angabe:
+
+* in der Zusammenfassung auf stdout und als Warnung auf stderr —
+  `Automatische Erkennung: abgeschaltet (--no-patterns). …`;
+* in der Oberfläche in der Kopfzeile der Trefferliste und als Satz in
+  Warnfarbe unter dem Schalter. Ganz aus:
+  `Automatische Suche AUS — nicht gesucht, nur von Hand: 2 Treffer · 2 werden
+  geschwärzt`. Einzelne Muster aus:
+  `6 Treffer · 6 werden geschwärzt · 1 Muster abgeschaltet` — die Zahl steht
+  dann hinter den Trefferzahlen, weil sie sie ergänzt statt sie umzudeuten.
+  Ist noch kein Dokument geladen, sagt die Statuszeile den Zustand trotzdem
+  (`Automatische Erkennung: alle Muster an` bzw. der jeweilige Satz);
+* im **Audit-Log** als eigenes Feld, das auch dann dasteht, wenn nichts
+  abgeschaltet war:
+
+```json
+"patterns": { "all_disabled": false, "disabled": ["konto_nr"] }
+```
+
+Zusätzlich ist „Analysieren“ in der Oberfläche ausgegraut, solange die Analyse
+nachweislich nichts finden könnte (kein Muster, keine Buchungsliste, keine
+Regionsdatei) — mit dem Grund in der Sprechblase. Ein Knopf, der eine leere
+Trefferliste hinterlässt, läse sich sonst als „nichts gefunden“.
+
+Was **nicht** geschieht: der Rückgabewert bleibt `0`. Eine abgeschaltete
+Erkennung ist eine Anweisung des Aufrufenden und kein Befund an der Datei — die
+Analyse hat das Dokument vollständig gelesen und auf Geheiß nach weniger
+gesucht. Rückgabewert `3` ist der Frage „hat das Werkzeug alles *gesehen*?“
+vorbehalten (siehe [Kommandozeile](#kommandozeile)); spränge er auch bei jedem
+`--no-patterns` an, wäre er für die Fälle wertlos, für die es ihn gibt. Die
+Begründung im Einzelnen steht in `crates/redact-pipeline/src/coverage.rs`.
 
 ## Buchungsliste
 
@@ -548,10 +756,16 @@ Rasterbild steht für die Analyse kein Text, zu entfernen gibt es also nichts �
 siehe [`effect` je Region](#befund).
 
 Das Bild aus der Ausgabedatei erneut dekodiert und Pixel für Pixel mit dem
-Original verglichen (Region 80×40 pt bei `--padding 1.0`, also 82×42 Bildpunkte):
+Original verglichen (Region 80×40 pt, mit `--padding 1.0` also 82×42 pt):
 **3696 von 20 000 Pixeln geändert, alle 3696 auf Schwarz; kein einziges Pixel
 außerhalb des Rechtecks verändert** — der veränderte Bereich ist genau
-`x 48…131`, `y 28…71`, und das ist die gepolsterte Region.
+`x 48…131`, `y 28…71`, also **84×44 Bildpunkte**.
+
+Dass es 84×44 sind und nicht 82×42, ist kein Rundungsfehler, sondern die
+sichere Richtung: ein Rechteck von 82×42 pt liegt nicht auf dem Pixelraster,
+und ein nur teilweise getroffener Randpixel wird **mit** überschrieben statt
+stehen gelassen. Nach innen zu runden hieße, einen Streifen Originalbild am
+Rand der Schwärzung zu behalten.
 
 Neu kodiert wird dabei immer **verlustfrei** mit `/FlateDecode`
 (`crates/redact-pdf/src/image.rs`), auch dann, wenn das Original ein JPEG war.
@@ -566,22 +780,44 @@ die **Abwesenheit** des Wortes.
 Ein überschriebenes Bild wird **verlustfrei neu kodiert — immer als
 `/FlateDecode`**. Ein `/DCTDecode`-Bild (JPEG) verliert dabei seinen Filter:
 
+Nachgemessen an demselben 200×100-Bild wie oben, einmal als JPEG (Qualität 85)
+statt als Flate-Bild, mit derselben Region darüber:
+
 ```console
 $ # vorher                        nachher
 $ #   /Filter /DCTDecode            /Filter /FlateDecode
-$ #   10 307 Stream-Bytes           39 296 Stream-Bytes
-$ #   Datei 10 961 Byte             Datei 39 990 Byte
+$ #    6 939 Stream-Bytes          48 782 Stream-Bytes
+$ #   Datei 7 766 Byte             Datei 49 591 Byte
 ```
 
 Das ist Absicht. JPEG neu zu kodieren wäre verlustbehaftet, und die DCT-Blöcke
 am Rand der Schwärzung könnten Reste der ursprünglichen Pixel zurücktragen.
-Die Datei wird dafür deutlich größer.
+Die Datei wird dafür deutlich größer — **beim JPEG.** Bei einem Flate-Bild kann
+sie auch schrumpfen: dieselbe Region über dem Flate-Bild oben ergab 57 516 →
+49 031 Byte, weil eine große schwarze Fläche sich besser packen lässt als das,
+was vorher dort stand. Die Zusammenfassung sagt trotzdem pauschal „Datei
+dadurch größer“; gemeint ist der Regelfall.
 
-Ehrlich dazugesagt: **verlustfrei heißt pixelgleich, nicht bytegleich.** Die
-Bildpunkte außerhalb der Schwärzung sind nachweislich unverändert (siehe die
-Messung oben, auch beim JPEG-Fall), aber das Bild-Objekt in der Datei ist ein
-anderes als im Original. Wer Bitgleichheit gegenüber dem Original braucht, darf
-keine Schwärzung über ein Bild legen.
+Ehrlich dazugesagt: **verlustfrei heißt pixelgleich, nicht bytegleich** — und
+„pixelgleich“ heißt bei einem JPEG etwas Schwächeres, als es zunächst klingt:
+
+* **Flate-Bild → Flate-Bild: exakt.** Nachgemessen am Beispiel oben: von
+  20 000 Bildpunkten sind genau die 3696 innerhalb des Rechtecks geändert und
+  **null** außerhalb.
+* **JPEG → Flate-Bild: pixelgleich nur zum eigenen Dekodat.** redact-rs packt
+  das JPEG mit seinem Dekoder aus, überschreibt die Bildpunkte und schreibt das
+  Ergebnis verlustfrei weg. Wer die Ausgabe gegen das Original hält und dabei
+  einen *anderen* JPEG-Dekoder benutzt, sieht deshalb auch außerhalb der
+  Schwärzung Unterschiede — JPEG-Dekodierung ist zwischen Implementierungen
+  nicht bitgenau. Nachgemessen gegen Pillow: 8231 der 16 304 Bildpunkte
+  außerhalb des Rechtecks weichen ab, davon 8167 um **höchstens 2** je Kanal
+  (größte Abweichung 16). Innerhalb des Rechtecks sind alle 3696 schwarz. Das
+  ist Dekoder-Rauschen, kein zurückgetragener Inhalt — aber wer „unverändert“
+  wörtlich nachprüfen will, muss denselben Dekoder benutzen.
+
+Das Bild-*Objekt* in der Datei ist in beiden Fällen ein anderes als im Original.
+Wer Bitgleichheit gegenüber dem Original braucht, darf keine Schwärzung über ein
+Bild legen.
 
 ### Nicht dekodierbare Bilder brechen den Lauf ab
 
@@ -684,7 +920,7 @@ es nennt keine Herkunft und behauptet auch keine.
 ```json
 {
   "timestamp": "2026-08-01T09:04:22Z",
-  "tool": { "name": "redact-rs", "version": "0.2.0" },
+  "tool": { "name": "redact-rs", "version": "0.3.0" },
   "input":  { "path": "kontoauszug.pdf", "sha256": "466c0af4…" },
   "output": { "path": "geschwaerzt.pdf", "sha256": "c2c54724…" },
   "redactions": [
@@ -716,7 +952,8 @@ es nennt keine Herkunft und behauptet auch keine.
     "applied": 4, "covered": 0, "degenerate": 0, "missing_page": 0,
     "removed_glyphs": 66, "drawn_rects": 4, "removed_annotations": 0,
     "redacted_images": 0, "copied_images": 0
-  }
+  },
+  "patterns": { "all_disabled": false, "disabled": [] }
 }
 ```
 
@@ -725,6 +962,16 @@ es nennt keine Herkunft und behauptet auch keine.
 entfernt wurde (nicht, was vorgesehen war); `effect` fasst den Lauf in Zahlen
 zusammen — `redacted_images` und `copied_images` beziffern die
 [Bildschwärzung](#bilder).
+
+`patterns` sagt, wonach der Lauf **nicht** gesucht hat: `all_disabled` für
+`--no-patterns`, `disabled` für jedes einzeln abgeschaltete Muster (siehe
+[Automatische Funde abschalten](#automatische-funde-abschalten)). Das Feld steht
+auch dann da, wenn nichts abgeschaltet war — „nichts abgeschaltet“ ist die
+Aussage, auf die sich ein Prüfer verlassen können muss, und ein Feld, das nur
+im Ausnahmefall erschiene, machte ein Log mit abgeschalteter Erkennung
+ununterscheidbar von einem Log aus einer älteren Fassung. Denselben Sachverhalt
+trägt zusätzlich ein Satz in `warnings`: einmal für Maschinen, einmal für
+Menschen.
 
 <a id="befund"></a>
 
@@ -751,18 +998,35 @@ Jeder Befund außer `applied` steht auch in der Zusammenfassung auf der Konsole
 und als Warnung auf stderr — ein Lauf, der nichts entfernt hat, endet nicht
 mehr wortlos mit „Schwärzungen: 3“.
 
+Nachgemessen an einem dreiseitigen Dokument mit drei Regionen, von denen eine
+`"page": 3` nennt:
+
 ```console
-$ redact-rs auszug.pdf -o out.pdf --no-patterns --manual-regions regionen.json
+$ redact-rs drei.pdf -o out.pdf --no-patterns --manual-regions regionen.json
 Seiten:             3
+Textzeilen:         3
+Treffer gesamt:     3
+Automatische Erkennung: abgeschaltet (--no-patterns). …
 Schwärzungen:       3
   davon wirksam:      2 (Zeichen entfernt)
   davon wirkungslos:  1 (Seite gibt es in diesem Dokument nicht)
-Entfernte Zeichen:  44
+Entfernte Zeichen:  82
 Deck-Rechtecke:     2
 …
 Warnung: 1 von 3 Schwärzung(en) liegen auf einer Seite, die es in diesem
-Dokument nicht gibt (Seite 4; das Dokument hat 3 Seite(n)). …
+Dokument nicht gibt (Seite 4; das Dokument hat 3 Seite(n)). Dort wurde nichts
+entfernt und nichts überdeckt — der Text steht unverändert in der Ausgabe.
+Häufigste Ursache ist die Zählweise: in JSON ist die erste Seite „page“: 0, die
+letzte also 2.
+$ echo $?
+0
 ```
+
+Der Rückgabewert bleibt hier **`0`**: die Analyse hat das Dokument vollständig
+gelesen: eine Region, die ins Leere zeigt, ist ein Fehler in der *Eingabe* des
+Nutzers und keine Stelle, die das Werkzeug nicht durchsuchen konnte. Genau
+deshalb steht der Befund in der Zusammenfassung, auf stderr **und** als
+`missing_page` im Audit-Log.
 
 ### `page` zählt überall gleich
 
@@ -899,20 +1163,46 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
+Nachgemessen an der Ausgabe aus dem [Schnellstart](#schnellstart), die mit
+`--patterns iban_de,bic,email` entstanden ist:
+
 ```console
 $ cargo run --release -- ../kontoauszug_geschwaerzt.pdf \
       "DE89 3704 0044 0532 0130 00" "Max Mustermann" "532013000"
 sauber: DE89 3704 0044 0532 0130 00
 LECK (6x): Max Mustermann
-    Rohdaten-Stream @0x1e1 (inflate) [Inhalt, UTF-8/ASCII]: …(Kontoinhaber: Max Mustermann) Tj…
+    Rohdaten-Stream @0x1e7 (inflate) [Inhalt, UTF-8/ASCII]: …(Kontoinhaber: Max Mustermann) Tj…
     Objekt 11 0 <Stream, lopdf-dekodiert> [Zeichenketten-Verkettung]: …Kontoinhaber: Max Mustermann…
     …
 LECK (4x): 532013000
     …
+$ echo $?
+1
 ```
 
-Der Rückgabewert ist `1`, sobald irgendetwas gefunden wurde — das Programm
-eignet sich damit als Kontrollschritt in einem Skript.
+Der Rückgabewert ist `1`, sobald irgendetwas gefunden wurde, und `0` sonst
+(beides nachgemessen) — das Programm eignet sich damit als Kontrollschritt in
+einem Skript.
+
+**Und die Gegenprobe**, die dem Ergebnis erst seinen Wert gibt: dieselbe Datei
+ohne `--patterns`, also mit den Vorgabemustern, gegen alle fünf Werte geprüft:
+
+```console
+$ cargo run --release -- ../std.pdf \
+      "DE89 3704 0044 0532 0130 00" "532013000" "+49 30 123456789" \
+      "12345678901" "Max Mustermann"
+sauber: DE89 3704 0044 0532 0130 00
+sauber: 532013000
+sauber: +49 30 123456789
+sauber: 12345678901
+LECK (6x): Max Mustermann
+```
+
+IBAN, Kontonummer, Telefonnummer und Steuer-ID sind restlos weg — auf allen
+Ebenen, auf denen `leaks` sucht, nicht nur dort, wo `pdftotext` hinsieht. Übrig
+ist der **Name**, und zwar genau so oft wie vorher: für Namen gibt es kein
+Muster, und niemand hat ihn markiert. Das ist keine Schwäche der Prüfung,
+sondern ihr Ergebnis.
 
 ### Und wogegen prüft man?
 
@@ -966,9 +1256,15 @@ nicht steht, ist deshalb nicht automatisch abgedeckt.
   $ redact-rs wrap.pdf -o wrap_out.pdf --no-patterns --booking-list wrap.csv
   Textzeilen:         2
   Treffer gesamt:     0        # der Eintrag enthält die vollständige IBAN
+  Automatische Erkennung: abgeschaltet (--no-patterns). …
   $ redact-rs wrap.pdf -o wrap_out2.pdf --patterns iban_de
+  Textzeilen:         2
   Treffer gesamt:     0
   ```
+
+  Gegenprobe, damit die Null etwas bedeutet: steht dieselbe IBAN **in einer**
+  Zeile, findet `iban_de` sie (`Textzeilen: 1, Treffer gesamt: 1,
+  Schwärzungen: 1`) — auch ungruppiert geschrieben.
 
 * **Muster sind Heuristiken.** `konto_nr` und `blz` entscheiden über den
   Kontext: ohne Schlüsselwort daneben liegen sie mit 0.30 bzw. 0.25 unter der
@@ -1164,6 +1460,25 @@ cargo test -p redact-pdf --test marked_content
   wirklich anfällt, und wächst mit dem Inhalt, den die Datei *mitbringt* —
   nicht mit dem, was sie daraus macht. Ist es leer, wird die Datei abgelehnt.
 
+  **Auch die Hilfsdateien haben eine Grenze**, und die ist *fest* — es gibt
+  keinen Schalter dafür:
+
+  | Was | Grenze |
+  |---|---|
+  | Buchungsliste (`--booking-list`) | 16 MB |
+  | Review-Datei (`--apply-review`) | 16 MB |
+  | Regionsliste (`--manual-regions`) | 16 MB |
+  | Musterkonfiguration (`--patterns-config`) | 1 MB |
+  | Einstellungsdatei | 1 MB |
+
+  Sie sind nicht gegen Angreifer gerichtet — diese Dateien bringt der Bedienende
+  selbst mit —, sondern gegen den vertippten Pfad: `--manual-regions` auf einen
+  700-MB-Scan statt auf die JSON-Datei legte vorher einen Puffer in Dateigröße
+  an, bevor überhaupt feststand, dass es kein JSON ist (nachgemessen an einer
+  dünn belegten 6-GB-Datei: **6 150 MB Spitzenspeicher nach 24 s**; heute Exit 1
+  nach 0,00 s bei 6,3 MB). Eine benannte Pipe oder ein Gerät wird abgelehnt,
+  bevor die Größe überhaupt zur Sprache kommt.
+
   Details, Messwerte und die Begründung jeder Zahl in
   [`SECURITY.md`](SECURITY.md).
 
@@ -1291,6 +1606,16 @@ Je Eintrag lässt sich
   eigenem Ersatztext, je Treffer einzeln. Neue Treffer bekommen die Art aus
   `--action`/`--replace-with`.
 
+Über der Liste steht der Schalter für die **automatische Erkennung**: das
+Häkchen „Automatisch suchen“ (dasselbe wie `--no-patterns`) und darunter,
+aufklappbar, „Muster einzeln“ mit einem Kästchen je Muster dieses Laufs. Ist
+etwas abgeschaltet, sagt es die Kopfzeile selbst — `Automatische Suche AUS —
+nicht gesucht, nur von Hand: 2 Treffer · 2 werden geschwärzt` —, denn
+„0 Treffer“ hieße dort sonst dasselbe wie bei einem sauberen Dokument.
+Solange nichts zu finden wäre (keine Muster, keine Buchungsliste, keine
+Regionsdatei), ist „🔍 Analysieren“ ausgegraut und die Sprechblase sagt warum.
+Einzelheiten unter [Automatische Funde abschalten](#automatische-funde-abschalten).
+
 Über „🗄 Review speichern“ / „📋 Review laden“ geht der Stand als JSON hinaus
 und wieder herein — mit der SHA-256-Prüfsumme des Dokuments, geprüft von
 **derselben** Funktion, die `--apply-review` benutzt. Eine Review-Datei zu einem
@@ -1319,19 +1644,21 @@ startet das gebaute `redact-rs`-Binary als eigenen Prozess und daneben
 `AppState` (laden → analysieren → exportieren) mit denselben Einstellungen und
 vergleicht die Ausgabedatei **byteweise** sowie das Audit-Log Feld für Feld
 (beide Prüfsummen eingeschlossen; ausgenommen sind nur Zeitstempel und Pfade,
-die zwangsläufig verschieden sind). Fünf Fälle laufen dort:
+die zwangsläufig verschieden sind). Sieben Fälle laufen dort:
 
 | Test | prüft |
 |---|---|
 | `the_binary_and_the_window_produce_the_same_file_and_the_same_log` | Vorgabe-Aktion, `--padding 3`: gleiche Bytes, gleiches Log |
 | `the_binary_and_the_window_agree_on_a_replacement_too` | dasselbe mit `--action replace` — der schärfere Fall, weil eine Font-Ressource dazukommt |
+| `the_binary_and_the_window_agree_on_a_switched_off_pattern` | `--disable-pattern email`: gleiche Bytes, gleiches Log samt Feld `patterns` — mit Gegenprobe, dass ein Lauf **ohne** die Abschaltung andere Bytes ergibt |
+| `the_binary_and_the_window_agree_with_no_patterns_at_all` | `--no-patterns` plus eine Region von Hand: beide schwärzen nur diese eine |
 | `both_ways_write_the_same_review_file` | gleiche Review-Datei, beide mit Modus `0600` |
 | `both_ways_write_the_same_review_file_with_a_replacement` | dasselbe mit Ersatztext |
 | `a_deviating_window_would_be_caught` | **Gegenprobe**: die früher bestandene Abweichung (feste Polsterung) muss zu verschiedenen Bytes führen |
 
 ```bash
 cargo test -p redact-cli --test cli_and_gui_agree
-# test result: ok. 5 passed
+# test result: ok. 7 passed
 ```
 
 Was trotzdem für die Kommandozeile spricht: nur dort ist der ganze Lauf ein
@@ -1483,7 +1810,7 @@ Alle Abweichungen sind bewusst:
 
 | Kriterium | Stand | Nachweis |
 |-----------|-------|----------|
-| 10 Seiten in unter 2 s (ohne OCR) | erfüllt | 10 Seiten, 450 Zeilen, 1350 Schwärzungen in 77 ms (`examples/gen10.rs`, Release) |
+| 10 Seiten in unter 2 s (ohne OCR) | erfüllt | Nachgemessen: `crates/redact-pdf/examples/gen10.rs` erzeugt 10 Seiten à 45 Zeilen (59 824 Byte); `redact-rs gross.pdf -o out.pdf --patterns iban_de,amount_eur,date_de` findet **1350 Treffer**, schwärzt alle 1350 und entfernt 24 300 Zeichen. **0,16 s** Wanduhr für den ganzen Prozess (bestes von fünf Läufen, Release, `/usr/bin/time`; Spitzenspeicher 12,6 MB) — also inklusive Start, Lesen und Schreiben. Hier stand früher „77 ms“; das ist nicht die Zeit, die ein Aufruf braucht. |
 | Deutsche IBAN wird zuverlässig erkannt | erfüllt, **innerhalb einer Zeile** | Muster mit mod-97-Prüfung; gruppiert und ungruppiert getestet. Über einen Zeilenumbruch verteilt wird sie nicht gefunden. |
 | Negativliste blockiert Schwärzung zuverlässig | erfüllt | `negative_list_prevents_redaction` prüft am fertigen PDF, dass die geschützte IBAN erhalten bleibt und die ungeschützte verschwindet |
 | Copy-Paste liefert keinen sensitiven Text | erfüllt für gefundenen Text | geprüft mit `redact_pdf::leaks` an der geschriebenen Datei, nicht mit dem eigenen Extraktor. Was die Analyse nicht findet, wird nicht geschwärzt — siehe [Grenzen](#grenzen). |
@@ -1494,8 +1821,8 @@ Alle Abweichungen sind bewusst:
 | Review-Datei wirkt nur auf ihr eigenes Dokument | erfüllt, auch hinter `--manual-regions` | `review_file_from_another_document_is_rejected`, `a_foreign_review_file_behind_manual_regions_is_refused_too` |
 | Metadaten im Ausgabe-PDF entfernt | erfüllt | `metadata_is_stripped`, `names_tree_is_removed_as_the_module_documentation_promises` |
 | GUI: Rechtecke ziehen, Treffer abwählen, Export | umgesetzt, darüber hinaus | dazu Eckgriffe, Rückgängig/Wiederholen, Miniaturansichten, Zoom 0,25×–4×, Tastaturbedienung, Drag & Drop und die Schwärzungsart je Treffer ([Details](#grafische-oberfläche)). Alle Rechnungen und Zustandsübergänge liegen als reine Funktionen in `state.rs`, `selector.rs`, `viewer.rs`, `history.rs`, `focus.rs` und sind ohne Fenster getestet; das Fensterverhalten selbst ist nicht automatisiert prüfbar |
-| GUI-Binary unter 30 MB | erfüllt (für die gemessene Datei) | Windows 7,4 MB nachgemessen (`dist/redact-rs.exe`, 7 395 328 Byte) — das ist die **Konsolenfassung**. `redact-rs-gui.exe` ist seitdem als zweite Datei dazugekommen und hier **nicht** nachgemessen; der Linux-Wert (13 MB) stammt ebenfalls aus einer früheren Messung. |
-| Export der GUI identisch zur CLI | erfüllt | `cli_and_gui_agree.rs` startet das gebaute Binary als eigenen Prozess und daneben `AppState` (laden → analysieren → exportieren) und vergleicht Ausgabedatei **byteweise** sowie das Audit-Log Feld für Feld — inzwischen fünf Fälle: Vorgabe-Aktion, `--action replace`, die Review-Datei in beiden Varianten und die Gegenprobe `a_deviating_window_would_be_caught`, die die früher bestandene Abweichung nachstellt und anschlagen muss (Tabelle unter [Grafische Oberfläche](#grafische-oberfläche)). |
+| GUI-Binary unter 30 MB | erfüllt, alle vier Artefakte | An den **ausgelieferten** Binaries von v0.3.0 nachgemessen (heruntergeladen und gegen `SHA256SUMS-BINARIES` geprüft): `redact-rs.exe` 10,6 MB (10 586 624 Byte), `redact-rs-gui.exe` 9,8 MB (9 827 840 Byte), Linux/glibc `redact-rs` 14,9 MB (14 900 000 Byte), Linux/musl `redact-rs` 4,9 MB (4 944 824 Byte). Der größte Wert liegt bei der Hälfte der Grenze. Hier stand früher „Windows 7,4 MB (7 395 328 Byte)“ und „Linux 13 MB“ — beides aus einer früheren Fassung und an keinem ausgelieferten Artefakt nachgemessen. |
+| Export der GUI identisch zur CLI | erfüllt | `cli_and_gui_agree.rs` startet das gebaute Binary als eigenen Prozess und daneben `AppState` (laden → analysieren → exportieren) und vergleicht Ausgabedatei **byteweise** sowie das Audit-Log Feld für Feld — inzwischen **sieben** Fälle: Vorgabe-Aktion, `--action replace`, `--disable-pattern`, `--no-patterns`, die Review-Datei in beiden Varianten und die Gegenprobe `a_deviating_window_would_be_caught`, die die früher bestandene Abweichung nachstellt und anschlagen muss (Tabelle unter [Grafische Oberfläche](#grafische-oberfläche)). Nachgemessen: `test result: ok. 7 passed`. |
 
 Von dem, was das Konzept in §11 außerhalb des MVP führt, sind das
 [Entschlüsseln passwortgeschützter PDFs](#verschluesselte-pdfs) und die
@@ -1516,26 +1843,61 @@ cargo run --release -p redact-pdf --example gen10 -- gross.pdf 10
 
 ## Release bauen
 
-Die Version steht in `.release-version` (und muss zur Version in `Cargo.toml`
-passen). Wird diese Datei geändert und gepusht, baut GitHub Actions die
-Binaries für Windows und Linux, erzeugt `SHA256SUMS` und veröffentlicht den
-Release samt Tag:
+**Zwei Vorbedingungen, an denen kein Weg vorbeiführt** (`verify` in
+[`.github/workflows/release.yml`](.github/workflows/release.yml)):
+
+1. **Der Commit muss auf dem Default-Branch liegen.** Geprüft mit
+   `git merge-base --is-ancestor` gegen den Branch, den die GitHub-API als
+   Default meldet. Ein Arbeitsbranch veröffentlicht nichts — auch nicht über
+   einen Tag, auch nicht über `workflow_dispatch` mit eigenem `ref`.
+2. **Die vollständige CI muss grün sein.** `release.yml` ruft
+   [`ci.yml`](.github/workflows/ci.yml) als wiederverwendbaren Workflow auf
+   (Job `ci`) und macht ihn zur Vorbedingung von `build` und `release` — es ist
+   dieselbe Datei wie bei jedem Push, keine Kopie. Vorher gab es in diesem
+   Ablauf keinen einzigen Test-, Clippy-, fmt- oder `cargo deny`-Schritt: aus
+   rotem Code konnte ein öffentliches Binary werden, und genau das ist bei
+   v0.3.0 passiert.
+
+Dazu prüft `verify`, dass Tag, `.release-version` und die Version des Crates
+`redact-cli` (über `cargo metadata`) dasselbe sagen, und nagelt den Ref **einmal**
+auf eine Commit-ID fest, die dann CI, Bau und Veröffentlichung gemeinsam
+benutzen. Eine Versionsnummer mit Bindestrich (`v0.4.0-rc.1`) wird auf jedem
+Weg als Vorabversion gekennzeichnet.
+
+**Der übliche Weg** ist die Versionsdatei. Sie trägt einen Kommentarkopf, der
+sagt, dass eine Änderung an ihr veröffentlicht — der gehört nicht weggeworfen,
+deshalb wird nur die Versionszeile ersetzt und nicht die ganze Datei:
 
 ```bash
-printf '0.2.0\n' > .release-version
-# Version in Cargo.toml gleichziehen
-git commit -am "Release 0.2.0" && git push
+# Nur die Versionszeile ersetzen; Kommentarkopf bleibt stehen.
+sed -i 's/^[0-9].*/0.4.0/' .release-version
+# Version in Cargo.toml gleichziehen (verify vergleicht beide)
+git commit -am "Release 0.4.0"
+git push origin HEAD:main          # Default-Branch, sonst passiert nichts
 ```
 
-Alternativ genügt ein Tag:
+`publish-release.yml` reagiert auf Änderungen an `.release-version`, aber nur
+auf `main`/`master` **und** nur, wenn das auch der tatsächliche Default-Branch
+ist. Der Tag wird vom Release selbst am gebauten Commit angelegt; man legt ihn
+nicht vorher an.
 
-```bash
-git tag -a v0.2.0 -m "redact-rs 0.2.0" && git push origin v0.2.0
+**Der Tag-Weg** existiert weiter (`git push origin v0.4.0` löst `release.yml`
+direkt aus), führt aber durch dieselben beiden Vorbedingungen. Ein Tag auf einem
+Arbeitsstand scheitert an Nr. 1:
+
+```text
+::error::Commit <sha> liegt nicht auf dem Default-Branch (main). Ein Release
+entsteht nur aus Code, der dort angekommen ist. Erst zusammenführen, dann
+veröffentlichen.
 ```
 
 Der Weg über die Versionsdatei existiert zusätzlich, weil in abgeschotteten
 Umgebungen häufig nur auf einen bestimmten Branch gepusht werden darf und
 `workflow_dispatch` über die API gesperrt ist.
+
+Gebaut werden **drei** Artefakte (Matrix in `release.yml`): Windows
+(CLI + GUI), Linux/glibc (CLI + GUI) und Linux/musl (nur CLI, statisch). Dazu
+kommen `SHA256SUMS` und `SHA256SUMS-BINARIES` als eigene Release-Dateien.
 
 ## Lizenz
 

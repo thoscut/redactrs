@@ -19,7 +19,10 @@
 //! Zeichen in Form-XObjects werden ebenfalls entfernt. Wird dasselbe XObject
 //! mehrfach platziert, wirkt die Entfernung notwendigerweise auf alle
 //! Platzierungen — es wird also eher zu viel als zu wenig geschwärzt. Das ist
-//! die sichere Richtung.
+//! die sichere Richtung, und sie wird **gesagt**: liegt das Formular auf
+//! mehreren Seiten, meldet [`warn_about_shared_form`] die betroffenen. Sonst
+//! ändert sich eine Seite, die niemand ausgewählt hat, stillschweigend — in
+//! einer Datei, die danach weitergegeben wird.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -263,12 +266,18 @@ impl PdfRedactor {
         // Textspiegel in Form-XObjects: gefunden beim Scan der Seite, geleert
         // erst beim einmaligen Neuschreiben des Formulars.
         let mut form_marked: BTreeMap<ObjectId, Vec<MarkedTextRecord>> = BTreeMap::new();
+        // Welche Seiten benutzen welches Form-XObject. Ein Formular wird nur
+        // **einmal** neu geschrieben; steht es auf mehreren Seiten, wirkt die
+        // Schwärzung dort mit. Das muss gesagt werden — siehe
+        // [`warn_about_shared_form`].
+        let mut form_pages: BTreeMap<ObjectId, BTreeSet<usize>> = BTreeMap::new();
         // Eigenschaftslisten, die als eigenes Objekt in der Datei stehen und
         // deshalb nicht im Strom, sondern im Objekt bereinigt werden.
         let mut property_objects: BTreeSet<ObjectId> = BTreeSet::new();
         let no_inline: BTreeMap<usize, Operation> = BTreeMap::new();
         let no_plans: BTreeMap<usize, Plan> = BTreeMap::new();
         let no_marked: Vec<MarkedTextRecord> = Vec::new();
+        let no_form_pages: BTreeSet<usize> = BTreeSet::new();
 
         // Einmal statt je Seite: welche Seite benutzt welchen Content-Stream.
         // Siehe [`ContentUsers`] — die wiederholte Suche war der quadratische
@@ -309,6 +318,12 @@ impl PdfRedactor {
             })?;
             for warning in &scan.warnings {
                 push_warning(&mut report, warning.clone());
+            }
+            // Vor dem `continue`: gerade die Seiten **ohne** Schwärzung sind
+            // die, die von einem geteilten Formular unversehens getroffen
+            // werden.
+            for form_id in scan.form_placements.keys() {
+                form_pages.entry(*form_id).or_default().insert(page_index);
             }
             if page_redactions.is_empty() {
                 continue;
@@ -387,7 +402,15 @@ impl PdfRedactor {
             let inline = inline_images
                 .get(&InlineTarget::Form(form_id))
                 .unwrap_or(&no_inline);
-            report.removed_glyphs += plans.values().map(Plan::hidden_count).sum::<usize>();
+            let removed_here = plans.values().map(Plan::hidden_count).sum::<usize>();
+            if let Some(warning) = warn_about_shared_form(
+                form_pages.get(&form_id).unwrap_or(&no_form_pages),
+                removed_here,
+                inline.len(),
+            ) {
+                push_warning(&mut report, warning);
+            }
+            report.removed_glyphs += removed_here;
             add_per_redaction(&mut report, plans.values());
             let marked = form_marked.get(&form_id).unwrap_or(&no_marked);
             let mut mirrors = mirrors_to_clear(marked, StreamKey::Form(form_id), plans);
@@ -1225,6 +1248,48 @@ fn warn_about_images(doc: &Document, report: &mut RedactionReport) {
         pages.len()
     );
     push_warning(report, msg);
+}
+
+/// Sagt es, wenn ein geschwärztes Form-XObject auf mehreren Seiten steht.
+///
+/// Ein Formular steht **einmal** in der Datei, gleichgültig wie oft und wo es
+/// platziert ist; geschwärzt wird es deshalb auch nur einmal. Für die
+/// unbeteiligten Seiten heißt das: dort verschwindet derselbe Text, ohne dass
+/// jemand sie ausgewählt hätte. Das ist die sichere Richtung (siehe Modulkopf)
+/// und bleibt es auch — aber ungesagt ist es eine Überraschung in einer Datei,
+/// die die Nutzerin danach weitergibt.
+///
+/// Für *Bilder* im selben Formular sagt es [`crate::image`] längst; die
+/// Textmarke ist hier bewusst dieselbe, damit
+/// `redact_pipeline::coverage::NOT_A_COVERAGE_GAP` beide gleich einsortiert:
+/// zu viel geschwärzt ist keine Deckungslücke, der Rückgabewert bleibt 0.
+fn warn_about_shared_form(
+    pages: &BTreeSet<usize>,
+    removed_glyphs: usize,
+    inline_images: usize,
+) -> Option<String> {
+    if pages.len() < 2 || (removed_glyphs == 0 && inline_images == 0) {
+        return None;
+    }
+    let what = if removed_glyphs > 0 {
+        format!("{removed_glyphs} Zeichen entfernt")
+    } else {
+        format!("{inline_images} Inline-Bild(er) überschrieben")
+    };
+    // Bei einem Formular auf 200 Seiten hilft die vollständige Liste niemandem.
+    let shown: Vec<String> = pages.iter().take(8).map(|p| (p + 1).to_string()).collect();
+    let more = if pages.len() > shown.len() {
+        " …"
+    } else {
+        ""
+    };
+    Some(format!(
+        "In einem Form-XObject wurden {what}. Es wird von {} Seiten benutzt (Seite {}{more}) und \
+         steht nur einmal in der Datei — die Schwärzung wirkt deshalb auch auf die anderen \
+         Seiten, auch wenn dort keine Schwärzung angefordert war.",
+        pages.len(),
+        shown.join(", "),
+    ))
 }
 
 fn rect_from_object(obj: &Object) -> Option<Rect> {

@@ -71,8 +71,58 @@ pub struct AuditLog {
     pub metadata: MetadataRecord,
     /// Was die Schwärzung bewirkt hat — gemessen, nicht beabsichtigt.
     pub effect: EffectRecord,
+    /// Wonach dieser Lauf **nicht** gesucht hat.
+    ///
+    /// `#[serde(default)]`, damit ein vor dieser Fassung geschriebenes Log
+    /// weiterhin einlesbar bleibt. Geschrieben wird das Feld **immer**, auch
+    /// wenn nichts abgeschaltet war — siehe [`PatternRecord`].
+    #[serde(default)]
+    pub patterns: PatternRecord,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// Welche automatische Erkennung dieser Lauf **nicht** gemacht hat.
+///
+/// ## Warum das Feld immer geschrieben wird
+///
+/// „Nichts abgeschaltet“ ist die Aussage, auf die sich ein Prüfer verlassen
+/// können muss — und sie muss dastehen. Ein Feld, das nur im Ausnahmefall
+/// erscheint, macht ein Log mit abgeschalteter Erkennung ununterscheidbar von
+/// einem Log, das eine ältere Fassung des Werkzeugs geschrieben hat: in beiden
+/// fehlt es. Ein Nachweis, dem man ansieht, dass er nichts verschweigt, ist der
+/// halbe Zweck der Datei.
+///
+/// Derselbe Sachverhalt steht zusätzlich als Satz in [`AuditLog::warnings`]
+/// (siehe [`crate::detection_notice`]) — einmal für Maschinen, einmal für
+/// Menschen; gebaut werden beide aus derselben [`crate::Config`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternRecord {
+    /// Die automatische Erkennung war ganz abgeschaltet (`--no-patterns`).
+    pub all_disabled: bool,
+    /// Einzeln abgeschaltete Muster (`--disable-pattern`), in der angegebenen
+    /// Reihenfolge, getrimmt und ohne Dubletten.
+    #[serde(default)]
+    pub disabled: Vec<String>,
+}
+
+impl PatternRecord {
+    /// Was die Einstellungen dieses Laufs über die Erkennung sagen.
+    pub fn of(config: &crate::Config) -> Self {
+        Self {
+            all_disabled: config.no_patterns,
+            disabled: config
+                .disabled_pattern_ids()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    /// Ist überhaupt etwas abgeschaltet?
+    pub fn anything_disabled(&self) -> bool {
+        self.all_disabled || !self.disabled.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,7 +491,8 @@ pub struct BlockedEntry {
     pub blocked_reason: Option<String>,
 }
 
-/// Die gemessenen Ergebnisse eines Laufs, so wie sie ins Log gehören.
+/// Die Ergebnisse eines Laufs samt der Ansage, wonach überhaupt gesucht wurde
+/// — so wie beides ins Log gehört.
 #[derive(Debug, Clone, Copy)]
 pub struct Applied<'a> {
     /// Der Befund je Region — bereits gemessen, hier nicht noch einmal
@@ -451,6 +502,13 @@ pub struct Applied<'a> {
     pub redaction: &'a RedactionReport,
     /// Bericht des Metadatenlaufs.
     pub metadata: &'a MetadataReport,
+    /// Was an automatischer Erkennung abgeschaltet war.
+    ///
+    /// Das einzige Feld hier, das keine Messung ist — es steht trotzdem in
+    /// diesem Bündel, weil es zur selben Frage gehört wie die anderen drei:
+    /// *was ist wirklich geschehen?* Ein eigener Parameter an
+    /// [`AuditLog::build`] wäre der achte gewesen.
+    pub patterns: &'a PatternRecord,
 }
 
 impl AuditLog {
@@ -521,6 +579,7 @@ impl AuditLog {
                 redacted_images: applied.redaction.redacted_images,
                 copied_images: applied.redaction.copied_images,
             },
+            patterns: applied.patterns.clone(),
             redactions: entries,
             blocked_by_negative_list: blocked
                 .iter()
@@ -613,6 +672,24 @@ mod tests {
         report: &RedactionReport,
         metadata: &MetadataReport,
     ) -> (AuditLog, std::path::PathBuf) {
+        build_with(
+            redactions,
+            padding,
+            pages,
+            report,
+            metadata,
+            &crate::Config::default(),
+        )
+    }
+
+    fn build_with(
+        redactions: &[Redaction],
+        padding: f64,
+        pages: usize,
+        report: &RedactionReport,
+        metadata: &MetadataReport,
+        config: &crate::Config,
+    ) -> (AuditLog, std::path::PathBuf) {
         let dir = tempdir();
         let input = dir.join("in.pdf");
         let output = dir.join("out.pdf");
@@ -630,6 +707,7 @@ mod tests {
                 effects: &effects,
                 redaction: report,
                 metadata,
+                patterns: &PatternRecord::of(config),
             },
             &warnings,
         )
@@ -880,6 +958,81 @@ mod tests {
         let (log, dir) = build(&[iban_redaction()], 1.0, 1, &report, &stripped_info());
         assert_eq!(log.effect.redacted_images, 2);
         assert_eq!(log.effect.copied_images, 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ------------------------------------- Abschaltbare automatische Funde
+
+    /// Das Log sagt, wonach der Lauf **nicht** gesucht hat — und es sagt es
+    /// auch dann, wenn nichts abgeschaltet war.
+    #[test]
+    fn the_log_records_what_was_switched_off() {
+        // Fall 1: alles an. Das Feld steht trotzdem da und ist leer.
+        let (log, dir) = build(
+            &[iban_redaction()],
+            1.0,
+            1,
+            &report_with(&[4]),
+            &stripped_info(),
+        );
+        assert!(!log.patterns.anything_disabled());
+        let json = serde_json::to_string(&log).unwrap();
+        assert!(
+            json.contains("\"patterns\":{\"all_disabled\":false,\"disabled\":[]}"),
+            "das Feld fehlt im Log: {json}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+
+        // Fall 2: einzeln abgeschaltet.
+        let config = crate::Config {
+            disabled_patterns: vec!["date_de".into(), " bic ".into(), String::new()],
+            ..crate::Config::default()
+        };
+        let (log, dir) = build_with(
+            &[iban_redaction()],
+            1.0,
+            1,
+            &report_with(&[4]),
+            &stripped_info(),
+            &config,
+        );
+        assert!(!log.patterns.all_disabled);
+        assert_eq!(log.patterns.disabled, vec!["date_de", "bic"]);
+        std::fs::remove_dir_all(dir).ok();
+
+        // Fall 3: ganz aus.
+        let config = crate::Config {
+            no_patterns: true,
+            ..crate::Config::default()
+        };
+        let (log, dir) = build_with(
+            &[iban_redaction()],
+            1.0,
+            1,
+            &report_with(&[4]),
+            &stripped_info(),
+            &config,
+        );
+        assert!(log.patterns.all_disabled);
+        assert!(log.patterns.anything_disabled());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Ein Log aus einer Fassung ohne dieses Feld bleibt lesbar — sonst wäre
+    /// jede ältere Datei mit einem Schlag unbrauchbar.
+    #[test]
+    fn an_older_log_without_the_field_still_parses() {
+        let (log, dir) = build(
+            &[iban_redaction()],
+            1.0,
+            1,
+            &report_with(&[4]),
+            &stripped_info(),
+        );
+        let mut value: serde_json::Value = serde_json::to_value(&log).unwrap();
+        value.as_object_mut().unwrap().remove("patterns");
+        let old: AuditLog = serde_json::from_value(value).expect("altes Log bleibt lesbar");
+        assert_eq!(old.patterns, PatternRecord::default());
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -21,6 +21,7 @@ use redact_core::{
     Rect, RedactError, Redaction, Region, Result, ReviewFile, ReviewInput, Source, TextRun,
     AUDIT_SUFFIX, REVIEW_SUFFIX,
 };
+use redact_patterns::PatternDef;
 use redact_pdf::{page_boxes, PdfExtractor};
 use redact_pipeline::{sha256_bytes, Config, Outcome, ReviewIdentity, Secret};
 
@@ -257,6 +258,17 @@ pub struct HitSummary {
     pub protecting: usize,
     /// Anzahl derer, die wirklich geschwärzt werden.
     pub redacted: usize,
+    /// Hat dieser Lauf überhaupt automatisch gesucht?
+    ///
+    /// **Der Grund, warum das Feld hier steht** und nicht bloß am Schalter in
+    /// der Seitenleiste: ohne es lautet [`HitSummary::headline`] bei
+    /// abgeschalteter Erkennung „0 Treffer · 0 werden geschwärzt“ — Wort für
+    /// Wort dieselbe Zeile wie bei einem Dokument, in dem wirklich nichts
+    /// steht. Das ist der eine Satz dieses Programms, der niemals zweideutig
+    /// sein darf.
+    pub automatic: bool,
+    /// Wie viele Muster einzeln abgeschaltet sind.
+    pub disabled_patterns: usize,
 }
 
 impl HitSummary {
@@ -276,13 +288,33 @@ impl HitSummary {
     ///
     /// Schutzeinträge bekommen einen eigenen Platz, statt die Trefferzahl zu
     /// erhöhen: sie verhindern Schwärzungen, sie sind keine.
+    ///
+    /// ## Warum die Abschaltung **vor** den Zahlen steht
+    ///
+    /// Weil sie sie umdeutet. „0 Treffer“ heißt bei eingeschalteter Erkennung
+    /// „nichts gefunden“ und bei abgeschalteter „nicht gesucht“ — dieselben
+    /// Zeichen, die entgegengesetzte Aussage. Ein Zusatz hinter den Zahlen
+    /// käme zu spät: gelesen wird die Zeile von links, und eine Zahl, die man
+    /// schon falsch verstanden hat, liest man nicht noch einmal.
     pub fn headline(&self) -> String {
-        let mut text = format!(
+        let mut text = String::new();
+        if !self.automatic {
+            text.push_str("Automatische Suche AUS — nicht gesucht, nur von Hand: ");
+        }
+        text.push_str(&format!(
             "{} Treffer · {} werden geschwärzt",
             self.found, self.redacted
-        );
+        ));
         if self.protecting > 0 {
             text.push_str(&format!(" · {} geschützt", self.protecting));
+        }
+        // Bei „ganz aus“ ist die Zahl der einzeln abgeschalteten Muster
+        // gegenstandslos — es läuft ohnehin keines.
+        if self.automatic && self.disabled_patterns > 0 {
+            text.push_str(&format!(
+                " · {} Muster abgeschaltet",
+                self.disabled_patterns
+            ));
         }
         text
     }
@@ -447,6 +479,17 @@ impl std::fmt::Debug for PendingDocument {
     }
 }
 
+/// Die Muster einer Konfiguration mit ihrem Zustand — oder nichts.
+///
+/// Eine unbrauchbare `--patterns-config` liefert hier eine leere Liste statt
+/// eines Fehlers: die Seitenleiste hat keinen Platz für eine Fehlermeldung, und
+/// dieselbe Datei bringt die Analyse ohnehin mit Meldung zum Stehen (siehe
+/// [`AppState::analyze`]). Ein leeres Kästchenfeld ist dort das ehrlichere
+/// Bild als eine erfundene Vorgabeliste.
+fn pattern_states_of(config: &Config) -> Vec<PatternDef> {
+    redact_pipeline::pattern_states(config).unwrap_or_default()
+}
+
 /// Der gesamte Zustand der Anwendung.
 #[derive(Debug)]
 pub struct AppState {
@@ -495,6 +538,15 @@ pub struct AppState {
     pub warnings: Vec<String>,
     /// Schnappschüsse für Rückgängig/Wiederholen.
     pub history: History,
+    /// Die Muster dieses Laufs samt ihrem tatsächlichen Zustand.
+    ///
+    /// Grundlage der Kästchen in der Seitenleiste. Steht hier zwischengelegt
+    /// und wird **nicht** in jedem Bild neu bestimmt: dabei würden alle
+    /// regulären Ausdrücke übersetzt. Aufgefrischt wird bei jeder Änderung an
+    /// [`Config::no_patterns`] bzw. [`Config::disabled_patterns`], und die
+    /// gehen ausschließlich über [`AppState::set_patterns_enabled`] und
+    /// [`AppState::set_pattern_enabled`].
+    pattern_states: Vec<PatternDef>,
     /// Ein verschlüsseltes Dokument, das auf sein Passwort wartet.
     ///
     /// Solange das gesetzt ist, zeigt [`crate::app`] die Passwortabfrage.
@@ -508,7 +560,10 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
+        let config = Config::default();
+        let pattern_states = pattern_states_of(&config);
         Self {
+            pattern_states,
             pdf_path: None,
             document: None,
             input_sha256: String::new(),
@@ -519,7 +574,7 @@ impl Default for AppState {
             zoom: 1.0,
             regions: Vec::new(),
             selected_region: None,
-            config: Config::default(),
+            config,
             status: "Kein Dokument geladen".to_string(),
             extract_warnings: Vec::new(),
             warnings: Vec::new(),
@@ -537,10 +592,113 @@ impl AppState {
 
     /// Zustand mit den Einstellungen eines Kommandozeilenaufrufs.
     pub fn with_config(config: Config) -> Self {
-        Self {
+        let mut state = Self {
             config,
             ..Self::default()
+        };
+        // `--patterns`, `--patterns-config` und `--disable-pattern` bestimmen,
+        // welche Kästchen die Seitenleiste zeigt und wie sie stehen.
+        state.refresh_pattern_states();
+        state
+    }
+
+    // ------------------------------------------- Automatische Erkennung
+
+    /// Sucht dieser Lauf überhaupt automatisch?
+    pub fn patterns_enabled(&self) -> bool {
+        !self.config.no_patterns
+    }
+
+    /// Schaltet die automatische Erkennung ganz an oder aus.
+    ///
+    /// Die einzeln abgeschalteten Muster bleiben dabei gemerkt: wer alles
+    /// abschaltet und später wieder einschaltet, findet seine Auswahl vor und
+    /// nicht die Vorgabe.
+    ///
+    /// **Rechnet die Trefferliste nicht selbst neu** — das tut
+    /// [`crate::app::RedactApp`], nachdem es gefragt hat, ob dabei Arbeit
+    /// verlorengehen darf.
+    pub fn set_patterns_enabled(&mut self, on: bool) {
+        self.config.no_patterns = !on;
+        self.refresh_pattern_states();
+    }
+
+    /// Läuft dieses eine Muster in diesem Lauf?
+    ///
+    /// Antwortet aus [`AppState::pattern_states`], also aus dem *tatsächlichen*
+    /// Zustand: Vorgabe, `--patterns`, `--patterns-config` und die
+    /// Abschaltliste sind darin schon verrechnet. Ein unbekannter Name ist
+    /// `false` — er läuft ja auch nicht.
+    pub fn pattern_enabled(&self, id: &str) -> bool {
+        self.pattern_states
+            .iter()
+            .any(|def| def.id == id && def.enabled)
+    }
+
+    /// Schaltet ein einzelnes Muster an oder aus.
+    ///
+    /// Wie [`AppState::set_patterns_enabled`]: die Liste wird geändert, die
+    /// Treffer rechnet der Aufrufer neu.
+    pub fn set_pattern_enabled(&mut self, id: &str, on: bool) {
+        self.config.disabled_patterns.retain(|d| d.trim() != id);
+        if !on {
+            self.config.disabled_patterns.push(id.to_string());
         }
+        self.refresh_pattern_states();
+    }
+
+    /// Die Muster dieses Laufs mit ihrem Zustand — für die Kästchen.
+    pub fn pattern_states(&self) -> &[PatternDef] {
+        &self.pattern_states
+    }
+
+    /// Kann „Analysieren“ überhaupt etwas finden?
+    ///
+    /// Drei Quellen speisen die Analyse (siehe
+    /// [`redact_pipeline::collect_regions_for`]): die Muster, die Buchungsliste
+    /// und eine Regionsdatei aus `--manual-regions`. Ist die automatische
+    /// Erkennung aus und steht keine der beiden anderen dahinter, liefert der
+    /// Knopf eine **leere** Liste — und wirft dafür jede Abwahl und jede je
+    /// Treffer gewählte Schwärzungsart weg. Er gehört dann abgeschaltet, mit
+    /// dem Grund daneben ([`crate::toolbar::ANALYZE_OFF_HINT`]).
+    ///
+    /// Ausdrücklich **nicht** „automatische Erkennung an?“: mit einer
+    /// Buchungsliste findet die Analyse auch ohne jedes Muster etwas, und ein
+    /// Knopf, der dann grau wäre, log in die andere Richtung.
+    pub fn analysis_can_find_anything(&self) -> bool {
+        self.any_pattern_runs()
+            || self.config.booking_list.is_some()
+            || self.config.manual_regions.is_some()
+    }
+
+    /// Läuft in diesem Lauf überhaupt noch ein Muster?
+    ///
+    /// Beide Wege zu „nein“ zählen: der Schalter „alles aus“ und das
+    /// Abwählen jedes einzelnen Kästchens. Nur den ersten zu prüfen ließe die
+    /// zweite, ebenso erreichbare Hälfte des Falls offen.
+    ///
+    /// Eine **leere** Zustandsliste heißt „unbekannt“ und nicht „nichts läuft“:
+    /// dorthin führt eine unbrauchbare `--patterns-config` (siehe
+    /// [`pattern_states_of`]). Im Zweifel bleibt der Knopf benutzbar, damit die
+    /// echte Fehlermeldung erscheint statt einer erfundenen.
+    fn any_pattern_runs(&self) -> bool {
+        self.patterns_enabled()
+            && (self.pattern_states.is_empty() || self.pattern_states.iter().any(|d| d.enabled))
+    }
+
+    /// Wie viele Muster in diesem Lauf abgeschaltet sind.
+    pub fn disabled_pattern_count(&self) -> usize {
+        self.config.disabled_pattern_ids().len()
+    }
+
+    /// Die Ansage über abgeschaltete Erkennung — **derselbe Satz**, den die
+    /// Kommandozeile ausgibt und der im Audit-Log steht.
+    pub fn detection_notice(&self) -> Option<String> {
+        redact_pipeline::detection_notice(&self.config)
+    }
+
+    fn refresh_pattern_states(&mut self) {
+        self.pattern_states = pattern_states_of(&self.config);
     }
 
     // ---------------------------------------------------------------- Laden
@@ -1276,6 +1434,8 @@ impl AppState {
             protecting,
             redacted: resolution.redact.len(),
             outcomes,
+            automatic: self.patterns_enabled(),
+            disabled_patterns: self.disabled_pattern_count(),
         }
     }
 

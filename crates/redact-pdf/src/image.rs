@@ -50,6 +50,19 @@
 //!   nicht öffnen; dann so zu tun, als wäre geschwärzt worden, wäre der
 //!   gefährlichste aller Ausgänge. [`ImageOptions::allow_undecodable`] hebt das
 //!   auf — dann bleibt es bei einer Warnung und einem übermalten Bild.
+//! * **Was die Eingabe versteckt, bleibt versteckt.** Ein Bild kann Bildpunkte
+//!   unsichtbar machen: `/SMask`, ein `/Mask` als Stencil-Strom oder ein
+//!   `/Mask` als Farbschlüssel. Beim Neuaufbau des Dictionarys ist weg, was
+//!   nicht ausdrücklich mitkommt — und eine verlorene Maske ist die Umkehrung
+//!   des Kernversprechens: gerade eine Stelle, die die Eingabe absichtlich
+//!   verdeckt, ist das Muster einer bereits mit einem anderen Werkzeug
+//!   geschwärzten Stelle. Deshalb: ein `/Mask`-Strom wird **unverändert
+//!   mitgeschrieben** (er beschreibt das Bild im Einheitsquadrat und bleibt
+//!   dabei in voller Auflösung), ein Farbschlüssel wird beim Dekodieren in den
+//!   Alphakanal gerechnet und als `/SMask` neu geschrieben — er darf nicht
+//!   mitkommen, weil er Abtastwerte benennt und die geschwärzten Bildpunkte
+//!   sonst durchsichtig würden. Was sich so nicht sicher übertragen lässt,
+//!   beendet den Lauf mit einer Meldung ([`crate::ops::MaskPlan`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -81,13 +94,15 @@ pub const DEFAULT_MAX_DECODED_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 /// Stellschrauben der Bild-Schwärzung.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageOptions {
-    /// Nicht dekodierbare Bilder (`JPXDecode`, `CCITTFaxDecode`, defekte
-    /// Streams) durchgehen lassen, statt abzubrechen.
+    /// Bilder durchgehen lassen, die sich nicht schwärzen lassen, statt
+    /// abzubrechen: nicht dekodierbare (`JPXDecode`, `CCITTFaxDecode`, defekte
+    /// Streams) und solche mit einer Maske, die das Neukodieren nicht
+    /// überstünde ([`crate::ops::MaskPlan::Unsupported`]).
     ///
     /// **Unsicher.** Das Bild bleibt dann unverändert in der Datei; die
     /// Schwärzung liegt nur obenauf und ist rückgängig zu machen. Gedacht für
-    /// Aufrufer, die das bewusst in Kauf nehmen — die Kommandozeile bietet es
-    /// (noch) nicht an.
+    /// Aufrufer, die das bewusst in Kauf nehmen; auf der Kommandozeile heißt
+    /// der Schalter `--allow-undecodable-images`.
     pub allow_undecodable: bool,
     /// Obergrenze für die Summe der **gleichzeitig** gehaltenen dekodierten
     /// Bildbytes (RGBA8, 4 Byte je Bildpunkt).
@@ -782,6 +797,13 @@ struct Work {
     /// Aus welchen Streams heraus das Bild gezeichnet wird (für die Kopie).
     streams: BTreeSet<StreamKey>,
     filled: u64,
+    /// Der `/Mask`-Eintrag der Eingabe, der unverändert mitgeschrieben werden
+    /// muss (Stencil-Strom, siehe [`crate::ops::MaskPlan::Keep`]).
+    ///
+    /// `None` heißt: es gibt nichts mitzuschreiben — entweder hatte das Bild
+    /// kein `/Mask`, oder die Maske steckt bereits im Alphakanal und wird von
+    /// dort neu aufgebaut.
+    mask: Option<Object>,
 }
 
 /// Schwärzt die Bilder **einer** Seite — und zwar nur die, die eine Zone
@@ -862,6 +884,28 @@ fn fill_page(
         let mut work = match works.remove(&key) {
             Some(work) => work,
             None => {
+                // Eine Maske, die das Neukodieren nicht überstünde, ist ein
+                // Abbruchgrund und **kein** Fall für eine Näherung: was die
+                // Eingabe versteckt, stünde sonst in der Ausgabe sichtbar da.
+                let mask = match mask_to_carry(doc, first) {
+                    Ok(mask) => mask,
+                    Err(reason) => {
+                        let what = format!("{} {reason}", first.label(page_index));
+                        if options.allow_undecodable {
+                            outcome.warnings.push(format!(
+                                "{what}. Das Bild bleibt deshalb ungeschwärzt; die Bildpunkte im \
+                                 Schwärzungsbereich blieben in der Datei."
+                            ));
+                            continue;
+                        }
+                        let message = format!(
+                            "{what}. Die Datei wird nicht als geschwärzt ausgegeben, statt die \
+                             Maske stillschweigend fallen zu lassen — die versteckten Bildpunkte \
+                             stünden sonst sichtbar in der Ausgabe."
+                        );
+                        return Err(RedactError::Pdf(message));
+                    }
+                };
                 // Was [`crate::ops`] ohnehin nicht auspackt, kostet auch kein
                 // Budget — und soll „zu groß“ melden statt „Grenze
                 // überschritten“.
@@ -898,6 +942,7 @@ fn fill_page(
                     page_id,
                     streams: BTreeSet::new(),
                     filled: 0,
+                    mask,
                 };
                 budget.settle(reserved, &work);
                 work
@@ -956,6 +1001,49 @@ fn decode_placement(doc: &Document, placement: &Placement) -> (RasterImage, Opti
                 placement.fill,
             )
         }
+    }
+}
+
+/// Was von der `/Mask` dieses Bildes in die Ausgabe muss.
+///
+/// `Ok(Some(objekt))` heißt „unverändert mitschreiben“, `Ok(None)` „nichts zu
+/// tun“ (kein `/Mask`, oder die Maske steckt im Alphakanal). `Err(grund)` ist
+/// eine Maske, die sich nicht ohne stille Näherung übertragen ließe — dann ist
+/// Abbrechen die einzig ehrliche Antwort. Siehe [`crate::ops::MaskPlan`].
+fn mask_to_carry(
+    doc: &Document,
+    placement: &Placement,
+) -> std::result::Result<Option<Object>, String> {
+    let resources = placement.resources.as_deref();
+    let dict = match &placement.target {
+        Target::Inline { dict, .. } => {
+            // Ein Inline-Bild darf nach PDF 32000-1 (8.9.7, Tabelle 93) weder
+            // `/Mask` noch `/SMask` haben, und sein neu geschriebenes
+            // `BI`-Dictionary könnte auch keines aufnehmen: ein Verweis auf ein
+            // Objekt ist dort nicht erlaubt. Stünde trotzdem eines da, ginge es
+            // beim Neuschreiben verloren.
+            for key in [&b"Mask"[..], b"SMask"] {
+                if dict.get(key).is_ok() {
+                    return Err(format!(
+                        "trägt ein /{}, das ein Inline-Bild gar nicht haben darf. Beim \
+                         Neuschreiben ginge es verloren und die verdeckten Bildpunkte würden \
+                         sichtbar",
+                        String::from_utf8_lossy(key)
+                    ));
+                }
+            }
+            return Ok(None);
+        }
+        Target::XObject { name, .. } => match image_stream(doc, resources, name) {
+            Some(stream) => stream.dict.clone(),
+            // Nicht auflösbar: das meldet `decode_placement` gleich darauf.
+            None => return Ok(None),
+        },
+    };
+    match crate::ops::mask_plan(doc, resources, &dict) {
+        crate::ops::MaskPlan::None | crate::ops::MaskPlan::InAlpha => Ok(None),
+        crate::ops::MaskPlan::Keep(object) => Ok(Some(object)),
+        crate::ops::MaskPlan::Unsupported(reason) => Err(reason),
     }
 }
 
@@ -1127,6 +1215,21 @@ fn encode_xobject(work: &Work) -> Encoded {
     dict.set("BitsPerComponent", Object::Integer(8));
     let (space, data) = samples(work);
     dict.set("ColorSpace", Object::Name(space.to_vec()));
+
+    // Ein `/Mask` der Eingabe wird unverändert mitgeschrieben. Es steht neben
+    // dem Bild, beschreibt es im Einheitsquadrat und übersteht das Neukodieren
+    // deshalb in voller Auflösung und mit seinen harten Kanten. Ein `/SMask`
+    // gibt es dann nicht: beides nebeneinander ist regelwidrig (PDF 32000-1,
+    // Tabelle 89), und die Alphaebene, die hier vorläge, wäre nichts anderes
+    // als dieselbe Maske — auf die Auflösung des Bildes heruntergebrochen.
+    if let Some(mask) = &work.mask {
+        dict.set("Mask", mask.clone());
+        return Encoded {
+            dict,
+            data,
+            smask: None,
+        };
+    }
 
     let transparent = work.rgba.chunks_exact(4).any(|p| p[3] != 255);
     let smask = transparent.then(|| {
@@ -1375,6 +1478,7 @@ mod tests {
             page_id: (1, 0),
             streams: BTreeSet::new(),
             filled: 0,
+            mask: None,
         };
         let (space, data) = samples(&work);
         assert_eq!(space, b"DeviceGray");
@@ -1393,6 +1497,7 @@ mod tests {
             page_id: (1, 0),
             streams: BTreeSet::new(),
             filled: 0,
+            mask: None,
         };
         // Bit 0 = 0 (malt), Bit 1 = 1 (malt nicht), Rest Füllbits.
         assert_eq!(mask_bits(&work), vec![0b0111_1111]);

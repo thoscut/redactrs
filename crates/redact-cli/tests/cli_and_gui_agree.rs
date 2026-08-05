@@ -310,6 +310,173 @@ fn a_deviating_window_would_be_caught() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Und dieselbe Gleichheit mit **abgeschalteter Erkennung**.
+///
+/// Der neue Schalter geht denselben Weg wie alles andere: er steht in
+/// [`Config`], und beide Programme lesen ihn dort. Verglichen wird deshalb auch
+/// hier Byte für Byte und Feld für Feld — samt dem neuen Log-Feld `patterns`
+/// und dem Satz in `warnings`, der die Abschaltung benennt. Ohne diesen Test
+/// könnte die Oberfläche die Abschaltung übergehen (mehr schwärzen) oder sie
+/// nicht protokollieren (dieselbe Datei, ein schweigender Nachweis) — beides
+/// bliebe im Vergleich der übrigen Tests unsichtbar.
+#[test]
+fn the_binary_and_the_window_agree_on_a_switched_off_pattern() {
+    let dir = workdir("disabled");
+    let input = demo(&dir);
+
+    // `email` ist ein Muster, das der Demo-Auszug wirklich trifft — sonst
+    // verglichen wir zwei Läufe, in denen die Abschaltung nichts bewirkt.
+    let einstellungen = |input: &Path| Config {
+        input: input.to_path_buf(),
+        disabled_patterns: vec!["email".to_string()],
+        padding: 3.0,
+        ..Config::default()
+    };
+
+    let cli_out = dir.join("cli.pdf");
+    let cli_audit = dir.join("cli_audit.json");
+    succeeds(&run(&[
+        input.to_str().unwrap(),
+        "-o",
+        cli_out.to_str().unwrap(),
+        "--padding",
+        "3",
+        "--disable-pattern",
+        "email",
+        "--audit-log",
+        cli_audit.to_str().unwrap(),
+    ]));
+    let cli_bytes = std::fs::read(&cli_out).unwrap();
+
+    let gui_out = dir.join("gui.pdf");
+    let gui_audit = dir.join("gui_audit.json");
+    let gui_bytes = export_through_the_window(einstellungen(&input), &gui_out, Some(&gui_audit));
+
+    assert_eq!(
+        cli_bytes,
+        gui_bytes,
+        "mit --disable-pattern schreiben Kommandozeile und Oberfläche \
+         verschiedene Dateien ({} vs. {} Byte)",
+        cli_bytes.len(),
+        gui_bytes.len()
+    );
+    let cli_log = comparable_log(&cli_audit);
+    assert_eq!(cli_log, comparable_log(&gui_audit));
+
+    // Der Nachweis sagt es — in beiden Fassungen, denn die Logs sind gleich.
+    assert_eq!(
+        cli_log["patterns"],
+        serde_json::json!({ "all_disabled": false, "disabled": ["email"] }),
+        "{cli_log}"
+    );
+    assert!(
+        cli_log["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("Automatische Erkennung:")),
+        "{cli_log}"
+    );
+
+    // **Gegenprobe.** Ohne die Abschaltung ist es eine andere Datei — der
+    // Vergleich oben misst also wirklich etwas.
+    let ohne = export_through_the_window(
+        Config {
+            disabled_patterns: Vec::new(),
+            ..einstellungen(&input)
+        },
+        &dir.join("ohne.pdf"),
+        None,
+    );
+    assert_ne!(
+        cli_bytes, ohne,
+        "eine Oberfläche, die --disable-pattern übergeht, fiele hier nicht auf"
+    );
+    // Und der Grund für den Unterschied steht in der Datei: die Adresse ist
+    // nur im Lauf ohne Abschaltung verschwunden.
+    assert!(
+        !redact_pdf::leaks(&cli_bytes, "max.mustermann@example.org").is_empty(),
+        "das abgeschaltete Muster hat trotzdem geschwärzt"
+    );
+    assert!(
+        redact_pdf::leaks(&ohne, "max.mustermann@example.org").is_empty(),
+        "ohne Abschaltung muss die Adresse weg sein"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// „Alles aus“ geht denselben Weg: beide Programme schwärzen dann nur, was von
+/// Hand gezogen wurde — und schreiben dieselbe Datei.
+#[test]
+fn the_binary_and_the_window_agree_with_no_patterns_at_all() {
+    let dir = workdir("no-patterns");
+    let input = demo(&dir);
+
+    // Ohne Muster braucht es eine Region von Hand, sonst gäbe es nichts zu
+    // schwärzen und keine Ausgabe — auf beiden Wegen.
+    let regionen = dir.join("regionen.json");
+    let rect = redact_core::Rect::new(70.0, 730.0, 300.0, 745.0);
+    std::fs::write(
+        &regionen,
+        serde_json::to_string(&vec![redact_core::Region::new(
+            0,
+            rect,
+            None,
+            redact_core::Source::Manual {
+                reason: "IBAN-Zeile".to_string(),
+            },
+        )])
+        .unwrap(),
+    )
+    .unwrap();
+
+    let cli_out = dir.join("cli.pdf");
+    let cli_audit = dir.join("cli_audit.json");
+    succeeds(&run(&[
+        input.to_str().unwrap(),
+        "-o",
+        cli_out.to_str().unwrap(),
+        "--no-patterns",
+        "--manual-regions",
+        regionen.to_str().unwrap(),
+        "--audit-log",
+        cli_audit.to_str().unwrap(),
+    ]));
+    let cli_bytes = std::fs::read(&cli_out).unwrap();
+
+    let gui_out = dir.join("gui.pdf");
+    let gui_audit = dir.join("gui_audit.json");
+    let gui_bytes = export_through_the_window(
+        Config {
+            input: input.clone(),
+            no_patterns: true,
+            manual_regions: Some(regionen.clone()),
+            patterns: Vec::new(),
+            ..Config::default()
+        },
+        &gui_out,
+        Some(&gui_audit),
+    );
+
+    assert_eq!(cli_bytes, gui_bytes, "„alles aus“ läuft auseinander");
+    let cli_log = comparable_log(&cli_audit);
+    assert_eq!(cli_log, comparable_log(&gui_audit));
+    assert_eq!(cli_log["patterns"]["all_disabled"], serde_json::json!(true));
+    // Die Handregion hat wirklich gewirkt — sonst verglichen wir zwei
+    // unveränderte Kopien.
+    assert_eq!(
+        cli_log["effect"]["applied"],
+        serde_json::json!(1),
+        "{cli_log}"
+    );
+    assert!(redact_pdf::leaks(&cli_bytes, "DE89 3704 0044 0532 0130 00").is_empty());
+    // Und was kein Mensch markiert hat, steht in beiden Dateien noch da.
+    assert!(!redact_pdf::leaks(&cli_bytes, "COBADEFFXXX").is_empty());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Auch die Review-Datei ist zwischen beiden Wegen austauschbar — und beide
 /// legen sie mit denselben Rechten an.
 #[test]

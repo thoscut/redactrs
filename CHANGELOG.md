@@ -15,12 +15,120 @@ Stellen ändern; die dafür wichtigen Punkte stehen jeweils unter *Geändert*.
 Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 `git log <von>..<bis>`. Die Bereiche stehen unter der jeweiligen Überschrift.
 
+> **Diese Datei erzeugt die Release-Notizen.** `.github/workflows/release.yml`
+> schneidet beim Veröffentlichen den Abschnitt der gebauten Version heraus
+> (`## <version>`, bis zur nächsten `## `-Überschrift). Beim Release ist
+> „Unveröffentlicht“ deshalb in `## <version> — <datum>` umzubenennen; sonst
+> findet der Job nichts und meldet eine Warnung statt der
+> Verhaltensänderungen. Nachgeprüft: für 0.3.0, 0.2.0 und 0.1.0 findet er
+> heute 98, 84 bzw. 33 Zeilen.
+
 ---
 
 ## Unveröffentlicht
 
 Was seit `v0.3.0` im Baum liegt und in die nächste Fassung geht.
-Bereich: `git log 9aa4808..HEAD`.
+Bereich: `git log 9aa4808..HEAD` plus der noch nicht eingecheckte Arbeitsstand.
+
+### Neu
+
+* **Die automatische Erkennung lässt sich abschalten — ganz und je Muster.**
+  `--no-patterns` gab es schon; dazu kommen `--disable-pattern <ID>`
+  (mehrfach oder kommagetrennt), der Schlüssel `disabled_patterns` in der
+  Einstellungsdatei, ein Häkchen „Automatisch suchen“ samt aufklappbarer
+  Musterliste in der Oberfläche und das Feld `patterns` im Audit-Log.
+
+  **Der wichtigste Teil ist nicht der neue Schalter, sondern die Ansage.** In
+  0.3.0 war `--no-patterns` **vollständig stumm**: kein Satz in der
+  Zusammenfassung, keine Warnung auf stderr, kein Feld im Audit-Log
+  (`detection_notice` und `PatternRecord` gibt es dort noch nicht — nachgesehen
+  an `9aa4808`). Eine mit `--no-patterns` erzeugte Datei war von einer
+  vollständig geprüften nicht zu unterscheiden — nicht am Ergebnis, nicht am
+  Rückgabewert, nicht am Nachweis. „0 Treffer“ heißt dort nicht *nichts
+  gefunden*, sondern *nicht gesucht*. **Wer 0.3.0 mit `--no-patterns`
+  eingesetzt hat, sieht den Ergebnissen das nicht an und muss es aus dem
+  Aufruf rekonstruieren.**
+
+  Ab dieser Fassung sagt es jeder der drei Wege ausdrücklich, und alle drei
+  speisen sich aus derselben Angabe:
+
+  * die Zusammenfassung auf stdout, **direkt unter der Trefferzahl** — nicht
+    nur auf stderr, denn `redact-rs … > bericht.txt` behielte sonst genau die
+    harmlose Hälfte: `Automatische Erkennung: abgeschaltet (--no-patterns). …`
+    bzw. `Automatische Erkennung: 1 Muster abgeschaltet (konto_nr). …`;
+  * die Kopfzeile der Trefferliste in der Oberfläche
+    (`Automatische Suche AUS — nicht gesucht, nur von Hand: …`), dazu ein Satz
+    in Warnfarbe unter dem Schalter;
+  * das Audit-Log als Feld `patterns`, das **auch dann** dasteht, wenn nichts
+    abgeschaltet war (`{"all_disabled": false, "disabled": []}`) — ein Feld,
+    das nur im Ausnahmefall erschiene, machte ein Log mit abgeschalteter
+    Erkennung ununterscheidbar von einem Log einer älteren Fassung.
+
+  Der **Rückgabewert bleibt 0**. Eine abgeschaltete Erkennung ist eine
+  Anweisung des Aufrufenden und keine Deckungslücke: die Analyse hat das
+  Dokument vollständig gelesen und auf Geheiß nach weniger gesucht. Spränge
+  die 3 auch hier an, wäre sie für die Fälle wertlos, für die es sie gibt.
+  Wer im Skript darauf prüfen will, liest `patterns` aus dem Audit-Log.
+
+  Ein **unbekannter Musternamen beendet den Lauf mit Rückgabewert 2** und einer
+  Meldung, die alle gültigen nennt; abgeschaltet und geschwärzt wird dann
+  nichts. Ein stillschweigend übergangenes `--disable-pattern iban` sähe aus
+  wie eine Abschaltung und wäre keine. `no_patterns` gibt es in der
+  Einstellungsdatei bewusst **nicht** — der Schalter hat kein Gegenstück, aus
+  einer Datei heraus wäre er nicht mehr zu widerrufen; `disabled_patterns` ist
+  widerrufbar, weil eine Liste auf der Kommandozeile die aus der Datei ersetzt.
+
+### ⚠ Sicherheit
+
+* **Zwei weitere Stellen, an denen der Interpreter nichts sah, sind jetzt
+  laut.** Beide endeten vorher mit „Treffer 0, Rückgabewert 0“ — dem
+  schlimmsten Ergebnis, weil es sich wie „geprüft und sauber“ liest. Beide
+  setzen jetzt den Rückgabewert **3** und stehen mit `NICHT GEPRÜFT` auf
+  stderr:
+
+  * ein **Form-XObject, das in `/Resources` steht, aber nirgends gezeichnet
+    wird** — sein Text wurde nicht durchsucht. Ein Formular ohne Text bleibt
+    unerwähnt, und eines, das nur eine andere Seite zeichnet, gilt nicht als
+    Lücke; sonst spränge der Wert bei geteilten Ressourcen ständig an;
+  * eine **weiche Maske (`/ExtGState /SMask /G`), die sich nicht lesen lässt** —
+    keine eigene Objekt-Id, kein lesbarer Strom, nicht dekodierbar, zu tief
+    verschachtelt oder nur teilweise zerlegbar.
+
+  Eine weiche Maske, die sich **lesen** lässt, wird seit dieser Runde betreten
+  und ihr Text mitgeschwärzt: sie ist ein vollwertiges Form-XObject mit eigenem
+  Text, das kein `Do` je erreicht — der Interpreter kam bisher nie hinein,
+  während `pdftotext` die IBAN im Klartext las.
+* **Übereinander gedruckter Text wird wieder lesbar zusammengesetzt.**
+  Fett-Imitat, Schlagschatten, Rückkern in einer `TJ`-Operation und mehrere
+  Erscheinungsströme derselben Annotation verschränkten die Zeilenbildung
+  zeichenweise zu `IIBBAANN::  DDEE8899 …` — kein Muster traf mehr, und der
+  Lauf endete mit „Treffer 0“.
+* **Was die Eingabe versteckt, bleibt in der Ausgabe versteckt.** Beim
+  Schwärzen wird ein betroffenes Bild neu kodiert und sein Dictionary neu
+  aufgebaut; eine dabei verlorene Maske (`/SMask`, `/Mask` als Stencil-Strom,
+  `/Mask` als Farbschlüssel) dreht das Kernversprechen um — gerade eine Stelle,
+  die die Eingabe unsichtbar macht, ist das Muster einer bereits mit einem
+  anderen Werkzeug geschwärzten Stelle. Ein Stencil-Strom wird jetzt unverändert
+  mitgeschrieben, ein Farbschlüssel in den Alphakanal gerechnet; was sich nicht
+  sicher übertragen lässt, beendet den Lauf, statt still zu vereinfachen.
+  Zwei Bilder, die sich gegenseitig als `/SMask` nennen, führten in eine
+  endlose Rekursion.
+* **Die Hilfsdateien haben eine feste Größengrenze.** Buchungsliste
+  (`--booking-list`), Review-Datei (`--apply-review`) und Regionsliste
+  (`--manual-regions`) **16 MB**, Musterkonfiguration (`--patterns-config`)
+  **1 MB**; beide fest, ohne Schalter. Vorher gingen sie durch
+  `std::fs::read`/`read_to_string`, und das legt einen Puffer in **Dateigröße**
+  an, bevor irgendetwas geprüft ist: wie viel Arbeitsspeicher ein Lauf belegt,
+  stand damit in der Datei. Nachgemessen an einer dünn belegten 6-GB-Datei
+  hinter `--manual-regions`: vorher Exit 1 nach **24,0 s** bei **6 150 MB**,
+  jetzt Exit 1 nach **0,00 s** bei **6,3 MB**.
+
+  Das ist **keine** Vertrauensfrage — diese Dateien bringt der Bedienende
+  selbst mit. Der wahrscheinlichste Weg dorthin ist kein Angriff, sondern ein
+  vertippter Pfad: `--manual-regions` auf den 700-MB-Scan statt auf die
+  JSON-Datei. Eine benannte Pipe oder ein Gerät wird abgelehnt, bevor die Größe
+  überhaupt zur Sprache kommt (Länge 0, liefert endlos). Die Meldungen nennen
+  Nennlänge, Grenze und die wahrscheinlichere Ursache.
 
 ### Geändert
 
@@ -73,6 +181,38 @@ Bereich: `git log 9aa4808..HEAD`.
   neu gemessen.
 * `SECURITY.md`: die Stapel-Zusammenfassung in einem Beispiel stammte aus
   einer Fassung mit zwei Zahlen; das Programm gibt seit v0.3.0 drei aus.
+* `README.md`, fünf Angaben, die als **Messung** dastanden und keine mehr
+  waren — jede ist ersetzt durch eine, die für diesen Baum nachgefahren wurde:
+  * dieselbe Stapel-Zusammenfassung mit zwei Zahlen wie in `SECURITY.md`; dazu
+    fehlten in den Beispielen die Fortschrittszeilen auf stderr;
+  * die Binärgrößen („Windows 7,4 MB / 7 395 328 Byte“, „Linux 13 MB“). An den
+    **ausgelieferten** v0.3.0-Artefakten nachgemessen — gegen
+    `SHA256SUMS-BINARIES` geprüft — sind es 10,6 MB (`redact-rs.exe`), 9,8 MB
+    (`redact-rs-gui.exe`), 14,9 MB (Linux/glibc) und 4,9 MB (Linux/musl). Das
+    Akzeptanzkriterium (< 30 MB) hält weiter, mit Abstand;
+  * „1350 Schwärzungen in 77 ms“ für das 10-Seiten-Kriterium. 1350 Treffer
+    stimmen; die Zeit für den ganzen Prozess ist **0,16 s** (bestes von fünf
+    Läufen, Release);
+  * die Zahl der Fälle in `cli_and_gui_agree.rs` stand an einer Stelle auf
+    fünf, an der anderen auf sieben. Es sind sieben (`ok. 7 passed`);
+  * „82×42 Bildpunkte“ für die gepolsterte Bildregion — die daneben genannten
+    3696 geänderten Bildpunkte sind 84×44. Der Rasterrand wird nach **außen**
+    gerundet, und das ist die sichere Richtung.
+* `README.md`: „die Bildpunkte außerhalb der Schwärzung sind nachweislich
+  unverändert, auch beim JPEG-Fall“ war zu stark. Für ein Flate-Bild stimmt es
+  exakt (nachgemessen: null geänderte Bildpunkte außerhalb). Bei einem JPEG gilt
+  es nur gegenüber dem **eigenen** Dekodat: gegen Pillow gemessen weichen 8231
+  der 16 304 äußeren Bildpunkte ab, fast alle um höchstens 2 je Kanal. Das ist
+  Dekoder-Rauschen und kein zurückgetragener Inhalt — aber wer es wörtlich
+  nachprüfen will, braucht denselben Dekoder.
+* `README.md`, Release-Rezept: es empfahl `printf '0.2.0\n' > .release-version`
+  und nannte einen Tag als gleichwertige Alternative. Das erste warf den
+  Kommentarkopf der Datei weg, der sagt, dass eine Änderung an ihr
+  veröffentlicht; das zweite trifft nicht mehr zu, seit beide Wege durch
+  dieselben zwei Vorbedingungen gehen (Default-Branch, grüne CI).
+* `README.md`: der Änderungsverlauf war nirgends verlinkt, das musl-Archiv
+  nirgends erwähnt, und die Liste des Archivinhalts kannte `CHANGELOG.md`
+  noch nicht.
 
 ---
 

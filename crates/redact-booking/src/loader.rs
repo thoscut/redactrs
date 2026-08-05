@@ -4,11 +4,22 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 
-use redact_core::{BookingEntry, ListType, RedactError, Result};
+use redact_core::{BookingEntry, ListType, RedactError, Result, MAX_AUX_FILE_BYTES};
 use serde::Deserialize;
 
 /// Spalten, die in der Kopfzeile vorhanden sein müssen.
 const REQUIRED_COLUMNS: [&str; 3] = ["id", "list_type", "pattern"];
+
+/// Der Satz hinter der Meldung „zu groß“: woher die Grenze kommt und was zu
+/// tun ist.
+///
+/// Eine Meldung, aus der sich nicht ableiten lässt, was zu tun ist, ist nur
+/// halb fertig — und der wahrscheinlichste Fall ist nicht die zu große Liste,
+/// sondern der falsche Pfad hinter dem Schalter.
+const LIMIT_HINT: &str = "Für eine Buchungsliste ist das eine feste Grenze und keine \
+     Einstellung: die Beispielliste braucht 134 Byte je Eintrag, 16 MB fassen also über \
+     hunderttausend — mehr, als ein Lauf ohnehin verarbeitet. Zeigt `--booking-list` \
+     wirklich auf die CSV-Datei?";
 
 /// UTF-8 Byte-Order-Mark, das Excel gerne an CSV-Dateien schreibt.
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
@@ -52,6 +63,11 @@ impl CsvBookingLoader {
     ///
     /// Ein führendes UTF-8-BOM wird entfernt. Vollständig leere Zeilen werden
     /// übersprungen. Jede Fehlermeldung nennt die CSV-Zeilennummer.
+    ///
+    /// **Ungebremst:** gelesen wird bis zum Ende des Readers. Wer eine Datei
+    /// hat, nimmt [`CsvBookingLoader::load`] — dort steht die Grenze. Hier
+    /// steht sie nicht, weil ein Reader keine Größe hat, an der sie sich
+    /// festmachen ließe; wer einen mitbringt, hat ihn selbst gefüllt.
     pub fn from_reader<R: Read>(&self, mut reader: R) -> Result<Vec<BookingEntry>> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
@@ -100,21 +116,34 @@ impl CsvBookingLoader {
     }
 
     /// Liest eine Buchungsliste aus einer Datei.
+    ///
+    /// ## Erst fragen, dann lesen
+    ///
+    /// Gelesen wird über [`redact_core::read_limited`], also erst, wenn
+    /// feststeht, dass hier eine **gewöhnliche Datei** unterhalb von
+    /// [`MAX_AUX_FILE_BYTES`] liegt. Vorher stand hier ein `File::open` und
+    /// dahinter ein `read_to_end`, und damit bestimmte die Datei, wie viel
+    /// Arbeitsspeicher das Werkzeug belegt: eine dünn belegte Datei mit 1 GB
+    /// Nennlänge (4 kB auf der Platte) kostete 5 259 MB, eine mit 6 GB den
+    /// OOM-Killer, und eine benannte Pipe lief endlos weiter.
+    ///
+    /// Die Grenze greift dabei **vor** dem CSV-Parser, und darauf kommt es an:
+    /// die Verstärkung steckt nicht im Lesen, sondern im Parsen. Eine einzige
+    /// riesige Zelle wird als `String` materialisiert, dazu der Puffer des
+    /// Parsers und die kleingeschriebene Kopie im Abgleich — aus 1 GB Datei
+    /// wurden so über 5 GB Arbeitsspeicher.
     pub fn load(&self, path: &Path) -> Result<Vec<BookingEntry>> {
-        let file = std::fs::File::open(path).map_err(|e| {
-            RedactError::Booking(format!(
-                "Buchungsliste `{}` kann nicht geöffnet werden: {e}",
-                path.display()
-            ))
-        })?;
-        // Dateiname in jede Fehlermeldung hineinreichen.
-        self.from_reader(std::io::BufReader::new(file))
-            .map_err(|e| match e {
-                RedactError::Booking(msg) => {
-                    RedactError::Booking(format!("{}: {msg}", path.display()))
-                }
-                other => other,
-            })
+        let bytes = redact_core::read_limited(path, MAX_AUX_FILE_BYTES, LIMIT_HINT)
+            .map_err(RedactError::Booking)?;
+        // Dateiname in jede Fehlermeldung hineinreichen — durch `safe_path`,
+        // weil ein Dateiname Steuerzeichen enthalten darf und ein Terminal die
+        // ausführt.
+        self.from_reader(&bytes[..]).map_err(|e| match e {
+            RedactError::Booking(msg) => {
+                RedactError::Booking(format!("{}: {msg}", redact_core::safe_path(path)))
+            }
+            other => other,
+        })
     }
 }
 

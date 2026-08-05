@@ -51,7 +51,9 @@ use redact_pdf::document::{
 };
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
-pub use crate::audit::{sha256_bytes, sha256_file, Applied, AuditLog, Effects, EntryEffect};
+pub use crate::audit::{
+    sha256_bytes, sha256_file, Applied, AuditLog, Effects, EntryEffect, PatternRecord,
+};
 pub use crate::coverage::is_coverage_gap;
 pub use crate::settings::Settings;
 
@@ -134,7 +136,27 @@ pub struct Config {
     /// Vorhandene Dateien überschreiben.
     pub force: bool,
     pub patterns: Vec<String>,
+    /// **Keine** automatische Erkennung — geschwärzt wird nur, was von Hand
+    /// gezogen oder über die Buchungsliste angegeben wurde (`--no-patterns`).
+    ///
+    /// Der Schalter ist die grobe Fassung von [`Config::disabled_patterns`].
+    /// Beides zusammen ist erlaubt und kein Widerspruch: die Oberfläche merkt
+    /// sich die einzeln abgeschalteten Muster, während alles aus ist, damit sie
+    /// beim Wiedereinschalten noch da sind.
+    ///
+    /// Ist er gesetzt, sagt [`detection_notice`] das in jeder Ausgabe dieses
+    /// Laufs — Konsole, Oberfläche, Audit-Log.
     pub no_patterns: bool,
+    /// Einzeln abgeschaltete Muster (`--disable-pattern`).
+    ///
+    /// Die übrigen laufen weiter. Gedacht für Muster, die in einem bestimmten
+    /// Dokument mehr Fehltreffer als Funde erzeugen (`date_de` ist der
+    /// Regelfall), ohne deshalb die ganze Erkennung aufzugeben.
+    ///
+    /// **Ein unbekannter Name ist ein Bedienfehler** und beendet den Lauf; die
+    /// Begründung steht bei [`disable_patterns`]. Gelesen wird die Liste über
+    /// [`Config::disabled_pattern_ids`], nie roh.
+    pub disabled_patterns: Vec<String>,
     pub patterns_config: Option<PathBuf>,
     /// Mindestvertrauen; ohne Angabe gilt `redact_patterns::DEFAULT_MIN_CONFIDENCE`.
     pub min_confidence: Option<f32>,
@@ -213,6 +235,7 @@ impl Default for Config {
             force: false,
             patterns: Vec::new(),
             no_patterns: false,
+            disabled_patterns: Vec::new(),
             patterns_config: None,
             min_confidence: None,
             booking_list: None,
@@ -252,6 +275,90 @@ impl Config {
             .replacement()
             .unwrap_or(self.replace_with.as_str())
     }
+
+    /// Die abgeschalteten Muster dieses Laufs — die **eine** Lesart von
+    /// [`Config::disabled_patterns`].
+    ///
+    /// Leerraum wird abgeschnitten, leere Einträge und Dubletten fallen weg:
+    /// `--disable-pattern date_de,` und `--disable-pattern " date_de "` meinen
+    /// dasselbe wie `--disable-pattern date_de`. Ein leerer Eintrag nennt
+    /// keinen Namen, über den sich jemand täuschen könnte — anders als ein
+    /// falsch geschriebener, und der wird abgelehnt (siehe
+    /// [`disable_patterns`]).
+    pub fn disabled_pattern_ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = Vec::new();
+        for id in &self.disabled_patterns {
+            let id = id.trim();
+            if !id.is_empty() && !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+}
+
+/// Kopfzeile jeder Meldung über abgeschaltete automatische Erkennung.
+///
+/// Sie steht im unveränderlichen Teil beider Sätze aus [`detection_notice`] und
+/// ist damit die Textmarke, an der [`crate::coverage`] die Meldung einordnet.
+pub const DETECTION_NOTICE: &str = "Automatische Erkennung:";
+
+/// Was dieser Lauf **nicht** gesucht hat — als Satz, oder `None`.
+///
+/// ## Warum es diese Meldung gibt
+///
+/// Abschaltbare Erkennung ist bequem und genau deshalb gefährlich: eine Datei,
+/// die mit `--no-patterns` durchgelaufen ist, sieht in jeder Zahl aus wie eine
+/// vollständig geprüfte („0 Treffer“ heißt dann nicht „nichts gefunden“,
+/// sondern „nicht gesucht“). Wer sie später in die Hand bekommt, kann den
+/// Unterschied an der Ausgabe nicht sehen.
+///
+/// Dieser Satz ist der Unterschied. Er geht denselben Weg wie jede andere
+/// Warnung des Laufs — Konsole, Statuszeile der Oberfläche, `warnings` im
+/// Audit-Log — und steht zusätzlich als Struktur in
+/// [`crate::audit::PatternRecord`].
+///
+/// ## Warum er den Rückgabewert nicht anhebt
+///
+/// Er ist **keine** Deckungslücke (siehe [`crate::coverage`]): die Analyse hat
+/// das Dokument vollständig gelesen, sie hat nur nach weniger gesucht — und das
+/// auf ausdrückliche Anweisung. Ein Rückgabewert 3 bei jedem Lauf mit
+/// `--no-patterns` machte den Wert für die Fälle wertlos, für die es ihn gibt
+/// (ein Font ohne `/ToUnicode`, ein ungelesenes XObject).
+pub fn detection_notice(config: &Config) -> Option<String> {
+    if config.no_patterns {
+        return Some(format!(
+            "{DETECTION_NOTICE} abgeschaltet (--no-patterns). Es wurde nach keinem \
+             einzigen Muster gesucht; geschwärzt ist nur, was von Hand oder über die \
+             Buchungsliste angegeben war. Eine IBAN, die niemand markiert hat, steht \
+             unverändert in der Ausgabe."
+        ));
+    }
+    let off = config.disabled_pattern_ids();
+    if off.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{DETECTION_NOTICE} {} Muster abgeschaltet ({}). Wonach diese Muster gesucht \
+         hätten, wurde in diesem Lauf nicht gesucht — solche Stellen stehen unverändert \
+         in der Ausgabe.",
+        off.len(),
+        off.join(", ")
+    ))
+}
+
+/// Die Muster dieses Laufs mit ihrem tatsächlichen Zustand.
+///
+/// Genau die Liste, mit der [`collect_regions_for`] sucht: Vorgabe,
+/// `--patterns`, `--patterns-config` und die Abschaltungen sind darin bereits
+/// verrechnet. Die Oberfläche zeichnet daraus ihre Kästchen — ohne diese
+/// Funktion müsste sie den Zustand aus vier Quellen selbst zusammenrechnen,
+/// also ein zweites Mal, mit der üblichen Folge.
+///
+/// **Nicht billig**: dabei werden alle regulären Ausdrücke übersetzt. Die
+/// Oberfläche ruft es deshalb bei einer Änderung und nicht in jedem Bild.
+pub fn pattern_states(config: &Config) -> Result<Vec<redact_patterns::PatternDef>> {
+    Ok(pattern_matcher(config)?.defs().to_vec())
 }
 
 /// Ergebnis eines Laufs — Grundlage für die Ausgabe auf der Konsole und für
@@ -511,6 +618,62 @@ pub fn read_input(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Der Satz hinter der Meldung „zu groß“ für eine Review-Datei bzw. eine
+/// Regionsliste: woher die Grenze kommt und was zu tun ist.
+///
+/// Der wahrscheinlichste Fall ist nicht die zu große Review-Datei, sondern der
+/// falsche Pfad hinter dem Schalter — beide nehmen JSON, und beide stehen in
+/// derselben Kommandozeile wie die Eingabe-PDF. Genau danach fragt der Satz.
+const AUX_LIMIT_HINT: &str = "Für eine Review-Datei oder eine Regionsliste ist das eine feste \
+     Grenze und keine Einstellung: gemessen sind rund 600 Byte je geprüfter Stelle, 16 MB \
+     fassen also gut 25 000 — von Hand geprüft werden Dutzende bis Hunderte. Zeigt \
+     `--apply-review` bzw. `--manual-regions` wirklich auf die JSON-Datei und nicht auf die \
+     PDF-Datei?";
+
+/// Liest eine Hilfsdatei als Text — mit der Obergrenze **vor** dem ersten
+/// gelesenen Byte.
+///
+/// ## Warum das hier steht und nicht zweimal daneben
+///
+/// Zwei Aufrufer lesen dieselbe Sorte Datei: der Zweig `--apply-review` in
+/// [`run`] und [`load_manual_regions`]. Beide brauchen aus den Bytes einen
+/// `String`, und beide brauchen dafür dieselbe Meldung — geschrieben stünde
+/// das `from_utf8` sonst zweimal da, und die zweite Fassung liefe der ersten
+/// über kurz oder lang davon.
+///
+/// ## Erst fragen, dann lesen
+///
+/// Gelesen wird über [`redact_core::read_limited`], also erst, wenn feststeht,
+/// dass hier eine **gewöhnliche Datei** unterhalb von
+/// [`redact_core::MAX_AUX_FILE_BYTES`] liegt. Vorher stand an beiden Stellen
+/// ein `std::fs::read_to_string`, und das legt einen Puffer in Dateigröße an:
+/// eine dünn belegte Datei mit 6 GB Nennlänge (4 kB auf der Platte) kostete
+/// hinter `--apply-review` 6 157 MB Spitzenspeicher und 20 s, hinter
+/// `--manual-regions` 6 160 MB und 12 s — jedes Mal, bevor auch nur feststand,
+/// dass es kein JSON ist. Eine benannte Pipe lief endlos weiter; abgebrochen
+/// wurde erst durch die Zeitschranke von außen.
+///
+/// ## Warum [`RedactError::Parse`]
+///
+/// Weil daneben `ReviewFile::from_json` genau diese Fehlerart liefert: für die
+/// Bedienende ist „die Datei taugt nicht“ eine Aussage, gleich ob sie zu groß
+/// ist oder krummes JSON enthält, und die Kommandozeile leitet daraus ihren
+/// Rückgabewert ab. Vorher kam hier ein nackter [`RedactError::Io`] heraus —
+/// **ohne den Dateinamen**, weil `std::io::Error` den Pfad nicht mitführt.
+fn read_aux_text(path: &Path, hint: &str) -> Result<String> {
+    let bytes = redact_core::read_limited(path, redact_core::MAX_AUX_FILE_BYTES, hint)
+        .map_err(RedactError::Parse)?;
+    // Eigene Meldung statt der von `String::from_utf8`: die nennt die Stelle
+    // im Dateiinhalt, und der Inhalt gehört hier nicht in die Ausgabe — der
+    // Pfad kommt von außen und kann auf eine fremde Datei zeigen.
+    String::from_utf8(bytes).map_err(|_| {
+        RedactError::Parse(format!(
+            "{}: keine UTF-8-Datei. Erwartet wird JSON, also Text.",
+            redact_core::safe_path(path)
+        ))
+    })
+}
+
 /// Führt einen kompletten Lauf aus.
 pub fn run(config: &Config) -> Result<Outcome> {
     let mut outcome = Outcome {
@@ -544,7 +707,11 @@ pub fn run(config: &Config) -> Result<Outcome> {
     // 2./3./4./5. Analyse — oder eine bereits geprüfte Review-Datei.
     let (redactions, blocked) = match &config.apply_review {
         Some(path) => {
-            let data = std::fs::read_to_string(path)?;
+            // `read_aux_text` statt `std::fs::read_to_string`: gelesen wird
+            // erst, wenn feststeht, dass es eine gewöhnliche Datei unterhalb
+            // von `MAX_AUX_FILE_BYTES` ist — so wie es die Eingabe-PDF eine
+            // Handvoll Zeilen weiter oben längst hält.
+            let data = read_aux_text(path, AUX_LIMIT_HINT)?;
             let review = ReviewFile::from_json(&data)?;
             check_review_identity(
                 &review,
@@ -569,6 +736,17 @@ pub fn run(config: &Config) -> Result<Outcome> {
             // zum Dokument gehören, genau wie hinter `--apply-review`.
             let candidates = collect_regions_for(config, &runs, &outcome.input_sha256)?;
             outcome.candidates = candidates.len();
+
+            // Abgeschaltete Erkennung gehört auch dann gesagt, wenn der Lauf
+            // gar nicht bis zum Schwärzen kommt: `--review` ist die Stelle, an
+            // der jemand die Trefferliste prüft — und „0 Treffer“ heißt dort
+            // ohne diesen Satz „nichts gefunden“ statt „nicht gesucht“.
+            // [`apply`] trägt ihn für den gewöhnlichen Weg ein; doppelt wird er
+            // nicht, `push_warnings` lässt keine Dubletten zu.
+            push_warnings(
+                &mut outcome.warnings,
+                detection_notice(config).into_iter().collect(),
+            );
 
             let resolution = resolve_conflicts(candidates);
             outcome.blocked = resolution.blocked.len();
@@ -636,6 +814,16 @@ pub fn apply(
     outcome.redactions = redactions.len();
     outcome.blocked = outcome.blocked.max(blocked.len());
 
+    // Ganz vorn und für beide Programme an derselben Stelle: wonach dieser Lauf
+    // **nicht** gesucht hat. Die Oberfläche kommt nur hier vorbei (sie hat kein
+    // `run`), und die Reihenfolge der Warnungen muss zwischen beiden Wegen
+    // gleich bleiben — `cli_and_gui_agree` vergleicht das Log Feld für Feld.
+    let patterns = PatternRecord::of(config);
+    push_warnings(
+        &mut outcome.warnings,
+        detection_notice(config).into_iter().collect(),
+    );
+
     // Vor der Schwärzung gelesen: danach ist es dieselbe Zahl, aber die Frage
     // „gibt es diese Seite?“ gehört zu dem Dokument, auf das die Regionen
     // gerechnet wurden.
@@ -693,6 +881,7 @@ pub fn apply(
                 effects: &effects,
                 redaction: &report,
                 metadata: &metadata,
+                patterns: &patterns,
             },
             &outcome.warnings,
         )?;
@@ -781,22 +970,116 @@ pub fn collect_regions_for(
         regions.extend(matcher.find_matches(runs)?);
     }
 
-    // 5. Pattern-Matching.
+    // 5. Pattern-Matching — abschaltbar, ganz ([`Config::no_patterns`]) und je
+    //    Muster ([`Config::disabled_patterns`]).
+    //
+    // Gebaut wird der Sucher **auch dann**, wenn ohnehin nichts gesucht wird:
+    // sonst bliebe ein Tippfehler in `--disable-pattern` ausgerechnet neben
+    // `--no-patterns` wirkungslos, und ein wirkungsloser Name ist genau die
+    // falsche Entwarnung, gegen die dieser Schalter gedacht ist. Es kostet das
+    // Übersetzen von zwölf Ausdrücken, nicht mehr.
+    let matcher = pattern_matcher(config)?;
     if !config.no_patterns {
-        let mut matcher = match &config.patterns_config {
-            Some(path) => PatternMatcher::from_config_file(path)?,
-            None => PatternMatcher::new(&config.patterns)?,
-        };
-        // `--min-confidence` gewinnt gegen die Schwelle aus der
-        // Konfigurationsdatei: die Kommandozeile ist die spätere Anweisung.
-        if let Some(min) = config.min_confidence {
-            matcher = matcher.with_min_confidence(min)?;
-        }
         regions.extend(matcher.find_matches(runs)?);
     }
 
     check_candidate_budget(config, regions.len())?;
     Ok(regions)
+}
+
+/// Baut den Muster-Sucher dieses Laufs.
+///
+/// **Die eine Stelle**, an der `--patterns`, `--patterns-config`,
+/// `--disable-pattern` und `--min-confidence` zusammenkommen — Kommandozeile
+/// und Oberfläche gehen beide hier durch.
+fn pattern_matcher(config: &Config) -> Result<PatternMatcher> {
+    let matcher = match &config.patterns_config {
+        Some(path) => PatternMatcher::from_config_file(path)?,
+        None => PatternMatcher::new(&config.patterns)?,
+    };
+    let matcher = disable_patterns(matcher, config)?;
+    // `--min-confidence` gewinnt gegen die Schwelle aus der
+    // Konfigurationsdatei: die Kommandozeile ist die spätere Anweisung.
+    match config.min_confidence {
+        Some(min) => matcher.with_min_confidence(min),
+        None => Ok(matcher),
+    }
+}
+
+/// Schaltet die in [`Config::disabled_patterns`] genannten Muster ab.
+///
+/// ## Warum ein unbekannter Name den Lauf beendet
+///
+/// `--disable-pattern iban` (statt `iban_de`) still zu übergehen hätte zwei
+/// Lesarten, und beide sind schlecht: entweder hält der Aufrufende das Muster
+/// für abgeschaltet, während es weiterläuft — dann schwärzt der Lauf mehr als
+/// gedacht, was ärgerlich ist —, oder er hält es für abgeschaltet und es *ist*
+/// eines mit ähnlichem Namen betroffen. Vor allem aber wäre eine Angabe ohne
+/// Wirkung eine Angabe, deren Wirkung niemand mehr nachvollzieht. Deshalb:
+/// [`RedactError::Config`], also Rückgabewert 2, mit der Liste der gültigen
+/// Namen — abgeschaltet wird in diesem Fall gar nichts.
+///
+/// ## Wie
+///
+/// Die Definitionen bekommen `enabled = false` und der Sucher wird daraus neu
+/// gebaut; `PatternMatcher::with_defs` übersetzt abgeschaltete Muster erst gar
+/// nicht. Die Schwelle aus einer Musterkonfiguration muss dabei ausdrücklich
+/// mitgenommen werden — ein neuer Sucher fängt bei der Vorgabe an, und ein
+/// `--disable-pattern` hätte sonst nebenbei `min_confidence` einer YAML-Datei
+/// zurückgesetzt.
+fn disable_patterns(matcher: PatternMatcher, config: &Config) -> Result<PatternMatcher> {
+    let off = config.disabled_pattern_ids();
+    if off.is_empty() {
+        return Ok(matcher);
+    }
+
+    let known = known_pattern_ids(&matcher);
+    for id in &off {
+        if !known.iter().any(|k| k == id) {
+            return Err(RedactError::Config(format!(
+                "--disable-pattern: „{}“ ist kein bekanntes Muster. Gültig sind: {}. \
+                 (`redact-rs --list-patterns` zeigt sie mit Beschreibung.) Es wurde \
+                 nichts abgeschaltet und nichts geschwärzt: ein übergangener Name sähe \
+                 aus wie eine Abschaltung und wäre keine.",
+                redact_core::safe_text(id),
+                known.join(", ")
+            )));
+        }
+    }
+
+    let min = matcher.min_confidence();
+    let defs = matcher
+        .defs()
+        .iter()
+        .cloned()
+        .map(|mut def| {
+            if off.contains(&def.id.as_str()) {
+                def.enabled = false;
+            }
+            def
+        })
+        .collect();
+    PatternMatcher::with_defs(defs)?.with_min_confidence(min)
+}
+
+/// Die Musternamen, die dieser Lauf kennt: die eingebauten plus die aus
+/// `--patterns-config`.
+///
+/// **Nicht** nur die gerade ausgewählten. `--patterns iban_de` engt die Auswahl
+/// ein, macht `bic` aber nicht zu einem unbekannten Namen — ein Fehler an
+/// dieser Stelle wäre keine Warnung vor einem Tippfehler, sondern eine vor
+/// einer Doppelung.
+fn known_pattern_ids(matcher: &PatternMatcher) -> Vec<String> {
+    let mut ids: Vec<String> = redact_patterns::builtin_pattern_ids()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    for def in matcher.defs() {
+        if !ids.contains(&def.id) {
+            ids.push(def.id.clone());
+        }
+    }
+    ids
 }
 
 /// Lädt manuelle Regionen aus einer JSON-Datei.
@@ -818,12 +1101,21 @@ pub fn collect_regions_for(
 /// behauptet nirgends, zu einem bestimmten Dokument zu gehören. Wer es benutzt,
 /// hat die Seitenzahlen selbst gewählt; die Wirkung jeder einzelnen Region
 /// steht danach im Audit-Log (siehe [`audit::EntryEffect`]).
+///
+/// ## Erst fragen, dann lesen
+///
+/// Die Datei geht durch [`read_aux_text`] und damit durch
+/// [`redact_core::read_limited`]: sie muss eine gewöhnliche Datei unterhalb von
+/// [`redact_core::MAX_AUX_FILE_BYTES`] sein, bevor ein Byte gelesen wird.
 pub fn load_manual_regions(
     path: &Path,
     document_sha: &str,
     allow_unverified: bool,
 ) -> Result<Vec<Region>> {
-    let data = std::fs::read_to_string(path)?;
+    // Erst fragen, dann lesen — siehe [`read_aux_text`]. Beide Formate, die
+    // hier durchgehen, sind JSON von Hand gepflegter Größe; die Grenze greift
+    // vor `serde_json`, und darauf kommt es an.
+    let data = read_aux_text(path, AUX_LIMIT_HINT)?;
     if let Ok(regions) = serde_json::from_str::<Vec<Region>>(&data) {
         return Ok(regions.into_iter().map(normalize_region).collect());
     }
@@ -1497,6 +1789,228 @@ mod tests {
             Config::default().replace_with,
             redact_core::DEFAULT_REPLACEMENT
         );
+    }
+
+    // ------------------------- Abschaltbare automatische Funde (Aufgabe #81)
+
+    /// Eine Zeile, in der drei verschiedene Muster etwas finden.
+    fn mixed_run() -> Vec<TextRun> {
+        vec![
+            text_run("IBAN DE89 3704 0044 0532 0130 00 BIC COBADEFFXXX"),
+            text_run("Kontakt max.mustermann@example.org am 05.01.2026"),
+        ]
+    }
+
+    /// Welche Muster in diesem Ergebnis vorkommen.
+    fn hit_patterns(regions: &[Region]) -> Vec<String> {
+        let mut ids: Vec<String> = regions
+            .iter()
+            .filter_map(|r| match &r.source {
+                redact_core::Source::Pattern { pattern_id, .. } => Some(pattern_id.clone()),
+                _ => None,
+            })
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// **Die Auflage (1): ganz aus heißt kein einziger automatischer Treffer.**
+    #[test]
+    fn no_patterns_finds_nothing_at_all() {
+        let runs = mixed_run();
+        let alles_an = collect_regions(&Config::default(), &runs).unwrap();
+        assert!(
+            hit_patterns(&alles_an).len() >= 3,
+            "die Gegenprobe taugt nichts: {:?}",
+            hit_patterns(&alles_an)
+        );
+
+        let aus = Config {
+            no_patterns: true,
+            ..Config::default()
+        };
+        assert!(collect_regions(&aus, &runs).unwrap().is_empty());
+    }
+
+    /// **Die Auflage (2): einzeln aus nimmt genau ein Muster heraus.**
+    ///
+    /// Gemessen wird beides: das abgeschaltete Muster fehlt, und **alle
+    /// anderen sind noch da**. Nur die erste Hälfte zu prüfen ließe eine
+    /// Abschaltung durchgehen, die nebenbei den ganzen Lauf lahmlegt.
+    #[test]
+    fn switching_off_one_pattern_leaves_every_other_one_alone() {
+        let runs = mixed_run();
+        let alle = hit_patterns(&collect_regions(&Config::default(), &runs).unwrap());
+        assert!(alle.contains(&"email".to_string()), "{alle:?}");
+
+        let config = Config {
+            disabled_patterns: vec!["email".to_string()],
+            ..Config::default()
+        };
+        let übrig = hit_patterns(&collect_regions(&config, &runs).unwrap());
+        assert!(!übrig.contains(&"email".to_string()), "{übrig:?}");
+        assert_eq!(
+            übrig,
+            alle.iter()
+                .filter(|id| *id != "email")
+                .cloned()
+                .collect::<Vec<_>>(),
+            "abgeschaltet wurde mehr als das eine Muster"
+        );
+    }
+
+    /// **Die Auflage (3): ein unbekannter Name ist ein Bedienfehler.**
+    ///
+    /// `RedactError::Config` ist der Rückgabewert 2 der Kommandozeile; die
+    /// Meldung muss die gültigen Namen nennen, sonst hilft sie beim Tippfehler
+    /// nicht.
+    #[test]
+    fn an_unknown_pattern_name_is_a_usage_error_naming_the_valid_ones() {
+        let config = Config {
+            // Der naheliegende Tippfehler: `iban` statt `iban_de`.
+            disabled_patterns: vec!["iban".to_string()],
+            ..Config::default()
+        };
+        let error = collect_regions(&config, &mixed_run())
+            .expect_err("ein unbekannter Name darf nicht stillschweigend durchgehen");
+        assert!(
+            matches!(error, RedactError::Config(_)),
+            "das muss ein Bedienfehler sein (Rückgabewert 2), ist aber: {error:?}"
+        );
+        let text = error.to_string();
+        assert!(text.contains("iban"), "{text}");
+        for id in redact_patterns::builtin_pattern_ids() {
+            assert!(text.contains(id), "{id} fehlt in der Meldung: {text}");
+        }
+    }
+
+    /// Auch neben `--no-patterns` fällt der Tippfehler auf.
+    ///
+    /// Sonst wäre ausgerechnet die Kombination „alles aus, dieses eine
+    /// besonders“ die Stelle, an der ein Name wirkungslos verschwindet.
+    #[test]
+    fn an_unknown_name_is_refused_even_when_nothing_would_run_anyway() {
+        let config = Config {
+            no_patterns: true,
+            disabled_patterns: vec!["gibt_es_nicht".to_string()],
+            ..Config::default()
+        };
+        assert!(collect_regions(&config, &mixed_run()).is_err());
+    }
+
+    /// Ein Muster aus `--patterns-config` ist ein gültiger Name — und die
+    /// Schwelle dieser Datei überlebt das Abschalten.
+    ///
+    /// Der zweite Teil ist der Regressionsschutz: der Sucher wird zum
+    /// Abschalten neu gebaut, und ein neu gebauter Sucher fängt bei der
+    /// Vorgabe-Schwelle an.
+    #[test]
+    fn a_pattern_from_a_config_file_can_be_switched_off_without_losing_its_threshold() {
+        let dir = tempdir("musterdatei");
+        let path = dir.join("patterns.yaml");
+        std::fs::write(
+            &path,
+            "min_confidence: 0.25\npatterns:\n  - id: kundennummer\n    \
+             regex: 'KdNr\\.? ?[0-9]{5}'\n    confidence: 0.3\n",
+        )
+        .unwrap();
+
+        let runs = vec![text_run("KdNr 12345 und BLZ 37040044")];
+        let config = Config {
+            patterns_config: Some(path.clone()),
+            ..Config::default()
+        };
+        let alle = hit_patterns(&collect_regions(&config, &runs).unwrap());
+        // Beide leben nur von der abgesenkten Schwelle aus der Datei.
+        assert!(alle.contains(&"kundennummer".to_string()), "{alle:?}");
+        assert!(alle.contains(&"blz".to_string()), "{alle:?}");
+
+        let config = Config {
+            disabled_patterns: vec!["kundennummer".to_string()],
+            ..config
+        };
+        let übrig = hit_patterns(&collect_regions(&config, &runs).unwrap());
+        assert!(!übrig.contains(&"kundennummer".to_string()), "{übrig:?}");
+        assert!(
+            übrig.contains(&"blz".to_string()),
+            "die Schwelle aus der Musterdatei ging beim Abschalten verloren: {übrig:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `--patterns` engt die Auswahl ein, macht aber keinen Namen unbekannt.
+    #[test]
+    fn a_name_outside_the_selection_is_still_a_known_name() {
+        let config = Config {
+            patterns: vec!["iban_de".to_string()],
+            disabled_patterns: vec!["bic".to_string()],
+            ..Config::default()
+        };
+        let übrig = hit_patterns(&collect_regions(&config, &mixed_run()).unwrap());
+        assert_eq!(übrig, vec!["iban_de".to_string()]);
+    }
+
+    /// Die Ansage über abgeschaltete Erkennung — beide Fälle, und der Fall
+    /// „nichts abgeschaltet“ schweigt.
+    #[test]
+    fn the_notice_says_what_was_switched_off() {
+        assert_eq!(detection_notice(&Config::default()), None);
+
+        let ganz = detection_notice(&Config {
+            no_patterns: true,
+            ..Config::default()
+        })
+        .expect("ganz aus muss gesagt werden");
+        assert!(ganz.starts_with(DETECTION_NOTICE), "{ganz}");
+        assert!(ganz.contains("--no-patterns"), "{ganz}");
+
+        let einzeln = detection_notice(&Config {
+            disabled_patterns: vec!["date_de".into(), "date_de".into(), "  ".into()],
+            ..Config::default()
+        })
+        .expect("einzeln aus muss gesagt werden");
+        assert!(einzeln.starts_with(DETECTION_NOTICE), "{einzeln}");
+        // Getrimmt, ohne Dubletten, ohne Leereintrag: „1 Muster“, nicht drei.
+        assert!(
+            einzeln.contains("1 Muster abgeschaltet (date_de)"),
+            "{einzeln}"
+        );
+    }
+
+    /// Die Liste für die Oberfläche zeigt den *tatsächlichen* Zustand — nicht
+    /// die Vorgabe und nicht die Abschaltliste allein.
+    #[test]
+    fn the_pattern_states_show_what_really_runs() {
+        let states = pattern_states(&Config::default()).unwrap();
+        let state_of = |states: &[redact_patterns::PatternDef], id: &str| {
+            states
+                .iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("{id} fehlt"))
+                .enabled
+        };
+        // Vorgabe: `iban_de` an, `date_de` aus (zu viele Fehltreffer).
+        assert!(state_of(&states, "iban_de"));
+        assert!(!state_of(&states, "date_de"));
+
+        let states = pattern_states(&Config {
+            disabled_patterns: vec!["iban_de".into()],
+            ..Config::default()
+        })
+        .unwrap();
+        assert!(!state_of(&states, "iban_de"));
+
+        // `--patterns date_de` schaltet ein standardmäßig ausgeschaltetes
+        // Muster ein — auch das muss die Liste zeigen.
+        let states = pattern_states(&Config {
+            patterns: vec!["date_de".into()],
+            ..Config::default()
+        })
+        .unwrap();
+        assert_eq!(states.len(), 1);
+        assert!(state_of(&states, "date_de"));
     }
 
     #[test]

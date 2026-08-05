@@ -64,9 +64,10 @@ pub const THEMES: [&str; 2] = ["hell", "dunkel"];
 /// aufzählt, diese Meldung aber nicht benutzt wird (siehe
 /// [`Settings::from_yaml`]). Der Test `the_listed_keys_are_the_real_ones`
 /// misst nach, dass die Liste stimmt.
-pub const KEYS: [&str; 5] = [
+pub const KEYS: [&str; 6] = [
     "output_suffix",
     "patterns",
+    "disabled_patterns",
     "min_confidence",
     "padding",
     "theme",
@@ -74,7 +75,7 @@ pub const KEYS: [&str; 5] = [
 
 /// Obergrenze für die Einstellungsdatei.
 ///
-/// Sie ist eine von Hand gepflegte Datei mit fünf Schlüsseln; ein Kilobyte
+/// Sie ist eine von Hand gepflegte Datei mit einer Handvoll Schlüsseln; ein Kilobyte
 /// reicht dafür tausendfach. Die Grenze steht trotzdem da, und zwar aus
 /// demselben Grund wie die für die Eingabe-PDF: `REDACT_RS_CONFIG` zeigt auf
 /// einen beliebigen Pfad, und `std::fs::read_to_string` liest, was da steht —
@@ -95,6 +96,24 @@ pub struct Settings {
     pub output_suffix: String,
     /// Standardmäßig benutzte Muster (`--patterns`); leer = die eingebaute Auswahl.
     pub patterns: Vec<String>,
+    /// Standardmäßig abgeschaltete Muster (`--disable-pattern`).
+    ///
+    /// Für Muster, die im eigenen Bestand mehr Fehltreffer als Funde erzeugen
+    /// — `date_de` ist der Regelfall. Die Kommandozeile schlägt die Datei: eine
+    /// nicht leere Angabe hinter `--disable-pattern` ersetzt diese Liste.
+    ///
+    /// ## Warum es hier kein `no_patterns` gibt
+    ///
+    /// „Alle automatischen Funde aus“ ist die weitreichendste Einstellung, die
+    /// dieses Werkzeug kennt, und sie ließe sich hier **nicht mehr
+    /// widerrufen**: `--no-patterns` ist ein Schalter ohne Gegenstück, es gibt
+    /// kein `--patterns-an`. Stünde er in der Datei, arbeitete jeder Aufruf
+    /// ohne Erkennung, und die Kommandozeile hätte kein Mittel dagegen — genau
+    /// die stille falsche Entwarnung, gegen die die Meldung in
+    /// [`crate::detection_notice`] gedacht ist. Ein einzelnes Muster
+    /// abzuschalten ist etwas anderes: die Angabe ist widerrufbar, weil eine
+    /// Liste auf der Kommandozeile die Liste aus der Datei ersetzt.
+    pub disabled_patterns: Vec<String>,
     /// Mindestvertrauen (`--min-confidence`).
     ///
     /// `None` heißt „nicht festgelegt“ und ist etwas anderes als ein Wert:
@@ -112,6 +131,7 @@ impl Default for Settings {
         Self {
             output_suffix: redact_core::DEFAULT_OUTPUT_SUFFIX.to_string(),
             patterns: Vec::new(),
+            disabled_patterns: Vec::new(),
             min_confidence: None,
             padding: crate::DEFAULT_PADDING,
             theme: THEMES[0].to_string(),
@@ -310,8 +330,22 @@ mod tests {
         assert_eq!(settings.output_suffix, redact_core::DEFAULT_OUTPUT_SUFFIX);
         assert_eq!(settings.padding, crate::DEFAULT_PADDING);
         assert!(settings.patterns.is_empty());
+        assert!(settings.disabled_patterns.is_empty());
         assert_eq!(settings.min_confidence, None);
         assert_eq!(settings.theme, "hell");
+    }
+
+    /// „Alles aus“ darf nicht in der Datei stehen: der Schalter hat kein
+    /// Gegenstück auf der Kommandozeile und wäre damit nicht mehr zu widerrufen.
+    #[test]
+    fn the_file_cannot_switch_off_the_detection_as_a_whole() {
+        let error = Settings::from_yaml("no_patterns: true\n")
+            .expect_err("no_patterns gehört nicht in die Einstellungsdatei")
+            .to_string();
+        assert!(error.contains("unbekannter Schlüssel"), "{error}");
+        // Einzelne Muster dagegen schon — die Liste ist widerrufbar.
+        let settings = Settings::from_yaml("disabled_patterns: [date_de, bic]\n").unwrap();
+        assert_eq!(settings.disabled_patterns, vec!["date_de", "bic"]);
     }
 
     /// Eine Datei, die einen Schlüssel nennt, ändert auch nur diesen einen.
@@ -474,12 +508,13 @@ mod tests {
     #[test]
     fn every_field_can_be_set() {
         let settings = Settings::from_yaml(
-            "output_suffix: _anonym\npatterns: [iban_de, bic]\nmin_confidence: 0.25\n\
-             padding: 2.0\ntheme: dunkel\n",
+            "output_suffix: _anonym\npatterns: [iban_de, bic]\ndisabled_patterns: [bic]\n\
+             min_confidence: 0.25\npadding: 2.0\ntheme: dunkel\n",
         )
         .unwrap();
         assert_eq!(settings.output_suffix, "_anonym");
         assert_eq!(settings.patterns, vec!["iban_de", "bic"]);
+        assert_eq!(settings.disabled_patterns, vec!["bic"]);
         assert_eq!(settings.min_confidence, Some(0.25));
         assert_eq!(settings.padding, 2.0);
         assert_eq!(settings.theme, "dunkel");

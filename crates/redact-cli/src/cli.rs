@@ -68,9 +68,25 @@ pub struct Cli {
     #[arg(long, value_delimiter = ',', num_args = 1..)]
     pub patterns: Vec<String>,
 
-    /// Keine Patterns anwenden.
+    /// Keine Patterns anwenden — kein einziger automatischer Treffer.
+    ///
+    /// Geschwärzt wird dann nur, was `--manual-regions`, `--apply-review` oder
+    /// die Buchungsliste nennen. Der Lauf sagt es in der Zusammenfassung und
+    /// schreibt es ins Audit-Log: eine Datei, die so entstanden ist, sieht in
+    /// jeder Zahl aus wie eine vollständig geprüfte.
     #[arg(long, conflicts_with_all = ["patterns", "patterns_config"])]
     pub no_patterns: bool,
+
+    /// Einzelnes Muster abschalten (mehrfach oder kommagetrennt).
+    ///
+    /// Die übrigen bleiben an: `--disable-pattern date_de` nimmt genau das
+    /// Datumsmuster aus dem Lauf. Ein unbekannter Name beendet den Lauf mit
+    /// Rückgabewert 2 und nennt die gültigen — stillschweigend übergangen sähe
+    /// er aus wie eine Abschaltung und wäre keine.
+    ///
+    /// Ohne Angabe gilt die Liste aus der Einstellungsdatei.
+    #[arg(long = "disable-pattern", value_name = "ID", value_delimiter = ',', num_args = 1..)]
+    pub disable_pattern: Vec<String>,
 
     /// Eigene Pattern-Konfiguration (YAML oder JSON).
     #[arg(long, value_name = "DATEI")]
@@ -295,6 +311,14 @@ impl Cli {
                 self.patterns.clone()
             },
             no_patterns: self.no_patterns,
+            // Wie bei `patterns`: eine Angabe auf der Kommandozeile **ersetzt**
+            // die Liste aus der Datei. Nur so bleibt eine dort eingetragene
+            // Abschaltung widerrufbar (siehe `Settings::disabled_patterns`).
+            disabled_patterns: if self.disable_pattern.is_empty() {
+                settings.disabled_patterns.clone()
+            } else {
+                self.disable_pattern.clone()
+            },
             patterns_config: self.patterns_config.clone(),
             min_confidence: self.min_confidence.or(settings.min_confidence),
             booking_list: self.booking_list.clone(),
@@ -458,6 +482,7 @@ mod tests {
         Settings {
             output_suffix: "_ausDatei".into(),
             patterns: vec!["bic".into()],
+            disabled_patterns: vec!["date_de".into()],
             min_confidence: Some(0.25),
             padding: 7.5,
             theme: "dunkel".into(),
@@ -472,6 +497,8 @@ mod tests {
         assert_eq!(config.padding, redact_pipeline::DEFAULT_PADDING);
         assert_eq!(config.min_confidence, None);
         assert!(config.patterns.is_empty());
+        assert!(config.disabled_patterns.is_empty());
+        assert!(!config.no_patterns);
         assert_eq!(config.theme, "hell");
     }
 
@@ -483,6 +510,7 @@ mod tests {
         assert_eq!(config.padding, 7.5);
         assert_eq!(config.min_confidence, Some(0.25));
         assert_eq!(config.patterns, vec!["bic"]);
+        assert_eq!(config.disabled_patterns, vec!["date_de"]);
         assert_eq!(config.theme, "dunkel");
     }
 
@@ -500,12 +528,34 @@ mod tests {
             "0.9",
             "--patterns",
             "iban_de",
+            "--disable-pattern",
+            "bic,email",
         ])
         .config(&file_settings());
         assert_eq!(config.output_suffix, "_vonHand");
         assert_eq!(config.padding, 0.5);
         assert_eq!(config.min_confidence, Some(0.9));
         assert_eq!(config.patterns, vec!["iban_de"]);
+        assert_eq!(
+            config.disabled_patterns,
+            vec!["bic", "email"],
+            "die Abschaltung der Datei muss widerrufbar sein"
+        );
+    }
+
+    /// `--disable-pattern` nimmt Kommata **und** mehrere Angaben, wie
+    /// `--patterns` auch.
+    #[test]
+    fn disabled_patterns_come_as_a_list_or_one_by_one() {
+        let cli = Cli::parse_from([
+            "redact-rs",
+            "in.pdf",
+            "--disable-pattern",
+            "date_de,bic",
+            "--disable-pattern",
+            "email",
+        ]);
+        assert_eq!(cli.disable_pattern, vec!["date_de", "bic", "email"]);
     }
 
     /// Gegenprobe: ein Schalter, der *nicht* angegeben wurde, darf den Wert

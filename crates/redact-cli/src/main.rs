@@ -141,6 +141,22 @@ fn report(outcome: &Outcome) {
         println!("Textzeilen:         {}", outcome.text_runs);
         println!("Treffer gesamt:     {}", outcome.candidates);
     }
+    // Die Ansage über abgeschaltete Erkennung steht unten bei den Warnungen —
+    // sie gehört aber **neben die Trefferzahl**: „Treffer gesamt: 0“ liest sich
+    // sonst als „nichts gefunden“ statt als „nicht gesucht“. Und stdout und
+    // stderr landen nicht zwangsläufig an derselben Stelle: `redact-rs … >
+    // bericht.txt` behielte ohne diese Zeile nur die harmlose Hälfte.
+    //
+    // Gelesen wird die Warnung, nicht die Konfiguration: der Satz hat genau
+    // eine Quelle (`redact_pipeline::detection_notice`), und die Textmarke
+    // davor ist dafür da, ihn wiederzuerkennen.
+    if let Some(notice) = outcome
+        .warnings
+        .iter()
+        .find(|w| w.starts_with(redact_pipeline::DETECTION_NOTICE))
+    {
+        println!("{}", safe_text(notice));
+    }
     if outcome.blocked > 0 {
         println!("Durch Negativliste blockiert: {}", outcome.blocked);
         for detail in &outcome.blocked_details {
@@ -277,7 +293,11 @@ fn list_patterns() -> Result<()> {
     }
     println!(
         "\nAuswahl mit --patterns id1,id2 — standardmäßig ausgeschaltete Patterns\n\
-         lassen sich so gezielt einschalten.\n\n\
+         lassen sich so gezielt einschalten. Umgekehrt nimmt --disable-pattern id\n\
+         ein einzelnes Muster aus dem Lauf und lässt die übrigen laufen;\n\
+         --no-patterns schaltet die automatische Erkennung ganz ab. Beides steht\n\
+         danach in der Zusammenfassung und im Audit-Log — eine Datei ohne\n\
+         automatische Suche sieht sonst aus wie eine vollständig geprüfte.\n\n\
          Treffer unterhalb des Mindestvertrauens werden verworfen; die Vorgabe\n\
          ist {min:.2}. Ein Pattern, dessen Spalte „ohne“ darunter liegt, findet\n\
          also nichts, solange kein Schlüsselwort danebensteht — mit\n\

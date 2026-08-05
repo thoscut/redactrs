@@ -6,16 +6,69 @@
 //! (`DE89 `, `3704 `, `0044 …`). Wer nur einzelne Text-Runs betrachtet, findet
 //! sie nicht. Deshalb werden hier alle Glyphen einer Seite eingesammelt,
 //! nach Grundlinie gruppiert und zu Zeilen zusammengesetzt.
+//!
+//! ## Warum eine Zeile mehrere Druckschichten haben kann
+//!
+//! Das Verschmelzen über alle Textoperationen hinweg ist gewollt — eine
+//! Tabellenzeile besteht aus vielen `Tj`-Aufrufen und muss **eine** Zeile
+//! ergeben. Es hat aber eine Grenze: liegen zwei Texte auf derselben
+//! Grundlinie *übereinander*, verschränkt das Verschmelzen sie zeichenweise
+//! (`IIBBAANN::  DDEE8899 …`) und kein Muster greift mehr. Das ist kein
+//! Sonderfall, sondern das gängige Fett-Imitat (dieselbe Zeile zweimal
+//! gedruckt), der Schlagschatten und jede Annotation mit mehreren
+//! Erscheinungszuständen auf demselben `/Rect`.
+//!
+//! Die Unterscheidung ist **nicht** die Herkunft (nach `ShowRecord` zu trennen
+//! zerlegte jede Tabellenzeile), sondern die Geometrie: nebeneinander gesetzter
+//! Text *kachelt* die Grundlinie — jede Druckfolge beginnt dort, wo die vorige
+//! aufhört —, übereinander gedruckter Text *überdeckt* sie. Die Zeile wird
+//! deshalb in [`split_layers`] in Druckschichten zerlegt, und jede Schicht
+//! ergibt ihre eigene Zeile.
 
-use lopdf::Document;
+use std::collections::{BTreeMap, BTreeSet};
+
+use lopdf::{Document, ObjectId};
 use redact_core::{Glyph, Rect, Result, TextRun};
 
-use crate::content::{scan_page, GlyphItem};
+use crate::content::{scan_page, GlyphItem, ScanResult};
 
 /// Auflösung der Richtungs-Einteilung in Grad. Glyphen mit gleicher gerundeter
 /// Grundlinienrichtung kommen in dieselbe Zeile; ein 90°-Block bleibt also von
 /// waagerechtem Text getrennt.
 const DIRECTION_BUCKET_DEGREES: f64 = 1.0;
+
+/// Anteil der *kürzeren* der beiden Druckfolgen, den eine Überlappung erreichen
+/// muss, bevor sie als eigene Druckschicht gilt.
+///
+/// Ein Wert unterhalb davon ist Feinsatz: ein Kerningpaar, eine negative
+/// Laufweite, eine Zelle, deren Text ein Stück in die nächste ragt. Ein Wert
+/// darüber heißt, dass die eine Folge die andere über weite Strecken überdeckt
+/// — und zwei Texte übereinander sind zwei Zeilen, keine.
+const OVERPRINT_RATIO: f64 = 0.5;
+
+/// Untergrenze derselben Prüfung, als Anteil der Leerzeichenbreite.
+///
+/// Sie fängt sehr kurze Druckfolgen ab (eine einzelne Glyphe), bei denen der
+/// Anteil oben in den Bereich der Rundungs- und Metrikunschärfe fiele. Ohne
+/// sie zerfiele eine Zeile, deren Metriken nicht exakt zu den gesetzten
+/// Positionen passen, in lauter Schichten.
+const OVERPRINT_FLOOR_IN_SPACES: f64 = 0.5;
+
+/// Wie viele Druckschichten eine Zeile höchstens bekommt.
+///
+/// Die Zuordnung sucht linear über die bereits belegten Schichten; ohne
+/// Obergrenze machte eine Datei, die tausend Textstücke an dieselbe Stelle
+/// druckt, daraus quadratischen Aufwand. Ein Fett-Imitat hat zwei Schichten,
+/// ein Schlagschatten zwei, eine Checkbox mit allen Zuständen eine Handvoll —
+/// 64 liegt weit jenseits von allem, was ein Satzprogramm erzeugt.
+const MAX_PRINT_LAYERS: usize = 64;
+
+/// Wie viele ungezeichnete Formulare höchstens einzeln geöffnet werden.
+///
+/// Die Prüfung „steht da überhaupt Text?“ dekodiert einen Strom. Eine Datei
+/// mit zehntausend Karteileichen im Ressourcenverzeichnis dürfte damit nicht
+/// den Lauf aufhalten; jenseits der Grenze wird zusammengefasst gemeldet.
+const MAX_INSPECTED_UNPLACED_FORMS: usize = 64;
 
 /// Extrahiert Textzeilen mit zeichengenauen Koordinaten.
 #[derive(Debug, Clone)]
@@ -48,12 +101,7 @@ impl PdfExtractor {
             return Ok(Vec::new());
         };
         let scan = scan_page(doc, *page_id)?;
-        let glyphs: Vec<GlyphItem> = scan
-            .shows
-            .iter()
-            .flat_map(|s| s.glyphs().cloned())
-            .collect();
-        Ok(self.build_lines(page_index, glyphs))
+        Ok(self.build_lines(page_index, glyph_items(&scan)))
     }
 
     /// Wie [`PdfExtractor::extract`], liefert aber zusätzlich die Warnungen des
@@ -67,6 +115,10 @@ impl PdfExtractor {
     pub fn extract_with_warnings(&self, doc: &Document) -> Result<(Vec<TextRun>, Vec<String>)> {
         let mut runs = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
+        // Angeboten und gezeichnet — über **alle** Seiten hinweg, siehe
+        // [`unplaced_form_warnings`].
+        let mut declared: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
+        let mut placed: BTreeSet<ObjectId> = BTreeSet::new();
         for (index, (_, page_id)) in doc.get_pages().iter().enumerate() {
             let scan = scan_page(doc, *page_id)?;
             for warning in &scan.warnings {
@@ -74,12 +126,16 @@ impl PdfExtractor {
                     warnings.push(warning.clone());
                 }
             }
-            let glyphs: Vec<GlyphItem> = scan
-                .shows
-                .iter()
-                .flat_map(|s| s.glyphs().cloned())
-                .collect();
-            runs.extend(self.build_lines(index, glyphs));
+            for (id, name) in &scan.declared_forms {
+                declared.entry(*id).or_insert_with(|| name.clone());
+            }
+            placed.extend(scan.form_placements.keys().copied());
+            runs.extend(self.build_lines(index, glyph_items(&scan)));
+        }
+        for warning in unplaced_form_warnings(doc, &declared, &placed) {
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
         }
         Ok((runs, warnings))
     }
@@ -90,13 +146,30 @@ impl PdfExtractor {
     /// User-Space-Y-Achse: bei gedrehtem Text wandert der Zeilenursprung sonst
     /// in `y`, und jede einzelne Glyphe landet in einer eigenen „Zeile“ —
     /// womit kein Muster mehr über mehr als ein Zeichen greift.
-    fn build_lines(&self, page: usize, mut glyphs: Vec<GlyphItem>) -> Vec<TextRun> {
+    ///
+    /// Jede Glyphe kommt mit der laufenden Nummer ihrer Textoperation
+    /// ([`glyph_items`]). Die entscheidet **nicht** über die Zeilenbildung —
+    /// sie hält nur fest, welche Glyphen in *einem Zug* gesetzt wurden, und
+    /// daraus werden in [`print_runs`] die Druckfolgen.
+    fn build_lines(&self, page: usize, items: Vec<(usize, GlyphItem)>) -> Vec<TextRun> {
         // Codes ohne Textzuordnung fliegen raus, Ersatzzeichen bleiben erhalten:
         // sie halten die Position und verhindern falsche Zusammenschreibung.
-        glyphs.retain(|g| !g.text.is_empty());
-        if glyphs.is_empty() {
+        let items: Vec<(usize, GlyphItem)> = items
+            .into_iter()
+            .filter(|(_, g)| !g.text.is_empty())
+            .collect();
+        if items.is_empty() {
             return Vec::new();
         }
+
+        // Die Druckfolgen müssen **vor** dem Sortieren bestimmt werden: sie
+        // ergeben sich aus der Reihenfolge, in der die Glyphen gesetzt wurden.
+        let runs = print_runs(&items);
+        let mut glyphs: Vec<(usize, GlyphItem)> = items
+            .into_iter()
+            .zip(runs)
+            .map(|((_, g), run)| (run, g))
+            .collect();
 
         // Leserichtung herstellen: Zeilen in Vorschubrichtung, innerhalb der
         // Zeile in Schreibrichtung. Bei waagerechtem Text ist das genau
@@ -104,14 +177,14 @@ impl PdfExtractor {
         // Quantisierung des Zeilenabstands fängt kleine
         // Grundlinien-Schwankungen ab.
         let tol = self.baseline_tolerance.max(0.1);
-        glyphs.sort_by(|a, b| {
+        glyphs.sort_by(|(_, a), (_, b)| {
             sort_key(a, tol)
                 .partial_cmp(&sort_key(b, tol))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let mut lines: Vec<Vec<GlyphItem>> = Vec::new();
-        let mut current: Vec<GlyphItem> = Vec::new();
+        let mut lines: Vec<Vec<(usize, GlyphItem)>> = Vec::new();
+        let mut current: Vec<(usize, GlyphItem)> = Vec::new();
         // Bezugswerte der laufenden Zeile. Die Toleranz gehört zur **Zeile**,
         // nicht zur gerade betrachteten Glyphe — sonst entscheidet die
         // Reihenfolge über die Gruppierung, und eine große Überschrift zieht
@@ -120,7 +193,7 @@ impl PdfExtractor {
         let mut line_across = 0.0f64;
         let mut line_tol = tol;
 
-        for g in glyphs {
+        for (run, g) in glyphs {
             let direction = direction_bucket(&g);
             let across = across_of(&g);
             let same_line = !current.is_empty()
@@ -141,7 +214,7 @@ impl PdfExtractor {
                 };
                 line_tol = (height * 0.45).max(tol);
             }
-            current.push(g);
+            current.push((run, g));
         }
         if !current.is_empty() {
             lines.push(current);
@@ -149,7 +222,8 @@ impl PdfExtractor {
 
         lines
             .into_iter()
-            .filter_map(|line| self.assemble_line(page, line))
+            .flat_map(split_layers)
+            .filter_map(|layer| self.assemble_line(page, layer))
             .collect()
     }
 
@@ -250,6 +324,259 @@ impl PdfExtractor {
     pub fn extract(&self, doc: &Document) -> Result<Vec<TextRun>> {
         Ok(self.extract_with_warnings(doc)?.0)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Druckfolgen und Druckschichten
+// ---------------------------------------------------------------------------
+
+/// Die Glyphen eines Seiten-Scans, jede mit der laufenden Nummer ihrer
+/// Textoperation.
+///
+/// Die Nummer zählt **Platzierungen**, nicht Operationen im Strom: ein
+/// zweimal gezeichnetes Form-XObject liefert seine Textoperationen zweimal,
+/// und die beiden Durchgänge sind zwei verschiedene Druckvorgänge an zwei
+/// Stellen der Seite.
+fn glyph_items(scan: &ScanResult) -> Vec<(usize, GlyphItem)> {
+    scan.shows
+        .iter()
+        .enumerate()
+        .flat_map(|(index, show)| show.glyphs().cloned().map(move |g| (index, g)))
+        .collect()
+}
+
+/// Meldet Form-XObjects, die in einem Ressourcenverzeichnis **stehen**, aber
+/// im ganzen Dokument nie gezeichnet werden.
+///
+/// Der Interpreter führt aus, was ein `Do` erreicht — mehr nicht. Ein
+/// Formular, das nur in `/Resources /XObject` steht, wird deshalb nie gelesen;
+/// und weil es über `/Resources` erreichbar bleibt, überlebt es auch die
+/// Aufräumrunde für unerreichbare Objekte. Sein Text steht unverändert in der
+/// Ausgabe, und der Lauf meldete „nichts gefunden“ mit Rückgabewert 0.
+///
+/// ## Warum gemeldet und nicht entfernt
+///
+/// Der Eintrag aus `/Resources` zu streichen wäre gründlicher — das Objekt
+/// würde unerreichbar und fiele beim Schreiben weg. Es wäre aber ein Eingriff
+/// in eine Struktur, deren Reichweite hier gar nicht feststeht:
+///
+/// * Ein `/Resources`-Dictionary hängt oft am `/Pages`-Knoten oder wird von
+///   mehreren Seiten **als dasselbe Objekt** benutzt.
+/// * Erscheinungsströme von Annotationen greifen ersatzweise auf die
+///   Ressourcen der Seite zurück.
+/// * „Kein `Do` gefunden“ ist eine Aussage über *unseren* Durchlauf. Ein
+///   anderer Betrachter kann denselben Namen über einen Weg erreichen, den
+///   wir nicht gegangen sind.
+///
+/// Ein stiller Eingriff, der in einem dieser Fälle danebengeht, beschädigt
+/// eine Datei, ohne dass es jemand merkt — und er beseitigt nicht einmal die
+/// eigentliche Lücke, denn gelesen wurde der Text ja weiterhin nicht. Die
+/// Meldung sagt dagegen genau das, was zutrifft, nennt das Objekt beim Namen
+/// und setzt den Rückgabewert auf 3. Das Entfernen gehört, wenn es kommt, an
+/// die Oberfläche als ausdrückliche Entscheidung des Nutzers — nicht in einen
+/// Seiteneffekt der Analyse.
+fn unplaced_form_warnings(
+    doc: &Document,
+    declared: &BTreeMap<ObjectId, Vec<u8>>,
+    placed: &BTreeSet<ObjectId>,
+) -> Vec<String> {
+    let unplaced: Vec<(&ObjectId, &Vec<u8>)> = declared
+        .iter()
+        .filter(|(id, _)| !placed.contains(*id))
+        .collect();
+    if unplaced.is_empty() {
+        return Vec::new();
+    }
+    if unplaced.len() > MAX_INSPECTED_UNPLACED_FORMS {
+        return vec![format!(
+            "{} Form-XObjects stehen in den Ressourcen, werden aber nirgends gezeichnet. \
+             Ihr Inhalt wurde nicht durchsucht und kann deshalb nicht geschwärzt worden \
+             sein.",
+            unplaced.len()
+        )];
+    }
+    unplaced
+        .into_iter()
+        .filter(|(id, _)| crate::content::stream_shows_text(doc, **id))
+        .map(|(id, name)| {
+            format!(
+                "Das Form-XObject „{}“ (Objekt {} {}) steht in den Ressourcen, wird aber \
+                 nirgends gezeichnet; sein Text wurde nicht durchsucht und kann deshalb \
+                 nicht geschwärzt worden sein.",
+                String::from_utf8_lossy(name),
+                id.0,
+                id.1
+            )
+        })
+        .collect()
+}
+
+/// Wie weit eine Glyphe hinter den Stand ihrer Druckfolge zurückfallen darf,
+/// ohne dass eine neue Folge beginnt.
+///
+/// Ein Kerningpaar (`[(A) 80 (V)] TJ`) springt um Bruchteile eines Punktes
+/// zurück und gehört selbstverständlich zum selben Zug. Ein Rücksprung über
+/// die ganze Zeichenkette ist dagegen ein zweiter Druck an derselben Stelle.
+fn backstep_tolerance(g: &GlyphItem) -> f64 {
+    let space = g.baseline.space_width.abs();
+    let advance = g.baseline.advance.abs();
+    (space.max(advance) * 0.5).max(0.1)
+}
+
+/// Ausdehnung einer Glyphe entlang der Grundlinie.
+///
+/// Maßgeblich ist der Vorschub — er ist die Zelle, die die Glyphe in der Zeile
+/// belegt, und er stimmt genau mit dem Beginn der nächsten Glyphe überein.
+/// Nur wo er fehlt (Teilzeichen einer Ligatur, Glyphen ohne Breite), muss die
+/// Projektion des Glyphenkastens einspringen.
+fn extent_along(g: &GlyphItem) -> f64 {
+    let advance = g.baseline.advance.abs();
+    if advance > 1e-9 {
+        return advance;
+    }
+    let d = g.baseline.direction;
+    g.rect.width().abs() * d.x.abs() + g.rect.height().abs() * d.y.abs()
+}
+
+/// Zerlegt die Glyphen in **Druckfolgen**: Läufe, die in einem Zug und ohne
+/// Rücksprung auf die Grundlinie gesetzt wurden.
+///
+/// Eine neue Folge beginnt, wenn eine neue Textoperation anfängt oder wenn
+/// innerhalb einer Operation weit hinter den erreichten Stand zurückgesprungen
+/// wird (`[(Text) 16789 (Text)] TJ` — derselbe Text zweimal übereinander in
+/// *einer* Operation).
+///
+/// Teilzeichen einer Ligatur tragen keinen Vorschub und sitzen auf dem
+/// Ursprung ihres Codes. Sie sind Fortsetzung, nie Rücksprung — würde man sie
+/// wie eigenständige Glyphen prüfen, zerfiele jede Ligatur in eine eigene
+/// Schicht.
+fn print_runs(items: &[(usize, GlyphItem)]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(items.len());
+    let mut run = 0usize;
+    // (Quelle der laufenden Folge, bisher erreichter Stand auf der Grundlinie)
+    let mut open: Option<(usize, f64)> = None;
+    for (source, g) in items {
+        let start = along_of(g);
+        let end = start + extent_along(g);
+        let starts_new = match open {
+            None => true,
+            Some((src, _)) if src != *source => true,
+            Some(_) if g.baseline.advance.abs() <= 1e-9 => false,
+            Some((_, reached)) => start + backstep_tolerance(g) < reached,
+        };
+        if starts_new {
+            if open.is_some() {
+                run += 1;
+            }
+            open = Some((*source, end));
+        } else if let Some((src, reached)) = open {
+            open = Some((src, reached.max(end)));
+        }
+        out.push(run);
+    }
+    out
+}
+
+/// Zerlegt eine Zeile in **Druckschichten**.
+///
+/// Die Zeile kommt bereits in Leserichtung sortiert; jede Glyphe trägt die
+/// Nummer ihrer Druckfolge. Nebeneinander gesetzte Folgen kacheln die
+/// Grundlinie und bleiben in einer Schicht — das ist die Tabellenzeile aus
+/// vielen `Tj`-Aufrufen. Eine Folge, die eine bereits belegte Strecke
+/// **überdeckt**, eröffnet eine neue Schicht.
+///
+/// Gesucht wird dabei nicht die erstbeste freie Schicht, sondern die, deren
+/// Text am dichtesten davor endet. So findet ein Textstück, das nach einem
+/// Überdruck an der ursprünglichen Stelle weitergeht (der klassische
+/// Akzent-Überdruck `(Cr) Tj … (´) Tj … (dit) Tj`), zurück in seine eigene
+/// Schicht.
+fn split_layers(line: Vec<(usize, GlyphItem)>) -> Vec<Vec<GlyphItem>> {
+    // Spanne und Leerzeichenmaß je Druckfolge.
+    let mut spans: BTreeMap<usize, (f64, f64, f64)> = BTreeMap::new();
+    for (run, g) in &line {
+        let start = along_of(g);
+        let end = start + extent_along(g);
+        let space = g.baseline.space_width.abs();
+        spans
+            .entry(*run)
+            .and_modify(|s| {
+                s.0 = s.0.min(start);
+                s.1 = s.1.max(end);
+                s.2 = s.2.max(space);
+            })
+            .or_insert((start, end, space));
+    }
+    if spans.len() < 2 {
+        return vec![line.into_iter().map(|(_, g)| g).collect()];
+    }
+
+    // Abgearbeitet wird **entlang der Grundlinie**, nicht in der Reihenfolge
+    // der Zeile: die ist nach Grundlinienband und erst dann nach Lage
+    // sortiert, und eine hochgestellte Ziffer (`Ts`) steht deshalb vor dem
+    // Text, der links von ihr beginnt. Wer sie in dieser Reihenfolge einfüllt,
+    // erklärt den Zeilenanfang zur zweiten Schicht.
+    let mut order: Vec<usize> = spans.keys().copied().collect();
+    order.sort_by(|a, b| {
+        spans[a]
+            .0
+            .partial_cmp(&spans[b].0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(b))
+    });
+
+    // Belegte Schichten: (erreichter Stand, Länge der zuletzt eingefügten
+    // Folge, deren Leerzeichenmaß).
+    let mut layers: Vec<(f64, f64, f64)> = Vec::new();
+    let mut layer_of: BTreeMap<usize, usize> = BTreeMap::new();
+    for run in order {
+        let (start, end, space) = spans[&run];
+        let length = (end - start).max(0.0);
+        let mut chosen: Option<usize> = None;
+        // Die am weitesten zurückliegende Schicht — der Ausweg, wenn die
+        // Obergrenze erreicht ist.
+        let mut fallback = 0usize;
+        for (index, (reached, last_length, last_space)) in layers.iter().enumerate() {
+            if *reached < layers[fallback].0 {
+                fallback = index;
+            }
+            let overlap = reached - start;
+            let tolerance = (OVERPRINT_RATIO * length.min(*last_length))
+                .max(OVERPRINT_FLOOR_IN_SPACES * space.max(*last_space));
+            if overlap > tolerance {
+                continue;
+            }
+            if chosen.is_none_or(|best| *reached > layers[best].0) {
+                chosen = Some(index);
+            }
+        }
+        // Jenseits der Obergrenze wird nicht weiter aufgefächert: die Suche
+        // ist linear in der Zahl der Schichten, und eine Datei, die tausend
+        // Texte an dieselbe Stelle druckt, machte daraus quadratischen
+        // Aufwand. Kein Satz übereinander gedruckter Texte reicht so weit.
+        if chosen.is_none() && layers.len() >= MAX_PRINT_LAYERS {
+            chosen = Some(fallback);
+        }
+        match chosen {
+            Some(index) => {
+                layers[index] = (layers[index].0.max(end), length, space);
+                layer_of.insert(run, index);
+            }
+            None => {
+                layer_of.insert(run, layers.len());
+                layers.push((end, length, space));
+            }
+        }
+    }
+    if layers.len() < 2 {
+        return vec![line.into_iter().map(|(_, g)| g).collect()];
+    }
+
+    let mut out: Vec<Vec<GlyphItem>> = vec![Vec::new(); layers.len()];
+    for (run, g) in line {
+        out[layer_of[&run]].push(g);
+    }
+    out.retain(|layer| !layer.is_empty());
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +682,13 @@ mod tests {
         }
     }
 
+    /// Glyphen einer einzigen Textoperation — die Herkunft ist für die
+    /// Zeilenbildung ohnehin nicht maßgeblich, und die Tests unten prüfen die
+    /// Geometrie.
+    fn one_show(glyphs: Vec<GlyphItem>) -> Vec<(usize, GlyphItem)> {
+        glyphs.into_iter().map(|g| (0, g)).collect()
+    }
+
     /// Einseitiges PDF mit frei gewähltem Content-Stream; `/F1` ist Helvetica.
     fn doc_with_content(content: &str) -> Document {
         let mut doc = Document::with_version("1.5");
@@ -411,7 +745,7 @@ mod tests {
             glyph("B", 5.0, 100.0, 5.0),
             glyph("C", 0.0, 80.0, 5.0),
         ];
-        let lines = e.build_lines(0, glyphs);
+        let lines = e.build_lines(0, one_show(glyphs));
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "AB");
         assert_eq!(lines[1].text, "C");
@@ -425,7 +759,7 @@ mod tests {
             glyph("E", 5.0, 100.0, 5.0),
             glyph("8", 40.0, 100.0, 5.0),
         ];
-        let lines = e.build_lines(0, glyphs);
+        let lines = e.build_lines(0, one_show(glyphs));
         assert_eq!(lines[0].text, "DE 8");
         // Die Glyph-Liste muss zeichenweise deckungsgleich bleiben.
         assert_eq!(lines[0].glyphs.len(), lines[0].text.chars().count());
@@ -435,7 +769,7 @@ mod tests {
     fn sorts_out_of_order_glyphs_left_to_right() {
         let e = PdfExtractor::new();
         let glyphs = vec![glyph("Z", 20.0, 100.0, 5.0), glyph("A", 0.0, 100.0, 5.0)];
-        let lines = e.build_lines(0, glyphs);
+        let lines = e.build_lines(0, one_show(glyphs));
         assert!(lines[0].text.starts_with('A'));
     }
 
@@ -443,7 +777,7 @@ mod tests {
     fn ligature_glyph_keeps_char_alignment() {
         let e = PdfExtractor::new();
         let glyphs = vec![glyph("fi", 0.0, 100.0, 8.0), glyph("x", 8.0, 100.0, 5.0)];
-        let lines = e.build_lines(0, glyphs);
+        let lines = e.build_lines(0, one_show(glyphs));
         assert_eq!(lines[0].text, "fix");
         assert_eq!(lines[0].glyphs.len(), 3);
     }
@@ -671,6 +1005,61 @@ mod tests {
         assert_eq!(
             lines_of(content),
             vec!["4711000".to_string(), "Kontoauszug".to_string()]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Druckschichten — Grenzen der Regel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn overprinted_text_becomes_two_lines() {
+        let content = "BT /F1 10 Tf 1 0 0 1 72 700 Tm (4711000) Tj ET \
+                       BT /F1 10 Tf 1 0 0 1 72 700 Tm (4711000) Tj ET";
+        assert_eq!(
+            lines_of(content),
+            vec!["4711000".to_string(), "4711000".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_hundred_overprints_stay_within_the_layer_cap() {
+        // Die Zuordnung sucht linear über die belegten Schichten. Ohne
+        // Obergrenze wäre eine Datei, die hundertfach an dieselbe Stelle
+        // druckt, quadratischer Aufwand — und die kann sich jeder bauen.
+        let mut content = String::new();
+        for _ in 0..100 {
+            content.push_str("BT /F1 10 Tf 1 0 0 1 72 700 Tm (4711000) Tj ET ");
+        }
+        let lines = lines_of(&content);
+        assert!(
+            lines.len() <= MAX_PRINT_LAYERS,
+            "mehr Schichten als erlaubt: {}",
+            lines.len()
+        );
+        // Jenseits der Grenze fallen Drucke wieder zusammen und verschränken
+        // sich — die Schichten davor bleiben aber sauber, und darauf kommt es
+        // an: hundert Drucke an derselben Stelle sind kein Satz, sondern ein
+        // Angriff auf die Laufzeit.
+        assert!(
+            lines.iter().filter(|l| l.as_str() == "4711000").count() >= 2,
+            "keine saubere Schicht übrig: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_cell_that_slightly_overruns_the_next_stays_one_line() {
+        // „Kontonummer“ ist bei 10 pt rund 61 pt breit und ragt damit 3 pt in
+        // die nächste Zelle. Das ist Feinsatz, kein zweiter Druck: die Zeile
+        // bleibt **eine** Zeile. (Dass sich an der Nahtstelle ein Zeichen
+        // verschränkt, ist alte Kost und hat mit den Schichten nichts zu tun.)
+        let content = "BT /F1 10 Tf 1 0 0 1 72 700 Tm (Kontonummer) Tj \
+                       1 0 0 1 130 700 Tm (4711000) Tj ET";
+        let lines = lines_of(content);
+        assert_eq!(
+            lines.len(),
+            1,
+            "eine leichte Überschneidung darf die Zeile nicht zerlegen: {lines:?}"
         );
     }
 }

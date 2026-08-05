@@ -9,11 +9,16 @@
 //!    weder `Err` liefern noch panicken — im schlimmsten Fall ein weißes Blatt
 //!    mit `degraded = true`.
 //!
-//! Zusätzlich schreibt [`writes_reference_pngs`] die gerenderten Seiten der auf
-//! dieser Maschine vorhandenen echten PDFs als PNG heraus, damit ein Mensch sie
-//! ohne Bildschirm begutachten kann.
+//! Jedes Prüfstück entsteht hier im Speicher. Diese Datei liest **keine**
+//! Datei von der Maschine, auf der sie läuft — drei taten es einmal, und wenn
+//! sie fehlten (auf jedem CI-Runner der Normalfall), kehrte der betreffende
+//! Test mit „übersprungen“ grün zurück, ohne etwas geprüft zu haben. Siehe
+//! [`a_page_without_a_single_glyph_still_shows_its_drawing`].
+//!
+//! Zusätzlich schreibt [`writes_reference_pngs`] ein paar gerenderte Seiten als
+//! PNG heraus, damit ein Mensch sie ohne Bildschirm begutachten kann.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lopdf::{dictionary, Dictionary, Document, Object, Stream};
 use redact_render::{PageRenderer, RenderOptions, RenderedPage};
@@ -765,105 +770,111 @@ fn an_empty_page_is_a_clean_white_sheet() {
 }
 
 // ---------------------------------------------------------------------------
-// 18 — Echte PDFs von dieser Maschine
+// 18 — Eine Seite, auf der ausschließlich gezeichnet wird
 // ---------------------------------------------------------------------------
 
-/// Die drei echten PDFs, die auf dieser Maschine liegen, mit ihrer
-/// Mindestanforderung an sichtbaren Inhalt.
+/// Der ursprüngliche Fehlerfall dieser Datei: eine Seite ganz **ohne Text**.
 ///
-/// `AnnotationDemo.pdf` ist der eigentliche Fehlerfall: die Seite besteht
-/// ausschließlich aus Linienzeichenbefehlen (`m`, `l`, `s`) und enthält keine
-/// einzige Glyphe — die alte, rein textbasierte Vorschau zeigte sie als leeres
-/// weißes Blatt.
-fn real_pdfs() -> Vec<(PathBuf, f64)> {
-    let lopdf_assets = glob_first("/root/.cargo/registry/src", "lopdf-0.34.0/assets");
-    let mut found: Vec<(PathBuf, f64)> = vec![
-        (
-            PathBuf::from("/mnt/skills/examples/theme-factory/theme-showcase.pdf"),
-            0.01,
-        ),
-        (
-            PathBuf::from("/usr/lib/libreoffice/share/xpdfimport/xpdfimport_err.pdf"),
-            0.0,
-        ),
-    ];
-    if let Some(assets) = lopdf_assets {
-        found.push((assets.join("AnnotationDemo.pdf"), 0.001));
+/// Sie besteht nur aus Linien- und Kurvenbefehlen (`m`, `l`, `c`, `re`, `S`,
+/// `f`) — genau wie die technischen Zeichnungen, an denen die alte, rein
+/// textbasierte Vorschau als leeres weißes Blatt scheiterte. Kein `BT`, kein
+/// `Tj`, keine einzige Glyphe.
+///
+/// # Warum das hier erzeugt und nicht gelesen wird
+///
+/// Bis eben belegten drei *echte* Dateien von dieser Maschine diesen Punkt:
+/// `AnnotationDemo.pdf` aus dem entpackten `lopdf`-Quelltext, dazu ein PDF aus
+/// `/mnt/skills` und eines aus `/usr/lib/libreoffice`. Fehlten sie, kehrte der
+/// Test mit „keine echten PDFs vorhanden — Test übersprungen“ **grün** zurück,
+/// ohne irgendetwas geprüft zu haben. Auf jedem CI-Runner war das der
+/// Normalfall: keine der drei Dateien liegt dort. Ein Test, der bei fehlendem
+/// Material stillschweigend nichts prüft, ist schlimmer als ein roter — er
+/// beweist nichts und sieht aus, als täte er es.
+///
+/// Die Zeichnung unten enthält dasselbe, worauf es ankam: nur Pfade, keine
+/// Schrift. Sie liegt im Repository und prüft deshalb auf jeder Maschine.
+fn drawing_only_page() -> String {
+    let mut ops = String::from("0.15 0.15 0.15 RG 1.2 w\n");
+    // Ein Raster aus Linien — Striche, wie sie eine Zeichnung ausmacht.
+    for i in 0..20 {
+        let v = 20.0 + f64::from(i) * 18.0;
+        ops.push_str(&format!("{v:.1} 20 m {v:.1} 380 l S\n"));
+        ops.push_str(&format!("20 {v:.1} m 380 {v:.1} l S\n"));
     }
-    found.retain(|(path, _)| path.exists());
-    found
-}
-
-/// Sucht `<root>/<entry>/<suffix>` — der Registry-Ordner trägt einen Hash im
-/// Namen, den wir nicht fest verdrahten wollen.
-fn glob_first(root: &str, suffix: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(root).ok()?;
-    for entry in entries.flatten() {
-        let candidate = entry.path().join(suffix);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    // Eine Kurve und zwei Flächen darüber, damit auch `c` und `f` vorkommen.
+    ops.push_str("0.85 0.25 0.1 RG 3 w 40 60 m 140 340 260 40 360 320 c S\n");
+    ops.push_str("0.1 0.35 0.75 rg 60 60 120 90 re f\n");
+    ops.push_str("0.95 0.7 0.1 rg 220 250 120 90 re f\n");
+    ops
 }
 
 #[test]
-fn real_world_pdfs_render_without_degrading() {
-    let files = real_pdfs();
-    if files.is_empty() {
-        eprintln!("keine echten PDFs vorhanden — Test übersprungen");
-        return;
-    }
-    for (path, minimum) in files {
-        let bytes = std::fs::read(&path).expect("PDF lesbar");
-        let page = render_bytes(&bytes, 0, &RenderOptions::default());
-        let ratio = non_white_ratio(&page);
-        println!(
-            "{}: {}x{}, {} Ops, non-white = {:.4} %, warnings = {:?}",
-            path.display(),
-            page.width,
-            page.height,
-            page.drawn_ops,
-            ratio * 100.0,
-            page.warnings
-        );
-        assert!(
-            !page.degraded,
-            "{} kam nur als Notnagel durch: {:?}",
-            path.display(),
-            page.warnings
-        );
-        assert!(page.width > 0 && page.height > 0);
-        assert!(
-            ratio >= minimum,
-            "{}: nur {:.4} % nicht-weiß, erwartet mindestens {:.4} %",
-            path.display(),
-            ratio * 100.0,
-            minimum * 100.0
-        );
-    }
+fn a_page_without_a_single_glyph_still_shows_its_drawing() {
+    let page = render_square(&drawing_only_page());
+
+    assert!(!page.degraded, "Warnungen: {:?}", page.warnings);
+    assert!(page.drawn_ops > 0, "keine einzige Operation gezeichnet");
+    let ratio = non_white_ratio(&page);
+    println!(
+        "reine Zeichnung: {}x{}, {} Ops, non-white = {:.4} %",
+        page.width,
+        page.height,
+        page.drawn_ops,
+        ratio * 100.0
+    );
+    assert!(
+        ratio > 0.01,
+        "die Zeichnung ist praktisch unsichtbar: nur {:.4} % nicht-weiß",
+        ratio * 100.0
+    );
+
+    // Gegenprobe zum Namen des Tests: es ist wirklich kein Text im Spiel.
+    // Ohne sie könnte irgendwann Text dazukommen und der Test hieße nur noch so.
+    let ohne_text = PageRenderer::new().render(
+        &square_page(&drawing_only_page()),
+        0,
+        &RenderOptions {
+            draw_text: false,
+            ..square_opts()
+        },
+    );
+    assert_eq!(
+        ohne_text.rgba, page.rgba,
+        "die Seite verliert Farbe, wenn Text abgeschaltet wird — dann steht \
+         doch Text darauf und der Test prüft nicht, was er behauptet"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Sichtprüfung: PNGs herausschreiben
 // ---------------------------------------------------------------------------
 
-/// Legt die gerenderten Seiten der echten PDFs als PNG ab, damit sie ohne
-/// Bildschirm begutachtet werden können.
+/// Legt ein paar gerenderte Seiten als PNG ab, damit ein Mensch sie ohne
+/// Bildschirm begutachten kann.
+///
+/// Kein Prüfling, sondern ein Werkzeug — es steht hier, weil der PNG-Schreiber
+/// darunter ohnehin gebraucht wird und sonst niemand ihn benutzte. Das Ziel ist
+/// `<Temp>/redact-render-sichtpruefung/`; früher stand hier der absolute Pfad
+/// eines fremden Arbeitsverzeichnisses, das es auf keiner anderen Maschine gab,
+/// woraufhin der „Test“ wortlos zurückkehrte.
 #[test]
 fn writes_reference_pngs() {
-    let target = PathBuf::from(
-        "/tmp/claude-0/-home-user-redactrs/36123068-d075-5644-8aa5-44349df3c52f/scratchpad/render",
-    );
-    if std::fs::create_dir_all(&target).is_err() {
-        eprintln!("Ausgabeordner nicht anlegbar — Sichtprüfung übersprungen");
-        return;
-    }
-    for (path, _) in real_pdfs() {
-        let bytes = std::fs::read(&path).expect("PDF lesbar");
-        let page = render_bytes(&bytes, 0, &RenderOptions::default());
-        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        let out = target.join(format!("{stem}-p0.png"));
+    let target = std::env::temp_dir().join("redact-render-sichtpruefung");
+    std::fs::create_dir_all(&target).expect("Ausgabeordner anlegbar");
+
+    let seiten: [(&str, RenderedPage); 2] = [
+        (
+            "kontoauszug",
+            render_bytes(
+                &redact_pdf::testing::demo_statement(),
+                0,
+                &RenderOptions::default(),
+            ),
+        ),
+        ("zeichnung", render_square(&drawing_only_page())),
+    ];
+    for (name, page) in seiten {
+        let out = target.join(format!("{name}-p0.png"));
         write_png(&out, page.width, page.height, &page.rgba).expect("PNG schreibbar");
         println!("geschrieben: {}", out.display());
     }

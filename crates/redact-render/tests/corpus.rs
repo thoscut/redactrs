@@ -5,8 +5,8 @@
 //! auszuschließen, dass die darstellung versagt“.
 //!
 //! Diese Datei ist der Beweis. Ein breites Korpus (siehe [`corpus_gen`]:
-//! Text-, Vektor-, Bild-, Struktur- und bewusst kaputte Dateien, dazu echte
-//! PDFs fremder Werkzeuge) wird durch [`PageRenderer::render`] geschickt.
+//! Text-, Vektor-, Bild-, Struktur- und bewusst kaputte Dateien) wird durch
+//! [`PageRenderer::render`] geschickt.
 //! Geprüft wird für **jede Seite jedes Beispiels**:
 //!
 //! * der Aufruf kehrt zurück — keine Panik, kein Hänger,
@@ -14,18 +14,29 @@
 //! * bei `expect_content`: mehr als 0,1 % der Pixel sind nicht reinweiß
 //!   (**das** ist die eigentliche Prüfung — eine leere Vorschau ist der Fehler,
 //!   den diese Datei ausschließen soll; von der Schwelle darf nur abweichen,
-//!   wer in `Sample::min_non_white` begründet, warum — derzeit genau ein
-//!   echtes Dokument, siehe [`only_documented_samples_lower_the_threshold`]),
+//!   wer in `Sample::min_non_white` begründet, warum — derzeit **niemand**,
+//!   siehe [`only_documented_samples_lower_the_threshold`]),
 //! * zwei Läufe liefern Byte für Byte dasselbe Bild.
 //!
 //! Zusätzlich läuft das ganze Korpus durch Extraktion und Schwärzung und wird
 //! danach erneut gerendert — direkt und nach einem Speicher-/Ladezyklus: auch
 //! ein geschwärztes Dokument muss darstellbar bleiben.
+//!
+//! # Was hier *nicht* geprüft wird: die Maschine
+//!
+//! Das Korpus enthält keine Datei aus der Umgebung mehr. Sechs Beispiele
+//! stammten früher aus `~/.cargo/registry`, `/usr/lib` und `/mnt` — jeweils mit
+//! „fehlt die Datei, fällt das Beispiel weg“. Damit war das Ergebnis dieser
+//! Suite eine Aussage über den Rechner statt über den Renderer: derselbe
+//! Testbinary war mit gefülltem Cargo-Cache grün und mit leerem rot. Die
+//! Begründung und die Ersatzbeispiele stehen in der Modulbeschreibung von
+//! [`corpus_gen`]; hier hält [`the_corpus_is_complete`] fest, dass keines
+//! stillschweigend verschwinden kann.
 
 mod corpus_gen;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use corpus_gen::{corpus, Category, Sample, DEFAULT_MIN_NON_WHITE};
@@ -42,16 +53,52 @@ use redact_render::{PageRenderer, RenderOptions, RenderedPage};
 ///
 /// Damit die Messung etwas über den Renderer aussagt und nicht über die
 /// Auslastung der Maschine, wird das Korpus **einmal** gerendert (siehe
-/// [`rendered_corpus`]) und die dort gemessene Zeit von allen Tests geteilt.
+/// [`rendered_corpus`]) und die dort gemessene Zeit von allen Tests geteilt —
+/// und zwar unter [`RASTERBANK`], damit nicht der zweite schwere Test derselben
+/// Datei danebenläuft.
 const MAX_SAMPLE_TIME: Duration = Duration::from_secs(10);
+
+/// Wer das ganze Korpus rastert, nimmt diese Sperre.
+///
+/// # Warum das nötig ist
+///
+/// Der Kommentar über [`MAX_SAMPLE_TIME`] versprach schon immer, die Messung
+/// hänge nicht an der Auslastung der Maschine — und hielt es nur zur Hälfte.
+/// [`rendered_corpus`] rendert zwar nur einmal, aber
+/// [`extraction_and_redaction_survive_the_corpus`] rendert das Korpus daneben
+/// noch zweimal, völlig unabhängig. Auf einer Vierkernmaschine fochten damit
+/// die beiden schwersten Tests der Datei genau während der Zeitmessung
+/// gegeneinander. Nachgemessen an `hostile_huge_content` (2 MB
+/// Content-Stream): allein 5,7–6,1 s, nebeneinander 11,0–14,8 s — der
+/// Laufzeitwächter schlug also nicht bei einem langsamen Renderer an, sondern
+/// bei einem beschäftigten Rechner.
+///
+/// Die Sperre ist der Gegenentwurf zum bequemen Weg, das Budget anzuheben: das
+/// Budget bleibt bei zehn Sekunden und meint jetzt auch zehn Sekunden Rendern.
+/// Kosten tut es nichts, im Gegenteil — beide Tests lasten die Maschine ohnehin
+/// voll aus, und ohne das gegenseitige Ausbremsen wird die Datei sogar
+/// schneller fertig: dreimal 74–76 s ohne Sperre (alle drei Läufe rot), dreimal
+/// 49–68 s mit (alle drei grün), auf derselben Vierkernmaschine.
+static RASTERBANK: Mutex<()> = Mutex::new(());
+
+/// Nimmt [`RASTERBANK`] und übersteht dabei eine vergiftete Sperre.
+///
+/// Panikt ein Test, während er die Sperre hält, ist sie danach vergiftet. Das
+/// darf nicht *alle* übrigen Tests mit in den Fehlschlag reißen — die eine
+/// echte Fehlermeldung wäre sonst zwischen zehn Folgefehlern nicht mehr zu
+/// finden.
+fn rasterbank() -> MutexGuard<'static, ()> {
+    RASTERBANK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Renderoptionen des Korpus.
 ///
 /// Bewusst kleiner als die GUI-Vorgabe (1000 px). Alle Prüfungen hier sind
 /// auflösungsunabhängig — der Anteil nicht-weißer Pixel ändert sich mit der
 /// Bildgröße kaum, die Rechenzeit dagegen quadratisch. Mit 520 px bleibt das
-/// grösste Beispiel (2 MB Content-Stream) bei rund 4,5 s und damit klar unter
-/// dem Zeitbudget, auch wenn nebenher noch andere Testbinaries laufen.
+/// grösste Beispiel (2 MB Content-Stream) bei 5,7–6,1 s (nachgemessen, ohne
+/// Nebenläufigkeit) und damit unter dem Zeitbudget. Dass „ohne Nebenläufigkeit“
+/// dabei keine Ausrede ist, sondern eine Zusage, hält [`RASTERBANK`] fest.
 fn opts() -> RenderOptions {
     RenderOptions {
         width: 520,
@@ -98,7 +145,10 @@ struct Rendered {
 /// zufällig anschlagen. Also: einmal rendern, alle lesen mit.
 fn rendered_corpus() -> &'static [Rendered] {
     static CACHE: OnceLock<Vec<Rendered>> = OnceLock::new();
-    CACHE.get_or_init(|| corpus().into_iter().map(render_sample).collect())
+    CACHE.get_or_init(|| {
+        let _bank = rasterbank();
+        corpus().into_iter().map(render_sample).collect()
+    })
 }
 
 /// Rendert alle Seiten eines Beispiels und misst dabei die Zeit.
@@ -136,6 +186,40 @@ fn render_sample(sample: Sample) -> Rendered {
 // 1. Das Korpus selbst
 // ---------------------------------------------------------------------------
 
+/// Anzahl der Beispiele im Korpus.
+///
+/// Eine feste Zahl und keine Untergrenze — das ist der Kern der Sache. Solange
+/// hier `>= 40` stand, durfte das Korpus je nach Rechner zwischen 48 (frischer
+/// Runner: nur die erzeugten Beispiele) und 54 Beispielen haben (Rechner mit
+/// den sechs zusätzlich eingelesenen Dateien), und der Test sagte zu jeder Zahl
+/// ja. Als der Baum von `lopdf` 0.34 auf 0.42 wechselte, fielen vier davon weg
+/// — kein Test hat es bemerkt, vier Commits lang. Wer ein Beispiel hinzufügt,
+/// hebt die Zahl hier um eins an: eine Zeile Arbeit, dafür kann keines mehr
+/// unbemerkt verschwinden.
+const CORPUS_SIZE: usize = 50;
+
+/// Das Korpus ist vollständig — auf jeder Maschine dasselbe.
+///
+/// Siehe [`CORPUS_SIZE`]. Zusätzlich müssen die Namen eindeutig sein: doppelte
+/// Namen machen jede Fehlermeldung dieser Suite mehrdeutig, und ein Beispiel,
+/// das versehentlich zweimal antritt, verdeckt eines, das fehlt.
+#[test]
+fn the_corpus_is_complete() {
+    let names: Vec<&str> = corpus().iter().map(|s| s.name).collect();
+    assert_eq!(
+        names.len(),
+        CORPUS_SIZE,
+        "das Korpus hat {} statt {CORPUS_SIZE} Beispiele. Vorhanden: {names:?}",
+        names.len()
+    );
+
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    let before = sorted.len();
+    sorted.dedup();
+    assert_eq!(sorted.len(), before, "doppelte Beispielnamen im Korpus");
+}
+
 /// Ein Beispiel, das versehentlich kaputt ist, beweist gar nichts. Also wird
 /// zuerst geprüft, dass jedes nicht-bösartige Beispiel wirklich das PDF ist,
 /// als das es antritt: ladbar, mit der angekündigten Seitenzahl, und bei
@@ -143,11 +227,7 @@ fn render_sample(sample: Sample) -> Rendered {
 #[test]
 fn generator_samples_are_the_pdfs_they_claim_to_be() {
     let samples = corpus();
-    assert!(
-        samples.len() >= 40,
-        "das Korpus ist auf {} Beispiele geschrumpft",
-        samples.len()
-    );
+    assert_eq!(samples.len(), CORPUS_SIZE, "siehe the_corpus_is_complete");
 
     for sample in &samples {
         if sample.is_hostile() {
@@ -274,6 +354,14 @@ fn no_sample_exceeds_the_time_budget() {
 /// Die 0,1-%-Regel ist die eigentliche Zusage dieser Suite. Sie darf nicht
 /// stillschweigend aufgeweicht werden, deshalb steht hier schwarz auf weiß,
 /// **welche** Beispiele eine niedrigere Schwelle führen — und warum.
+///
+/// Die Liste ist inzwischen leer. Die einzige Ausnahme war `unicode.pdf` aus
+/// dem `lopdf`-Quelltext: eine einzige kurze Textzeile auf einer Letter-Seite,
+/// gemessen 0,04 % Farbe. Sie ist mit dem Beispiel entfallen — jedes erzeugte
+/// Beispiel ist bewusst so reich bedruckt, dass die Regelschwelle eine Aussage
+/// über die Vorschau bleibt und nicht über den Inhalt der Datei. Der Weg,
+/// abzuweichen, steht in `Sample::min_non_white` weiterhin offen; wer ihn geht,
+/// muss ihn hier eintragen und begründen.
 #[test]
 fn only_documented_samples_lower_the_threshold() {
     let exceptions: Vec<&str> = corpus()
@@ -283,11 +371,48 @@ fn only_documented_samples_lower_the_threshold() {
         .collect();
     assert_eq!(
         exceptions,
-        // `unicode.pdf` besteht aus einer einzigen kurzen Textzeile; siehe
-        // die Begründung in `corpus_gen::real_samples`.
-        vec!["real_lopdf_unicode"],
+        Vec::<&str>::new(),
         "unerwartete Ausnahme von der 0,1-%-Regel"
     );
+}
+
+/// Die beiden Beispiele, die für die entfallenen echten Dateien eingesprungen
+/// sind, prüfen wirklich das, wofür sie eingesprungen sind.
+///
+/// Ein erzeugtes Beispiel hat eine Schwäche, die eine echte Datei nicht hat:
+/// man kann es versehentlich so bauen, dass es auch dann bunt ist, wenn der
+/// geprüfte Weg gar nicht gegangen wird — dann steht es im Korpus und sagt
+/// nichts. Also die Gegenprobe: einmal dasselbe Dokument ohne das eingebettete
+/// Fontprogramm, einmal ohne die angehängte Aktualisierung. Beide **müssen**
+/// weiß bleiben. Bleiben sie es nicht, kommt die Farbe im Korpusbeispiel
+/// woanders her, und das Beispiel ist seinen Platz nicht wert.
+#[test]
+fn the_new_samples_would_notice_if_the_renderer_stopped() {
+    let mut renderer = PageRenderer::new();
+    let options = opts();
+
+    for (was, bytes) in [
+        (
+            "ohne eingebettetes Fontprogramm",
+            corpus_gen::text_embedded_truetype_without_the_font(),
+        ),
+        (
+            "ohne die angehängte Aktualisierung",
+            corpus_gen::struct_incremental_update_without_the_update(),
+        ),
+    ] {
+        let doc = redact_pdf::load_from_bytes(&bytes)
+            .unwrap_or_else(|e| panic!("die Gegenprobe „{was}“ laedt nicht: {e}"));
+        let page = renderer.render(&doc, 0, &options);
+        assert_valid_image(&page, was, 0);
+        let ratio = page.non_white_ratio();
+        assert!(
+            ratio <= DEFAULT_MIN_NON_WHITE,
+            "die Gegenprobe „{was}“ ist mit {:.4} % nicht weiß — das Korpusbeispiel \
+             bekommt seine Farbe also nicht von dem Weg, den es prüfen soll",
+            ratio * 100.0
+        );
+    }
 }
 
 /// Bösartige Beispiele dürfen `degraded` setzen und Warnungen sammeln — ein
@@ -360,6 +485,9 @@ fn rendering_is_deterministic() {
 /// Schritte darf an irgendeinem PDF zerbrechen.
 #[test]
 fn extraction_and_redaction_survive_the_corpus() {
+    // Der zweite schwere Test dieser Datei — und der, der die Zeitmessung in
+    // [`rendered_corpus`] verdorben hat. Siehe [`RASTERBANK`].
+    let _bank = rasterbank();
     let options = opts();
     let mut roundtrip_failures: Vec<&str> = Vec::new();
 

@@ -150,3 +150,113 @@ fn load_error_mentions_file_name() {
         other => panic!("Buchungslisten-Fehler erwartet, war: {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Die Datei bestimmt nicht mehr, wie viel Arbeitsspeicher sie kostet
+// ---------------------------------------------------------------------------
+//
+// Der Befund: `--booking-list` prüfte nicht, was da liegt, sondern las erst und
+// fragte dann. Gemessen am gebauten Binary — eine dünn belegte Datei belegt
+// 4 kB auf der Platte:
+//
+// | Datei | vorher | nachher |
+// |---|---|---|
+// | 512 MB dünn belegt | 2 638 MB, 24,5 s | 17 MB, 0,00 s |
+// | 1 GB dünn belegt | 5 259 MB, 50,4 s | 17 MB, 0,00 s |
+// | 6 GB dünn belegt | OOM-Killer (SIGKILL, Messung der Prüfung) | 17 MB, 0,04 s |
+// | benannte Pipe | 7 201 MB nach 20 s, kein Ende | 17 MB, 0,01 s |
+//
+// Gemessen wird hier nicht der Speicher — ein Test, der 5 GB belegt, reißt den
+// Testläufer mit —, sondern **ob abgelehnt wird und woran**: dass die Meldung
+// die Größe nennt, kann sie nur aus der Angabe des Dateisystems haben, also von
+// vor dem ersten gelesenen Byte.
+
+/// Ein eigenes Verzeichnis je Test; Tests laufen nebenläufig.
+fn tempdir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("redact-booking-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// **Die Auflage:** die Grenze greift *vor* dem CSV-Parser.
+///
+/// Die Verstärkung steckt nicht im Lesen, sondern im Parsen — eine einzige
+/// riesige Zelle wird als `String` materialisiert, dazu Puffer und
+/// kleingeschriebene Kopie. Deshalb muss die Datei abgelehnt sein, bevor
+/// `csv` sie überhaupt sieht.
+#[test]
+fn a_file_beyond_the_limit_is_refused_before_the_parser_sees_it() {
+    let dir = tempdir("gross");
+    let path = dir.join("riesig.csv");
+    let file = std::fs::File::create(&path).unwrap();
+    // Dünn belegt: 6 GB Nennlänge, 0 Byte geschrieben.
+    file.set_len(6 * 1024 * 1024 * 1024).unwrap();
+    drop(file);
+
+    match CsvBookingLoader.load(&path) {
+        Err(RedactError::Booking(msg)) => {
+            assert!(msg.contains("riesig.csv"), "{msg}");
+            // Die Größe kann nur aus der Dateiangabe stammen …
+            assert!(msg.contains("6144 MB"), "{msg}");
+            // … und die Meldung sagt, welche Grenze das war …
+            assert!(msg.contains("16 MB"), "{msg}");
+            // … und wo sie herkommt.
+            assert!(msg.contains("feste Grenze"), "{msg}");
+            assert!(msg.contains("--booking-list"), "{msg}");
+            // Keine Meldung des CSV-Parsers: der war nie dran.
+            assert!(!msg.contains("Kopfzeile"), "{msg}");
+        }
+        other => panic!("Buchungslisten-Fehler erwartet, war: {other:?}"),
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Die Auflage:** eine benannte Pipe wird abgelehnt, statt endlos zu liefern.
+///
+/// Der Test kommt ohne Schreiber am anderen Ende aus, und das ist gerade der
+/// Punkt: schon das *Öffnen* einer Pipe ohne Schreiber blockiert endlos. Dass
+/// dieser Test überhaupt zurückkehrt, ist die Aussage.
+#[cfg(unix)]
+#[test]
+fn a_named_pipe_is_refused_without_opening_it() {
+    let dir = tempdir("pipe");
+    let path = dir.join("liste.csv");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("mkfifo startbar");
+    assert!(status.success(), "mkfifo ist fehlgeschlagen");
+
+    match CsvBookingLoader.load(&path) {
+        Err(RedactError::Booking(msg)) => {
+            assert!(msg.contains("gewöhnliche Datei"), "{msg}");
+            assert!(msg.contains("liste.csv"), "{msg}");
+        }
+        other => panic!("Buchungslisten-Fehler erwartet, war: {other:?}"),
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Die Gegenprobe zur Grenze: eine gewöhnliche Liste geht weiterhin durch —
+/// auch eine große. Ohne diesen Test wäre alles darüber nur kaputt statt
+/// abgesichert.
+#[test]
+fn an_ordinary_list_still_loads_completely() {
+    let dir = tempdir("normal");
+    let path = dir.join("liste.csv");
+    let mut csv = String::from(HEADER);
+    for i in 0..20_000 {
+        csv.push_str(&format!("b{i:05},positive,Musterfirma {i} GmbH,,,false\n"));
+    }
+    std::fs::write(&path, &csv).unwrap();
+
+    let entries = CsvBookingLoader
+        .load(&path)
+        .expect("20 000 Einträge sind eine gewöhnliche Liste");
+    assert_eq!(entries.len(), 20_000);
+
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -9,10 +9,44 @@
 //!
 //! Jede Datei ist ein [`Sample`]. `expect_content == true` heißt: auf der Seite
 //! ist wirklich etwas zu sehen, eine weiße Ausgabe wäre also ein Fehler.
+//!
+//! # Das Korpus kommt aus dem Repository, nicht von der Maschine
+//!
+//! Hier wird **nichts** aus der Umgebung gelesen — kein `~/.cargo/registry`,
+//! kein `/usr/lib`, kein `/mnt`. Das war einmal anders: vier Beispiele holten
+//! sich Prüfmaterial aus dem entpackten Quelltext von `lopdf`, zwei weitere aus
+//! Systemverzeichnissen, jeweils mit „fehlt die Datei, fällt das Beispiel eben
+//! weg“. Damit hing das *Ergebnis* der Suite daran, welche Krate-Versionen
+//! zufällig im Cargo-Cache des Rechners lagen. Beim Sprung von `lopdf` 0.34 auf
+//! 0.42 (0.42 hat gar kein `assets/`) verschwanden vier Beispiele — auf einem
+//! frischen Runner rot, auf jedem Entwicklerrechner mit Altbestand grün. Vier
+//! Commits lang hat das niemand gesehen, weil das lokale Gate den Defekt
+//! strukturell nicht sehen *konnte*.
+//!
+//! Ein Test, dessen Ergebnis vom Rechner abhängt, auf dem er läuft, ist kein
+//! Test. Deshalb gilt jetzt: jedes Beispiel entsteht aus Bytes, die im
+//! Repository stehen — erzeugt per `lopdf`, von Hand geschrieben, oder aus den
+//! ohnehin mitgelieferten Fontdateien. [`corpus`] liefert damit auf jeder
+//! Maschine dieselbe Liste, und `corpus::the_corpus_is_complete` nagelt ihre
+//! Länge auf eine feste Zahl — schrumpfen kann sie nicht mehr, ohne dass ein
+//! Test es sagt.
+//!
+//! Was dabei verloren ging und wie es ersetzt ist:
+//!
+//! | frühere echte Datei    | war besonders wegen …            | jetzt                        |
+//! |------------------------|----------------------------------|------------------------------|
+//! | `example.pdf`          | nichts — Helvetica, eine Seite   | `text_helvetica_base14`      |
+//! | `AnnotationDemo.pdf`   | `/ObjStm` + `/XRef` (und 6,9 MB) | `struct_objstm_xref_stream`  |
+//! | `Incremental.pdf`      | inkrementelle Aktualisierung     | `struct_incremental_update`  |
+//! | `unicode.pdf`          | eingebettetes `/FontFile2`       | `text_embedded_truetype`     |
+//!
+//! Die beiden Ersatzbeispiele prüfen dabei *schärfer* als ihre Vorbilder: bei
+//! ihnen ist die Seite nachweislich leer, wenn der Renderer den jeweiligen Weg
+//! nicht geht (siehe die Kommentare dort). `AnnotationDemo.pdf` hat mit seinen
+//! Annotationen nichts beigetragen, was die Vorschau betrifft — gezeichnet
+//! werden Seiteninhalte, keine Annotationen.
 
 #![allow(dead_code)]
-
-use std::path::{Path, PathBuf};
 
 use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, Stream};
 
@@ -60,8 +94,6 @@ pub enum Category {
     Image,
     Structure,
     Hostile,
-    /// Keine Konstruktion, sondern eine echte Datei von dieser Maschine.
-    Real,
 }
 
 impl Category {
@@ -72,12 +104,14 @@ impl Category {
             Category::Image => "image",
             Category::Structure => "structure",
             Category::Hostile => "hostile",
-            Category::Real => "real",
         }
     }
 }
 
 /// Das gesamte Korpus.
+///
+/// Auf jeder Maschine dieselbe Liste — siehe die Modulbeschreibung.
+/// `corpus::the_corpus_is_complete` prüft Länge und Eindeutigkeit der Namen.
 pub fn corpus() -> Vec<Sample> {
     let mut out = Vec::new();
     out.extend(text_samples());
@@ -85,7 +119,6 @@ pub fn corpus() -> Vec<Sample> {
     out.extend(image_samples());
     out.extend(structure_samples());
     out.extend(hostile_samples());
-    out.extend(real_samples());
     out
 }
 
@@ -258,6 +291,7 @@ fn text_samples() -> Vec<Sample> {
     vec![
         text_helvetica(),
         text_type0_identity_h(),
+        text_embedded_truetype(),
         text_encoding_differences(),
         text_without_widths(),
         text_tj_kerning(),
@@ -397,6 +431,131 @@ fn text_type0_identity_h() -> Sample {
     let content = b.content(&ops);
     b.simple_page(content, res, A4);
     one_page("text_type0_identity_h", Category::Text, true, b.finish())
+}
+
+/// Das Fontprogramm, das als `/FontFile2` eingebettet wird.
+///
+/// Es ist derselbe TrueType-Schnitt, den der Renderer auch als Ersatzfont
+/// mitbringt (Liberation-Subset, SIL OFL 1.1, Herkunft siehe
+/// `assets/fonts/LICENSE-OFL.txt`). Das ist Absicht und keine Bequemlichkeit:
+/// die Datei liegt ohnehin im Baum, ist geprüft, und für den Zweck — „hier
+/// steckt ein echtes Fontprogramm im PDF“ — ist ein zweiter Font kein Gewinn.
+/// Verwechseln kann der Renderer die beiden Wege nicht, siehe
+/// [`text_embedded_truetype`].
+const EMBEDDED_TTF: &[u8] = include_bytes!("../../assets/fonts/serif-regular.ttf");
+
+/// Type0/Identity-H **mit** eingebettetem `/FontFile2` und **ohne**
+/// `/ToUnicode` — das Gegenstück zu [`text_type0_identity_h`].
+///
+/// # Warum das ein eigenes Beispiel ist
+///
+/// Das ist der Fall, den früher `unicode.pdf` aus dem `lopdf`-Quelltext
+/// abgedeckt hat (Skia/Google-Docs-Ausgabe, `/FontFile2` in einem
+/// Identity-H-Font) — und der einzige Weg im Renderer, bei dem Glyphen aus
+/// einem *fremden* Fontprogramm kommen. Alle anderen Textbeispiele des Korpus
+/// landen früher oder später beim mitgelieferten Ersatzfont.
+///
+/// # Warum es schärfer prüft als die echte Datei
+///
+/// Ohne `/ToUnicode` gibt es zu einem Code **keinen** Buchstaben, auf den der
+/// Renderer ausweichen könnte: `raster::glyph_candidates` liefert für einen
+/// CID-Font dann genau einen Kandidaten, „Code = Glyph-ID im eigenen
+/// Programm“ — und auch den nur, wenn sich das eingebettete Programm laden
+/// ließ. Scheitert das Einbetten, bleibt die Liste leer und die Seite ist
+/// **weiß**. Die 0,1-%-Regel schlägt dann an, statt dass es niemand merkt.
+///
+/// Die Codes sind deshalb rohe Glyph-IDs (`/CIDToGIDMap /Identity`). Welche
+/// Buchstaben dabei herauskommen, ist gleichgültig — geprüft wird, *dass*
+/// gezeichnet wird. Der Bereich 2..=70 ist in `serif-regular.ttf` nachgemessen
+/// vollständig mit Umrissen belegt (GID 0 ist `.notdef`, GID 1 leer); wird der
+/// Font je ausgetauscht und passt der Bereich nicht mehr, wird die Seite leer
+/// und der Test rot — nicht still.
+fn text_embedded_truetype() -> Sample {
+    embedded_truetype(true)
+}
+
+/// Die Gegenprobe zu [`text_embedded_truetype`]: dieselbe Datei, nur **ohne**
+/// das eingebettete Fontprogramm.
+///
+/// Sie gehört nicht ins Korpus. Sie belegt, dass das Beispiel dort wirklich
+/// etwas prüft: diese Fassung muss weiß bleiben, sonst kommt die Farbe von
+/// irgendwoher — und dann wäre das Korpusbeispiel keine Aussage über
+/// eingebettete Fontprogramme mehr. Siehe
+/// `corpus::the_new_samples_would_notice_if_the_renderer_stopped`.
+pub fn text_embedded_truetype_without_the_font() -> Vec<u8> {
+    embedded_truetype(false).bytes
+}
+
+fn embedded_truetype(embed: bool) -> Sample {
+    let mut b = Builder::new();
+
+    let mut descriptor_dict = dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => "RedactEingebettet",
+        // 4 = symbolisch, wie es Subsets echter Werkzeuge angeben.
+        "Flags" => 4,
+        "FontBBox" => vec![(-200).into(), (-250).into(), 1000.into(), 900.into()],
+        "ItalicAngle" => 0,
+        "Ascent" => 750,
+        "Descent" => (-250),
+        "CapHeight" => 700,
+        "StemV" => 80,
+    };
+    if embed {
+        let file = b.add(Object::Stream(Stream::new(
+            dictionary! { "Length1" => EMBEDDED_TTF.len() as i64 },
+            EMBEDDED_TTF.to_vec(),
+        )));
+        descriptor_dict.set("FontFile2", Object::Reference(file));
+    }
+    let descriptor = b.add(descriptor_dict);
+    let descendant = b.add(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType2",
+        "BaseFont" => "RedactEingebettet",
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0,
+        },
+        "FontDescriptor" => descriptor,
+        // Eine Vorschubbreite für alle: enger als das Geviert, damit eine Zeile
+        // aus 36 Glyphen auf die Seite passt.
+        "DW" => 600,
+        "CIDToGIDMap" => "Identity",
+    });
+    let font = b.add(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => "RedactEingebettet",
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => vec![Object::Reference(descendant)],
+        // Kein /ToUnicode — das ist der Punkt des Beispiels.
+    });
+    let res = b.add(Object::Dictionary(dictionary! {
+        "Font" => dictionary! { "F1" => font },
+    }));
+
+    const GIDS: std::ops::RangeInclusive<u16> = 2..=70;
+    const PER_LINE: usize = 36;
+    const LINE_COUNT: usize = 12;
+    let gids: Vec<u16> = GIDS.collect();
+    let mut ops = String::from("BT\n/F1 22 Tf\n30 TL\n1 0 0 1 40 800 Tm\n");
+    for line in 0..LINE_COUNT {
+        let mut hex = String::with_capacity(PER_LINE * 4);
+        for column in 0..PER_LINE {
+            hex.push_str(&format!(
+                "{:04X}",
+                gids[(line * PER_LINE + column) % gids.len()]
+            ));
+        }
+        ops.push_str(&format!("<{hex}> Tj T*\n"));
+    }
+    ops.push_str("ET\n");
+
+    let content = b.content(&ops);
+    b.simple_page(content, res, A4);
+    one_page("text_embedded_truetype", Category::Text, true, b.finish())
 }
 
 /// Einfacher Font mit `/Encoding << /Differences … >>`.
@@ -1129,6 +1288,7 @@ fn structure_samples() -> Vec<Sample> {
         struct_cropbox_smaller(),
         struct_multipage(),
         struct_object_stream(),
+        struct_incremental_update(),
     ];
     out.extend([90, 180, 270].map(struct_rotate));
     out
@@ -1477,6 +1637,106 @@ fn struct_object_stream() -> Sample {
     one_page("struct_objstm_xref_stream", Category::Structure, true, out)
 }
 
+/// Inkrementelle Aktualisierung: zwei `%%EOF`, zwei Querverweistabellen, die
+/// zweite über `/Prev` an die erste gekettet.
+///
+/// # Warum das ein eigenes Beispiel ist
+///
+/// Das ist der Fall, den früher `Incremental.pdf` aus dem `lopdf`-Quelltext
+/// abgedeckt hat. Ein PDF, das nachträglich verändert wurde — signiert,
+/// ausgefüllt, kommentiert —, wird nicht neu geschrieben, sondern hinten
+/// angehängt. Wer die letzte Tabelle nicht findet oder die Kette nicht
+/// zurückverfolgt, liest eine *ältere* Fassung des Dokuments. Bei einer
+/// Schwärzungsvorschau ist das kein Schönheitsfehler: dann zeigt die Vorschau
+/// etwas anderes, als in der Datei steht.
+///
+/// # Warum es schärfer prüft als die echte Datei
+///
+/// Objekt 5 (der Content-Stream) steht zweimal in der Datei. Die **erste**
+/// Fassung ist leer, die zweite trägt den ganzen Seiteninhalt. Wird die
+/// Aktualisierung übergangen, ist die Seite weiß und die 0,1-%-Regel schlägt
+/// an. `Incremental.pdf` konnte das nicht leisten — dort war auch die erste
+/// Fassung schon bedruckt.
+///
+/// Von Hand geschrieben, weil `lopdf` beim Speichern immer eine vollständige
+/// Datei erzeugt und keine angehängte Aktualisierung.
+fn struct_incremental_update() -> Sample {
+    // Die zweite Fassung des Content-Streams — der eigentliche Seiteninhalt.
+    let content = format!(
+        "0.1 0.45 0.8 rg 40 440 515 340 re f\n\
+         0.95 0.6 0.05 rg 40 60 515 340 re f\n{}",
+        text_block("F1", 20.0, 30.0, 60.0, 700.0, &LINES[..8])
+    );
+
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(b"%PDF-1.5\n%\xE2\xE3\xCF\xD3\n");
+
+    // Grundfassung: Katalog, Seitenbaum, Seite, Font — und ein **leerer**
+    // Content-Stream als Objekt 5.
+    let bodies: [&str; 5] = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 595 842] >>",
+        "<< /Type /Page /Parent 2 0 R /Contents 5 0 R \
+         /Resources << /Font << /F1 4 0 R >> >> >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        "<< /Length 0 >>\nstream\n\nendstream",
+    ];
+    let mut offsets = [0usize; 6];
+    for (index, body) in bodies.iter().enumerate() {
+        let id = index + 1;
+        offsets[id] = out.len();
+        out.extend_from_slice(format!("{id} 0 obj\n{body}\nendobj\n").as_bytes());
+    }
+
+    // Erste Querverweistabelle, klassisch, mit 20-Byte-Einträgen.
+    let first_xref = out.len();
+    out.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+    for offset in &offsets[1..=5] {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{first_xref}\n%%EOF\n").as_bytes(),
+    );
+
+    // Die Aktualisierung: dasselbe Objekt 5, diesmal mit Inhalt.
+    let updated = out.len();
+    out.extend_from_slice(format!("5 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes());
+    out.extend_from_slice(content.as_bytes());
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+
+    // Zweite Tabelle: zwei Abschnitte (der freie Kopf und Objekt 5), und
+    // `/Prev` zeigt auf die erste.
+    let second_xref = out.len();
+    out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n5 1\n");
+    out.extend_from_slice(format!("{updated:010} 00000 n \n").as_bytes());
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size 6 /Root 1 0 R /Prev {first_xref} >>\n\
+             startxref\n{second_xref}\n%%EOF\n"
+        )
+        .as_bytes(),
+    );
+
+    one_page("struct_incremental_update", Category::Structure, true, out)
+}
+
+/// Die Gegenprobe zu [`struct_incremental_update`]: dieselbe Datei, an ihrem
+/// ersten `%%EOF` abgeschnitten — also nur die Grundfassung.
+///
+/// Auch das ist ein vollständiges, gültiges PDF; nur ist sein Content-Stream
+/// der leere. Wer die Aktualisierung übergeht, sieht genau diese Seite. Siehe
+/// `corpus::the_new_samples_would_notice_if_the_renderer_stopped`.
+pub fn struct_incremental_update_without_the_update() -> Vec<u8> {
+    let bytes = struct_incremental_update().bytes;
+    const EOF: &[u8] = b"%%EOF\n";
+    let end = bytes
+        .windows(EOF.len())
+        .position(|w| w == EOF)
+        .expect("die Grundfassung endet mit %%EOF")
+        + EOF.len();
+    bytes[..end].to_vec()
+}
+
 // ---------------------------------------------------------------------------
 // Bösartig / entartet
 // ---------------------------------------------------------------------------
@@ -1753,94 +2013,4 @@ fn hostile_huge_content() -> Sample {
         ops.push_str(&format!("{r:.3} {g:.3} 0.4 rg {x:.2} {y:.2} 12 12 re f\n"));
     }
     hostile_page("hostile_huge_content", true, &ops)
-}
-
-// ---------------------------------------------------------------------------
-// Echte Dateien
-// ---------------------------------------------------------------------------
-
-/// Selbstgebaute Dateien treffen immer nur das, woran der Autor gedacht hat.
-/// Deshalb kommen — sofern vorhanden — ein paar echte PDFs von dieser Maschine
-/// dazu: erzeugt von fremden Werkzeugen, mit allem, was die so einbauen.
-///
-/// Alle Pfade sind mit [`Path::exists`] abgesichert; fehlt eine Datei, fällt
-/// das Beispiel einfach weg und der Rest des Korpus läuft weiter.
-fn real_samples() -> Vec<Sample> {
-    let mut out = Vec::new();
-    let mut candidates: Vec<(&'static str, PathBuf)> = vec![
-        (
-            "real_theme_showcase",
-            PathBuf::from("/mnt/skills/examples/theme-factory/theme-showcase.pdf"),
-        ),
-        (
-            "real_libreoffice_xpdfimport_err",
-            PathBuf::from("/usr/lib/libreoffice/share/xpdfimport/xpdfimport_err.pdf"),
-        ),
-    ];
-    for (name, file) in [
-        ("real_lopdf_annotation_demo", "AnnotationDemo.pdf"),
-        ("real_lopdf_incremental", "Incremental.pdf"),
-        ("real_lopdf_example", "example.pdf"),
-        ("real_lopdf_unicode", "unicode.pdf"),
-    ] {
-        if let Some(path) = cargo_registry_asset("lopdf-0.34.0", file) {
-            candidates.push((name, path));
-        }
-    }
-
-    for (name, path) in candidates {
-        if !path.exists() {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        // Seitenzahl wird gemessen, nicht geraten. Was sich nicht laden lässt,
-        // gehört nicht in dieses (nicht-bösartige) Segment des Korpus.
-        let Ok(doc) = redact_pdf::load_from_bytes(&bytes) else {
-            continue;
-        };
-        let pages = redact_pdf::page_count(&doc);
-        if pages == 0 {
-            continue;
-        }
-        out.push(Sample {
-            name,
-            category: Category::Real,
-            bytes,
-            // Echte Seiten aus echten Werkzeugen zeigen immer etwas; genau
-            // dieser Anspruch wird hier geprüft.
-            expect_content: true,
-            pages,
-            // `unicode.pdf` (Google Docs / Skia) besteht aus genau einer
-            // kurzen Textzeile auf einer Letter-Seite — gemessen 0,04 %
-            // Farbe. Die Regelschwelle von 0,1 % wäre hier keine Aussage über
-            // die Vorschau, sondern über den Inhalt der Datei. Die Zeile muss
-            // trotzdem erscheinen, deshalb bleibt eine Schwelle stehen, nur
-            // eine niedrigere.
-            min_non_white: match name {
-                "real_lopdf_unicode" => 0.0002,
-                _ => DEFAULT_MIN_NON_WHITE,
-            },
-        });
-    }
-    out
-}
-
-/// Sucht `~/.cargo/registry/src/<irgendein-index>/<krate>/assets/<datei>`.
-///
-/// Der Verzeichnisname des Index ist ein Hash und darf nicht fest verdrahtet
-/// werden, deshalb wird die Ebene durchsucht statt geraten.
-fn cargo_registry_asset(crate_dir: &str, file: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".cargo")))?;
-    let entries = std::fs::read_dir(home.join("registry/src")).ok()?;
-    for entry in entries.flatten() {
-        let candidate = entry.path().join(crate_dir).join("assets").join(file);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
 }

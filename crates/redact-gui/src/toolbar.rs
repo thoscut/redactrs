@@ -173,6 +173,17 @@ pub fn buttons() -> Vec<ToolButton> {
         .collect()
 }
 
+/// Sprechblase an „Analysieren“, solange es nichts zu finden gibt.
+///
+/// Dasselbe Muster wie [`crate::sidebar::OUTPUT_FIXED_HINT`]: der Knopf wird
+/// **abgeschaltet und der Grund steht daneben**. Ein Knopf, der sich drücken
+/// lässt und dann eine leere Trefferliste hinterlässt, ist die schlechtere
+/// Antwort — er sähe aus wie „nichts gefunden“.
+pub const ANALYZE_OFF_HINT: &str = "Die automatische Suche ist abgeschaltet, und es \
+     steht weder eine Buchungsliste noch eine Regionsdatei dahinter — es gäbe nichts \
+     zu finden. Häkchen „Automatisch suchen“ in der Trefferliste setzen oder eine \
+     Buchungsliste laden.";
+
 /// Woran hängt, ob ein Knopf benutzbar ist.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ToolContext {
@@ -183,6 +194,13 @@ pub struct ToolContext {
     pub last_page: bool,
     pub can_zoom_in: bool,
     pub can_zoom_out: bool,
+    /// Hat „Analysieren“ überhaupt eine Quelle, aus der es schöpfen könnte?
+    ///
+    /// Falsch, sobald die automatische Erkennung aus ist **und** weder eine
+    /// Buchungsliste noch eine Regionsdatei dahintersteht — dann liefert der
+    /// Knopf eine leere Liste und wirft dafür jede Entscheidung weg. Siehe
+    /// [`crate::state::AppState::analysis_can_find_anything`].
+    pub can_find_anything: bool,
 }
 
 /// Darf dieser Knopf gedrückt werden?
@@ -193,8 +211,12 @@ pub fn is_enabled(action: ToolAction, context: &ToolContext) -> bool {
     match action {
         // Öffnen geht immer, sonst käme man nie zu einem Dokument.
         ToolAction::Open | ToolAction::ToggleTheme => true,
-        ToolAction::Analyze
-        | ToolAction::Booking
+        // Ein Knopf, der nachweislich nichts finden kann, gehört ausgegraut —
+        // und zwar mit einem Satz daneben, der sagt warum (das macht
+        // [`crate::app::RedactApp::top_bar`] mit [`ANALYZE_OFF_HINT`]). Dasselbe
+        // Muster wie beim Feld „Namenszusatz“, das mit `-o` nichts bewirkt.
+        ToolAction::Analyze => context.loaded && context.can_find_anything,
+        ToolAction::Booking
         | ToolAction::Export
         | ToolAction::ReviewSave
         | ToolAction::ReviewLoad
@@ -274,7 +296,12 @@ mod tests {
 
     #[test]
     fn nothing_but_opening_works_without_a_document() {
-        let empty = ToolContext::default();
+        let empty = ToolContext {
+            // Ausdrücklich gesetzt: sonst prüfte der Test „Analysieren“ aus
+            // dem falschen Grund als abgeschaltet.
+            can_find_anything: true,
+            ..ToolContext::default()
+        };
         for button in buttons() {
             let enabled = is_enabled(button.action, &empty);
             assert_eq!(
@@ -285,12 +312,36 @@ mod tests {
         }
     }
 
+    /// „Analysieren“ ist grau, sobald es nichts zu finden gäbe — und wieder
+    /// benutzbar, sobald es eine Quelle gibt.
+    #[test]
+    fn analysing_is_greyed_out_when_there_is_nothing_left_to_find() {
+        let loaded = ToolContext {
+            loaded: true,
+            can_find_anything: true,
+            ..ToolContext::default()
+        };
+        assert!(is_enabled(ToolAction::Analyze, &loaded));
+
+        let nothing = ToolContext {
+            can_find_anything: false,
+            ..loaded
+        };
+        assert!(!is_enabled(ToolAction::Analyze, &nothing));
+        // Die übrigen Knöpfe bleiben davon unberührt — abgeschaltete Muster
+        // sind kein Grund, das Exportieren zu verbieten.
+        assert!(is_enabled(ToolAction::Export, &nothing));
+        assert!(is_enabled(ToolAction::Booking, &nothing));
+        assert!(ANALYZE_OFF_HINT.contains("Automatisch suchen"));
+    }
+
     #[test]
     fn navigation_and_history_follow_the_state() {
         let loaded = ToolContext {
             loaded: true,
             can_zoom_in: true,
             can_zoom_out: true,
+            can_find_anything: true,
             ..Default::default()
         };
 

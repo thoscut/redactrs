@@ -15,10 +15,12 @@
 //! wird zusätzlich [`egui::ViewportCommand::CancelClose`] geschickt, solange
 //! nicht bestätigt wurde.
 //!
-//! Es sind **fünf** Wege: „Analysieren“ (und damit auch „Buchungsliste laden“)
+//! Es sind **sechs** Wege: „Analysieren“ (und damit auch „Buchungsliste laden“)
 //! wirft zwar keine gezogenen Rechtecke weg, aber jede Abwahl, jede je Treffer
 //! gewählte Schwärzungsart und ein geladenes Review — und fragte als einziger
-//! nicht. Siehe [`RedactApp::analyze`].
+//! nicht. Siehe [`RedactApp::analyze`]. Der sechste ist das Umschalten der
+//! automatischen Erkennung ([`RedactApp::apply_pattern_toggle`]): es rechnet
+//! dieselbe Liste neu und geht deshalb durch dieselbe Frage.
 
 use std::path::PathBuf;
 
@@ -354,6 +356,60 @@ pub fn discard_question(regions: usize, what: &str) -> String {
     )
 }
 
+/// Der Satz hinter der Meldung „zu groß“ für eine im Dialog gewählte
+/// Review-Datei.
+///
+/// Anders formuliert als der Satz der Kommandozeile: hier gibt es keinen
+/// Schalter, auf den man zeigen könnte, sondern einen Dateidialog — und der
+/// wahrscheinlichste Fall ist deshalb nicht die zu große Review-Datei, sondern
+/// die versehentlich angeklickte PDF- oder Archivdatei daneben.
+const REVIEW_LIMIT_HINT: &str = "Für eine Review-Datei ist das eine feste Grenze und keine \
+     Einstellung: gemessen sind rund 600 Byte je geprüfter Stelle, 16 MB fassen also gut \
+     25 000 — von Hand geprüft werden Dutzende bis Hunderte. Gewählt war vermutlich nicht \
+     die Review-Datei, sondern eine PDF- oder Archivdatei daneben.";
+
+/// Liest eine Review-Datei als Text — mit der Obergrenze **vor** dem ersten
+/// gelesenen Byte.
+///
+/// Der Dateidialog ist an dieser Stelle kein Schutz, sondern nur eine
+/// Eingabemaske: er liefert einen *Namen*, und was hinter dem Namen liegt —
+/// eine dünn belegte Riesendatei, eine benannte Pipe, ein Gerät — bestimmt
+/// nicht, wer geklickt hat. [`redact_core::read_limited`] fragt deshalb auch
+/// hier zuerst und liest dann.
+///
+/// [`redact_core::RedactError::Parse`] wie auf der Kommandozeile
+/// (`redact_pipeline::read_aux_text`): daneben liefert `ReviewFile::from_json`
+/// dieselbe Fehlerart, und für die Bedienende ist „die Datei taugt nicht“ eine
+/// Aussage. Vorher kam hier ein nackter `Io`-Fehler heraus — **ohne den
+/// Dateinamen**.
+fn read_review_text(path: &std::path::Path) -> redact_core::Result<String> {
+    let bytes = redact_core::read_limited(path, redact_core::MAX_AUX_FILE_BYTES, REVIEW_LIMIT_HINT)
+        .map_err(redact_core::RedactError::Parse)?;
+    String::from_utf8(bytes).map_err(|_| {
+        redact_core::RedactError::Parse(format!(
+            "{}: keine UTF-8-Datei. Eine Review-Datei ist JSON, also Text.",
+            redact_core::safe_path(path)
+        ))
+    })
+}
+
+/// Die Überschrift des Hinweisfensters beim Laden einer Review-Datei.
+///
+/// Die alte Überschrift lautete immer „Review-Datei passt nicht zum Dokument“.
+/// Solange nur die Prüfsumme scheitern konnte, stimmte das; seit die Datei
+/// auch „zu groß“ oder „keine gewöhnliche Datei“ sein kann, stimmt es nicht
+/// mehr — und eine Überschrift, die am Text darunter vorbeiredet, schickt die
+/// Suche in die falsche Richtung. Die Zugehörigkeit meldet
+/// [`redact_pipeline::check_review_identity`] als
+/// [`redact_core::RedactError::Config`]; alles andere ist ein Fehler an der
+/// Datei selbst.
+pub fn review_error_title(error: &redact_core::RedactError) -> &'static str {
+    match error {
+        redact_core::RedactError::Config(_) => "Review-Datei passt nicht zum Dokument",
+        _ => "Review-Datei nicht lesbar",
+    }
+}
+
 /// Meldung nach einem geglückten Speichern der Review-Datei.
 ///
 /// Die Datei enthält die gefundenen Geheimnisse im Klartext (dieselben, die im
@@ -650,6 +706,52 @@ impl RedactApp {
         ran
     }
 
+    /// Schaltet die automatische Erkennung um und rechnet die Treffer neu.
+    ///
+    /// **Der sechste Weg zum Datenverlust** — und er geht durch dieselbe
+    /// Rückfrage wie die fünf anderen ([`RedactApp::may_discard`]). Umschalten
+    /// heißt, die Trefferliste neu aufzubauen: jede Abwahl und jede je Treffer
+    /// gewählte Schwärzungsart ist danach weg, ein geladenes Review ebenso.
+    ///
+    /// **Was bleibt**, und das ist der Punkt: von Hand gezogene Rechtecke
+    /// überstehen es (darum kümmert sich [`AppState::analyze`]), und die
+    /// Schutzeinträge der Buchungsliste werden aus derselben Liste neu gefunden
+    /// — die steht in der Konfiguration und wird hier nicht angefasst.
+    ///
+    /// Sagt die Nutzerin „nein“, bleibt auch das Kästchen, wie es war: die
+    /// Seitenleiste ändert nichts selbst, sie meldet nur den Wunsch (siehe
+    /// [`crate::sidebar::PatternToggle`]).
+    fn apply_pattern_toggle(&mut self, toggle: crate::sidebar::PatternToggle) {
+        use crate::sidebar::PatternToggle;
+
+        let what = match &toggle {
+            PatternToggle::All(true) => "Die automatische Erkennung einzuschalten",
+            PatternToggle::All(false) => "Die automatische Erkennung abzuschalten",
+            PatternToggle::One { .. } => "Ein Muster umzuschalten",
+        };
+        if !self.may_discard(what) {
+            self.state.status = "Umschalten abgebrochen — nichts verändert".to_string();
+            return;
+        }
+
+        match toggle {
+            PatternToggle::All(on) => self.state.set_patterns_enabled(on),
+            PatternToggle::One { id, on } => self.state.set_pattern_enabled(&id, on),
+        }
+
+        // Ohne Dokument gibt es nichts neu zu rechnen; die Einstellung gilt
+        // trotzdem und wirkt beim nächsten Öffnen.
+        if !self.state.is_loaded() {
+            self.state.status = self
+                .state
+                .detection_notice()
+                .unwrap_or_else(|| "Automatische Erkennung: alle Muster an".to_string());
+            return;
+        }
+        let result = self.state.analyze().map(|_| ());
+        self.report(result);
+    }
+
     /// Öffnet ein aus dem Speicher abgelegtes PDF (Web-Build ohne Pfad).
     pub fn open_bytes_and_analyze(&mut self, bytes: &[u8], name: &str) {
         let path = (!name.is_empty()).then(|| PathBuf::from(name));
@@ -761,6 +863,7 @@ impl RedactApp {
             last_page: self.state.is_last_page(),
             can_zoom_in: self.state.can_zoom_in(),
             can_zoom_out: self.state.can_zoom_out(),
+            can_find_anything: self.state.analysis_can_find_anything(),
         }
     }
 
@@ -778,9 +881,25 @@ impl RedactApp {
                     }
                     ToolItem::Button(button) => {
                         let enabled = toolbar::is_enabled(button.action, &context);
+                        // Ein grauer Knopf sagt „geht gerade nicht“; **warum**
+                        // steht in der Sprechblase. Für „Analysieren“ ist der
+                        // Grund einer, den der Nutzer selbst gesetzt hat und
+                        // selbst zurücknehmen kann — der gehört genannt.
+                        //
+                        // Ausdrücklich an `can_find_anything` und nicht an
+                        // `!enabled`: ohne Dokument ist derselbe Knopf auch
+                        // grau, aber aus einem ganz anderen Grund.
+                        let hint = if button.action == ToolAction::Analyze
+                            && context.loaded
+                            && !context.can_find_anything
+                        {
+                            toolbar::ANALYZE_OFF_HINT
+                        } else {
+                            button.hint
+                        };
                         if ui
                             .add_enabled(enabled, egui::Button::new(button.label()))
-                            .on_hover_text(button.hint)
+                            .on_hover_text(hint)
                             .clicked()
                         {
                             clicked = Some(button.action);
@@ -962,9 +1081,19 @@ impl RedactApp {
     /// Hinweisfenster. Eine Zeile am unteren Rand ginge hier zu leicht unter:
     /// wer eine fremde Review-Datei anwendet, bekommt ein Ergebnis, das
     /// geschwärzt aussieht und keines ist.
+    ///
+    /// ## Erst fragen, dann lesen
+    ///
+    /// Gelesen wird über [`read_review_text`] und damit über
+    /// [`redact_core::read_limited`]. Hier stand ein `std::fs::read_to_string`
+    /// auf einen im Dateidialog gewählten Pfad — derselbe Fehler wie hinter
+    /// `--apply-review` auf der Kommandozeile, nur ohne Kommandozeile: eine
+    /// dünn belegte Datei mit 6 GB Nennlänge (4 kB auf der Platte) belegte 6 GB
+    /// Arbeitsspeicher, eine benannte Pipe ließ die Oberfläche stehen. Dass ein
+    /// Mensch die Datei im Dialog aussucht, ist dabei kein Schutz: ausgesucht
+    /// wird ein *Name*, und was hinter dem Namen liegt, bestimmt nicht er.
     pub fn load_review_file(&mut self, path: &std::path::Path) {
-        let result = std::fs::read_to_string(path)
-            .map_err(redact_core::RedactError::from)
+        let result = read_review_text(path)
             .and_then(|data| ReviewFile::from_json(&data))
             .and_then(|review| self.state.apply_review_file(review));
         if let Err(error) = &result {
@@ -972,7 +1101,12 @@ impl RedactApp {
             if self.ask == Ask::User {
                 rfd::MessageDialog::new()
                     .set_level(rfd::MessageLevel::Error)
-                    .set_title("Review-Datei passt nicht zum Dokument")
+                    // Der Titel darf nicht mehr behaupten, es liege an der
+                    // Zugehörigkeit: seit der Grenze kommt hier auch „zu groß“
+                    // und „keine gewöhnliche Datei“ an, und ein Titel, der am
+                    // Text vorbeiredet, schickt die Suche in die falsche
+                    // Richtung.
+                    .set_title(review_error_title(error))
                     .set_description(&message)
                     .set_buttons(rfd::MessageButtons::Ok)
                     .show();
@@ -1612,12 +1746,18 @@ impl eframe::App for RedactApp {
                 crate::thumbnails::show(ui, &mut self.state, &mut self.pages, page_changed);
             });
 
-        egui::SidePanel::left("sidebar")
+        let toggle = egui::SidePanel::left("sidebar")
             .default_width(SIDEBAR_WIDTH)
             .width_range(SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH)
             .show(ctx, |ui| {
-                crate::sidebar::show(ui, &mut self.state, &summary);
-            });
+                crate::sidebar::show(ui, &mut self.state, &summary)
+            })
+            .inner;
+        // Erst zeichnen, dann umschalten: die Rückfrage öffnet ein Fenster des
+        // Systems, und das gehört nicht in die Mitte eines Panels.
+        if let Some(toggle) = toggle {
+            self.apply_pattern_toggle(toggle);
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.central_rect = Some(ui.max_rect());
@@ -1733,10 +1873,18 @@ mod tests {
             egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
                 app.borrow_mut().top_bar(ui);
             });
-            egui::SidePanel::left("sidebar").show(ctx, |ui| {
-                let mut app = app.borrow_mut();
-                crate::sidebar::show(ui, &mut app.state, &summary);
-            });
+            // Wie in `update`: die Seitenleiste **meldet** eine Umschaltung,
+            // ausgeführt wird sie danach. Ohne diese zwei Zeilen liefe ein Test,
+            // der auf ein Kästchen klickt, ins Leere.
+            let toggle = egui::SidePanel::left("sidebar")
+                .show(ctx, |ui| {
+                    let mut app = app.borrow_mut();
+                    crate::sidebar::show(ui, &mut app.state, &summary)
+                })
+                .inner;
+            if let Some(toggle) = toggle {
+                app.borrow_mut().apply_pattern_toggle(toggle);
+            }
             egui::CentralPanel::default().show(ctx, |ui| {
                 if app.borrow().state.is_loaded() {
                     app.borrow_mut().paint_page(ui, &summary);
@@ -3329,6 +3477,284 @@ mod tests {
         assert!(app.state.status.starts_with("Analyse:"));
     }
 
+    // ------------------------- Abschaltbare automatische Funde (Aufgabe #81)
+
+    /// Eine Buchungsliste, die „Max Mustermann“ schützt.
+    fn protecting_list(dir: &Path) -> PathBuf {
+        let path = dir.join("liste.csv");
+        std::fs::write(
+            &path,
+            "id,list_type,pattern\nb003,negative,\"Max Mustermann\"\n",
+        )
+        .unwrap();
+        path
+    }
+
+    /// Wie viele Regionen aus einem Muster stammen.
+    fn automatic(app: &RedactApp) -> usize {
+        app.state
+            .regions
+            .iter()
+            .filter(|a| matches!(a.region.source, redact_core::Source::Pattern { .. }))
+            .count()
+    }
+
+    /// **Die Auflage (1) in der Oberfläche: ganz aus heißt kein automatischer
+    /// Treffer — und Handarbeit und Schutzmarken überstehen es.**
+    ///
+    /// Das ist die eigentliche Prüfung dieses Schalters: er rechnet die
+    /// Trefferliste neu, und dabei darf weder ein selbst gezogenes Rechteck
+    /// noch ein Schutzeintrag der Buchungsliste verlorengehen.
+    #[test]
+    fn switching_the_detection_off_keeps_hand_drawn_regions_and_protections() {
+        let dir = temp_dir("erkennung-aus");
+        let mut app = RedactApp::silent(Config {
+            booking_list: Some(protecting_list(&dir)),
+            ..Config::default()
+        });
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+
+        app.state
+            .add_manual_region(0, Rect::new(70.0, 745.0, 250.0, 760.0), "Anschrift");
+        let vorher_automatisch = automatic(&app);
+        let vorher_schutz = app.state.hit_summary().protecting;
+        assert!(vorher_automatisch >= 3, "{vorher_automatisch}");
+        assert!(vorher_schutz > 0, "die Schutzmarke fehlt schon vorher");
+
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::All(false));
+
+        assert_eq!(automatic(&app), 0, "es darf kein Muster mehr laufen");
+        assert_eq!(
+            app.state
+                .regions
+                .iter()
+                .filter(|a| matches!(a.region.source, redact_core::Source::Manual { .. }))
+                .count(),
+            1,
+            "das selbst gezogene Rechteck ist weg"
+        );
+        assert_eq!(
+            app.state.hit_summary().protecting,
+            vorher_schutz,
+            "die Schutzmarke der Buchungsliste ist weg"
+        );
+        assert!(app.state.detection_notice().is_some());
+
+        // Und zurück: dieselben Treffer wie vorher.
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::All(true));
+        assert_eq!(automatic(&app), vorher_automatisch);
+        assert_eq!(app.state.detection_notice(), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **Die Auflage (2) in der Oberfläche: ein Muster aus, die übrigen an.**
+    #[test]
+    fn switching_off_one_pattern_leaves_the_others_running() {
+        let mut app = RedactApp::silent(Config::default());
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        let ids = |app: &RedactApp| -> Vec<String> {
+            let mut ids: Vec<String> = app
+                .state
+                .regions
+                .iter()
+                .filter_map(|a| match &a.region.source {
+                    redact_core::Source::Pattern { pattern_id, .. } => Some(pattern_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        let alle = ids(&app);
+        assert!(alle.contains(&"email".to_string()), "{alle:?}");
+
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::One {
+            id: "email".to_string(),
+            on: false,
+        });
+
+        let übrig = ids(&app);
+        assert!(!übrig.contains(&"email".to_string()), "{übrig:?}");
+        assert_eq!(
+            übrig,
+            alle.iter()
+                .filter(|id| *id != "email")
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert!(!app.state.pattern_enabled("email"));
+        assert!(app.state.pattern_enabled("iban_de"));
+    }
+
+    /// Und die Rückfrage: wird sie abgelehnt, bleibt **auch das Kästchen**
+    /// stehen. Ein Schalter, der sich schon umgestellt hat, während die Liste
+    /// noch die alte ist, wäre die schlimmere Lüge.
+    #[test]
+    fn a_refused_toggle_changes_neither_the_hits_nor_the_switch() {
+        let mut app = RedactApp::refusing(iban_only());
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        app.state
+            .add_manual_region(0, Rect::new(70.0, 745.0, 250.0, 760.0), "Anschrift");
+        let vorher = app.state.regions.clone();
+        assert!(app.state.has_manual_work());
+
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::All(false));
+        assert_eq!(app.state.regions, vorher, "nichts durfte sich ändern");
+        assert!(app.state.patterns_enabled(), "der Schalter steht weiter an");
+        assert!(app.state.detection_notice().is_none());
+        assert!(
+            app.state.status.contains("abgebrochen"),
+            "und es gehört gesagt: {}",
+            app.state.status
+        );
+
+        // Gegenprobe mit „Ja“ — sonst prüfte der Test nur, dass nie etwas
+        // geschieht.
+        app.ask = Ask::Answer(true);
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::All(false));
+        assert!(!app.state.patterns_enabled());
+        assert_eq!(automatic(&app), 0);
+    }
+
+    /// **Die Kopfzeile darf niemals zweideutig sein.**
+    ///
+    /// Der Befund, um den es geht: bei abgeschalteter Automatik stand dort
+    /// „0 Treffer · 0 werden geschwärzt“ — Wort für Wort dasselbe wie bei einem
+    /// Dokument, in dem wirklich nichts steht. Genau dieselbe Zeile für „nichts
+    /// gefunden“ und „nicht gesucht“.
+    #[test]
+    fn the_headline_never_reads_the_same_for_found_nothing_and_did_not_look() {
+        let mut app = RedactApp::silent(Config::default());
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        let gesucht = app.state.hit_summary().headline();
+        assert!(!gesucht.contains("AUS"), "{gesucht}");
+
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::All(false));
+        let nicht_gesucht = app.state.hit_summary().headline();
+        assert_ne!(gesucht, nicht_gesucht);
+        assert!(
+            nicht_gesucht.contains("AUS") && nicht_gesucht.contains("nicht gesucht"),
+            "die Kopfzeile verschweigt die Abschaltung: {nicht_gesucht}"
+        );
+        // Und der Beweis, dass die Zeile ohne diesen Zusatz mehrdeutig wäre:
+        // die Zahlen sind dieselben wie bei einem leeren Dokument.
+        let leer = AppState::new().hit_summary().headline();
+        assert!(
+            leer.starts_with("0 Treffer · 0 werden geschwärzt"),
+            "{leer}"
+        );
+        assert!(!nicht_gesucht.starts_with("0 Treffer"), "{nicht_gesucht}");
+
+        // Einzeln abgeschaltet: die Zahl steht daneben, denn hier ist die
+        // Trefferzahl nicht null und trotzdem unvollständig.
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::All(true));
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::One {
+            id: "email".to_string(),
+            on: false,
+        });
+        let teilweise = app.state.hit_summary().headline();
+        assert!(teilweise.contains("1 Muster abgeschaltet"), "{teilweise}");
+    }
+
+    /// „Analysieren“ ist grau, wenn es nichts zu finden gäbe — und **nicht**,
+    /// solange eine Buchungsliste dahintersteht.
+    #[test]
+    fn the_analyse_button_says_when_it_could_not_find_anything() {
+        let dir = temp_dir("knopf");
+        let mut app = RedactApp::silent(Config::default());
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        assert!(toolbar::is_enabled(
+            ToolAction::Analyze,
+            &app.tool_context()
+        ));
+
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::All(false));
+        assert!(
+            !toolbar::is_enabled(ToolAction::Analyze, &app.tool_context()),
+            "ohne Muster und ohne Liste findet der Knopf nichts"
+        );
+
+        // Mit Buchungsliste ist er wieder benutzbar: die Analyse hat dann eine
+        // Quelle, auch ganz ohne Muster.
+        app.state.config.booking_list = Some(protecting_list(&dir));
+        assert!(toolbar::is_enabled(
+            ToolAction::Analyze,
+            &app.tool_context()
+        ));
+        assert!(app.state.analysis_can_find_anything());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Der zweite Weg zu „nichts läuft mehr“: jedes Kästchen einzeln
+    /// abwählen. Er führt zu demselben Zustand wie der große Schalter und
+    /// gehört genauso behandelt — sonst bliebe ein Knopf benutzbar, der
+    /// nachweislich eine leere Liste erzeugt.
+    #[test]
+    fn unticking_every_single_pattern_counts_as_switched_off_too() {
+        let mut app = RedactApp::silent(Config::default());
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+
+        let ids: Vec<String> = app
+            .state
+            .pattern_states()
+            .iter()
+            .map(|def| def.id.clone())
+            .collect();
+        assert!(ids.len() > 5, "{ids:?}");
+        for id in &ids {
+            app.apply_pattern_toggle(crate::sidebar::PatternToggle::One {
+                id: id.clone(),
+                on: false,
+            });
+        }
+
+        assert_eq!(automatic(&app), 0);
+        assert!(
+            !app.state.analysis_can_find_anything(),
+            "alle Kästchen aus ist dasselbe wie der große Schalter aus"
+        );
+        assert!(!toolbar::is_enabled(
+            ToolAction::Analyze,
+            &app.tool_context()
+        ));
+        // Der große Schalter steht dabei weiter auf „an“ — die Kopfzeile darf
+        // deshalb nicht „AUS“ behaupten, sondern muss die Zahl nennen.
+        assert!(app.state.patterns_enabled());
+        let headline = app.state.hit_summary().headline();
+        assert!(
+            headline.contains(&format!("{} Muster abgeschaltet", ids.len())),
+            "{headline}"
+        );
+
+        // Und eines wieder an: alles kommt zurück.
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::One {
+            id: "iban_de".to_string(),
+            on: true,
+        });
+        assert!(app.state.analysis_can_find_anything());
+        assert!(automatic(&app) > 0);
+    }
+
+    /// Ohne geladenes Dokument gilt die Einstellung trotzdem — sie wirkt beim
+    /// nächsten Öffnen, und die Statuszeile sagt es.
+    #[test]
+    fn the_switch_works_before_a_document_is_open() {
+        let mut app = RedactApp::silent(Config::default());
+        app.apply_pattern_toggle(crate::sidebar::PatternToggle::All(false));
+        assert!(!app.state.patterns_enabled());
+        assert!(
+            app.state.status.contains(redact_pipeline::DETECTION_NOTICE),
+            "{}",
+            app.state.status
+        );
+
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+        assert_eq!(automatic(&app), 0, "die Einstellung galt beim Öffnen nicht");
+    }
+
     /// Auch ein geladenes Review geht diesen Weg — „Buchungsliste laden“ ruft
     /// dieselbe Analyse. Und wird sie abgelehnt, darf auch die Buchungsliste
     /// nicht heimlich in der Konfiguration stehen bleiben.
@@ -3484,6 +3910,137 @@ mod tests {
         a.load_review_file(&path);
         assert!(a.error.is_none(), "{:?}", a.error);
         assert!(!a.state.regions.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --------------------------- Review-Dateien: die Grenze vor dem Lesen
+
+    /// **Die Auflage:** eine dünn belegte Riesendatei wird abgelehnt, **bevor**
+    /// sie gelesen wird — und die Ablehnung erreicht die Oberfläche.
+    ///
+    /// Das war der fünfte Weg derselben Art, den die Sicherheitsprüfung nicht
+    /// gefunden hat: `load_review_file` las mit `std::fs::read_to_string`, was
+    /// im Dateidialog angeklickt worden war. Der Dialog ist dabei kein Schutz —
+    /// er liefert einen Namen, nicht eine Zusicherung über das, was hinter ihm
+    /// liegt. Eine Datei mit 6 GB Nennlänge (4 kB auf der Platte) belegte 6 GB
+    /// Arbeitsspeicher, und die Oberfläche stand so lange still.
+    ///
+    /// Geprüft wird beides: dass die Grenze *vor* dem Lesen greift — zu sehen
+    /// daran, dass die Meldung die Größe nennt, die sie nur aus der Angabe des
+    /// Dateisystems haben kann — und dass die Meldung in der Statuszeile
+    /// **und** in `error` ankommt, also weder als Absturz noch als stilles
+    /// Nichts.
+    #[test]
+    fn a_sparse_giant_review_file_is_refused_and_the_window_says_so() {
+        let dir = temp_dir("riesig-review");
+        let path = dir.join("riesig.json");
+        let file = std::fs::File::create(&path).unwrap();
+        // Dünn belegt: 6 GB Nennlänge, 0 Byte geschrieben.
+        file.set_len(6 * 1024 * 1024 * 1024).unwrap();
+        drop(file);
+
+        let mut app = RedactApp::silent(iban_only());
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "a.pdf");
+        let before = app.state.regions.clone();
+
+        app.load_review_file(&path);
+
+        let error = app.error.clone().expect("die Datei muss abgelehnt werden");
+        assert!(error.contains("riesig.json"), "{error}");
+        assert!(error.contains("6144 MB"), "die Größe fehlt: {error}");
+        assert!(error.contains("16 MB"), "die Grenze fehlt: {error}");
+        assert!(error.contains("feste Grenze"), "der Hinweis fehlt: {error}");
+        // In der Oberfläche sichtbar: die Statuszeile trägt denselben Text.
+        assert_eq!(app.state.status, error, "die Statuszeile schweigt");
+        assert_eq!(
+            app.state.regions, before,
+            "es darf nichts übernommen werden"
+        );
+        // Und das Hinweisfenster verspricht nicht das Falsche: es liegt nicht
+        // an der Zugehörigkeit zum Dokument.
+        assert_eq!(
+            review_error_title(&redact_core::RedactError::Parse(error)),
+            "Review-Datei nicht lesbar"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **Die Auflage:** eine benannte Pipe lässt die Oberfläche nicht stehen.
+    ///
+    /// `#[cfg(unix)]`, weil es unter Windows kein `mkfifo` und keine benannte
+    /// Pipe im Dateisystem gibt, die man im Dateidialog anklicken könnte — der
+    /// Angriffsweg existiert dort nicht, und ein Test, der ihn nachstellen
+    /// wollte, scheiterte schon am Anlegen.
+    ///
+    /// Der Test kommt ohne Schreiber am anderen Ende aus, und das ist gerade
+    /// der Punkt: schon das *Öffnen* einer Pipe ohne Schreiber blockiert
+    /// endlos. Gearbeitet wird deshalb in einem eigenen Faden mit
+    /// Zeitschranke — griffe die Grenze nicht, hinge sonst der Testlauf selbst,
+    /// und ein hängender Test ist schlimmer als ein roter.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_chosen_in_the_dialog_does_not_freeze_the_window() {
+        let dir = temp_dir("pipe-review");
+        let path = dir.join("pipe.json");
+        let ok = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo startbar");
+        assert!(ok.success(), "mkfifo ist fehlgeschlagen");
+
+        // `RedactApp` bleibt in seinem Faden — nur die Meldung kommt zurück.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let pfad = path.clone();
+        std::thread::spawn(move || {
+            let mut app = RedactApp::silent(iban_only());
+            app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "a.pdf");
+            app.load_review_file(&pfad);
+            let _ = sender.send((app.error.clone(), app.state.status.clone()));
+        });
+
+        let (error, status) = receiver
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("die Oberfläche hängt an der Pipe, statt sie abzulehnen");
+
+        let error = error.expect("eine Pipe muss abgelehnt werden");
+        assert!(error.contains("gewöhnliche Datei"), "{error}");
+        assert!(error.contains("pipe.json"), "{error}");
+        assert_eq!(status, error, "die Statuszeile schweigt");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Die Gegenprobe: eine gewöhnliche Review-Datei geht weiterhin durch.
+    ///
+    /// Ohne diesen Test wäre der Weg nur zugemauert statt abgesichert. Der
+    /// Umweg über die Platte ist dabei Absicht — geprüft wird genau der Weg,
+    /// den der Dateidialog nimmt.
+    #[test]
+    fn an_ordinary_review_file_still_loads() {
+        let dir = temp_dir("legitim-review");
+        let mut app = RedactApp::silent(iban_only());
+        app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "a.pdf");
+        app.state
+            .add_manual_region(0, Rect::new(10.0, 10.0, 50.0, 20.0), "Gehalt");
+        let path = dir.join("review.json");
+        std::fs::write(&path, app.state.to_review_file().to_json().unwrap()).unwrap();
+        // Verglichen werden die Rechtecke, nicht die `RegionId`s: die werden
+        // beim Laden neu vergeben, und das ist richtig so.
+        let erwartet: Vec<_> = app.state.regions.iter().map(|r| r.region.clone()).collect();
+
+        app.state.regions.clear();
+        app.load_review_file(&path);
+
+        assert!(app.error.is_none(), "{:?}", app.error);
+        let geladen: Vec<_> = app.state.regions.iter().map(|r| r.region.clone()).collect();
+        assert_eq!(geladen, erwartet);
+        assert!(
+            app.state.status.contains("Review übernommen"),
+            "{}",
+            app.state.status
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

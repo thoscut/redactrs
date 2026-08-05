@@ -7,6 +7,12 @@
 //! OOM-Killer oder zu SIGABRT; zwei weitere machten aus einer Einstellung bzw.
 //! einem Dateinamen ein Werkzeug gegen den Bedienenden.
 //!
+//! Dazu der Abschnitt „Befund 4, Fortsetzung“: derselbe Fehler wie bei der
+//! Eingabedatei — erst lesen, dann fragen — steckte in vier weiteren Schaltern
+//! (`--booking-list`, `--patterns-config`, `--manual-regions`,
+//! `--apply-review`). Über sie ließ sich der Prozess mit einer Datei, die auf
+//! der Platte 4 kB belegt, auf mehrere Gigabyte treiben oder endlos anhalten.
+//!
 //! ## Warum hier keine Megabyte stehen
 //!
 //! Spitzenspeicher lässt sich in einem Testfall schlecht messen: der
@@ -16,6 +22,24 @@
 //! Rückgabewert, die genannte Größe, und ob eine Ausgabedatei entstanden ist.
 //! Die Speicherzahlen (mit `getrusage(RUSAGE_CHILDREN)` vorher/nachher
 //! erhoben) stehen in `SECURITY.md`.
+//!
+//! ## Zwei Systeme, eine Zusage
+//!
+//! Drei Tests zu Befund 6 tragen ein `#[cfg(unix)]`, weil ihr Angriffsweg —
+//! ein Steuerzeichen **im Dateinamen** — unter Windows gar nicht existiert:
+//! `CreateFile` lehnt jedes Zeichen unter `U+0020` ab. Ohne das `cfg` war das
+//! kein Vorteil, sondern ein Ausfall: `cargo test` scheiterte auf
+//! `windows-2025` beim Anlegen der Datei, und damit gab es für das
+//! Windows-Artefakt überhaupt keinen grünen Testlauf. Was auf Windows sehr wohl
+//! geht, prüfen die Tests im Abschnitt „Befund 6, Fortsetzung“ — dort steht
+//! auch, was dort prinzipiell nicht prüfbar ist.
+//!
+//! Aus demselben Grund trägt der Pipe-Test zu Befund 4 eines: es gibt unter
+//! Windows weder `mkfifo` noch eine benannte Pipe, die sich einem Pfad
+//! unterschieben ließe — sie leben dort unter `\\.\pipe\` und kommen als
+//! Argument eines Dateischalters nicht vor. Die Größengrenze dagegen gilt auf
+//! beiden Systemen und wird auf beiden geprüft; sie ist die Hälfte des
+//! Schutzes, die überall greift.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -398,9 +422,17 @@ fn a_suffix_with_a_path_component_is_refused_on_the_command_line() {
 /// `ESC [ 2 K` löscht die Zeile, `ESC [ A` fährt eine Zeile hoch: damit lässt
 /// sich die Zusammenfassung eines Stapels überschreiben, bis „1 fehlgeschlagen“
 /// als „0 fehlgeschlagen“ dasteht.
+#[cfg(unix)]
 const BOESER_NAME: &str = "a\u{1b}[31mrot\u{1b}[2K\u{1b}[A.pdf";
 
 /// **Die Auflage:** kein Steuerzeichen erreicht stdout oder stderr.
+///
+/// Nur unter Unix, siehe den Abschnitt „Befund 6, Fortsetzung“ weiter unten:
+/// `CreateFile` lehnt jedes Zeichen unter `U+0020` ab, [`BOESER_NAME`] lässt
+/// sich dort also gar nicht erst anlegen. Vorher stand hier kein `cfg`, und
+/// genau daran ist die Windows-Hälfte der CI gescheitert — mit
+/// `Os { code: 123, kind: InvalidFilename }` schon beim Anlegen der Datei.
+#[cfg(unix)]
 #[test]
 fn control_characters_from_a_file_name_never_reach_the_terminal() {
     let dir = workdir("steuer");
@@ -434,6 +466,7 @@ fn control_characters_from_a_file_name_never_reach_the_terminal() {
 }
 
 /// Auch die Fehlermeldung eines Stapels darf keine Zeile fälschen können.
+#[cfg(unix)]
 #[test]
 fn a_failing_file_with_a_hostile_name_cannot_forge_the_summary() {
     let dir = workdir("steuer-fehler");
@@ -456,6 +489,12 @@ fn a_failing_file_with_a_hostile_name_cannot_forge_the_summary() {
 
 /// In `--json` bleibt der Name vollständig — dort liest ihn keine Anzeige,
 /// sondern ein Programm, und `serde_json` schreibt Steuerzeichen als ``.
+///
+/// Das ist die eine Zusage dieses Abschnitts, für die es unter Windows **kein**
+/// Gegenstück gibt: dort kann kein Steuerzeichen in einen Dateinamen, und einen
+/// anderen Weg, eines in die JSON-Ausgabe zu bekommen, gibt es nicht. Siehe
+/// den Abschnitt „Befund 6, Fortsetzung“.
+#[cfg(unix)]
 #[test]
 fn json_keeps_the_name_but_escapes_it_itself() {
     let dir = workdir("steuer-json");
@@ -471,6 +510,184 @@ fn json_keeps_the_name_but_escapes_it_itself() {
     ]);
     assert!(!out.stdout.contains(&0x1b), "{}", stdout(&out));
     assert!(stdout(&out).contains("\\u001b"), "{}", stdout(&out));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Befund 6, Fortsetzung — und unter Windows?
+// ---------------------------------------------------------------------------
+//
+// Die drei Tests oben tragen die Zusage „fremde Zeichen erreichen das Terminal
+// nicht“ — und liefen bis hierher **nur** unter Unix, ohne dass es dort stand.
+// Für das Windows-Artefakt, die eigentliche Zielgruppe dieses Programms, gab es
+// die Zusage damit gar nicht: `cargo test` brach auf `windows-2025` beim
+// Anlegen der Datei ab (`Os { code: 123, kind: InvalidFilename }`).
+//
+// ## Was auf Windows prinzipiell nicht geht
+//
+// Ein Dateiname darf dort kein Zeichen unter `U+0020` enthalten — `CreateFile`
+// weist das ab, und zwar unabhängig vom Dateisystem. Ein ESC in einem
+// *Dateinamen* ist auf Windows also kein Angriffsweg, sondern eine
+// Unmöglichkeit. Dasselbe gilt für den Zeilenumbruch im Namen und damit für
+// die JSON-Zusage („`serde_json` maskiert Steuerzeichen selbst“): über einen
+// Dateinamen kommt dort kein Steuerzeichen in die Ausgabe.
+//
+// ## Was sehr wohl geht
+//
+// Zwei Wege bleiben, und beide sind hier abgedeckt:
+//
+// 1. **Steuerzeichen aus einem Argument.** Die Kommandozeile ist kein
+//    Dateiname; sie darf jedes Zeichen tragen, auf beiden Systemen. `redact-rs`
+//    nimmt mit `--output-suffix` einen Namensbestandteil von aussen entgegen
+//    und nennt ihn in der Fehlermeldung wieder — der Weg von der Eingabe auf
+//    das Terminal ist derselbe wie beim Dateinamen.
+// 2. **Richtungsumschalter im Dateinamen.** `U+202E` (RIGHT-TO-LEFT OVERRIDE)
+//    liegt über `U+0020` und ist auf Windows in einem Dateinamen erlaubt — es
+//    ist dort seit Jahren der übliche Trick, `…gpj.exe` als `…exe.jpg` aussehen
+//    zu lassen. Es steuert kein Terminal, dreht aber die Leserichtung um und
+//    kann damit dieselbe Zeile fälschen. `redact_core::display` behandelt es
+//    aus genau diesem Grund wie ein Steuerzeichen.
+//
+// Die Tests dazu laufen bewusst auf **beiden** Systemen: unter Unix sind sie
+// eine zusätzliche Prüfung, unter Windows sind sie die einzige.
+//
+// Nicht abgedeckt bleiben die Windows-eigenen Fallstricke `CON`/`NUL`, der
+// abschließende Punkt und das abschließende Leerzeichen. Sie gehören nicht zu
+// dieser Zusage: sie fälschen keine Ausgabe, sondern lassen einen Pfad auf
+// etwas anderes zeigen, als er zu sagen scheint. Das ist ein eigener Befund und
+// keine Fussnote zu diesem hier.
+
+/// Ein Dateiname, der die Leserichtung umdreht — auf beiden Systemen anlegbar.
+const RICHTUNGSNAME: &str = "a\u{202e}rot.pdf";
+
+/// **Die Auflage, Windows-Hälfte:** ein Steuerzeichen aus einem *Argument*
+/// erreicht das Terminal ebenso wenig wie eines aus einem Dateinamen.
+///
+/// `--output-suffix` ist der einzige Schalter, der einen Namensbestandteil von
+/// aussen annimmt; abgelehnt wird er samt Begründung, und in der Begründung
+/// steht er drin. Genau dort muss er entschärft sein.
+#[test]
+fn a_control_character_from_an_argument_never_reaches_the_terminal() {
+    let dir = workdir("steuer-argument");
+    let input = write(&dir, "auszug.pdf", &redact_pdf::testing::demo_statement());
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--output-suffix",
+        "a\u{1b}[2K\u{1b}[A",
+    ]);
+
+    assert_controlled_failure(&out);
+    for (kanal, text) in [
+        ("stdout", out.stdout.clone()),
+        ("stderr", out.stderr.clone()),
+    ] {
+        assert!(
+            !text.contains(&0x1b),
+            "{kanal} enthält ein ESC-Byte: {:?}",
+            String::from_utf8_lossy(&text)
+        );
+    }
+    // Entschärft heißt auch hier nicht verschwiegen: die Meldung sagt weiterhin,
+    // welcher Zusatz gemeint ist und warum er keiner ist.
+    let message = stderr(&out);
+    assert!(message.contains("\\u{1b}"), "{message}");
+    assert!(message.contains("Steuerzeichen"), "{message}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Die Auflage, Windows-Hälfte:** auch der Richtungsumschalter erreicht die
+/// Anzeige nicht — und die Datei wird trotzdem genannt.
+#[test]
+fn a_direction_override_in_a_file_name_never_reaches_the_terminal() {
+    let dir = workdir("richtung");
+    write(&dir, RICHTUNGSNAME, &redact_pdf::testing::demo_statement());
+    write(&dir, "normal.pdf", &redact_pdf::testing::demo_statement());
+
+    for args in [
+        vec![dir.to_str().unwrap(), "--patterns", "iban_de", "--force"],
+        vec![dir.to_str().unwrap(), "--review", "--force"],
+    ] {
+        let out = run(&args);
+        let gesamt = format!("{}{}", stdout(&out), stderr(&out));
+        assert!(
+            !gesamt.contains('\u{202e}'),
+            "der Richtungsumschalter steht in der Ausgabe: {gesamt}"
+        );
+        assert!(
+            gesamt.contains("\\u{202e}"),
+            "er wurde weder ausgegeben noch sichtbar gemacht: {gesamt}"
+        );
+        assert!(
+            gesamt.contains("rot"),
+            "der Name wird gar nicht mehr genannt"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Die Auflage, Windows-Hälfte:** eine scheiternde Datei mit einem solchen
+/// Namen kann die Zusammenfassung nicht fälschen.
+#[test]
+fn a_failing_file_with_a_direction_override_cannot_hide_in_the_summary() {
+    let dir = workdir("richtung-fehler");
+    // Kein PDF: diese Datei scheitert und wird gemeldet.
+    write(&dir, RICHTUNGSNAME, b"kein PDF");
+    write(&dir, "gut.pdf", &redact_pdf::testing::demo_statement());
+
+    let out = run(&[dir.to_str().unwrap(), "--patterns", "iban_de"]);
+    let gesamt = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(!gesamt.contains('\u{202e}'), "{gesamt}");
+    assert!(
+        stdout(&out).contains("1 fehlgeschlagen"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(out.status.code(), Some(1), "eine Datei ist gescheitert");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Die Gegenprobe, Windows-Hälfte:** in `--json` bleibt der Name so, wie er
+/// auf der Platte steht — Zeichen für Zeichen.
+///
+/// Das ist bewusst die *andere* Erwartung als bei den Steuerzeichen: JSON liest
+/// ein Programm, und ein Programm braucht den echten Namen, um die Datei
+/// wiederzufinden. `serde_json` maskiert `U+202E` nicht, weil es aus JSON-Sicht
+/// ein gewöhnliches Zeichen ist — hier wird deshalb geprüft, dass der Name den
+/// Weg unbeschädigt übersteht.
+#[test]
+fn json_keeps_a_direction_override_verbatim() {
+    let dir = workdir("richtung-json");
+    write(&dir, RICHTUNGSNAME, &redact_pdf::testing::demo_statement());
+    write(&dir, "normal.pdf", &redact_pdf::testing::demo_statement());
+
+    let out = run(&[
+        dir.to_str().unwrap(),
+        "--patterns",
+        "iban_de",
+        "--json",
+        "--force",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let berichte: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("die JSON-Ausgabe ist gültiges JSON");
+    let namen: Vec<&str> = berichte
+        .as_array()
+        .expect("eine Liste je Datei")
+        .iter()
+        .filter_map(|e| e.get("input").and_then(|v| v.as_str()))
+        .collect();
+    // Verglichen wird der Dateiname, nicht der ganze Pfad: der Pfadtrenner
+    // unterscheidet sich zwischen den Systemen, der Name ist der Prüfling.
+    assert!(
+        namen.iter().any(|n| n.ends_with(RICHTUNGSNAME)),
+        "der Name kommt aus der JSON-Ausgabe nicht unverändert zurück: {namen:?}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -546,6 +763,357 @@ fn an_oversized_settings_file_is_refused() {
     let out = run_with_settings(settings.to_str().unwrap(), &[input.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("zu groß"), "{}", stderr(&out));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Befund 4, Fortsetzung — dieselbe Lücke in den Hilfsdatei-Lesern
+// ---------------------------------------------------------------------------
+//
+// Die Eingabe-PDF (`--max-input-mb`) und die Einstellungsdatei prüften erst und
+// lasen dann; vier weitere Schalter taten es umgekehrt. `--booking-list`,
+// `--patterns-config`, `--manual-regions` und `--apply-review` gingen mit
+// `std::fs::read_to_string` bzw. `read_to_end` an einen Pfad, der von außen
+// kommt — und legten damit einen Puffer in Dateigröße an, bevor überhaupt
+// feststand, ob dort eine Liste, eine Konfiguration oder nur eine dünn belegte
+// Datei liegt. Gemessen am gebauten Binary (dünn belegt: 4 kB auf der Platte,
+// 6 GB Nennlänge):
+//
+// | Schalter | vorher | nachher |
+// |---|---|---|
+// | `--apply-review`, 6 GB | 6 157 MB, 20,2 s | 15 MB, 0,0 s |
+// | `--manual-regions`, 6 GB | 6 160 MB, 12,1 s | 16 MB, 0,0 s |
+// | `--apply-review`, Pipe | kein Ende (nach 45 s abgeschossen) | 15 MB, 0,0 s |
+// | `--manual-regions`, Pipe | kein Ende (nach 45 s abgeschossen) | 17 MB, 0,0 s |
+//
+// Die Zahlen für `--booking-list` (5 259 MB bei 1 GB) und `--patterns-config`
+// (2 114 MB bei 2 GB) stehen in `redact_core::read`; die Tests hier sind die
+// Ebene, die am **gebauten Binary** nachweist, dass es für alle vier gilt.
+//
+// Gemessen wird in den Tests nicht der Speicher, sondern **woran** abgelehnt
+// wird: dass die Meldung die Größe nennt, kann sie nur aus der Angabe des
+// Dateisystems haben — also von vor dem ersten gelesenen Byte. Ein Test, der
+// wirklich 6 GB belegte, risse den Testläufer mit.
+
+/// Ein Lauf mit **Zeitschranke** — für die Fälle, in denen der Fehler das
+/// Hängen selbst ist.
+///
+/// `run` wartet, bis der Prozess zurückkommt. An einer benannten Pipe ohne
+/// Schreiber kommt er nie zurück, und ein hängender Test ist schlimmer als ein
+/// roter: er nimmt keinen Rückgabewert an, sondern blockiert den ganzen
+/// Testlauf, bis jemand von außen eingreift. Die Schranke gehört deshalb in den
+/// Test und nicht in die Erwartung an den Testläufer.
+///
+/// Bewusst ohne das Programm `timeout`: das ist GNU-Coreutils und liegt weder
+/// unter Windows noch auf macOS ohne Zutun bereit. `try_wait` gibt es überall,
+/// wo es Rust gibt.
+///
+/// `None` heißt: die Schranke hat gegriffen, der Prozess wurde abgeschossen.
+///
+/// Das `#[cfg(unix)]` steht hier nicht, weil die Funktion unter Windows nicht
+/// liefe — sie benutzt nur `std` —, sondern weil ihr einziger Aufrufer der
+/// Pipe-Test ist. Ohne das `cfg` wäre sie dort ungenutzter Code, und
+/// `-D warnings` machte daraus einen roten Lauf auf `windows-2025`.
+#[cfg(unix)]
+fn run_within(seconds: u64, args: &[&str]) -> Option<Output> {
+    use std::process::Stdio;
+
+    let mut child = Command::new(bin())
+        .args(args)
+        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env_remove("REDACT_RS_PASSWORD")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Binary startbar");
+
+    let frist = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    loop {
+        match child.try_wait().expect("Kindprozess abfragbar") {
+            // `wait_with_output` liest die Rohre leer; `wait` darin gibt den
+            // schon abgeholten Status unverändert zurück.
+            Some(_) => return Some(child.wait_with_output().expect("Ausgabe lesbar")),
+            None if std::time::Instant::now() >= frist => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+}
+
+/// Eine benannte Pipe: Länge 0, und beim Lesen kein Ende.
+///
+/// `#[cfg(unix)]`, weil es unter Windows weder `mkfifo` noch eine benannte
+/// Pipe im Dateisystem gibt — dort leben sie unter `\\.\pipe\` und lassen sich
+/// keinem Pfad unterschieben, den ein Schalter entgegennimmt. Der Angriffsweg
+/// existiert dort also nicht; ein Test, der ihn nachstellen wollte, scheiterte
+/// schon am Anlegen und nähme dem Windows-Artefakt seinen grünen Testlauf —
+/// derselbe Grund, aus dem drei Tests zu Befund 6 ein `cfg` tragen.
+#[cfg(unix)]
+fn fifo(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    let ok = Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("mkfifo startbar");
+    assert!(ok.success(), "mkfifo ist fehlgeschlagen");
+    path
+}
+
+/// Die gemeinsame Erwartung an eine dünn belegte Riesendatei hinter einem
+/// Schalter: kontrolliert abgelehnt, mit Namen, Größe und Grenze — und ohne
+/// Ausgabedatei.
+///
+/// Die **Größe** in der Meldung ist der eigentliche Nachweis: sie steht nirgends
+/// im Dateiinhalt (der ist leer), sondern nur in der Angabe des Dateisystems.
+/// Wer sie nennt, hat gefragt, bevor er las.
+#[track_caller]
+fn assert_refused_by_size(out: &Output, name: &str, grenze: &str, ausgabe: &Path) {
+    assert_controlled_failure(out);
+    let message = stderr(out);
+    assert!(
+        message.contains(name),
+        "die Datei wird nicht genannt:\n{message}"
+    );
+    assert!(
+        message.contains("6144 MB"),
+        "die Größe fehlt — dann kann die Grenze nicht vor dem Lesen gegriffen haben:\n{message}"
+    );
+    assert!(
+        message.contains(grenze),
+        "die Grenze {grenze} fehlt:\n{message}"
+    );
+    assert!(
+        message.contains("feste Grenze"),
+        "der Hinweis fehlt, woher die Grenze kommt:\n{message}"
+    );
+    assert!(!ausgabe.exists(), "es ist trotzdem eine Ausgabe entstanden");
+}
+
+/// Die gemeinsame Erwartung an eine benannte Pipe hinter einem Schalter:
+/// abgelehnt, **bevor** sie geöffnet wird.
+///
+/// Der Test kommt ohne Schreiber am anderen Ende aus, und das ist gerade der
+/// Punkt: schon das *Öffnen* einer Pipe ohne Schreiber blockiert endlos. Kommt
+/// der Lauf innerhalb der Schranke zurück, ist vor dem Öffnen entschieden
+/// worden.
+#[cfg(unix)]
+#[track_caller]
+fn assert_refused_as_not_a_file(out: Option<Output>, name: &str, ausgabe: &Path) {
+    let out = out.unwrap_or_else(|| {
+        panic!("der Lauf hängt an der Pipe, statt sie abzulehnen (Zeitschranke abgelaufen)")
+    });
+    assert_controlled_failure(&out);
+    let message = stderr(&out);
+    assert!(
+        message.contains("gewöhnliche Datei"),
+        "die Pipe wird nicht als solche benannt:\n{message}"
+    );
+    assert!(
+        message.contains(name),
+        "die Datei wird nicht genannt:\n{message}"
+    );
+    assert!(!ausgabe.exists(), "es ist trotzdem eine Ausgabe entstanden");
+}
+
+/// **Die Auflage:** eine Buchungsliste von 6 GB wird abgelehnt, bevor sie
+/// gelesen wird.
+///
+/// Die Buchungsliste war der schlimmste der vier Wege, weil der CSV-Parser
+/// obendrauf kam: aus 1 GB Datei wurden über 5 GB Arbeitsspeicher.
+#[test]
+fn an_oversized_booking_list_is_refused_before_it_is_read() {
+    let dir = workdir("liste-gross");
+    let input = write(&dir, "auszug.pdf", &redact_pdf::testing::demo_statement());
+    let liste = sparse(&dir, "riesig.csv", 6 * 1024 * 1024 * 1024);
+    let ausgabe = dir.join("out.pdf");
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        ausgabe.to_str().unwrap(),
+        "--booking-list",
+        liste.to_str().unwrap(),
+    ]);
+    assert_refused_by_size(&out, "riesig.csv", "16 MB", &ausgabe);
+    assert!(
+        stderr(&out).contains("--booking-list"),
+        "die Meldung sagt nicht, welcher Schalter gemeint ist:\n{}",
+        stderr(&out)
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Die Auflage:** eine Pattern-Konfiguration von 6 GB wird abgelehnt, bevor
+/// sie gelesen wird — und mit der engeren Grenze von 1 MB.
+#[test]
+fn an_oversized_patterns_config_is_refused_before_it_is_read() {
+    let dir = workdir("muster-gross");
+    let input = write(&dir, "auszug.pdf", &redact_pdf::testing::demo_statement());
+    let muster = sparse(&dir, "riesig.yaml", 6 * 1024 * 1024 * 1024);
+    let ausgabe = dir.join("out.pdf");
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        ausgabe.to_str().unwrap(),
+        "--patterns-config",
+        muster.to_str().unwrap(),
+    ]);
+    // 1 MB und nicht 16 MB: jedes kompilierte Muster kostet rund 12 kB, die
+    // Verstärkung je Byte ist hier eine andere.
+    assert_refused_by_size(&out, "riesig.yaml", "1 MB", &ausgabe);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Die Auflage:** eine Regionsliste von 6 GB wird abgelehnt, bevor sie
+/// gelesen wird.
+#[test]
+fn oversized_manual_regions_are_refused_before_they_are_read() {
+    let dir = workdir("regionen-gross");
+    let input = write(&dir, "auszug.pdf", &redact_pdf::testing::demo_statement());
+    let regionen = sparse(&dir, "riesig.json", 6 * 1024 * 1024 * 1024);
+    let ausgabe = dir.join("out.pdf");
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        ausgabe.to_str().unwrap(),
+        "--manual-regions",
+        regionen.to_str().unwrap(),
+    ]);
+    assert_refused_by_size(&out, "riesig.json", "16 MB", &ausgabe);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Die Auflage:** eine Review-Datei von 6 GB wird abgelehnt, bevor sie
+/// gelesen wird.
+///
+/// Zusätzlich geprüft: die Meldung **nennt die Datei**. Vorher kam hier ein
+/// nackter `Io`-Fehler heraus — `std::io::Error` führt den Pfad nicht mit, auf
+/// dem Schirm stand „Parse-Fehler: expected value at line 1 column 1“, und wer
+/// drei Dateien in der Kommandozeile stehen hat, weiß danach nicht, welche
+/// gemeint ist.
+#[test]
+fn an_oversized_review_file_is_refused_before_it_is_read() {
+    let dir = workdir("review-gross");
+    let input = write(&dir, "auszug.pdf", &redact_pdf::testing::demo_statement());
+    let review = sparse(&dir, "riesig.json", 6 * 1024 * 1024 * 1024);
+    let ausgabe = dir.join("out.pdf");
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        ausgabe.to_str().unwrap(),
+        "--apply-review",
+        review.to_str().unwrap(),
+    ]);
+    assert_refused_by_size(&out, "riesig.json", "16 MB", &ausgabe);
+    assert!(
+        stderr(&out).contains("--apply-review"),
+        "die Meldung sagt nicht, welcher Schalter gemeint ist:\n{}",
+        stderr(&out)
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Die Auflage:** hinter keinem der vier Schalter lässt sich eine benannte
+/// Pipe unterschieben, die den Lauf endlos hängen lässt.
+///
+/// Alle vier in einem Test, weil es eine einzige Aussage ist und jeder Fall bei
+/// einem Rückfall dieselben 30 s kostet. Zum `#[cfg(unix)]` siehe [`fifo`].
+#[cfg(unix)]
+#[test]
+fn a_named_pipe_behind_any_switch_does_not_hang_the_run() {
+    let dir = workdir("pipe-schalter");
+    let input = write(&dir, "auszug.pdf", &redact_pdf::testing::demo_statement());
+
+    for (schalter, name) in [
+        ("--booking-list", "pipe_liste.csv"),
+        ("--patterns-config", "pipe_muster.yaml"),
+        ("--manual-regions", "pipe_regionen.json"),
+        ("--apply-review", "pipe_review.json"),
+    ] {
+        let pipe = fifo(&dir, name);
+        let ausgabe = dir.join(format!("{name}.pdf"));
+        let out = run_within(
+            30,
+            &[
+                input.to_str().unwrap(),
+                "-o",
+                ausgabe.to_str().unwrap(),
+                schalter,
+                pipe.to_str().unwrap(),
+            ],
+        );
+        assert_refused_as_not_a_file(out, name, &ausgabe);
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Die Gegenprobe:** gewöhnliche Hilfsdateien gehen weiterhin durch — sonst
+/// wäre der Weg nur zugemauert statt abgesichert.
+///
+/// Geprüft wird jeder der vier Schalter mit einer Datei, wie sie legitim
+/// vorkommt: die Beispiele aus `examples/`, und für die Review-Datei die, die
+/// `--review` im selben Lauf erzeugt hat.
+#[test]
+fn ordinary_auxiliary_files_still_go_through() {
+    let dir = workdir("legitim");
+    let input = write(&dir, "auszug.pdf", &redact_pdf::testing::demo_statement());
+    let beispiele = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+
+    // Zuerst eine echte Review-Datei erzeugen — mit der Prüfsumme des
+    // Dokuments, wie sie `--review` schreibt.
+    let review = dir.join("review.json");
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        review.to_str().unwrap(),
+        "--patterns",
+        "iban_de",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    for (n, (schalter, datei)) in [
+        ("--booking-list", beispiele.join("booking_list.csv")),
+        ("--patterns-config", beispiele.join("patterns.yaml")),
+        ("--manual-regions", beispiele.join("manual_regions.json")),
+        ("--apply-review", review.clone()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(datei.exists(), "{} fehlt", datei.display());
+        let ausgabe = dir.join(format!("out{n}.pdf"));
+        let out = run(&[
+            input.to_str().unwrap(),
+            "-o",
+            ausgabe.to_str().unwrap(),
+            schalter,
+            datei.to_str().unwrap(),
+        ]);
+        assert!(
+            out.status.success(),
+            "{schalter} lehnt eine legitime Datei ab:\n{}",
+            stderr(&out)
+        );
+        assert!(
+            ausgabe.exists(),
+            "{schalter} hat keine Ausgabe erzeugt:\n{}",
+            stdout(&out)
+        );
+    }
 
     std::fs::remove_dir_all(&dir).ok();
 }

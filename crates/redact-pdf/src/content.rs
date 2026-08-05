@@ -378,6 +378,11 @@ pub struct ScanResult {
     pub marked: Vec<MarkedTextRecord>,
     /// Wie oft ein Form-XObject auf dieser Seite gezeichnet wurde.
     pub form_placements: BTreeMap<ObjectId, usize>,
+    /// Form-XObjects, die in einem der gelesenen Ressourcenverzeichnisse
+    /// **stehen** — samt ihrem Ressourcennamen. Wer hier steht und nicht in
+    /// [`ScanResult::form_placements`], wurde nie gezeichnet und deshalb auch
+    /// nie gelesen.
+    pub declared_forms: BTreeMap<ObjectId, Vec<u8>>,
     /// Befunde, die den Nutzer erreichen müssen — allen voran Fonts, deren
     /// Text sich nicht dekodieren lässt. Aus solchem Text kann die Analyse
     /// nichts erkennen; ohne Warnung hielte man die Datei für sauber.
@@ -406,6 +411,12 @@ impl ContentSink for ScanResult {
 
     fn form(&mut self, id: ObjectId) {
         *self.form_placements.entry(id).or_insert(0) += 1;
+    }
+
+    fn declares_form(&mut self, id: ObjectId, name: &[u8]) {
+        self.declared_forms
+            .entry(id)
+            .or_insert_with(|| name.to_vec());
     }
 
     fn warn(&mut self, message: String) {
@@ -500,6 +511,13 @@ pub trait ContentSink {
     }
     /// Ein Form-XObject wurde platziert.
     fn form(&mut self, _id: ObjectId) {}
+    /// Ein Form-XObject **steht in den Ressourcen** eines gelesenen Stroms.
+    ///
+    /// Das ist nicht dasselbe wie [`ContentSink::form`]: dort wird gezeichnet,
+    /// hier nur angeboten. Die Differenz beider Mengen ist genau der Text, den
+    /// der Interpreter nie betritt — siehe
+    /// [`crate::extract::PdfExtractor::extract_with_warnings`].
+    fn declares_form(&mut self, _id: ObjectId, _name: &[u8]) {}
     /// Ein Befund, der den Nutzer erreichen muss (siehe [`ScanResult::warnings`]).
     fn warn(&mut self, _message: String) {}
 }
@@ -966,6 +984,7 @@ fn scan_with_budget(
 ) {
     let fonts = fonts_from_resources(doc, resources);
     let mut visiting = HashSet::new();
+    let mut declared: HashSet<StreamKey> = HashSet::new();
     let mut stats = FontDecodeStats::default();
     scan_operations(
         doc,
@@ -976,6 +995,7 @@ fn scan_with_budget(
         initial_ctm,
         0,
         &mut visiting,
+        &mut declared,
         &mut stats,
         budget,
         sink,
@@ -985,20 +1005,81 @@ fn scan_with_budget(
     }
 }
 
+/// Wie viele `/Parent`-Schritte im Seitenbaum verfolgt werden.
+///
+/// Ein Seitenbaum ist selten tiefer als eine Handvoll Ebenen; die Grenze
+/// begrenzt nur den Aufwand bei absichtlich entarteten Dateien. Zyklen fängt
+/// ohnehin die Besuchsmenge ab.
+const MAX_PAGE_TREE_DEPTH: usize = 64;
+
 /// Sammelt das (ggf. geerbte) `/Resources`-Dictionary einer Seite.
+///
+/// Die Vererbungskette wird **selbst** abgelaufen und nicht
+/// `lopdf::Document::get_page_resources` überlassen: das liefert die geerbten
+/// Ressourcen nur als Liste von Objekt-Ids. Steht `/Resources` am
+/// `/Pages`-Knoten als *direktes* Dictionary — nach PDF 32000-1, Tabelle 30
+/// völlig regulär —, hat es keine Objekt-Id und fällt aus dem Ergebnis. Die
+/// Seite sah dann so aus, als hätte sie **gar keine** Ressourcen: ein
+/// `/XObject`, das ihr Strom mit `Do` zeichnet, war nicht auflösbar, sein Text
+/// wurde nie gelesen und konnte nie geschwärzt werden. Gemessen an einer
+/// zweiseitigen Datei: „Treffer 0, Rückgabewert 0“, und die IBAN stand
+/// unverändert in der Ausgabe.
 pub fn page_resources(doc: &Document, page_id: ObjectId) -> Option<Dictionary> {
-    let (dict, ids) = doc.get_page_resources(page_id).ok()?;
-    let mut merged = Dictionary::new();
-    // Geerbte Ressourcen zuerst, damit die seiteneigenen sie überschreiben.
-    for id in ids {
-        if let Ok(d) = doc.get_dictionary(id) {
-            merge_resources(&mut merged, d);
+    // Von der Seite aufwärts sammeln …
+    let mut chain: Vec<Dictionary> = Vec::new();
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    let mut current = Some(page_id);
+    while let Some(id) = current {
+        if seen.len() >= MAX_PAGE_TREE_DEPTH || !seen.insert(id) {
+            break;
         }
+        let Ok(node) = doc.get_dictionary(id) else {
+            break;
+        };
+        if let Some(resources) = node
+            .get(b"Resources")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+        {
+            chain.push(resources.clone());
+        }
+        current = match node.get(b"Parent") {
+            Ok(Object::Reference(parent)) => Some(*parent),
+            _ => None,
+        };
     }
-    if let Some(d) = dict {
-        merge_resources(&mut merged, d);
+
+    // … und von oben nach unten mischen, damit die seiteneigenen Ressourcen
+    // die geerbten überschreiben.
+    let mut merged = Dictionary::new();
+    for resources in chain.iter().rev() {
+        merge_resources(&mut merged, resources);
     }
     Some(merged)
+}
+
+/// Setzt dieser Strom überhaupt Text?
+///
+/// Ein Formular ohne Textoperator ist eine Zeichnung — ein Logo, ein Rahmen,
+/// eine Schraffur. Dass es niemand zeichnet, ist dann kein Befund, und eine
+/// Meldung darüber wäre nur Rauschen (vgl. das Kachelmuster in
+/// [`scan_tiling_pattern`]).
+pub fn stream_shows_text(doc: &Document, id: ObjectId) -> bool {
+    let Ok(stream) = doc.get_object(id).and_then(|o| o.as_stream()) else {
+        return false;
+    };
+    let Ok(data) = stream
+        .decompressed_content()
+        .or_else(|_| stream.get_plain_content())
+    else {
+        // Nicht lesbar heißt nicht harmlos: hier kann Text stehen.
+        return true;
+    };
+    crate::ops::decode_content_checked(&data)
+        .operations
+        .iter()
+        .any(|op| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,10 +1138,28 @@ fn scan_annotations(
             .ok()
             .and_then(|o| doc.dereference(o).ok())
             .and_then(|(_, o)| o.as_dict().ok());
+        // Der Zustand, den ein Betrachter zeigt (`/AS`), zuerst — die übrigen
+        // danach. Siehe [`appearance_streams`]: sie fallen nicht aus der
+        // Analyse, sie bekommen nur ihre eigene Druckschicht.
+        let selected = dict
+            .get(b"AS")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_name().ok().map(|n| n.to_vec()));
         let mut streams = Vec::new();
         if let Some(appearance) = appearance {
-            for (_state, value) in appearance.iter() {
-                streams.extend(appearance_streams(doc, value));
+            for key in [b"N".as_slice(), b"D".as_slice(), b"R".as_slice()] {
+                if let Ok(value) = appearance.get(key) {
+                    streams.extend(appearance_streams(doc, value, selected.as_deref()));
+                }
+            }
+            // Alles Übrige — ein `/AP` darf weitere Schlüssel tragen, und was
+            // in der Datei steht, wird gelesen.
+            for (key, value) in appearance.iter() {
+                if matches!(key.as_slice(), b"N" | b"D" | b"R") {
+                    continue;
+                }
+                streams.extend(appearance_streams(doc, value, selected.as_deref()));
             }
         }
 
@@ -1106,20 +1205,37 @@ fn annot_has_text(doc: &Document, dict: &Dictionary) -> bool {
 ///
 /// Der Eintrag ist entweder direkt ein Strom oder ein Dictionary von
 /// Erscheinungszuständen (`/Off`, `/On`, …). Es werden **alle** Zustände
-/// gelesen: was in irgendeinem Zustand steht, steht in der Datei.
-fn appearance_streams(doc: &Document, value: &Object) -> Vec<ObjectId> {
+/// gelesen: was in irgendeinem Zustand steht, steht in der Datei. Jede
+/// Checkbox und jedes Radio-Feld bringt so zwei Textflüsse mit, die
+/// deckungsgleich auf demselben `/Rect` liegen.
+///
+/// Sie deshalb wegzulassen wäre falsch — sie *sind* Text, den ein Betrachter
+/// unter Umständen zeigt. Sie dürfen sich aber auch nicht gegenseitig
+/// unlesbar machen: genau dafür zerlegt [`crate::extract::PdfExtractor`] eine
+/// Zeile in Druckschichten. Hier wird nur die Reihenfolge festgelegt — der
+/// durch `/AS` benannte, also sichtbare Zustand zuerst.
+fn appearance_streams(doc: &Document, value: &Object, selected: Option<&[u8]>) -> Vec<ObjectId> {
     let Ok((id, resolved)) = doc.dereference(value) else {
         return Vec::new();
     };
     match resolved {
         Object::Stream(_) => id.into_iter().collect(),
-        Object::Dictionary(states) => states
-            .iter()
-            .filter_map(|(_, state)| match doc.dereference(state) {
-                Ok((Some(id), Object::Stream(_))) => Some(id),
-                _ => None,
-            })
-            .collect(),
+        Object::Dictionary(states) => {
+            let mut out: Vec<ObjectId> = Vec::new();
+            let mut rest: Vec<ObjectId> = Vec::new();
+            for (name, state) in states.iter() {
+                let Ok((Some(id), Object::Stream(_))) = doc.dereference(state) else {
+                    continue;
+                };
+                if selected.is_some_and(|s| s == name.as_slice()) {
+                    out.push(id);
+                } else {
+                    rest.push(id);
+                }
+            }
+            out.append(&mut rest);
+            out
+        }
         _ => Vec::new(),
     }
 }
@@ -1435,6 +1551,31 @@ fn has_mirror_key(doc: &Document, dict: &Dictionary) -> bool {
     })
 }
 
+/// Meldet der Senke jedes Form-XObject, das in diesem Ressourcenverzeichnis
+/// **steht** — unabhängig davon, ob der Strom es je zeichnet.
+///
+/// Nur die Objekt-Id wird angefasst, nicht der Strom: die Prüfung, ob dort
+/// überhaupt Text steht, wäre hier zu teuer (sie liefe für jedes Formular auf
+/// jeder Ebene) und wird erst fällig, wenn feststeht, dass niemand es
+/// gezeichnet hat.
+fn declare_forms(doc: &Document, resources: Option<&Dictionary>, sink: &mut dyn ContentSink) {
+    let Some(xobjects) = resources
+        .and_then(|r| r.get(b"XObject").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+    else {
+        return;
+    };
+    for (name, value) in xobjects.iter() {
+        let Ok((Some(id), Object::Stream(stream))) = doc.dereference(value) else {
+            continue;
+        };
+        if stream.dict.get(b"Subtype").and_then(|o| o.as_name()).ok() == Some(b"Form".as_slice()) {
+            sink.declares_form(id, name);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scan_operations(
     doc: &Document,
@@ -1445,11 +1586,18 @@ fn scan_operations(
     initial_ctm: Matrix,
     depth: usize,
     visiting: &mut HashSet<ObjectId>,
+    declared: &mut HashSet<StreamKey>,
     stats: &mut FontDecodeStats,
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
     scan_marked_text(doc, operations, stream, resources, sink);
+    // Einmal je Strom, nicht einmal je Platzierung: ein zwanzigmal
+    // gezeichnetes Formular bietet zwanzigmal dieselben Ressourcen an, und die
+    // Liste durchzugehen kostet jedes Mal.
+    if declared.insert(stream) {
+        declare_forms(doc, resources, sink);
+    }
     let graphics = sink.wants_graphics();
     let mut state = GraphicsState::new(initial_ctm);
     let mut stack: Vec<GraphicsState> = Vec::new();
@@ -1717,6 +1865,7 @@ fn scan_operations(
                         initial_ctm,
                         depth,
                         visiting,
+                        declared,
                         stats,
                         budget,
                         sink,
@@ -1768,7 +1917,27 @@ fn scan_operations(
                 }
                 state.dash_phase = op.operands.get(1).and_then(as_f64).unwrap_or(0.0);
             }
-            "gs" if graphics => apply_ext_gstate(doc, resources, &op.operands, &mut state),
+            "gs" => {
+                if graphics {
+                    apply_ext_gstate(doc, resources, &op.operands, &mut state);
+                }
+                // Eine weiche Maske mit Gruppen-Form trägt einen **eigenen**
+                // Inhaltsstrom, den kein `Do` je erreicht. Er wird hier
+                // betreten — unabhängig davon, ob die Senke Grafik will: Text
+                // ist Text, gleich in welcher Rolle er in der Datei steht.
+                scan_soft_mask(
+                    doc,
+                    resources,
+                    &op.operands,
+                    &state,
+                    depth,
+                    visiting,
+                    declared,
+                    stats,
+                    budget,
+                    sink,
+                );
+            }
             // --- Inline-Bild ------------------------------------------------
             // Der Operationsstrom kommt von `ops::decode_content`, das
             // `BI … ID … EI` zu einer Operation mit Dictionary und Rohdaten
@@ -1856,6 +2025,7 @@ fn scan_operations(
                             form_matrix.mul(&state.ctm),
                             depth + 1,
                             visiting,
+                            declared,
                             stats,
                             budget,
                             sink,
@@ -1881,6 +2051,160 @@ fn set_color(state: &mut GraphicsState, operator: &str, space: ColorSpace, color
     }
 }
 
+/// Das `/ExtGState`-Dictionary hinter einem `gs`-Operanden.
+fn ext_gstate_dict(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    operands: &[Object],
+) -> Option<Dictionary> {
+    let Some(Object::Name(name)) = operands.first() else {
+        return None;
+    };
+    resources
+        .and_then(|r| r.get(b"ExtGState").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(name.as_slice()).ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok().cloned())
+}
+
+/// Betritt die Gruppen-Form einer weichen Maske (`/ExtGState /SMask /G`).
+///
+/// Eine weiche Maske ist ein vollwertiges Form-XObject mit eigenem
+/// Ressourcenverzeichnis und eigenem Text. Sie wird nicht mit `Do` gezeichnet,
+/// sondern über die Grafikzustands-Parameter gesetzt — der Interpreter kam
+/// deshalb nie hinein. Ihr Text stand ungelesen in der Datei: „Treffer 0,
+/// Rückgabewert 0“, während `pdftotext` die IBAN im Klartext las.
+///
+/// Gelesen wird im Koordinatensystem, das beim `gs` gilt (PDF 32000-1,
+/// 11.6.5.2), also mit der CTM dieses Augenblicks. Die Datensätze tragen
+/// [`StreamKey::Form`] mit der Objekt-Id der Gruppe; die Schwärzung schreibt
+/// sie damit wie jedes andere Formular neu.
+#[allow(clippy::too_many_arguments)]
+fn scan_soft_mask(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    operands: &[Object],
+    state: &GraphicsState,
+    depth: usize,
+    visiting: &mut HashSet<ObjectId>,
+    declared: &mut HashSet<StreamKey>,
+    stats: &mut FontDecodeStats,
+    budget: &mut Budget,
+    sink: &mut dyn ContentSink,
+) {
+    let Some(gstate) = ext_gstate_dict(doc, resources, operands) else {
+        return;
+    };
+    // `/SMask /None` schaltet die Maske ab und ist ein Name, kein Dictionary.
+    let Some(mask) = gstate
+        .get(b"SMask")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok().cloned())
+    else {
+        return;
+    };
+    let Ok(group) = mask.get(b"G") else {
+        return;
+    };
+    let Some(group_id) = group.as_reference().ok() else {
+        // Eine Gruppe ohne eigene Objekt-Id ließe sich nicht neu schreiben —
+        // was darin steht, bliebe stehen. Das muss gesagt werden.
+        sink.warn(
+            "Eine weiche Maske (/ExtGState /SMask /G) trägt ihre Gruppen-Form nicht als \
+             eigenes Objekt; sie wurde nicht durchsucht und kann deshalb nicht \
+             geschwärzt worden sein."
+                .to_string(),
+        );
+        return;
+    };
+    if depth >= MAX_FORM_DEPTH {
+        sink.warn(format!(
+            "Die Gruppen-Form einer weichen Maske (Objekt {} {}) liegt tiefer als \
+             {MAX_FORM_DEPTH} Ebenen; ab dort wurde nicht weitergelesen. Ihr Text wurde \
+             nicht durchsucht und kann deshalb nicht geschwärzt worden sein.",
+            group_id.0, group_id.1
+        ));
+        return;
+    }
+    let Ok(stream) = doc.get_object(group_id).and_then(|o| o.as_stream()) else {
+        sink.warn(format!(
+            "Die Gruppen-Form einer weichen Maske (Objekt {} {}) ist kein lesbarer Strom; \
+             ihr Text wurde nicht durchsucht und kann deshalb nicht geschwärzt worden sein.",
+            group_id.0, group_id.1
+        ));
+        return;
+    };
+    let Ok(data) = stream
+        .decompressed_content()
+        .or_else(|_| stream.get_plain_content())
+    else {
+        sink.warn(format!(
+            "Die Gruppen-Form einer weichen Maske (Objekt {} {}) ließ sich nicht \
+             dekodieren; ihr Text wurde nicht durchsucht und kann deshalb nicht \
+             geschwärzt worden sein.",
+            group_id.0, group_id.1
+        ));
+        return;
+    };
+    let decoded = crate::ops::decode_content_checked(&data);
+    if !decoded.truncated.is_empty() {
+        sink.warn(format!(
+            "Ein Teil der Gruppen-Form einer weichen Maske (Objekt {} {}) ließ sich nicht \
+             in Operationen zerlegen ({} Byte betroffen). Dieser Text wurde nicht \
+             durchsucht und kann deshalb nicht geschwärzt worden sein.",
+            group_id.0,
+            group_id.1,
+            decoded.affected_bytes()
+        ));
+    }
+    let operations = decoded.operations;
+    if operations.is_empty() {
+        return;
+    }
+    budget.credit(Some(group_id), operations.len());
+    if !visiting.insert(group_id) {
+        return; // Zyklus
+    }
+    let matrix = stream
+        .dict
+        .get(b"Matrix")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_array().ok())
+        .and_then(|a| matrix_from(a))
+        .unwrap_or(Matrix::IDENTITY);
+    let group_resources = stream
+        .dict
+        .get(b"Resources")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .cloned()
+        .or_else(|| resources.cloned());
+    let group_fonts = fonts_from_resources(doc, group_resources.as_ref());
+    // Die Maske ist ein platzierter Strom wie ein Formular; sie muss auch so
+    // gezählt werden, sonst hielte die Ressourcenprüfung sie für ungezeichnet.
+    sink.form(group_id);
+    scan_operations(
+        doc,
+        &operations,
+        StreamKey::Form(group_id),
+        group_resources.as_ref(),
+        &group_fonts,
+        matrix.mul(&state.ctm),
+        depth + 1,
+        visiting,
+        declared,
+        stats,
+        budget,
+        sink,
+    );
+    visiting.remove(&group_id);
+}
+
 /// Übernimmt die für das Zeichnen relevanten Einträge aus einem `/ExtGState`.
 fn apply_ext_gstate(
     doc: &Document,
@@ -1888,17 +2212,7 @@ fn apply_ext_gstate(
     operands: &[Object],
     state: &mut GraphicsState,
 ) {
-    let Some(Object::Name(name)) = operands.first() else {
-        return;
-    };
-    let Some(dict) = resources
-        .and_then(|r| r.get(b"ExtGState").ok())
-        .and_then(|o| doc.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict().ok())
-        .and_then(|d| d.get(name.as_slice()).ok())
-        .and_then(|o| doc.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict().ok().cloned())
-    else {
+    let Some(dict) = ext_gstate_dict(doc, resources, operands) else {
         return;
     };
     if let Some(lw) = dict.get(b"LW").ok().and_then(as_f64) {
@@ -2071,6 +2385,7 @@ fn scan_tiling_pattern(
     base_ctm: Matrix,
     depth: usize,
     visiting: &mut HashSet<ObjectId>,
+    declared: &mut HashSet<StreamKey>,
     stats: &mut FontDecodeStats,
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
@@ -2179,6 +2494,7 @@ fn scan_tiling_pattern(
         matrix.mul(&base_ctm),
         depth + 1,
         visiting,
+        declared,
         stats,
         budget,
         sink,
