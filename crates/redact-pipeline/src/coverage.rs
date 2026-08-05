@@ -61,6 +61,15 @@ pub const NOT_A_COVERAGE_GAP: &[(&str, &str)] = &[
         "zu viel geschwärzt, nicht zu wenig — das Gegenteil einer Lücke",
     ),
     (
+        "Die Maske verbirgt nichts und ist deshalb",
+        "am dekodierten Bild nachgemessen: kein Abtastwert fällt in den \
+         Schlüsselbereich, samt Band für den verlustbehafteten Decoder. Es wird \
+         also nichts sichtbar, was die Eingabe verborgen hätte — die Analyse \
+         kann für diese Datei vollständig einstehen. Ohne diesen Eintrag \
+         endete ein JPEG mit Farbschlüssel-Maske mit „NICHT GEPRÜFT“ und \
+         Rückgabewert 3, obwohl gemessen wurde, dass es nichts zu prüfen gibt",
+    ),
+    (
         "inkrementellen Revisionen",
         "die Ausgabe wird als eine einzige Revision ohne Vorgeschichte \
          geschrieben; der Hinweis gilt der Eingabedatei",

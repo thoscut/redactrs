@@ -246,6 +246,16 @@ fn report(outcome: &Outcome) {
             println!("Deck-Rechtecke:     {}", outcome.drawn_rects);
             if outcome.removed_annotations > 0 {
                 println!("Entfernte Annotationen: {}", outcome.removed_annotations);
+                // Die Zahl allein verschweigt, was verlorengegangen ist: mit
+                // der Annotation verschwindet ein Formularfeld samt seinem
+                // sichtbaren Text. Der Name geht durch `safe_text`, weil er
+                // aus der fremden Datei stammt.
+                for detail in &outcome.removed_annotation_details {
+                    println!(
+                        "  - {} (samt allen Erscheinungszustaenden)",
+                        redact_core::safe_text(detail)
+                    );
+                }
             }
             // Ein überschriebenes Bild gehört gemeldet: die Bildpunkte
             // außerhalb der Schwärzung bleiben zwar unverändert (neu kodiert

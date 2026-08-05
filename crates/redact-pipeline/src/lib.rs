@@ -394,6 +394,16 @@ pub struct Outcome {
     pub removed_glyphs: usize,
     pub drawn_rects: usize,
     pub removed_annotations: usize,
+    /// Welche Annotationen das waren — Seite, `/Subtype` und, falls vorhanden,
+    /// der Feldname.
+    ///
+    /// Die blosse Zahl sagt nicht, dass mit der Annotation ein Formularfeld
+    /// samt sichtbarem Text verschwunden ist. Das ist gewolltes Verhalten
+    /// (eine Annotation, deren `/Rect` einen Schwaerzungsbereich schneidet,
+    /// wird ganz entfernt), aber es gehoert benannt statt gezaehlt: zu viel
+    /// geschwaerzt ist kein Leck, wohl aber ein Verlust, den die Nutzerin
+    /// bemerken koennen muss.
+    pub removed_annotation_details: Vec<String>,
     /// Bilder, deren Bildpunkte überschrieben wurden.
     ///
     /// Neu kodiert wird verlustfrei; die Datei wird dadurch meist größer — aus
@@ -850,6 +860,9 @@ pub fn apply(
     outcome.removed_glyphs = report.removed_glyphs;
     outcome.drawn_rects = report.drawn_rects;
     outcome.removed_annotations = report.removed_annotations;
+    outcome
+        .removed_annotation_details
+        .clone_from(&report.removed_annotation_details);
     outcome.redacted_images = report.redacted_images;
     outcome.copied_images = report.copied_images;
     // Anfügen, nicht ersetzen: die Warnungen des Extraktors stehen schon drin
