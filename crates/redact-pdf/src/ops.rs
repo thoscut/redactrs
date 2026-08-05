@@ -721,6 +721,23 @@ fn cid_to_gid_table(bytes: &[u8]) -> BTreeMap<u32, u16> {
 // Bilder
 // ---------------------------------------------------------------------------
 
+/// Das `/Subtype` eines XObjects — die **eine** Fassung dieser Frage.
+///
+/// Sie stand fünfmal im Crate, eine davon abweichend: nur hier wurde eine
+/// indirekte Referenz aufgelöst, und weil der Torwächter
+/// [`crate::content::scan_page`] ohne Auflösung vorher aussteigt, kam diese
+/// Fassung nie zum Zug. Gemessen an einer Datei mit `/Subtype 9 0 R → /Image`:
+/// „NICHT GEPRÜFT“ und Rückgabewert 3, kein Bild geschwärzt.
+///
+/// Aufgelöst wird jetzt überall. PDF 32000-1 (7.3.10) erlaubt jedem Wert eine
+/// indirekte Referenz; wer sie hier nicht auflöst, hält ein Bild für
+/// „unbekanntes XObject“ und lässt seine Pixel stehen. Ein Zyklus kann daraus
+/// nichts machen: `Document::dereference` bricht nach `DEREF_LIMIT` Schritten
+/// ab.
+pub(crate) fn xobject_subtype<'a>(doc: &'a Document, dict: &'a Dictionary) -> Option<&'a [u8]> {
+    deref(doc, dict.get(b"Subtype").ok())?.as_name().ok()
+}
+
 /// Sucht ein Bild-XObject in den Ressourcen.
 ///
 /// Gibt eine Referenz zurück — gescannte Seiten bringen zweistellige
@@ -739,8 +756,7 @@ fn image_xobject<'a>(
     };
     let (_, resolved) = doc.dereference(entry).ok()?;
     let stream = resolved.as_stream().ok()?;
-    let subtype = deref(doc, stream.dict.get(b"Subtype").ok()).and_then(|o| o.as_name().ok());
-    if subtype != Some(b"Image") {
+    if xobject_subtype(doc, &stream.dict) != Some(b"Image") {
         return None;
     }
     Some((id, stream))

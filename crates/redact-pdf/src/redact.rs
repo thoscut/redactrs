@@ -337,11 +337,13 @@ impl PdfRedactor {
                 .filter(|(_, r)| !r.is_empty())
                 .collect();
             let rects: Vec<Rect> = indexed_rects.iter().map(|(_, r)| *r).collect();
+            // Einmal je Seite statt je Textoperation — siehe [`RectIndex`].
+            let rect_index = RectIndex::new(&indexed_rects);
 
             let mut page_plans: BTreeMap<usize, Plan> = BTreeMap::new();
 
             for record in &scan.shows {
-                let selection = hidden_flags(record, &indexed_rects);
+                let selection = hidden_flags(record, &rect_index);
                 if !selection.any() {
                     continue;
                 }
@@ -607,28 +609,101 @@ fn encode_inline_image(dict: &Dictionary, data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Die Schwärzungsbereiche einer Seite, nach x vorsortiert.
+///
+/// ## Warum
+///
+/// Ohne Vorsortierung legte [`hidden_flags`] für **jeden** Bereich einen
+/// `Vec<bool>` über **alle** Zeichen der Operation an. Der Aufwand einer Seite
+/// war damit Σ(Zeichen) × Anzahl Bereiche — und beide wachsen mit dem
+/// Seiteninhalt, weil die Bereiche ja aus dem Text entstehen. Gemessen (200
+/// Zeilen, Kandidaten 24 → 1 536): die Analyse blieb linear, die Schwärzung
+/// wuchs mit dem Produkt.
+///
+/// Eine Textoperation belegt aber nur ihre eigene Hülle. Bereiche, die diese
+/// nicht einmal berühren, können kein Zeichen daraus treffen — sie brauchen
+/// weder einen Vektor noch einen Zeichendurchlauf. Die Sortierung nach `ll.x`
+/// macht daraus zwei binäre Suchen statt eines Durchlaufs durch alle.
+struct RectIndex {
+    /// (Index in der übergebenen Schwärzungsliste, Bereich), nach `ll.x`
+    /// aufsteigend sortiert.
+    rects: Vec<(usize, Rect)>,
+    /// `right[k]` ist das größte `ur.x` unter `rects[0..=k]`. Als Präfixmaximum
+    /// wächst es monoton und lässt sich deshalb binär durchsuchen.
+    right: Vec<f64>,
+}
+
+impl RectIndex {
+    fn new(rects: &[(usize, Rect)]) -> Self {
+        let mut rects = rects.to_vec();
+        // `total_cmp` statt `partial_cmp`: eine NaN-Koordinate darf die
+        // Sortierung nicht in eine Panik oder eine kaputte Ordnung führen.
+        rects.sort_by(|a, b| a.1.ll.x.total_cmp(&b.1.ll.x));
+        let mut right = Vec::with_capacity(rects.len());
+        let mut max = f64::NEG_INFINITY;
+        for (_, rect) in &rects {
+            max = max.max(rect.ur.x);
+            right.push(max);
+        }
+        Self { rects, right }
+    }
+
+    /// Die Bereiche, die `hull` überhaupt berühren **können**.
+    ///
+    /// Ausgeschlossen wird nur, was sicher ausscheidet: alles links davon
+    /// (Präfixmaximum der rechten Kanten unter `hull.ll.x`) und alles rechts
+    /// davon (linke Kante über `hull.ur.x`). Die genaue Entscheidung fällt
+    /// danach [`touches`].
+    fn candidates(&self, hull: &Rect) -> &[(usize, Rect)] {
+        let hi = self.rects.partition_point(|(_, r)| r.ll.x <= hull.ur.x);
+        let lo = self.right[..hi].partition_point(|x| *x < hull.ll.x);
+        &self.rects[lo..hi]
+    }
+}
+
+/// Berühren sich die beiden Rechtecke — **Berührung eingeschlossen**?
+///
+/// Bewusst großzügiger als [`Rect::intersects`]: [`hidden_flags`] wertet ein
+/// entartetes Zeichenrechteck (Breite oder Höhe 0, etwa ein Leerzeichen) über
+/// `Rect::contains` aus, und das zählt die Kante mit. Eine Vorauswahl, die
+/// die Kante ausschlösse, könnte ein solches Zeichen übergehen — ein stiller
+/// Fehler genau in der Richtung, die wehtut.
+fn touches(a: &Rect, b: &Rect) -> bool {
+    a.ll.x <= b.ur.x && b.ll.x <= a.ur.x && a.ll.y <= b.ur.y && b.ll.y <= a.ur.y
+}
+
 /// Welche Glyphen einer Text-Operation liegen im Schwärzungsbereich?
 ///
-/// `rects` sind die (bereits um `padding` erweiterten) Bereiche zusammen mit
+/// `index` sind die (bereits um `padding` erweiterten) Bereiche zusammen mit
 /// ihrem Index in der übergebenen Schwärzungsliste. Der Index wird
 /// mitgeschleppt, damit der Bericht je Region Rechenschaft ablegen kann.
-fn hidden_flags(record: &ShowRecord, rects: &[(usize, Rect)]) -> Selection {
+fn hidden_flags(record: &ShowRecord, index: &RectIndex) -> Selection {
     let mut selection = Selection {
         hidden: vec![false; record.items.len()],
         per_redaction: BTreeMap::new(),
     };
-    for (index, rect) in rects {
-        let mut flags: Vec<bool> = record
-            .items
-            .iter()
-            .map(|item| match item {
-                ShowItem::Glyph(g) => {
-                    g.rect.covered_fraction(rect) >= GLYPH_COVERAGE_THRESHOLD
-                        || rect.contains(g.rect.center())
-                }
-                ShowItem::Adjust(_) => false,
-            })
-            .collect();
+    // Die Hülle über alle Zeichen dieser Operation. Ohne Zeichen gibt es
+    // nichts zu verdecken.
+    let Some(hull) = redact_core::bounding_box(record.glyphs().map(|g| &g.rect)) else {
+        return selection;
+    };
+    // Ein Puffer für alle Bereiche: übernommen wird er nur, wenn er trifft.
+    let mut flags: Vec<bool> = Vec::with_capacity(record.items.len());
+    for (redaction, rect) in index.candidates(&hull) {
+        // Jedes Zeichenrechteck liegt in der Hülle. Berührt ein Bereich sie
+        // nicht, kann er auch kein Zeichen daraus überdecken — weder über
+        // `covered_fraction` noch über den Mittelpunkt.
+        if !touches(rect, &hull) {
+            continue;
+        }
+        flags.clear();
+        flags.extend(record.items.iter().map(|item| match item {
+            ShowItem::Glyph(g) => {
+                g.rect.covered_fraction(rect) >= GLYPH_COVERAGE_THRESHOLD
+                    || rect.contains(g.rect.center())
+            }
+            ShowItem::Adjust(_) => false,
+        }));
         // Erst je Bereich verbreitern, dann vereinigen: eine Region, die nur
         // eine Hälfte einer Ligatur trifft, hat auch die andere zu verantworten.
         widen_over_ligatures(&record.items, &mut flags);
@@ -638,7 +713,7 @@ fn hidden_flags(record: &ShowRecord, rects: &[(usize, Rect)]) -> Selection {
         for (all, one) in selection.hidden.iter_mut().zip(&flags) {
             *all = *all || *one;
         }
-        selection.per_redaction.insert(*index, flags);
+        selection.per_redaction.insert(*redaction, flags.clone());
     }
     selection
 }
@@ -1813,5 +1888,108 @@ mod tests {
             }
         }
         assert_eq!(target[&7].hidden(), [true, false, true]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Die Vorauswahl der Bereiche
+    // -----------------------------------------------------------------------
+
+    /// `count` schmale Bereiche nebeneinander, jeder 10 breit, Lücke 10.
+    fn kette(count: usize) -> Vec<(usize, Rect)> {
+        (0..count)
+            .map(|k| {
+                let x = k as f64 * 20.0;
+                (k, Rect::new(x, 100.0, x + 10.0, 110.0))
+            })
+            .collect()
+    }
+
+    /// **Die Aufwandsschranke.** Eine Textoperation, die nur einen Bereich
+    /// überdeckt, darf auch nur eine Handvoll Bereiche *anschauen* — sonst ist
+    /// die Schwärzung wieder das Produkt aus Zeichen und Bereichen.
+    #[test]
+    fn die_vorauswahl_waechst_nicht_mit_der_zahl_der_bereiche() {
+        for count in [10usize, 100, 1_000, 10_000] {
+            let index = RectIndex::new(&kette(count));
+            // Eine Hülle über genau einen Bereich, in der Mitte der Kette.
+            let mitte = (count / 2) as f64 * 20.0;
+            let hull = Rect::new(mitte + 1.0, 101.0, mitte + 9.0, 109.0);
+            assert_eq!(
+                index.candidates(&hull).len(),
+                1,
+                "{count} Bereiche, aber nur einer liegt an dieser Stelle"
+            );
+        }
+    }
+
+    /// Die Vorauswahl darf nichts wegwerfen, was die genaue Prüfung noch
+    /// getroffen hätte — **Berührung eingeschlossen**.
+    #[test]
+    fn die_vorauswahl_behaelt_beruehrende_bereiche() {
+        let rects = kette(50);
+        let index = RectIndex::new(&rects);
+        for (k, rect) in &rects {
+            // Eine Hülle, die diesen Bereich nur an der linken Kante berührt.
+            let hull = Rect::new(rect.ur.x, 100.0, rect.ur.x, 110.0);
+            let ids: Vec<usize> = index.candidates(&hull).iter().map(|(i, _)| *i).collect();
+            assert!(
+                ids.contains(k),
+                "Bereich {k} berührt die Hülle und muss in der Vorauswahl bleiben: {ids:?}"
+            );
+        }
+    }
+
+    /// Gegenprobe zur Vorauswahl: **jeder** Bereich, den [`touches`] annimmt,
+    /// steht auch in der Vorauswahl. Geprüft über alle Paare eines kleinen
+    /// Feldes — das ist die Eigenschaft, an der die Gleichheit hängt.
+    #[test]
+    fn die_vorauswahl_laesst_keinen_treffer_aus() {
+        let rects: Vec<(usize, Rect)> = (0..40)
+            .map(|k| {
+                let x = (k % 8) as f64 * 7.0;
+                let y = (k / 8) as f64 * 11.0;
+                (k, Rect::new(x, y, x + 9.0, y + 13.0))
+            })
+            .collect();
+        let index = RectIndex::new(&rects);
+        for x0 in 0..60 {
+            for y0 in 0..60 {
+                let hull = Rect::new(x0 as f64, y0 as f64, x0 as f64 + 3.0, y0 as f64 + 2.0);
+                let ausgewaehlt: Vec<usize> = index
+                    .candidates(&hull)
+                    .iter()
+                    .filter(|(_, r)| touches(r, &hull))
+                    .map(|(i, _)| *i)
+                    .collect();
+                let alle: Vec<usize> = rects
+                    .iter()
+                    .filter(|(_, r)| touches(r, &hull))
+                    .map(|(i, _)| *i)
+                    .collect();
+                let mut ausgewaehlt = ausgewaehlt;
+                ausgewaehlt.sort_unstable();
+                assert_eq!(ausgewaehlt, alle, "Hülle bei ({x0}, {y0})");
+            }
+        }
+    }
+
+    /// Eine NaN-Koordinate darf die Sortierung weder zum Absturz bringen noch
+    /// die Ordnung zerstören — eine Region kommt aus einer JSON-Datei.
+    #[test]
+    fn nan_bringt_die_vorauswahl_nicht_aus_dem_tritt() {
+        let mut rects = kette(5);
+        rects.push((5, Rect::new(f64::NAN, 100.0, f64::NAN, 110.0)));
+        let index = RectIndex::new(&rects);
+        let hull = Rect::new(0.0, 100.0, 200.0, 110.0);
+        // Alles Endliche muss weiterhin gefunden werden.
+        let ids: Vec<usize> = index
+            .candidates(&hull)
+            .iter()
+            .filter(|(_, r)| touches(r, &hull))
+            .map(|(i, _)| *i)
+            .collect();
+        for k in 0..5 {
+            assert!(ids.contains(&k), "Bereich {k} fehlt: {ids:?}");
+        }
     }
 }

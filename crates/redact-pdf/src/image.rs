@@ -395,9 +395,9 @@ fn resources_have_image(
         let Ok(stream) = resolved.as_stream() else {
             continue;
         };
-        match stream.dict.get(b"Subtype").and_then(Object::as_name) {
-            Ok(b"Image") => return true,
-            Ok(b"Form") => {
+        match crate::ops::xobject_subtype(doc, &stream.dict) {
+            Some(b"Image") => return true,
+            Some(b"Form") => {
                 let inner = stream
                     .dict
                     .get(b"Resources")
@@ -625,6 +625,10 @@ fn declared_pixels(doc: &Document, dict: &Dictionary) -> u64 {
 
 /// Bild-XObject aus den Ressourcen — Gegenstück zu `ops::image_xobject`, aber
 /// ohne den Stream festzuhalten (hier wird nur das Dictionary gebraucht).
+///
+/// „Gegenstück“ heißt: dieselbe Frage, dieselbe Antwort. Die Prüfung auf
+/// `/Subtype` steht deshalb in [`crate::ops::xobject_subtype`] — vorher stand
+/// sie fünfmal im Crate, und eine der fünf antwortete anders.
 fn image_xobject(
     doc: &Document,
     resources: Option<&Dictionary>,
@@ -639,7 +643,7 @@ fn image_xobject(
     };
     let (_, resolved) = doc.dereference(entry).ok()?;
     let stream = resolved.as_stream().ok()?;
-    if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Image") {
+    if crate::ops::xobject_subtype(doc, &stream.dict) != Some(b"Image") {
         return None;
     }
     Some((id, stream.dict.clone()))
@@ -1058,7 +1062,7 @@ fn image_stream<'a>(
     let entry = xobjects.as_dict().ok()?.get(name).ok()?;
     let (_, resolved) = doc.dereference(entry).ok()?;
     let stream = resolved.as_stream().ok()?;
-    if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Image") {
+    if crate::ops::xobject_subtype(doc, &stream.dict) != Some(b"Image") {
         return None;
     }
     Some(stream)

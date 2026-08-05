@@ -26,10 +26,11 @@
 //! über [`ContentSink::wants_graphics`] danach fragt; für die reine
 //! Textextraktion kostet der Ausbau also nichts.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
 
 use lopdf::content::Operation;
-use lopdf::{Dictionary, Document, Object, ObjectId};
+use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use redact_core::{Point, Rect, RedactError, Result};
 
 use crate::font::{as_f64, fonts_from_resources, FontInfo};
@@ -86,6 +87,178 @@ const MAX_AMPLIFICATION: usize = 16;
 /// 500-seitigen Kontoauszugs 6 000. Faktor 160 Luft.
 const MAX_GLYPHS_PER_SCAN: usize = 1_000_000;
 
+/// Wie viele Zeichenoperationen der Strom-Zwischenspeicher insgesamt behalten
+/// darf.
+///
+/// Der Zwischenspeicher tauscht Rechenzeit gegen Arbeitsspeicher; ohne Decke
+/// wäre das nur die andere Erschöpfung. Gemessen an einer Datei von 74 kB mit
+/// 200 verschiedenen Formularen zu je 75 kB Inhalt (1,7 Mio. Operationen,
+/// jedes Formular genau einmal gezeichnet): ohne Decke 968 MB Spitzenspeicher
+/// gegenüber 13 MB vorher. Eine dekodierte `Operation` kostet gemessen rund
+/// 570 Byte — Operator, Operandenvektor und der reichlich große
+/// `lopdf::Object`.
+///
+/// 100 000 Operationen sind danach rund 55 MB. Die Zahl ist so gewählt, dass
+/// sie **weit über** jedem echten Fall liegt (ein Formular eines Kontoauszugs
+/// trägt einige hundert Operationen) und zugleich weit unter dem, was ohne
+/// Decke möglich wäre.
+///
+/// Wichtig: gerade der gefährliche Fall braucht kaum Platz. Ein
+/// Zwischenspeicher zahlt sich nur aus, wenn **derselbe** Strom mehrfach
+/// gezeichnet wird — und dann ist es *ein* Eintrag, gleich wie oft. Die
+/// Dateien, die die Decke reißen, sind die mit vielen **verschiedenen**
+/// Strömen, und die gewinnen ohnehin nichts.
+///
+/// Ist sie erreicht, wird **nicht verdrängt**, sondern nur nichts mehr
+/// aufgenommen: was schon drin ist, bleibt gültig, alles Weitere wird wie
+/// vorher je Platzierung neu ausgepackt. Der schlechteste Fall ist damit die
+/// Laufzeit von vorher — nie ein falsches Ergebnis.
+const MAX_CACHED_OPERATIONS: usize = 100_000;
+
+/// Wie viele Schriftenverzeichnisse der Zwischenspeicher behalten darf.
+///
+/// Hier zählen Verzeichnisse und nicht Schriften, weil sich die Größe einer
+/// einzelnen [`FontInfo`] von außen nicht ablesen lässt (`/ToUnicode` kann
+/// eine Million Einträge haben). Gezählt wird deshalb gegen das, was der
+/// Interpreter **ohnehin schon** gleichzeitig hält: die Rekursion hat bis zu
+/// [`MAX_FORM_DEPTH`] Ebenen offen, dazu die Seite selbst und Erscheinungs-
+/// bzw. Musterströme. 16 ist rund das Doppelte davon — der Zwischenspeicher
+/// kann also nie mehr als etwa das Doppelte des Bedarfs belegen, den es auch
+/// ohne ihn schon gibt.
+///
+/// Gemessen an einer Datei von 325 kB mit 300 verschiedenen
+/// `/Resources`-Objekten, die alle dieselben 20 Schriften mit je 2 000
+/// CMap-Einträgen aufzählen: ohne Decke 1 083 MB Spitzenspeicher gegenüber
+/// 15 MB vorher.
+const MAX_CACHED_FONT_MAPS: usize = 16;
+
+/// Schriften eines Ressourcenverzeichnisses: Ressourcenname → Metriken.
+type FontMap = BTreeMap<Vec<u8>, FontInfo>;
+
+/// Was ein Seiten-Scan an **Vorarbeit** gekostet hat.
+///
+/// Beides sind Arbeiten, die *vor* der ersten gezählten Zeichenoperation
+/// anfallen und deshalb von keiner Schranke des Aufwandskontos gesehen
+/// werden: einen Strom auszupacken und zu zerlegen, und ein
+/// Ressourcenverzeichnis in Schriftmetriken zu übersetzen. Genau daraus
+/// bestand die Vervielfachung durch mehrfach platzierte Form-XObjects — je
+/// Platzierung einmal, obwohl das Ergebnis jedes Mal dasselbe ist.
+///
+/// Die Zahlen sind **deterministisch**: sie hängen an der Datei, nicht an der
+/// Maschine. Ein Test kann damit die Aufwandsschranke festhalten, ohne eine
+/// Uhr zu befragen.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ScanEffort {
+    /// Wie oft ein Strom ausgepackt und in Operationen zerlegt wurde.
+    ///
+    /// Ohne den Seitenstrom selbst — der wird ohnehin nur einmal dekodiert.
+    /// Ein hundertmal platziertes Formular zählt hier **einmal**.
+    pub decoded_streams: usize,
+    /// Wie oft ein `/Resources`-Verzeichnis in Schriftmetriken übersetzt
+    /// wurde (`/ToUnicode`, `/W`, `/Widths`, eingebettete `cmap`).
+    pub loaded_font_maps: usize,
+}
+
+/// Woher ein `/Resources`-Verzeichnis stammt — der Schlüssel des
+/// Schriften-Zwischenspeichers.
+///
+/// Beide Fälle benennen das Verzeichnis **eindeutig innerhalb dieses
+/// Dokuments**, und mehr braucht es nicht: [`fonts_from_resources`] liest
+/// ausschließlich aus dem Verzeichnis und den Schriftobjekten, an denen es
+/// hängt. Weder CTM noch Textzustand noch der Fundort gehen ein.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::enum_variant_names)]
+enum ResourceKey {
+    /// Eigenes Objekt (`/Resources 7 0 R`) — mehrere Ströme können sich
+    /// dasselbe teilen, und dann teilen sie sich auch den Eintrag.
+    Object(ObjectId),
+    /// Direkt im Dictionary des Stroms — gehört genau diesem einen Strom.
+    InStream(ObjectId),
+}
+
+/// Ein platzierbarer Strom — Form-XObject, Gruppen-Form einer weichen Maske
+/// oder Kachelmuster —, **einmal** ausgepackt und zerlegt.
+///
+/// Alles hier drin ist eine reine Funktion des Stromobjekts: Auspacken und
+/// Zerlegen kennen weder den Fundort noch den Grafik- oder Textzustand. Was
+/// vom Zusammenhang abhängt, steht deshalb bewusst **nicht** hier:
+///
+/// * die **Beschriftung** (der Ressourcenname, unter dem der Strom gefunden
+///   wurde) — sie geht nur in Warnungen ein und wird je Platzierung gebildet,
+/// * die **CTM** — sie entsteht je Platzierung aus `/Matrix` und dem
+///   Grafikzustand des Augenblicks,
+/// * die **geerbten Ressourcen**: bringt der Strom kein eigenes
+///   `/Resources` mit, gelten die des Aufrufers. Genau dafür steht hier
+///   `None` statt einer Kopie — sonst wäre der Zwischenspeicher der stille
+///   Fehler, vor dem er bewahren soll,
+/// * **Tiefe**, Zyklusprüfung und Textzustand — die führt der Interpreter
+///   ohnehin je Durchlauf.
+#[derive(Debug)]
+struct PlacedStream {
+    /// `None`: der Strom ließ sich gar nicht auspacken (defekter oder
+    /// unbekannter Filter).
+    content: Option<crate::ops::DecodedContent>,
+    /// Stand in den ausgepackten Bytes überhaupt etwas anderes als Leerraum?
+    has_tokens: bool,
+    /// Das **eigene** `/Resources` des Stroms, bereits aufgelöst. `None`
+    /// heißt: er bringt keins mit und erbt das des Aufrufers.
+    resources: Option<Dictionary>,
+    /// Unter welchem Schlüssel die Schriften zu [`PlacedStream::resources`]
+    /// im Zwischenspeicher stehen — belegt genau dann, wenn jenes belegt ist.
+    ///
+    /// Hier steht der **Schlüssel** und nicht die Schriften selbst: sonst
+    /// hinge deren Lebensdauer am Strom-Zwischenspeicher, und dessen Decke
+    /// zählt Operationen, nicht Schriften. Eine Datei mit dreihundert kleinen
+    /// Formularen, die alle dieselben schweren Schriften aufzählen, käme so
+    /// unter jeder Operationsdecke durch und belegte trotzdem ein Gigabyte
+    /// (gemessen). Über den Schlüssel entscheidet allein
+    /// [`MAX_CACHED_FONT_MAPS`], wie viel liegen bleibt.
+    font_key: Option<ResourceKey>,
+}
+
+impl PlacedStream {
+    /// Die Operationen, oder eine leere Liste, wenn nichts zu holen war.
+    fn operations(&self) -> &[Operation] {
+        match &self.content {
+            Some(content) => &content.operations,
+            None => &[],
+        }
+    }
+
+    /// Ließ sich der Strom überhaupt auspacken?
+    fn decodable(&self) -> bool {
+        self.content.is_some()
+    }
+
+    /// Ging beim Zerlegen etwas verloren?
+    fn truncated(&self) -> bool {
+        self.content
+            .as_ref()
+            .is_some_and(|c| !c.truncated.is_empty())
+    }
+
+    /// Größe der Teilstücke, in denen etwas fehlt.
+    fn affected_bytes(&self) -> usize {
+        self.content.as_ref().map_or(0, |c| c.affected_bytes())
+    }
+}
+
+/// Ein Eintrag des Strom-Zwischenspeichers.
+///
+/// Der Eintrag wird für **jeden** einmal ausgepackten Strom angelegt, auch
+/// wenn sein Rumpf nicht behalten wird: an ihm hängt die Buchführung des
+/// Aufwandskontos, und die muss unabhängig davon stimmen, wie viel Platz
+/// gerade noch da war.
+#[derive(Debug)]
+struct CachedStream {
+    /// Der Rumpf — `None`, sobald [`MAX_CACHED_OPERATIONS`] erreicht war.
+    /// Dann wird bei jeder Platzierung neu ausgepackt, wie vor der Änderung.
+    body: Option<Rc<PlacedStream>>,
+    /// Hat dieser Strom schon einmal Guthaben eingebracht? Ein zweites Mal
+    /// zählt er nicht — sonst finanzierte die Fächerung sich selbst.
+    credited: bool,
+}
+
 /// Aufwandskonto eines Seiten-Scans.
 ///
 /// Die dokumentierten Grenzen für Eingabedateien messen **Bytes**. Was der
@@ -99,15 +272,31 @@ const MAX_GLYPHS_PER_SCAN: usize = 1_000_000;
 /// gewarnt. Eine Seite, deren Text nur zum Teil durchsucht wurde, darf nicht
 /// als Erfolg enden: der ungeprüfte Rest ist genau der, in dem das Geheimnis
 /// stehen kann.
+///
+/// ## Warum der Zwischenspeicher hier steht
+///
+/// Das Konto zählte schon immer, **welcher** Strom seinen Inhalt bereits
+/// gutgeschrieben bekommen hat. Es fehlte nur das Ergebnis: derselbe Strom
+/// wurde je Platzierung erneut ausgepackt und zerlegt, und sein
+/// Schriftenverzeichnis erneut geladen — Arbeit, die vor der ersten gezählten
+/// Operation anfällt und deshalb von keiner Schranke gesehen wurde. Seit hier
+/// das Ergebnis steht statt nur des Häkchens, kostet die zweite Platzierung
+/// eines Formulars nichts mehr als das Nachschlagen.
 #[derive(Debug)]
 struct Budget {
     /// Verbleibendes Guthaben an Zeichenoperationen.
     operations: usize,
     glyphs: usize,
-    /// Ströme, deren Inhalt schon einmal Guthaben eingebracht hat. Ein
-    /// zweites Mal zählt er nicht — sonst finanzierte die Fächerung sich
-    /// selbst.
-    credited: HashSet<ObjectId>,
+    /// Einmal ausgepackte und zerlegte Ströme, je Objekt-Id — samt der
+    /// Auskunft, ob der Strom schon Guthaben eingebracht hat.
+    streams: HashMap<ObjectId, CachedStream>,
+    /// Einmal geladene Schriftenverzeichnisse, je Ressourcenobjekt.
+    fonts: HashMap<ResourceKey, Rc<FontMap>>,
+    /// Wie viele Operationen in [`Budget::streams`] liegen — die Decke ist
+    /// [`MAX_CACHED_OPERATIONS`].
+    cached_operations: usize,
+    /// Die Vorarbeit, die wirklich anfiel — siehe [`ScanEffort`].
+    effort: ScanEffort,
     /// Type3-Schriften, deren Glyphprozeduren schon untersucht wurden — je
     /// Strom und Ressourcenname.
     ///
@@ -125,7 +314,10 @@ impl Default for Budget {
         Self {
             operations: BASE_OPERATIONS,
             glyphs: MAX_GLYPHS_PER_SCAN,
-            credited: HashSet::new(),
+            streams: HashMap::new(),
+            fonts: HashMap::new(),
+            cached_operations: 0,
+            effort: ScanEffort::default(),
             looked_at_type3: HashSet::new(),
             exceeded: None,
         }
@@ -133,14 +325,144 @@ impl Default for Budget {
 }
 
 impl Budget {
+    /// Packt einen platzierbaren Strom aus, zerlegt ihn und lädt seine
+    /// Schriften — **einmal je Objekt-Id**.
+    ///
+    /// Jede weitere Platzierung bekommt dasselbe Ergebnis zurück. Warum das
+    /// zulässig ist und was deshalb *nicht* darin steht: [`PlacedStream`].
+    fn stream(&mut self, doc: &Document, id: ObjectId, stream: &Stream) -> Rc<PlacedStream> {
+        if let Some(entry) = self.streams.get(&id) {
+            return match &entry.body {
+                Some(body) => Rc::clone(body),
+                // Über der Decke: auspacken wie vor der Änderung.
+                None => Rc::new(self.load_stream(doc, Some(id), stream)),
+            };
+        }
+        let body = Rc::new(self.load_stream(doc, Some(id), stream));
+        let keep = self
+            .cached_operations
+            .saturating_add(body.operations().len())
+            <= MAX_CACHED_OPERATIONS;
+        if keep {
+            self.cached_operations += body.operations().len();
+        }
+        self.streams.insert(
+            id,
+            CachedStream {
+                body: keep.then(|| Rc::clone(&body)),
+                credited: false,
+            },
+        );
+        body
+    }
+
+    /// Packt einen Strom aus, zerlegt ihn und lädt seine Schriften — ohne den
+    /// Strom selbst zu merken.
+    ///
+    /// `id` ist `None` für einen Strom ohne eigene Objekt-Id; ein solcher ist
+    /// nicht zu merken (und nicht neu zu schreiben), und auch seine Schriften
+    /// bekommen dann keinen Schlüssel.
+    fn load_stream(
+        &mut self,
+        doc: &Document,
+        id: Option<ObjectId>,
+        stream: &Stream,
+    ) -> PlacedStream {
+        self.effort.decoded_streams += 1;
+        let (content, has_tokens) = match stream
+            .decompressed_content()
+            .or_else(|_| stream.get_plain_content())
+        {
+            Ok(data) => (
+                Some(crate::ops::decode_content_checked(&data)),
+                has_tokens(&data),
+            ),
+            Err(_) => (None, false),
+        };
+        // `/Resources` wird mitsamt seiner Objekt-Id aufgelöst: teilen sich
+        // mehrere Ströme dasselbe Verzeichnis, teilen sie sich auch dessen
+        // Schriften.
+        let (resource_id, resources) = match stream
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+        {
+            Some((resource_id, object)) => match object.as_dict() {
+                Ok(dict) => (resource_id, Some(dict.clone())),
+                Err(_) => (None, None),
+            },
+            None => (None, None),
+        };
+        let font_key = resources.as_ref().and(
+            resource_id
+                .map(ResourceKey::Object)
+                .or(id.map(ResourceKey::InStream)),
+        );
+        PlacedStream {
+            content,
+            has_tokens,
+            resources,
+            font_key,
+        }
+    }
+
+    /// Die Schriften zum **eigenen** `/Resources` eines Stroms.
+    ///
+    /// `None` heißt: der Strom bringt keins mit; dann gelten unverändert die
+    /// des Aufrufers. Das ist die eine Stelle, an der die Vererbung
+    /// entschieden wird — und sie wird bei **jeder** Platzierung neu
+    /// entschieden, nicht einmal beim Auspacken.
+    fn fonts_of(&mut self, doc: &Document, placed: &PlacedStream) -> Option<Rc<FontMap>> {
+        let resources = placed.resources.as_ref()?;
+        Some(match placed.font_key {
+            Some(key) => self.font_map(doc, key, resources),
+            // Weder das Verzeichnis noch der Strom hat eine Objekt-Id: es
+            // gibt nichts, worunter sich das merken ließe.
+            None => Rc::new(self.load_font_map(doc, Some(resources))),
+        })
+    }
+
+    /// Lädt die Schriften eines `/Resources`-Verzeichnisses — einmal je
+    /// Verzeichnis.
+    ///
+    /// Siehe [`ResourceKey`] für die Begründung des Schlüssels und
+    /// [`MAX_CACHED_FONT_MAPS`] für die Decke. Über der Decke wird geladen wie
+    /// bisher, nur eben nicht behalten.
+    fn font_map(
+        &mut self,
+        doc: &Document,
+        key: ResourceKey,
+        resources: &Dictionary,
+    ) -> Rc<FontMap> {
+        if let Some(fonts) = self.fonts.get(&key) {
+            return Rc::clone(fonts);
+        }
+        let fonts = Rc::new(self.load_font_map(doc, Some(resources)));
+        if self.fonts.len() < MAX_CACHED_FONT_MAPS {
+            self.fonts.insert(key, Rc::clone(&fonts));
+        }
+        fonts
+    }
+
+    /// Übersetzt ein `/Resources`-Verzeichnis in Schriftmetriken und zählt den
+    /// Vorgang mit — die eine Stelle, an der das im Interpreter geschieht.
+    fn load_font_map(&mut self, doc: &Document, resources: Option<&Dictionary>) -> FontMap {
+        self.effort.loaded_font_maps += 1;
+        fonts_from_resources(doc, resources)
+    }
+
     /// Schreibt den Inhalt eines Stroms gut — einmal je Strom.
     ///
     /// `id` ist `None` für den Seitenstrom selbst; der wird ohnehin nur einmal
-    /// dekodiert.
+    /// dekodiert. Ein Strom mit Id muss vorher durch [`Budget::stream`]
+    /// gegangen sein; ist er das nicht, wird im Zweifel **nicht**
+    /// gutgeschrieben — die strengere Richtung.
     fn credit(&mut self, id: Option<ObjectId>, operations: usize) {
         if let Some(id) = id {
-            if !self.credited.insert(id) {
-                return;
+            match self.streams.get_mut(&id) {
+                Some(entry) if !entry.credited => entry.credited = true,
+                _ => return,
             }
         }
         self.operations = self
@@ -387,6 +709,11 @@ pub struct ScanResult {
     /// Text sich nicht dekodieren lässt. Aus solchem Text kann die Analyse
     /// nichts erkennen; ohne Warnung hielte man die Datei für sauber.
     pub warnings: Vec<String>,
+    /// Was der Scan an Vorarbeit gekostet hat — siehe [`ScanEffort`].
+    ///
+    /// Wird von [`scan_page`] gefüllt; über [`interpret`] bleibt sie leer,
+    /// weil dort der Aufrufer die Senke stellt.
+    pub effort: ScanEffort,
     /// Welche Spiegel schon in `marked` stehen. Als Menge geführt, nicht durch
     /// Durchsuchen der Liste: eine getaggte Seite bringt leicht Tausende
     /// Abschnitte mit, und ein mehrfach platziertes Formular liefert sie
@@ -871,12 +1198,14 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
         &operations,
         StreamKey::Page,
         resources.as_ref(),
+        None,
         Matrix::IDENTITY,
         &mut budget,
         &mut result,
     );
     scan_annotations(doc, page_id, resources.as_ref(), &mut budget, &mut result);
     budget.result()?;
+    result.effort = budget.effort;
     Ok(result)
 }
 
@@ -964,6 +1293,7 @@ pub fn interpret(
         operations,
         stream,
         resources,
+        None,
         initial_ctm,
         &mut budget,
         sink,
@@ -973,16 +1303,31 @@ pub fn interpret(
 
 /// Der gemeinsame Kern von [`interpret`] und [`scan_page`] — mit einem
 /// Aufwandskonto, das über mehrere Ströme derselben Seite hinweg gilt.
+///
+/// `fonts` sind die bereits geladenen Schriften zu `resources`, falls der
+/// Aufrufer sie schon hat; `None` heißt „bitte laden“. Ein
+/// Erscheinungsstrom, an dem zweihundert Annotationen hängen, bringt seine
+/// eigenen Schriften genau einmal mit — sie hier erneut zu laden wäre
+/// dieselbe Vervielfachung wie beim Form-XObject.
+#[allow(clippy::too_many_arguments)]
 fn scan_with_budget(
     doc: &Document,
     operations: &[Operation],
     stream: StreamKey,
     resources: Option<&Dictionary>,
+    fonts: Option<&FontMap>,
     initial_ctm: Matrix,
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
-    let fonts = fonts_from_resources(doc, resources);
+    let loaded;
+    let fonts = match fonts {
+        Some(fonts) => fonts,
+        None => {
+            loaded = budget.load_font_map(doc, resources);
+            &loaded
+        }
+    };
     let mut visiting = HashSet::new();
     let mut declared: HashSet<StreamKey> = HashSet::new();
     let mut stats = FontDecodeStats::default();
@@ -991,7 +1336,7 @@ fn scan_with_budget(
         operations,
         stream,
         resources,
-        &fonts,
+        fonts,
         initial_ctm,
         0,
         &mut visiting,
@@ -1251,10 +1596,10 @@ fn scan_appearance(
     let Ok(stream) = doc.get_object(id).and_then(|o| o.as_stream()) else {
         return;
     };
-    let Ok(data) = stream
-        .decompressed_content()
-        .or_else(|_| stream.get_plain_content())
-    else {
+    // Mehrere Annotationen dürfen sich denselben Erscheinungsstrom teilen;
+    // ausgepackt wird er trotzdem nur einmal.
+    let appearance = budget.stream(doc, id, stream);
+    if !appearance.decodable() {
         sink.warn(format!(
             "Der Erscheinungsstrom einer Annotation (Objekt {} {}) ließ sich nicht \
              dekodieren; sein Text wurde nicht durchsucht und kann deshalb nicht \
@@ -1262,9 +1607,8 @@ fn scan_appearance(
             id.0, id.1
         ));
         return;
-    };
-    let decoded = crate::ops::decode_content_checked(&data);
-    if !decoded.truncated.is_empty() {
+    }
+    if appearance.truncated() {
         sink.warn(format!(
             "Ein Teil des Erscheinungsstroms einer Annotation (Objekt {} {}) ließ sich nicht \
              in Operationen zerlegen; ab der Bruchstelle fehlt alles Weitere ({} Byte \
@@ -1272,14 +1616,13 @@ fn scan_appearance(
              geschwärzt worden sein.",
             id.0,
             id.1,
-            decoded.affected_bytes()
+            appearance.affected_bytes()
         ));
     }
-    let operations = decoded.operations;
-    if operations.is_empty() {
+    if appearance.operations().is_empty() {
         return;
     }
-    budget.credit(Some(id), operations.len());
+    budget.credit(Some(id), appearance.operations().len());
 
     let matrix = stream
         .dict
@@ -1295,20 +1638,20 @@ fn scan_appearance(
         .ok()
         .and_then(|o| doc.dereference(o).ok())
         .and_then(|(_, o)| annot_rect(o));
-    let resources = stream
-        .dict
-        .get(b"Resources")
-        .ok()
-        .and_then(|o| doc.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict().ok())
-        .cloned()
-        .or_else(|| page_resources.cloned());
+    // Bringt der Erscheinungsstrom eigene Ressourcen mit, gelten sie samt
+    // seiner schon geladenen Schriften; sonst die der Seite.
+    let own_fonts = budget.fonts_of(doc, &appearance);
+    let (resources, fonts) = match (&appearance.resources, &own_fonts) {
+        (Some(own), Some(own_fonts)) => (Some(own.clone()), Some(&**own_fonts)),
+        _ => (page_resources.cloned(), None),
+    };
 
     scan_with_budget(
         doc,
-        &operations,
+        appearance.operations(),
         StreamKey::Form(id),
         resources.as_ref(),
+        fonts,
         appearance_matrix(&matrix, bbox, rect),
         budget,
         sink,
@@ -1861,6 +2204,7 @@ fn scan_operations(
                     scan_tiling_pattern(
                         doc,
                         resources,
+                        fonts,
                         pattern,
                         initial_ctm,
                         depth,
@@ -1928,6 +2272,7 @@ fn scan_operations(
                 scan_soft_mask(
                     doc,
                     resources,
+                    fonts,
                     &op.operands,
                     &state,
                     depth,
@@ -1987,7 +2332,7 @@ fn scan_operations(
                     // Schwärzung meldete „nichts gefunden“, und die Datei galt
                     // als sauber.
                     XObjectEntry::Unusable(message) => sink.warn(message),
-                    XObjectEntry::Form(form_id, form_dict, form_ops) => {
+                    XObjectEntry::Form(form_id, form_matrix, form) => {
                         if depth >= MAX_FORM_DEPTH {
                             sink.warn(format!(
                                 "Form-XObject „{}“ ist tiefer als {MAX_FORM_DEPTH} Ebenen \
@@ -2002,26 +2347,21 @@ fn scan_operations(
                         if !visiting.insert(form_id) {
                             continue; // Zyklus
                         }
-                        let form_matrix = form_dict
-                            .get(b"Matrix")
-                            .ok()
-                            .and_then(|o| o.as_array().ok())
-                            .and_then(|a| matrix_from(a))
-                            .unwrap_or(Matrix::IDENTITY);
-                        let form_resources = form_dict
-                            .get(b"Resources")
-                            .ok()
-                            .and_then(|o| doc.dereference(o).ok())
-                            .and_then(|(_, o)| o.as_dict().ok())
-                            .cloned()
-                            .or_else(|| resources.cloned());
-                        let form_fonts = fonts_from_resources(doc, form_resources.as_ref());
+                        // Ohne eigenes `/Resources` gelten die des Aufrufers —
+                        // und damit auch dessen bereits geladene Schriften.
+                        // Genau hier hängt das Ergebnis am Zusammenhang, und
+                        // genau hier wird deshalb nichts gemerkt.
+                        let own_fonts = budget.fonts_of(doc, &form);
+                        let (form_resources, form_fonts) = match (&form.resources, &own_fonts) {
+                            (Some(own), Some(own_fonts)) => (Some(own), &**own_fonts),
+                            _ => (resources, fonts),
+                        };
                         scan_operations(
                             doc,
-                            &form_ops,
+                            form.operations(),
                             StreamKey::Form(form_id),
-                            form_resources.as_ref(),
-                            &form_fonts,
+                            form_resources,
+                            form_fonts,
                             form_matrix.mul(&state.ctm),
                             depth + 1,
                             visiting,
@@ -2085,6 +2425,7 @@ fn ext_gstate_dict(
 fn scan_soft_mask(
     doc: &Document,
     resources: Option<&Dictionary>,
+    fonts: &FontMap,
     operands: &[Object],
     state: &GraphicsState,
     depth: usize,
@@ -2137,10 +2478,10 @@ fn scan_soft_mask(
         ));
         return;
     };
-    let Ok(data) = stream
-        .decompressed_content()
-        .or_else(|_| stream.get_plain_content())
-    else {
+    // Eine Maske kann an jedem einzelnen `gs` hängen; ausgepackt wird sie
+    // trotzdem nur einmal.
+    let group = budget.stream(doc, group_id, stream);
+    if !group.decodable() {
         sink.warn(format!(
             "Die Gruppen-Form einer weichen Maske (Objekt {} {}) ließ sich nicht \
              dekodieren; ihr Text wurde nicht durchsucht und kann deshalb nicht \
@@ -2148,23 +2489,21 @@ fn scan_soft_mask(
             group_id.0, group_id.1
         ));
         return;
-    };
-    let decoded = crate::ops::decode_content_checked(&data);
-    if !decoded.truncated.is_empty() {
+    }
+    if group.truncated() {
         sink.warn(format!(
             "Ein Teil der Gruppen-Form einer weichen Maske (Objekt {} {}) ließ sich nicht \
              in Operationen zerlegen ({} Byte betroffen). Dieser Text wurde nicht \
              durchsucht und kann deshalb nicht geschwärzt worden sein.",
             group_id.0,
             group_id.1,
-            decoded.affected_bytes()
+            group.affected_bytes()
         ));
     }
-    let operations = decoded.operations;
-    if operations.is_empty() {
+    if group.operations().is_empty() {
         return;
     }
-    budget.credit(Some(group_id), operations.len());
+    budget.credit(Some(group_id), group.operations().len());
     if !visiting.insert(group_id) {
         return; // Zyklus
     }
@@ -2176,24 +2515,22 @@ fn scan_soft_mask(
         .and_then(|(_, o)| o.as_array().ok())
         .and_then(|a| matrix_from(a))
         .unwrap_or(Matrix::IDENTITY);
-    let group_resources = stream
-        .dict
-        .get(b"Resources")
-        .ok()
-        .and_then(|o| doc.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict().ok())
-        .cloned()
-        .or_else(|| resources.cloned());
-    let group_fonts = fonts_from_resources(doc, group_resources.as_ref());
+    // Ohne eigenes `/Resources` gelten die des Aufrufers — samt seiner
+    // bereits geladenen Schriften.
+    let own_fonts = budget.fonts_of(doc, &group);
+    let (group_resources, group_fonts) = match (&group.resources, &own_fonts) {
+        (Some(own), Some(own_fonts)) => (Some(own), &**own_fonts),
+        _ => (resources, fonts),
+    };
     // Die Maske ist ein platzierter Strom wie ein Formular; sie muss auch so
     // gezählt werden, sonst hielte die Ressourcenprüfung sie für ungezeichnet.
     sink.form(group_id);
     scan_operations(
         doc,
-        &operations,
+        group.operations(),
         StreamKey::Form(group_id),
-        group_resources.as_ref(),
-        &group_fonts,
+        group_resources,
+        group_fonts,
         matrix.mul(&state.ctm),
         depth + 1,
         visiting,
@@ -2270,8 +2607,8 @@ fn rect_path(operands: &[Object], ctm: &Matrix) -> Option<Vec<PathSeg>> {
 /// Was hinter einem `Do`-Namen in den Ressourcen steckt.
 enum XObjectEntry {
     Image,
-    /// Form-XObject: Objekt-Id, Dictionary und dekodierter Operationsstrom.
-    Form(ObjectId, Dictionary, Vec<Operation>),
+    /// Form-XObject: Objekt-Id, `/Matrix` und der einmal ermittelte Rumpf.
+    Form(ObjectId, Matrix, Rc<PlacedStream>),
     /// Vorhanden, aber nicht auswertbar — mit fertiger Begründung für die
     /// Warnung. Was hier steht, wird nicht durchsucht; das muss der Nutzer
     /// erfahren.
@@ -2280,12 +2617,17 @@ enum XObjectEntry {
     Missing,
 }
 
-/// Löst einen `Do`-Namen auf und dekodiert bei einem Form-XObject gleich den
-/// Inhalt.
+/// Löst einen `Do`-Namen auf und holt bei einem Form-XObject gleich den Rumpf.
 ///
 /// Jeder Weg, auf dem hier nichts Brauchbares herauskommt, wird benannt statt
 /// verschwiegen: ein Form-XObject ohne `/Subtype` oder mit einem Filter, den
 /// niemand dekodieren kann, versteckt seinen Text sonst lautlos.
+///
+/// Die **Beschriftung** (`label`) wird bei jeder Platzierung frisch gebildet:
+/// dasselbe Objekt kann unter zwei Ressourcennamen stehen, und dann muss die
+/// Warnung den Namen nennen, unter dem es hier steht — nicht den, unter dem
+/// es zuerst gefunden wurde. Zwischengespeichert wird deshalb nur, was am
+/// Objekt hängt (siehe [`FormBody`]).
 fn load_xobject(
     doc: &Document,
     resources: Option<&Dictionary>,
@@ -2312,13 +2654,7 @@ fn load_xobject(
             "XObject „{label}“ ist kein Stream; sein Inhalt wurde nicht durchsucht."
         ));
     };
-    let subtype = stream
-        .dict
-        .get(b"Subtype")
-        .and_then(Object::as_name)
-        .ok()
-        .map(|n| n.to_vec());
-    match subtype.as_deref() {
+    match crate::ops::xobject_subtype(doc, &stream.dict) {
         Some(b"Image") => XObjectEntry::Image,
         Some(b"Form") => {
             let Some(id) = id else {
@@ -2327,38 +2663,41 @@ fn load_xobject(
                      wurde nicht durchsucht und kann deshalb nicht geschwärzt worden sein."
                 ));
             };
-            let Ok(data) = stream
-                .decompressed_content()
-                .or_else(|_| stream.get_plain_content())
-            else {
+            let form = budget.stream(doc, id, stream);
+            if !form.decodable() {
                 return XObjectEntry::Unusable(format!(
                     "Form-XObject „{label}“ ließ sich nicht dekodieren (unbekannter oder \
                      defekter Filter); sein Text wurde nicht durchsucht und kann deshalb \
                      nicht geschwärzt worden sein."
                 ));
-            };
-            let decoded = crate::ops::decode_content_checked(&data);
-            if !decoded.truncated.is_empty() {
+            }
+            if form.truncated() {
                 return XObjectEntry::Unusable(format!(
                     "Ein Teil des Form-XObjects „{label}“ ließ sich nicht in Operationen \
                      zerlegen; ab der Bruchstelle fehlt alles Weitere ({} Byte betroffen). \
                      Dieser Text wurde nicht durchsucht und kann deshalb nicht geschwärzt \
                      worden sein.",
-                    decoded.affected_bytes()
+                    form.affected_bytes()
                 ));
             }
-            let operations = decoded.operations;
             // Der Inhalt dieses Stroms bringt einmal Guthaben ein; jede
             // weitere Platzierung zehrt nur noch davon.
-            budget.credit(Some(id), operations.len());
-            if operations.is_empty() && has_tokens(&data) {
+            budget.credit(Some(id), form.operations().len());
+            if form.operations().is_empty() && form.has_tokens {
                 return XObjectEntry::Unusable(format!(
                     "Der Inhalt des Form-XObjects „{label}“ ließ sich nicht in Operationen \
                      zerlegen; sein Text wurde nicht durchsucht und kann deshalb nicht \
                      geschwärzt worden sein."
                 ));
             }
-            XObjectEntry::Form(id, stream.dict.clone(), operations)
+            let matrix = stream
+                .dict
+                .get(b"Matrix")
+                .ok()
+                .and_then(|o| o.as_array().ok())
+                .and_then(|a| matrix_from(a))
+                .unwrap_or(Matrix::IDENTITY);
+            XObjectEntry::Form(id, matrix, form)
         }
         // Ohne `/Subtype /Form` steigt der Interpreter aus — und stünde dann
         // vor genau dem Text, den er hätte finden sollen.
@@ -2381,6 +2720,7 @@ fn load_xobject(
 fn scan_tiling_pattern(
     doc: &Document,
     resources: Option<&Dictionary>,
+    fonts: &FontMap,
     name: &[u8],
     base_ctm: Matrix,
     depth: usize,
@@ -2410,29 +2750,31 @@ fn scan_tiling_pattern(
     if stream.dict.get(b"PatternType").ok().and_then(as_f64) == Some(2.0) {
         return;
     }
-    let Ok(data) = stream
-        .decompressed_content()
-        .or_else(|_| stream.get_plain_content())
-    else {
+    // Ein Muster kann an jedem einzelnen `scn` hängen; ausgepackt wird es
+    // trotzdem nur einmal.
+    let pattern = match id {
+        Some(id) => budget.stream(doc, id, stream),
+        None => Rc::new(budget.load_stream(doc, None, stream)),
+    };
+    if !pattern.decodable() {
         sink.warn(format!(
             "Kachelmuster „{label}“ ließ sich nicht dekodieren; sein Inhalt wurde nicht \
              durchsucht. Steht dort Text, blieb er ungeschwärzt."
         ));
         return;
-    };
-    let decoded = crate::ops::decode_content_checked(&data);
-    if !decoded.truncated.is_empty() {
+    }
+    if pattern.truncated() {
         sink.warn(format!(
             "Ein Teil des Kachelmusters „{label}“ ließ sich nicht in Operationen zerlegen; \
              ab der Bruchstelle fehlt alles Weitere ({} Byte betroffen). Dieser Text wurde \
              nicht durchsucht und kann deshalb nicht geschwärzt worden sein.",
-            decoded.affected_bytes()
+            pattern.affected_bytes()
         ));
     }
-    let operations = decoded.operations;
     // Ein Muster ohne Textoperator ist ein Schraffur- oder Logomuster: kein
     // Befund, keine Meldung.
-    if !operations
+    if !pattern
+        .operations()
         .iter()
         .any(|op| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
     {
@@ -2458,7 +2800,7 @@ fn scan_tiling_pattern(
     if !visiting.insert(id) {
         return;
     }
-    budget.credit(Some(id), operations.len());
+    budget.credit(Some(id), pattern.operations().len());
 
     sink.warn(format!(
         "Kachelmuster „{label}“ enthält Text. Er wird an der Stelle der ersten Kachel \
@@ -2476,21 +2818,19 @@ fn scan_tiling_pattern(
         .and_then(|(_, o)| o.as_array().ok())
         .and_then(|a| matrix_from(a))
         .unwrap_or(Matrix::IDENTITY);
-    let pattern_resources = stream
-        .dict
-        .get(b"Resources")
-        .ok()
-        .and_then(|o| doc.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict().ok())
-        .cloned()
-        .or_else(|| resources.cloned());
-    let fonts = fonts_from_resources(doc, pattern_resources.as_ref());
+    // Ohne eigenes `/Resources` gelten die des Aufrufers — samt seiner
+    // bereits geladenen Schriften.
+    let own_fonts = budget.fonts_of(doc, &pattern);
+    let (pattern_resources, pattern_fonts) = match (&pattern.resources, &own_fonts) {
+        (Some(own), Some(own_fonts)) => (Some(own), &**own_fonts),
+        _ => (resources, fonts),
+    };
     scan_operations(
         doc,
-        &operations,
+        pattern.operations(),
         StreamKey::Form(id),
-        pattern_resources.as_ref(),
-        &fonts,
+        pattern_resources,
+        pattern_fonts,
         matrix.mul(&base_ctm),
         depth + 1,
         visiting,
@@ -2577,21 +2917,21 @@ fn warn_about_text_in_charprocs(
             unreadable += 1;
             continue;
         };
-        let Ok(data) = proc_stream
-            .decompressed_content()
-            .or_else(|_| proc_stream.get_plain_content())
-        else {
+        let decoded = match id {
+            Some(id) => budget.stream(doc, id, proc_stream),
+            None => Rc::new(budget.load_stream(doc, None, proc_stream)),
+        };
+        if !decoded.decodable() {
             unreadable += 1;
             continue;
-        };
-        let decoded = crate::ops::decode_content_checked(&data);
-        if !decoded.truncated.is_empty() {
+        }
+        if decoded.truncated() {
             unreadable += 1;
         }
         // Der Inhalt bringt einmal Guthaben ein — wie jeder andere Strom auch.
-        budget.credit(id, decoded.operations.len());
+        budget.credit(id, decoded.operations().len());
         let mut sets_text = false;
-        for op in &decoded.operations {
+        for op in decoded.operations() {
             // Jede geprüfte Operation kostet. Ist das Konto leer, endet der
             // Scan ohnehin; dann wird hier nichts mehr behauptet.
             if !budget.operation() {
