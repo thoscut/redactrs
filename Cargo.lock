@@ -2717,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "redact-booking"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "csv",
  "redact-core",
@@ -2726,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "redact-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clap",
  "lopdf",
@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "redact-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "lopdf",
  "serde",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "redact-gui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "eframe",
  "egui",
@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "redact-patterns"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fancy-regex",
  "redact-core",
@@ -2779,7 +2779,7 @@ dependencies = [
 
 [[package]]
 name = "redact-pdf"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "flate2",
  "lopdf",
@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "redact-pipeline"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "lopdf",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "redact-render"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "lopdf",
  "redact-core",

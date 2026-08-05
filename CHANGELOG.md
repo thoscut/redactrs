@@ -25,10 +25,15 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 ---
 
-## Unveröffentlicht
+## 0.4.0 — 2026-08-05
 
-Was seit `v0.3.0` im Baum liegt und in die nächste Fassung geht.
-Bereich: `git log 9aa4808..HEAD` plus der noch nicht eingecheckte Arbeitsstand.
+Bereich: `git log 9aa4808..v0.4.0`.
+
+Diese Fassung ist das Ergebnis einer vollständigen Expertenprüfung aus fünf
+Blickwinkeln — Bedrohung für den ausführenden Rechner, Kernversprechen der
+Schwärzung, Bedienung, Doku und Freigabeweg, Leistung und Einfachheit. Jeder
+Befund darin ist an einem echten Lauf belegt; die Zahlen unten sind gemessen,
+nicht geschätzt.
 
 ### Neu
 
@@ -213,6 +218,101 @@ Bereich: `git log 9aa4808..HEAD` plus der noch nicht eingecheckte Arbeitsstand.
 * `README.md`: der Änderungsverlauf war nirgends verlinkt, das musl-Archiv
   nirgends erwähnt, und die Liste des Archivinhalts kannte `CHANGELOG.md`
   noch nicht.
+
+### ⚠ Bedienung — Wege, auf denen eine IBAN stehenbleiben konnte
+
+* **Mit den Pfeiltasten ließ sich ein Treffer neben das Blatt schieben, und
+  die Kopfzeile versprach ihn weiter.** `move_selected` war die einzige
+  Rechteckänderung, die weder die Klemmung noch den gemeinsamen Schreibweg
+  durchlief. Nach etwa sechzig Anschlägen lag das Rechteck komplett außerhalb
+  der Seite — unsichtbar, weil der Maler dort abschneidet —, während die
+  Kopfzeile unverändert „2 werden geschwärzt“ sagte und der Export ohne Fehler
+  durchlief. Die Warnung kam erst danach. Über den Eckgriff war derselbe Weg
+  längst geklemmt.
+
+  Geklemmt wird jetzt **versetzend**, nicht schneidend: reines Beschneiden
+  hätte den Balken am Blattrand bei jedem weiteren Anschlag schrumpfen lassen —
+  genau die Richtung, die eine IBAN wieder hervorkommen lässt.
+
+* **Ein mit den Pfeiltasten korrigierter Treffer galt nicht als Handarbeit.**
+  „Analysieren“ oder eine Buchungsliste warf ihn deshalb **ohne Rückfrage**
+  weg, während die vier anderen Wege zum selben Verlust fragen.
+
+* **Regionen aus einer Review-Datei, die neben der Seite liegen, zählten als
+  „wird geschwärzt“.** Sie tragen jetzt ein eigenes Wort in Liste und
+  Kopfzeile und gehen weder in die Konfliktauflösung noch in den Export. Die
+  Aussage steht damit *vor* der Arbeit statt als Warnung danach. Geklemmt wird
+  hier bewusst **nicht**: eine Review-Datei ist die Angabe der Nutzerin.
+
+* **Die Zahl an der Miniaturansicht zählte Zeilen statt Schwärzungen.** Eine
+  Seite, auf der ein Schutzeintrag alles blockiert und drei Handrechtecke
+  abgewählt sind, zeigte 5, obwohl dort nichts geschwärzt wird — und die
+  Miniaturspalte ist der Ort, an dem man am Ende prüft, ob nichts stehen
+  geblieben ist.
+
+* Ein Seitenwechsel mitten im Zug am Eckgriff veränderte blind die Region auf
+  der alten Seite, gerechnet mit der Geometrie der neuen. Bei zwei
+  deckungsgleichen Zeilen gewann außerdem die Schwärzungsart der *abgewählten*
+  — *ob* geschwärzt wurde stimmte, *wie* nicht. Und fünfzig Tastenanschläge
+  leerten den gesamten Rückgängig-Stapel.
+
+### Leistung
+
+Vier Stellen wuchsen schneller als die Eingabe. Alle vier sind an
+Messreihen belegt, und für jede ist nachgewiesen, dass sich am **Ergebnis**
+nichts ändert — bei einem Werkzeug, das entscheidet, welche Schwärzung
+wegfällt, wiegt das schwerer als die Geschwindigkeit.
+
+* **Die Konfliktauflösung war weiterhin quadratisch — bei genau der Anordnung,
+  die ein Kontoauszug erzeugt.** Der Streifenzug lief über die x-Achse;
+  Treffer mit derselben x-Spanne, die sich nur in y unterscheiden — eine IBAN
+  auf jeder Zeile, also eine Spalte — fielen nie aus dem Streifen. 100 000
+  Kandidaten kosteten **74,6 s**, jetzt 0,21 s. Der vorhandene Test wählte
+  ausgerechnet die Anordnung, die nicht wehtut; er prüft jetzt beide.
+
+  Die Suche stützt sich auf ein Gitter und darf sich nur deshalb auf die Zelle
+  des Mittelpunkts beschränken, weil beide Schwellen bei mindestens 50 %
+  liegen. Diese Kopplung ist als **Compile-Fehler** verankert, nicht als
+  Kommentar: wer eine Schwelle senkt, macht die Suche lautlos unvollständig.
+
+* **Ein oft platziertes Form-XObject kostete 4,4 ms Rechenzeit je zusätzlichem
+  Dateibyte.** Strom und Schriftverzeichnis wurden bei *jeder* Platzierung neu
+  ausgepackt; eine Platzierung sind sechs Byte in der Datei. 1 600
+  Platzierungen in einer 231-kB-Datei brauchten **126,5 s** — ohne Abbruch,
+  ohne Warnung, Rückgabewert 0, obwohl die README ausdrücklich Schutz gegen
+  diese Vervielfachung verspricht. Jetzt 0,65 s. Dieselbe Vervielfachung lag
+  bei weichen Masken, Kachelmustern und Erscheinungsströmen.
+
+* **Die Schwärzung wuchs quadratisch im Seiteninhalt.** Für jedes Rechteck
+  wurde eine Markierung über *alle* Zeichen der Textoperation angelegt, und
+  beide Größen wachsen mit dem Inhalt, weil Treffer aus Text entstehen. 25 600
+  Kandidaten auf einer Seite: **23,3 s**, jetzt 2,9 s und genau linear.
+
+* **Die Miniaturansichten kosteten je Einzelbild O(Seiten × Regionen).** Bei
+  1 600 Seiten und 96 000 Regionen 743 ms je Bild, jetzt 0,8 ms.
+
+### Prüfgrundlage
+
+* **Zwei Schwellen, die entscheiden, ob eine Schwärzung verworfen wird, hielt
+  kein Test.** Beide ließen sich auf einen falschen Wert setzen, ohne dass
+  einer von 640 Tests anschlug.
+* **Ein Test schlug auf grünem Code in einem von fünf Läufen fehl** — und
+  verdeckte dabei die halbe Suite, weil `cargo test` nach dem ersten roten
+  Testbinary abbricht.
+* Die Prüfung der Aufwandsschranken zählt jetzt ausgepackte Ströme und
+  geladene Schriftverzeichnisse statt Sekunden — deterministisch statt
+  lastabhängig.
+
+### Aufgeräumt
+
+Eine Zusicherung, die nichts zusicherte; eine Hülle um ein einzelnes Feld;
+ein `.max()`, das zwei Wahrheiten versöhnte, die nachweislich nie
+auseinandergehen; zwei Funktionen ohne Aufrufer; und zwei öffentlich
+einstellbare Felder, die keiner der 35 Aufrufer je gesetzt hat. Fünf Kopien
+der Frage „ist das ein Bild?“ sind zu einer geworden — die abweichende von
+ihnen löste eine indirekte Referenz auf und war unerreichbar; jetzt löst die
+eine Fassung sie überall auf, was einen echten Fall von „Deckungslücke
+gemeldet“ zu „Bild geschwärzt“ bewegt.
 
 ---
 
