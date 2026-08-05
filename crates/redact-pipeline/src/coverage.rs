@@ -151,6 +151,30 @@ pub const NOT_A_COVERAGE_GAP: &[(&str, &str)] = &[
         "eine Folge der Seitenzählung in der Regionsdatei, also einer Angabe \
          des Nutzers",
     ),
+    // Der Nachbar der Zeile darüber, und aus demselben Grund hier: bei
+    // `missing_page` stimmt die Seitenzahl nicht, hier die Koordinaten. Beide
+    // Male hat die Analyse das Dokument vollständig gelesen und ausgerechnet
+    // die Stelle, an der die Angabe nicht trägt, **benannt** — samt Seite.
+    //
+    // Warum das trotz seiner Nähe zu einem echten Leck kein Rückgabewert 3
+    // ist: die 3 beantwortet „hat das Werkzeug alles gesehen?“. Hier lautet
+    // die Antwort darauf ja; offen ist „hat meine Angabe gestimmt?“, und das
+    // ist eine andere Frage mit einer anderen Abhilfe (Koordinaten prüfen,
+    // nicht das Ergebnis von Hand nachlesen). Beide unter eine Zahl zu legen
+    // hieße, den Fällen, für die es die 3 gibt — ein Font ohne /ToUnicode, ein
+    // ungelesenes XObject —, ihre Unterscheidbarkeit zu nehmen.
+    //
+    // Verschwiegen wird nichts: der Fall steht als eigene Zahl in der
+    // Zusammenfassung („davon wirkungslos … neben der Seite“), als eigenes
+    // Feld `off_page` im Audit-Log, als eigener Befund je Region
+    // (`EntryEffect::OffPage`) und in der Warnung darüber mit Seitenzahl — und
+    // in der Oberfläche mit **denselben Worten** vor dem Export.
+    (
+        "liegen vollständig neben der Seite, auf der sie stehen sollen",
+        "eine Folge der Koordinaten in der Review- oder Regionsdatei, also \
+         einer Angabe des Nutzers; die Seite selbst wurde vollständig \
+         durchsucht und der Fall wird mit Seitenzahl benannt",
+    ),
 ];
 
 /// Heißt diese Warnung „für einen Teil des Dokuments kann ich nicht einstehen“?
@@ -288,6 +312,14 @@ mod tests {
             "1 von 3 Schwärzung(en) liegen auf einer Seite, die es in diesem Dokument \
              nicht gibt (Seite 27; das Dokument hat 3 Seite(n)). Dort wurde nichts \
              entfernt und nichts überdeckt — der Text steht unverändert in der Ausgabe.",
+        ),
+        (
+            false,
+            "1 von 3 Schwärzung(en) liegen vollständig neben der Seite, auf der sie \
+             stehen sollen (Seite 1). Dort kann kein Zeichen liegen und kein \
+             Deck-Rechteck sichtbar werden — der Text der Seite steht unverändert in \
+             der Ausgabe. Häufigste Ursache sind Koordinaten aus einer Review- oder \
+             Regionsdatei, die zu einem anders großen Blatt gehören.",
         ),
     ];
 

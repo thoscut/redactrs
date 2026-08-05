@@ -215,7 +215,8 @@ fn report(outcome: &Outcome) {
             println!("Schwärzungen:       {}", outcome.redactions);
             let unproven = outcome.covered_redactions
                 + outcome.degenerate_redactions
-                + outcome.missing_page_redactions;
+                + outcome.missing_page_redactions
+                + outcome.off_page_redactions;
             if unproven > 0 {
                 println!(
                     "  davon wirksam:      {} (Zeichen entfernt)",
@@ -240,6 +241,18 @@ fn report(outcome: &Outcome) {
                 println!(
                     "  davon wirkungslos:  {} (Seite gibt es in diesem Dokument nicht)",
                     outcome.missing_page_redactions
+                );
+            }
+            // Dieselben Worte wie die Kopfzeile der Oberfläche („n neben der
+            // Seite“), und an derselben Stelle wie ihr Nachbar darüber: die
+            // Seite gibt es, die Koordinaten treffen sie nur nicht. Bis zu
+            // dieser Runde lief der Fall in der Zeile „davon ohne Textfund“
+            // mit — also unter „Deck-Rechteck gezeichnet“, was neben dem Blatt
+            // nicht stimmt.
+            if outcome.off_page_redactions > 0 {
+                println!(
+                    "  davon wirkungslos:  {} (Rechteck liegt neben der Seite)",
+                    outcome.off_page_redactions
                 );
             }
             println!("Entfernte Zeichen:  {}", outcome.removed_glyphs);

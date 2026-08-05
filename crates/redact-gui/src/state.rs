@@ -1775,6 +1775,13 @@ impl AppState {
     /// Einträgen — so entstehen sie beim Laden einer Review-Datei mit doppeltem
     /// Eintrag — gewann damit die Art des **abgewählten**: die Oberfläche zeigte
     /// „Ersetzen [IBAN]“, exportiert wurde `Blackout`.
+    ///
+    /// Seit dieser Runde gibt es die zweite Stelle gar nicht mehr:
+    /// [`AppState::enabled_redactions`] liest die Entscheidung aus
+    /// [`AppState::hit_summary`], und die trifft sie je Zeile mit genau diesen
+    /// beiden Prüfungen (`is_blocking` ⇒ `Protecting`, `!enabled` ⇒
+    /// `Disabled`). Die Vorauswahl steht damit noch an **einer** Stelle —
+    /// hier, für [`AppState::conflict_input`].
     fn counts_for_resolution(entry: &AnnotatedRegion) -> bool {
         entry.is_blocking() || entry.enabled
     }
@@ -1833,14 +1840,33 @@ impl AppState {
     /// Einmal je Bild berechnen und weiterreichen — [`resolve_conflicts`] ist
     /// nicht teuer, aber quadratisch in der Trefferzahl.
     ///
-    /// Die Zuordnung geschieht der Reihe nach: `resolve_conflicts` behält bei
-    /// Duplikaten das **erste** Vorkommen, also findet auch hier das erste
-    /// Vorkommen seinen Eintrag im Ergebnis, das zweite nicht mehr.
+    /// ## Warum zwei Zeiger und keine Suche
+    ///
+    /// Die Zuordnung geschieht **der Reihe nach**, und sie darf das, weil
+    /// [`resolve_conflicts`] beide Listen in Eingabereihenfolge zurückgibt:
+    /// `redact` und `blocked` sind Teilfolgen der Kandidaten, in derselben
+    /// Ordnung. Genau diese Zusage hält
+    /// [`crate::state::rev7_tests::resolve_conflicts_haelt_die_eingabereihenfolge`]
+    /// — ohne sie wäre jeder Umbau von `dedup` ein stiller Datenfehler in der
+    /// Anzeige, und deshalb steht sie als Test da und nicht als Bemerkung.
+    ///
+    /// Vorher wurde für **jede** Zeile die passende Stelle im Ergebnis
+    /// *gesucht*: n Zeilen gegen n Ergebnisplätze, also n²/2 Vergleiche ganzer
+    /// [`Region`]-Werte. Bei 96 000 Regionen kostete allein diese Bilanz 1,6 s
+    /// — und sie läuft einmal je Bild, bei jedem Zug am Eckgriff und nach
+    /// jeder Analyse. Mit zwei Zeigern ist es **ein** Vergleich je Zeile
+    /// (gemessen 81 ms), bei sonst gleichem Ergebnis: verglichen wird dasselbe
+    /// wie zuvor, nur an genau einer Stelle statt in einer Schleife.
+    ///
+    /// Läuft ein Zeiger doch einmal daneben — weil die Reihenfolgezusage
+    /// gefallen ist —, dann fällt die Zeile auf [`HitOutcome::Duplicate`]
+    /// zurück, nicht auf „wird geschwärzt“. Der Test oben ist trotzdem der
+    /// Wächter: die vorsichtige Richtung ist kein Ersatz für die Zusage.
     pub fn hit_summary(&self) -> HitSummary {
         let resolution = self.resolution();
-        let mut redact: Vec<Option<&Region>> = resolution.redact.iter().map(Some).collect();
-        let mut blocked: Vec<Option<&BlockedRegion>> =
-            resolution.blocked.iter().map(Some).collect();
+        // Zeigt auf den nächsten noch nicht vergebenen Platz im Ergebnis.
+        let mut next_redact = 0usize;
+        let mut next_blocked = 0usize;
 
         let outcomes: Vec<HitOutcome> = self
             .regions
@@ -1870,17 +1896,23 @@ impl AppState {
                         None => HitOutcome::MissingPage,
                     };
                 }
-                if let Some(slot) = redact
-                    .iter_mut()
-                    .find(|slot| slot.is_some_and(|r| *r == entry.region))
+                // Genau **ein** Vergleich, mit demselben Gleichheitsbegriff
+                // wie zuvor: der Platz, der dieser Zeile zusteht, ist der
+                // vorderste noch freie.
+                if resolution
+                    .redact
+                    .get(next_redact)
+                    .is_some_and(|r| *r == entry.region)
                 {
-                    *slot = None;
+                    next_redact += 1;
                     return HitOutcome::Redacted;
                 }
-                if let Some(slot) = blocked.iter_mut().find(|slot| {
-                    slot.is_some_and(|b| b.page == entry.region.page && b.rect == entry.region.rect)
-                }) {
-                    *slot = None;
+                if resolution
+                    .blocked
+                    .get(next_blocked)
+                    .is_some_and(|b| b.page == entry.region.page && b.rect == entry.region.rect)
+                {
+                    next_blocked += 1;
                     return HitOutcome::Blocked;
                 }
                 HitOutcome::Duplicate
@@ -1892,7 +1924,13 @@ impl AppState {
         HitSummary {
             found: outcomes.len() - protecting,
             protecting,
-            redacted: resolution.redact.len(),
+            // **Eine** Quelle, nicht zwei. `found`, `protecting` und
+            // `off_page` kamen schon immer aus `outcomes`, `redacted` allein
+            // aus `resolution.redact.len()` — und beide werden nebeneinander
+            // gelesen: die Kopfzeile nahm `redacted`, Miniaturspalte und
+            // Betrachter nehmen `outcomes`. Zwei Quellen für dieselbe Zahl
+            // können nur auseinanderlaufen; abweichen darf hier nichts.
+            redacted: count(HitOutcome::Redacted),
             off_page: count(HitOutcome::OffPage),
             missing_page: count(HitOutcome::MissingPage),
             outcomes,
@@ -1961,27 +1999,34 @@ impl AppState {
     /// mindestens 50 % überdeckt wird. Manuelle Regionen überstimmen die
     /// Negativliste (das entscheidet `resolve_conflicts`).
     ///
-    /// **Die Schwärzungsart kommt aus derselben Vorauswahl**, die auch in die
-    /// Konfliktauflösung ging ([`AppState::counts_for_resolution`]). Ohne sie
-    /// entschied bei zwei deckungsgleichen Zeilen die **erste** — auch wenn sie
-    /// abgewählt war und die andere eine andere Art trug. *Ob* geschwärzt wird,
-    /// stimmte dabei; *wie*, nicht.
+    /// **Die Schwärzungsart kommt von der Zeile selbst.** Sie wurde früher
+    /// gesucht: für jede Region der Auflösung ein Durchlauf durch alle Zeilen,
+    /// bis eine gleich war — n²/2 Vergleiche ganzer [`Region`]-Werte samt
+    /// ihrem `Option<String>`, gemessen 25,0 s bei 96 000 Regionen. Die Suche
+    /// beantwortete dabei genau die Frage, die [`AppState::hit_summary`]
+    /// ohnehin schon für **jede** Zeile beantwortet hat: wird sie geschwärzt?
+    ///
+    /// Also wird sie hier gelesen statt zum zweiten Mal gestellt. Damit fallen
+    /// weg: die Suche, der Filter über [`AppState::counts_for_resolution`] an
+    /// dieser Stelle (`hit_summary` prüft dasselbe schon, nur je Zeile
+    /// einmal), der Rückfall auf [`Config::action`] für eine Region ohne Zeile
+    /// — den es nicht geben kann, weil jede Region der Auflösung aus einer
+    /// Zeile stammt — und **ein ganzer Lauf von `resolve_conflicts`**.
+    ///
+    /// Die Reihenfolge bleibt dieselbe: `outcomes` steht in Zeilenreihenfolge,
+    /// und `resolution.redact` ist deren Teilfolge (siehe `hit_summary`).
+    ///
+    /// Was die frühere Fassung damit behielt: bei zwei deckungsgleichen Zeilen
+    /// entschied vor Befund B5 die **erste** — auch wenn sie abgewählt war und
+    /// die andere eine andere Art trug. Jetzt entscheidet die Zeile, der die
+    /// Bilanz die Schwärzung zugeschrieben hat, und das ist dieselbe.
     pub fn enabled_redactions(&self) -> Vec<Redaction> {
-        self.resolution()
-            .redact
-            .into_iter()
-            .map(|region| {
-                let action = self
-                    .regions
-                    .iter()
-                    .filter(|a| Self::counts_for_resolution(a))
-                    .find(|a| a.region == region)
-                    .map(|a| a.action.clone())
-                    // Ohne Zeile in der Liste gilt die Schwärzungsart des
-                    // Laufs — dieselbe, die `redact_pipeline::run` benutzt.
-                    .unwrap_or_else(|| self.config.action.clone());
-                Redaction::new(region, action)
-            })
+        let summary = self.hit_summary();
+        self.regions
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| summary.outcome(*index).is_redacted())
+            .map(|(_, entry)| Redaction::new(entry.region.clone(), entry.action.clone()))
             .collect()
     }
 
@@ -2314,6 +2359,14 @@ fn page_rotation(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
     }
     0
 }
+
+// Prüfrunde 7: die beiden Quadratiken in der Trefferbilanz und die
+// Reihenfolgezusage, auf der ihre Beseitigung steht. Eigene Datei, aber
+// **Kindmodul von `state`** — sie fährt `resolution`, `is_off_page` und die
+// Bilanz unmittelbar an.
+#[cfg(test)]
+#[path = "rev7_tests.rs"]
+pub mod rev7_tests;
 
 #[cfg(test)]
 mod tests {

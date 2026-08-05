@@ -197,24 +197,70 @@ pub enum EntryEffect {
     /// dorthin ist die verwechselte Zählweise: in jeder JSON-Datei ist die
     /// erste Seite `0`, nur der Fließtext sagt „Seite 1“.
     MissingPage,
+    /// Das Rechteck liegt **vollständig neben dem Blatt** seiner Seite.
+    ///
+    /// Der Nachbarfall von [`EntryEffect::MissingPage`]: die Seite gibt es, die
+    /// Koordinaten treffen sie nur nicht. Kein Zeichen kann darunter liegen,
+    /// und was außerhalb der MediaBox gezeichnet wird, sieht kein Betrachter —
+    /// die Schwärzung ist wirkungslos, bevor irgendetwas gemessen wurde.
+    ///
+    /// ## Warum das ein eigener Befund ist
+    ///
+    /// **Es war einer — aber nur in der Oberfläche.** Dort heißt er
+    /// `HitOutcome::OffPage`, wird *vor* dem Export gesagt und aus der Zahl
+    /// „n werden geschwärzt“ herausgerechnet. Die Kommandozeile kannte ihn
+    /// nicht: dasselbe Rechteck ging dort als geplante Schwärzung durch, wurde
+    /// als [`EntryEffect::Covered`] verbucht („Deck-Rechteck gezeichnet, kein
+    /// Zeichen entfernt“) und kam als Warnung **hinterher**. Genau die
+    /// Divergenz zwischen beiden Programmen, die dieses Crate abstellen soll.
+    ///
+    /// Und `Covered` war dabei sachlich falsch: dort ist kein Deck-Rechteck
+    /// gezeichnet worden, das jemand sähe. `Covered` heißt „über einer Grafik
+    /// steht eben kein Text“ und ist häufig richtig; diesen Fall darunter zu
+    /// mischen machte den häufigen Befund unbrauchbar für den seltenen.
+    ///
+    /// ## Warum er **vor** der Messung entschieden wird
+    ///
+    /// Weil er sich vor der Messung entscheiden lässt: er hängt an den
+    /// Koordinaten und an der MediaBox, nicht am Ergebnis. Deshalb steht er in
+    /// [`EntryEffect::of`] noch vor der Frage nach den entfernten Zeichen —
+    /// dieselbe Reihenfolge, in der die Oberfläche ihn stellt.
+    OffPage,
 }
 
 impl EntryEffect {
     /// Bewertet eine Region gegen das, was gemessen wurde.
     ///
-    /// `pages` ist die Seitenzahl des verarbeiteten Dokuments, `removed_glyphs`
-    /// der Eintrag dieser Region in
+    /// `sheets` sind die geprüften MediaBoxen des verarbeiteten Dokuments (eine
+    /// je Seite, siehe [`redact_pdf::document::sane_page_boxes`]);
+    /// `removed_glyphs` ist der Eintrag dieser Region in
     /// [`redact_pdf::RedactionReport::per_redaction`].
     ///
-    /// Die Reihenfolge der Prüfungen ist Absicht: eine Seite, die es nicht
-    /// gibt, macht jede weitere Frage gegenstandslos — dort ist kein Rechteck
-    /// zu klein und keines daneben, dort geschieht gar nichts.
-    pub fn of(redaction: &Redaction, padding: f64, pages: usize, removed_glyphs: usize) -> Self {
-        if redaction.region.page >= pages {
+    /// Die Reihenfolge der Prüfungen ist Absicht:
+    ///
+    /// 1. eine Seite, die es nicht gibt, macht jede weitere Frage
+    ///    gegenstandslos — dort ist kein Rechteck zu klein und keines daneben,
+    ///    dort geschieht gar nichts;
+    /// 2. ein Rechteck, von dem `--padding` nichts übrig lässt, wird von
+    ///    [`redact_pdf::PdfRedactor`] übersprungen — auch das entscheidet sich
+    ///    ohne Messung;
+    /// 3. ein Rechteck neben dem Blatt kann kein Zeichen treffen. **Vor** der
+    ///    Frage nach den entfernten Zeichen, weil das der Grund ist und nicht
+    ///    die Folge: „kein Zeichen entfernt“ wäre hier eine richtige Zahl mit
+    ///    der falschen Erklärung.
+    ///
+    /// Die ersten drei brauchen den Bericht der Schwärzung überhaupt nicht —
+    /// sie stünden auch fest, bevor irgendetwas geschwärzt wurde. Genau
+    /// deshalb kann die Oberfläche dieselbe Auskunft **vor** dem Export geben.
+    pub fn of(redaction: &Redaction, padding: f64, sheets: &[Rect], removed_glyphs: usize) -> Self {
+        let Some(sheet) = sheets.get(redaction.region.page) else {
             return Self::MissingPage;
-        }
+        };
         if redaction.region.rect.expanded(padding).is_empty() {
             return Self::Degenerate;
+        }
+        if beside_the_sheet(&redaction.region.rect, sheet) {
+            return Self::OffPage;
         }
         if removed_glyphs > 0 {
             Self::Applied
@@ -222,6 +268,25 @@ impl EntryEffect {
             Self::Covered
         }
     }
+}
+
+/// Liegt `rect` vollständig neben `sheet`?
+///
+/// **Dieselbe Rechnung wie `redact_gui::AppState::clamp_to_page`**, und das ist
+/// der Punkt: was dort nichts übrig lässt, kann auch hier nichts schwärzen.
+/// Beide Programme müssen zu demselben Rechteck dasselbe sagen, sonst ist die
+/// Divergenz nur an eine andere Stelle gewandert.
+///
+/// Gerechnet wird auf dem **ungepolsterten** Rechteck: `--padding` vergrößert
+/// oder verkleinert die Fläche, verschiebt sie aber nicht auf die Seite. Ein
+/// Rechteck, das erst durch eine großzügige Polsterung das Blatt berührt,
+/// träfe dort ohnehin keinen Text, den die Analyse gefunden hätte.
+fn beside_the_sheet(rect: &Rect, sheet: &Rect) -> bool {
+    let rect = rect.normalized();
+    let sheet = sheet.normalized();
+    let (x0, x1) = (rect.ll.x.max(sheet.ll.x), rect.ur.x.min(sheet.ur.x));
+    let (y0, y1) = (rect.ll.y.max(sheet.ll.y), rect.ur.y.min(sheet.ur.y));
+    !(x1 > x0 && y1 > y0)
 }
 
 /// Der Befund je Region samt Summen — die eine Quelle für Log, Zusammenfassung
@@ -248,9 +313,17 @@ pub struct Effects {
     pub degenerate: usize,
     /// Zahl der Regionen mit [`EntryEffect::MissingPage`].
     pub missing_page: usize,
+    /// Zahl der Regionen mit [`EntryEffect::OffPage`].
+    pub off_page: usize,
     /// Die angesprochenen, aber nicht vorhandenen Seiten — 0-basiert,
     /// aufsteigend, ohne Dubletten.
     pub missing_pages: Vec<usize>,
+    /// Die Seiten, neben denen ein Rechteck lag — 0-basiert, aufsteigend, ohne
+    /// Dubletten.
+    ///
+    /// Aus demselben Grund wie [`Effects::missing_pages`]: die Zahl allein
+    /// sagt nicht, wo nachzusehen ist.
+    pub off_page_pages: Vec<usize>,
 }
 
 impl Effects {
@@ -262,7 +335,7 @@ impl Effects {
     pub fn measure(
         redactions: &[Redaction],
         padding: f64,
-        pages: usize,
+        sheets: &[Rect],
         report: &RedactionReport,
     ) -> Self {
         let removed_glyphs: Vec<usize> = (0..redactions.len())
@@ -271,12 +344,12 @@ impl Effects {
         let per_entry: Vec<EntryEffect> = redactions
             .iter()
             .zip(&removed_glyphs)
-            .map(|(r, removed)| EntryEffect::of(r, padding, pages, *removed))
+            .map(|(r, removed)| EntryEffect::of(r, padding, sheets, *removed))
             .collect();
 
         let mut effects = Self {
             padding,
-            pages,
+            pages: sheets.len(),
             ..Self::default()
         };
         for (redaction, effect) in redactions.iter().zip(&per_entry) {
@@ -284,6 +357,13 @@ impl Effects {
                 EntryEffect::Applied => effects.applied += 1,
                 EntryEffect::Covered => effects.covered += 1,
                 EntryEffect::Degenerate => effects.degenerate += 1,
+                EntryEffect::OffPage => {
+                    effects.off_page += 1;
+                    let page = redaction.region.page;
+                    if let Err(at) = effects.off_page_pages.binary_search(&page) {
+                        effects.off_page_pages.insert(at, page);
+                    }
+                }
                 EntryEffect::MissingPage => {
                     effects.missing_page += 1;
                     let page = redaction.region.page;
@@ -304,21 +384,32 @@ impl Effects {
     }
 
     /// Regionen, bei denen nachweislich gar nichts geschehen ist.
+    ///
+    /// [`Effects::off_page`] gehört dazu und nicht zu [`Effects::covered`]:
+    /// neben dem Blatt wird kein Deck-Rechteck sichtbar und kein Zeichen
+    /// getroffen. Das ist dieselbe Einordnung, die die Oberfläche mit
+    /// `HitOutcome::OffPage` trifft — dort fällt der Fall aus „n werden
+    /// geschwärzt“ heraus.
     pub fn ineffective(&self) -> usize {
-        self.degenerate + self.missing_page
+        self.degenerate + self.missing_page + self.off_page
     }
 
     /// Warnungen, die sich aus dem *Ergebnis* eines Laufs ergeben.
     ///
-    /// Vier Fälle, die stillschweigend als Erfolg durchgingen:
+    /// Fünf Fälle, die stillschweigend als Erfolg durchgingen:
     ///
     /// 1. Eine Region auf einer Seite, die es nicht gibt. Sie wird nie
     ///    angefasst; die Zusammenfassung meldete trotzdem „Schwärzungen: 1“.
     /// 2. Eine Region, die nach `--padding` leer ist. Sie wird übersprungen.
-    /// 3. Eine Region, die kein Zeichen entfernt hat. Das kann richtig sein
+    /// 3. Eine Region, die vollständig **neben** ihrem Blatt liegt. Sie kann
+    ///    kein Zeichen treffen, und was außerhalb der MediaBox gezeichnet
+    ///    wird, sieht niemand. Bis zu dieser Runde lief der Fall unter Nummer
+    ///    4 mit — mit deren Wortlaut („Deck-Rechteck gezeichnet“), der hier
+    ///    schlicht nicht stimmt. Siehe [`EntryEffect::OffPage`].
+    /// 4. Eine Region, die kein Zeichen entfernt hat. Das kann richtig sein
     ///    (Grafik, Rasterbild), ist es aber nicht zwingend — und der
     ///    Unterschied entscheidet, ob das Geheimnis noch dasteht.
-    /// 4. Überschriebene Bilder. Sie werden neu kodiert — pixelgenau
+    /// 5. Überschriebene Bilder. Sie werden neu kodiert — pixelgenau
     ///    verlustfrei, aber nicht mehr in der ursprünglichen Kodierung. Wer
     ///    eine deutlich größere Ausgabedatei vorfindet, soll wissen, woher sie
     ///    kommt.
@@ -352,6 +443,29 @@ impl Effects {
                  Rechteck und konnten nichts entfernen. Der Text steht unverändert in der \
                  Ausgabe. Ein negatives Padding verkleinert jeden Bereich.",
                 self.degenerate, self.padding
+            ));
+        }
+        // Vor dem Nachbarn darunter und mit eigenem Wortlaut: „Deck-Rechteck
+        // gezeichnet, aber kein Zeichen entfernt“ wäre hier eine richtige Zahl
+        // mit der falschen Erklärung — neben dem Blatt ist überhaupt nichts
+        // gezeichnet worden, was jemand sähe. Dieselben Worte wie in der
+        // Oberfläche („neben der Seite“), damit beide Wege wiedererkennbar
+        // dasselbe sagen.
+        if self.off_page > 0 {
+            let list = self
+                .off_page_pages
+                .iter()
+                .map(|p| (p + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            warnings.push(format!(
+                "{} von {total} Schwärzung(en) liegen vollständig neben der Seite, auf \
+                 der sie stehen sollen (Seite {list}). Dort kann kein Zeichen liegen und \
+                 kein Deck-Rechteck sichtbar werden — der Text der Seite steht \
+                 unverändert in der Ausgabe. Häufigste Ursache sind Koordinaten aus \
+                 einer Review- oder Regionsdatei, die zu einem anders großen Blatt \
+                 gehören.",
+                self.off_page
             ));
         }
         if self.covered > 0 {
@@ -418,6 +532,15 @@ pub struct EffectRecord {
     /// Welche Seiten das waren (0-basiert).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_pages: Vec<usize>,
+    /// Davon vollständig neben ihrem Blatt — wirkungslos.
+    ///
+    /// Siehe [`EntryEffect::OffPage`]. `#[serde(default)]`, damit ein Log aus
+    /// einer früheren Fassung weiter lesbar bleibt.
+    #[serde(default)]
+    pub off_page: usize,
+    /// Welche Seiten das waren (0-basiert).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub off_page_pages: Vec<usize>,
     /// Tatsächlich aus den Content-Streams entfernte Zeichen.
     pub removed_glyphs: usize,
     /// Tatsächlich gezeichnete Deck-Rechtecke.
@@ -573,6 +696,8 @@ impl AuditLog {
                 degenerate: effects.degenerate,
                 missing_page: effects.missing_page,
                 missing_pages: effects.missing_pages.clone(),
+                off_page: effects.off_page,
+                off_page_pages: effects.off_page_pages.clone(),
                 removed_glyphs: applied.redaction.removed_glyphs,
                 drawn_rects: applied.redaction.drawn_rects,
                 removed_annotations: applied.redaction.removed_annotations,
@@ -644,6 +769,14 @@ mod tests {
         )
     }
 
+    /// `n` A4-Blätter — die Blattgrößen, gegen die die Bewertung rechnet.
+    ///
+    /// Die Rechtecke der Testregionen liegen alle innerhalb davon; wer eines
+    /// danebenlegen will, nimmt Koordinaten jenseits von A4.
+    fn sheets(n: usize) -> Vec<Rect> {
+        vec![Rect::new(0.0, 0.0, 595.0, 842.0); n]
+    }
+
     fn stripped_info() -> MetadataReport {
         MetadataReport {
             info_removed: true,
@@ -695,7 +828,7 @@ mod tests {
         let output = dir.join("out.pdf");
         std::fs::write(&input, b"a").unwrap();
         std::fs::write(&output, b"b").unwrap();
-        let effects = Effects::measure(redactions, padding, pages, report);
+        let effects = Effects::measure(redactions, padding, &sheets(pages), report);
         let warnings = effects.warnings(report);
         let log = AuditLog::build(
             &input,
@@ -871,23 +1004,26 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// Die vier Befunde sind vier verschiedene, und die Summe stimmt.
+    /// Die fünf Befunde sind fünf verschiedene, und die Summe stimmt.
     #[test]
     fn every_region_is_judged_on_its_own_measurement() {
         let applied = iban_redaction();
         let covered = iban_redaction();
         let mut missing = iban_redaction();
         missing.region.page = 7;
-        let redactions = [applied, covered, missing];
+        // Weit rechts neben dem A4-Blatt aus `sheets`.
+        let mut beside = iban_redaction();
+        beside.region.rect = Rect::new(900.0, 2.0, 950.0, 4.0);
+        let redactions = [applied, covered, missing, beside];
 
         let effects = Effects::measure(
             &redactions,
             1.0,
-            2,
+            &sheets(2),
             &RedactionReport {
                 removed_glyphs: 22,
                 drawn_rects: 2,
-                per_redaction: vec![22, 0, 0],
+                per_redaction: vec![22, 0, 0, 0],
                 ..Default::default()
             },
         );
@@ -896,18 +1032,108 @@ mod tests {
             vec![
                 EntryEffect::Applied,
                 EntryEffect::Covered,
-                EntryEffect::MissingPage
+                EntryEffect::MissingPage,
+                EntryEffect::OffPage,
             ]
         );
         assert_eq!(effects.applied, 1);
         assert_eq!(effects.covered, 1);
         assert_eq!(effects.missing_page, 1);
-        assert_eq!(effects.ineffective(), 1);
+        assert_eq!(effects.off_page, 1);
+        assert_eq!(effects.ineffective(), 2);
         assert_eq!(
-            effects.applied + effects.covered + effects.degenerate + effects.missing_page,
+            effects.applied
+                + effects.covered
+                + effects.degenerate
+                + effects.missing_page
+                + effects.off_page,
             effects.requested()
         );
-        assert_eq!(effects.removed_glyphs, vec![22, 0, 0]);
+        assert_eq!(effects.removed_glyphs, vec![22, 0, 0, 0]);
+    }
+
+    /// **Ein Rechteck neben dem Blatt ist nicht „überdeckt“.**
+    ///
+    /// Der Befund, den nur die Oberfläche kannte. Bis zu dieser Runde lief er
+    /// hier als [`EntryEffect::Covered`] mit — mit der Erklärung „Deck-Rechteck
+    /// gezeichnet, aber kein Zeichen entfernt“, die über einer Grafik der
+    /// Normalfall ist und hier schlicht nicht stimmt.
+    ///
+    /// Beides steht als Zusicherung da: der Befund **und** dass es nicht der
+    /// alte ist. Nimmt man die `OffPage`-Prüfung aus [`EntryEffect::of`]
+    /// heraus, wird dieser Test rot.
+    #[test]
+    fn a_rect_beside_the_sheet_is_off_page_and_not_covered() {
+        let mut beside = iban_redaction();
+        beside.region.rect = Rect::new(900.0, 100.0, 950.0, 120.0);
+        let effects = Effects::measure(&[beside], 1.0, &sheets(1), &report_with(&[0]));
+
+        assert_eq!(effects.per_entry, vec![EntryEffect::OffPage]);
+        assert_eq!(effects.off_page, 1);
+        assert_eq!(effects.covered, 0, "der Fall läuft wieder als „überdeckt“");
+        assert_eq!(effects.applied, 0);
+        assert_eq!(effects.off_page_pages, vec![0]);
+        assert_eq!(effects.ineffective(), 1);
+
+        // Die Warnung nennt den Fall und die Seite — im Fließtext ab 1.
+        let warnings = effects.warnings(&report_with(&[0]));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("neben der Seite, auf der sie stehen sollen"),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("(Seite 1)"), "{warnings:?}");
+        assert!(
+            !warnings[0].contains("Deck-Rechteck gezeichnet, aber"),
+            "der falsche Satz ist zurück: {warnings:?}"
+        );
+        // Und die Einordnung: eine Angabe des Nutzers, keine Deckungslücke.
+        assert!(!crate::is_coverage_gap(&warnings[0]), "{warnings:?}");
+    }
+
+    /// Ein Rechteck, das das Blatt **berührt**, ist keins daneben.
+    ///
+    /// Die Gegenprobe zum Test darüber: ohne sie wäre er auch dann grün, wenn
+    /// jedes Rechteck als „neben der Seite“ gälte. Geprüft wird die Kante — ein
+    /// Punkt Überlappung genügt, genau wie in
+    /// `redact_gui::AppState::clamp_to_page`.
+    #[test]
+    fn a_rect_that_still_touches_the_sheet_is_not_off_page() {
+        // Das Blatt endet bei x = 595; dieses Rechteck ragt hinein.
+        let mut kante = iban_redaction();
+        kante.region.rect = Rect::new(594.0, 100.0, 650.0, 120.0);
+        let effects = Effects::measure(&[kante], 1.0, &sheets(1), &report_with(&[3]));
+        assert_eq!(effects.per_entry, vec![EntryEffect::Applied]);
+        assert_eq!(effects.off_page, 0);
+
+        // Und genau einen Punkt weiter draußen ist es doch daneben.
+        let mut daneben = iban_redaction();
+        daneben.region.rect = Rect::new(595.0, 100.0, 650.0, 120.0);
+        let effects = Effects::measure(&[daneben], 1.0, &sheets(1), &report_with(&[0]));
+        assert_eq!(effects.per_entry, vec![EntryEffect::OffPage]);
+    }
+
+    /// Die Reihenfolge der Prüfungen: eine Seite, die es nicht gibt, schlägt
+    /// „neben dem Blatt“ — dort gibt es gar kein Blatt, neben dem etwas läge.
+    #[test]
+    fn a_missing_page_wins_over_a_rect_beside_the_sheet() {
+        let mut region = iban_redaction();
+        region.region.page = 9;
+        region.region.rect = Rect::new(900.0, 100.0, 950.0, 120.0);
+        let effects = Effects::measure(&[region], 1.0, &sheets(1), &report_with(&[0]));
+        assert_eq!(effects.per_entry, vec![EntryEffect::MissingPage]);
+        assert_eq!(effects.off_page, 0);
+    }
+
+    /// Und `--padding`, das ein Rechteck leert, schlägt beides: dort wird
+    /// überhaupt nichts angefasst.
+    #[test]
+    fn a_degenerate_rect_wins_over_a_rect_beside_the_sheet() {
+        let mut region = iban_redaction();
+        region.region.rect = Rect::new(900.0, 100.0, 950.0, 120.0);
+        let effects = Effects::measure(&[region], -100.0, &sheets(1), &report_with(&[0]));
+        assert_eq!(effects.per_entry, vec![EntryEffect::Degenerate]);
+        assert_eq!(effects.off_page, 0);
     }
 
     /// Eine Seite, die es nicht gibt, schlägt jede weitere Bewertung: dort ist
@@ -916,14 +1142,14 @@ mod tests {
     fn a_missing_page_wins_over_a_degenerate_rect() {
         let mut region = iban_redaction();
         region.region.page = 9;
-        let effects = Effects::measure(&[region], -100.0, 1, &RedactionReport::default());
+        let effects = Effects::measure(&[region], -100.0, &sheets(1), &RedactionReport::default());
         assert_eq!(effects.per_entry, vec![EntryEffect::MissingPage]);
         assert_eq!(effects.degenerate, 0);
     }
 
     #[test]
     fn an_effective_run_produces_no_warning() {
-        let effects = Effects::measure(&[iban_redaction()], 1.0, 1, &report_with(&[26]));
+        let effects = Effects::measure(&[iban_redaction()], 1.0, &sheets(1), &report_with(&[26]));
         assert!(effects.warnings(&report_with(&[26])).is_empty());
     }
 
@@ -938,7 +1164,7 @@ mod tests {
             per_redaction: vec![0],
             ..Default::default()
         };
-        let effects = Effects::measure(&[iban_redaction()], 1.0, 1, &report);
+        let effects = Effects::measure(&[iban_redaction()], 1.0, &sheets(1), &report);
         let warnings = effects.warnings(&report);
         // Zwei Befunde: die Region hat kein Zeichen entfernt (über einem Bild
         // der Normalfall — und genau das steht auch dabei), und das Bild wurde

@@ -41,8 +41,8 @@ use std::path::{Path, PathBuf};
 use lopdf::{Document, LoadOptions};
 use redact_booking::{BookingMatcher, CsvBookingLoader};
 use redact_core::{
-    output_path_with_suffix, resolve_conflicts, sibling_path, Action, BlockedRegion, RedactError,
-    Redaction, Region, Result, ReviewFile, ReviewInput, TextRun, REVIEW_SUFFIX,
+    output_path_with_suffix, resolve_conflicts, sibling_path, Action, BlockedRegion, Rect,
+    RedactError, Redaction, Region, Result, ReviewFile, ReviewInput, TextRun, REVIEW_SUFFIX,
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::document::{
@@ -390,6 +390,16 @@ pub struct Outcome {
     /// Davon auf einer Seite, die es im Dokument nicht gibt — dort ist
     /// überhaupt nichts geschehen.
     pub missing_page_redactions: usize,
+    /// Davon vollständig **neben** ihrem Blatt — dort kann kein Zeichen liegen
+    /// und kein Deck-Rechteck sichtbar werden.
+    ///
+    /// Der Nachbarfall von [`Outcome::missing_page_redactions`], und die Zahl,
+    /// die die grafische Oberfläche unter dem Namen `HitSummary::off_page`
+    /// schon vor dem Export nennt. Bis zu dieser Runde gab es sie hier nicht:
+    /// derselbe Fall lief als [`Outcome::covered_redactions`] mit, also unter
+    /// „Deck-Rechteck gezeichnet“ — was neben dem Blatt nicht stimmt. Siehe
+    /// [`audit::EntryEffect::OffPage`].
+    pub off_page_redactions: usize,
     pub blocked: usize,
     pub removed_glyphs: usize,
     pub drawn_rects: usize,
@@ -843,10 +853,20 @@ pub fn apply(
         detection_notice(config).into_iter().collect(),
     );
 
-    // Vor der Schwärzung gelesen: danach ist es dieselbe Zahl, aber die Frage
-    // „gibt es diese Seite?“ gehört zu dem Dokument, auf das die Regionen
-    // gerechnet wurden.
-    let pages = redact_pdf::page_count(doc);
+    // Vor der Schwärzung gelesen: danach sind es dieselben Blätter, aber die
+    // Fragen „gibt es diese Seite?“ und „liegt das Rechteck darauf?“ gehören zu
+    // dem Dokument, auf das die Regionen gerechnet wurden.
+    //
+    // **Die geprüften MediaBoxen**, nicht die Rohangaben aus der Datei: eine
+    // Seite mit `/MediaBox [0 0 0 0]` wird von `redact-render` auf A4
+    // gezeichnet, und die Oberfläche rechnet über
+    // `redact_pdf::document::sane_page_boxes` genauso. Nähme diese Stelle die
+    // Rohangabe, fiele auf so einer Seite **jedes** Rechteck als „neben dem
+    // Blatt“ heraus — dieselbe Divergenz, nur andersherum.
+    let sheets: Vec<Rect> = redact_pdf::document::sane_page_boxes(doc)
+        .into_iter()
+        .map(|box_| box_.rect)
+        .collect();
 
     let output = plan_outputs(config)?.ok_or_else(|| {
         RedactError::Config("ohne --review muss das Ausgabeziel feststehen".into())
@@ -876,11 +896,12 @@ pub fn apply(
     // einer nicht vorhandenen Seite wird nie angefasst, und eine Region mit
     // gültigem Rechteck kann trotzdem kein Zeichen treffen. Keiner dieser
     // Fälle ist eine ausgeführte Schwärzung.
-    let effects = Effects::measure(redactions, config.padding, pages, &report);
+    let effects = Effects::measure(redactions, config.padding, &sheets, &report);
     outcome.effective_redactions = effects.applied;
     outcome.covered_redactions = effects.covered;
     outcome.degenerate_redactions = effects.degenerate;
     outcome.missing_page_redactions = effects.missing_page;
+    outcome.off_page_redactions = effects.off_page;
     push_warnings(&mut outcome.warnings, effects.warnings(&report));
 
     // 10. Metadaten strippen.
