@@ -38,6 +38,9 @@ pub struct FontInfo {
     pub ascent: f64,
     /// Unterkante unter der Grundlinie (negativ).
     pub descent: f64,
+    /// Wie viele Tabelleneinträge diese Schrift auf dem Haufen hält — siehe
+    /// [`FontInfo::weight`].
+    table_entries: usize,
 }
 
 impl Default for FontInfo {
@@ -50,11 +53,31 @@ impl Default for FontInfo {
             explicit_default_width: false,
             ascent: DEFAULT_ASCENT,
             descent: DEFAULT_DESCENT,
+            table_entries: 0,
         }
     }
 }
 
 impl FontInfo {
+    /// Der Platzbedarf dieser Schrift, gezählt in **Tabelleneinträgen**.
+    ///
+    /// Der Interpreter merkt sich geladene Schriften, und eine Decke, die
+    /// *Schriften* oder *Verzeichnisse* zählt, zählt die falsche Einheit: eine
+    /// Helvetica ohne `/ToUnicode` kostet ein paar hundert Byte, eine
+    /// CJK-Schrift mit voller Zuordnung ein paar Megabyte. Hier steht deshalb
+    /// die Größe, die von außen sonst nicht ablesbar ist — die Summe aller
+    /// Einträge in `/Widths` bzw. `/W`, `/ToUnicode`, der hergeleiteten
+    /// CID-Zuordnung und der `/Differences`.
+    ///
+    /// Es ist bewusst kein Byte-Wert: Bytes hingen an Allokator und Zielsystem,
+    /// Einträge hängen an der Datei. Gemessen (Release) kostet ein Eintrag der
+    /// `/ToUnicode`-Zuordnung rund 100 Byte, ein `/Widths`-Eintrag rund 40 —
+    /// eine Decke in Einträgen ist damit oben durch etwa 100 Byte je Eintrag
+    /// abgeschätzt.
+    pub fn weight(&self) -> usize {
+        self.table_entries
+    }
+
     /// Breite eines Glyphen in Text-Space-Einheiten (1.0 = Schriftgröße).
     ///
     /// Reihenfolge: `/Widths` bzw. `/W` — dann eine im Dokument **erklärte**
@@ -92,16 +115,30 @@ impl FontInfo {
     }
 }
 
-/// Lädt alle Fonts aus einem `/Resources`-Dictionary.
+/// Das `/Font`-Verzeichnis eines `/Resources`, aufgelöst.
+///
+/// Getrennt von [`fonts_from_resources`], weil der Interpreter zwischen Name
+/// und geladener Schrift noch seinen Zwischenspeicher schiebt: er will die
+/// Objekt-Id jedes Schrifteintrags sehen, um dieselbe Schrift nicht zweimal zu
+/// parsen (siehe `content::Budget::font_object`).
+pub fn font_dictionary<'a>(
+    doc: &'a Document,
+    resources: Option<&'a Dictionary>,
+) -> Option<&'a Dictionary> {
+    resolve_dict(doc, resources?.get(b"Font").ok()).ok()
+}
+
+/// Lädt alle Fonts aus einem `/Resources`-Dictionary — ohne Zwischenspeicher.
+///
+/// Der Interpreter benutzt diesen Weg **nicht**; er geht über
+/// [`font_dictionary`] und lädt je Objekt-Id einmal. Hier steht der einfache
+/// Weg für Aufrufer ohne Aufwandskonto.
 pub fn fonts_from_resources(
     doc: &Document,
     resources: Option<&Dictionary>,
 ) -> BTreeMap<Vec<u8>, FontInfo> {
     let mut out = BTreeMap::new();
-    let Some(resources) = resources else {
-        return out;
-    };
-    let Ok(font_dict) = resolve_dict(doc, resources.get(b"Font").ok()) else {
+    let Some(font_dict) = font_dictionary(doc, resources) else {
         return out;
     };
     for (name, obj) in font_dict.iter() {
@@ -184,6 +221,7 @@ fn load_font(doc: &Document, font: &Dictionary) -> FontInfo {
             // vollständig ab; dort geht nichts verloren, was eine Warnung wert
             // wäre.
             if !parsed.over_limit && !parsed.map.is_empty() {
+                info.table_entries = info.table_entries.saturating_add(parsed.map.len());
                 info.charmap.set_to_unicode(parsed.map);
             }
         }
@@ -197,6 +235,10 @@ fn load_font(doc: &Document, font: &Dictionary) -> FontInfo {
         derive_cid_to_unicode(doc, font, &mut info);
     }
 
+    // Die Breiten kommen aus `load_simple`/`load_type0` und werden erst hier
+    // mitgezählt — eine Stelle für die ganze Buchführung (siehe
+    // [`FontInfo::weight`]).
+    info.table_entries = info.table_entries.saturating_add(info.widths.len());
     info
 }
 
@@ -261,6 +303,7 @@ fn derive_cid_to_unicode(doc: &Document, font: &Dictionary, info: &mut FontInfo)
         }
     }
     if !derived.is_empty() {
+        info.table_entries = info.table_entries.saturating_add(derived.len());
         info.charmap.set_derived(derived);
     }
 }
@@ -358,6 +401,7 @@ fn load_simple(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
     let mut charmap = CharMap::one_byte(table);
     charmap.apply_differences(&differences);
     info.charmap = charmap;
+    info.table_entries = info.table_entries.saturating_add(differences.len());
 
     // --- Breiten ---
     let first_char = font

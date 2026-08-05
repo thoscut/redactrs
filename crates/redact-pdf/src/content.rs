@@ -33,7 +33,7 @@ use lopdf::content::Operation;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use redact_core::{Point, Rect, RedactError, Result};
 
-use crate::font::{as_f64, fonts_from_resources, FontInfo};
+use crate::font::{as_f64, font_from_dict, FontInfo};
 use crate::matrix::Matrix;
 use crate::ops::{PathSeg, Rgb, Stroke};
 
@@ -103,6 +103,14 @@ const MAX_GLYPHS_PER_SCAN: usize = 1_000_000;
 /// trägt einige hundert Operationen) und zugleich weit unter dem, was ohne
 /// Decke möglich wäre.
 ///
+/// Gezählt werden **nicht nur** Operationen: ein [`PlacedStream`] hält auch
+/// eine Kopie des aufgelösten `/Resources` (siehe [`stream_cost`]). Ein Strom
+/// mit *null* Operationen zählte sonst *null* und wäre damit gratis. Gemessen
+/// an Formularen mit leerem Rumpf und je 800 Ressourceneinträgen: der Scan
+/// legte 12,8 kB je Strom an — über das hinaus, was das Dokument selbst
+/// belegt —, und zwar linear ohne Ende (2 000 Ströme 25,5 MB, 5 000 Ströme
+/// 62,6 MB), während der Zähler die ganze Zeit „0“ ablas.
+///
 /// Wichtig: gerade der gefährliche Fall braucht kaum Platz. Ein
 /// Zwischenspeicher zahlt sich nur aus, wenn **derselbe** Strom mehrfach
 /// gezeichnet wird — und dann ist es *ein* Eintrag, gleich wie oft. Die
@@ -115,25 +123,47 @@ const MAX_GLYPHS_PER_SCAN: usize = 1_000_000;
 /// Laufzeit von vorher — nie ein falsches Ergebnis.
 const MAX_CACHED_OPERATIONS: usize = 100_000;
 
-/// Wie viele Schriftenverzeichnisse der Zwischenspeicher behalten darf.
+/// Wie viele **Tabelleneinträge** an Schriften der Zwischenspeicher insgesamt
+/// behalten darf.
 ///
-/// Hier zählen Verzeichnisse und nicht Schriften, weil sich die Größe einer
-/// einzelnen [`FontInfo`] von außen nicht ablesen lässt (`/ToUnicode` kann
-/// eine Million Einträge haben). Gezählt wird deshalb gegen das, was der
-/// Interpreter **ohnehin schon** gleichzeitig hält: die Rekursion hat bis zu
-/// [`MAX_FORM_DEPTH`] Ebenen offen, dazu die Seite selbst und Erscheinungs-
-/// bzw. Musterströme. 16 ist rund das Doppelte davon — der Zwischenspeicher
-/// kann also nie mehr als etwa das Doppelte des Bedarfs belegen, den es auch
-/// ohne ihn schon gibt.
+/// Die frühere Decke zählte *Verzeichnisse* (16), und das war die falsche
+/// Einheit: gemessen belegte **ein** Verzeichnis mit 40 Namen auf dieselbe
+/// schwere Schrift 279 MB, bei 300 Namen wären es rund 2 GB — allesamt weit
+/// unter der Decke. Und selbst innerhalb der Decke sind 16 Verzeichnisse mit je
+/// ein paar schweren Schriften mehrere hundert MB. Die Begründung, 16 sei „rund
+/// das Doppelte dessen, was der Interpreter ohnehin hält“, trug außerdem nur
+/// für ein achtfach geschachteltes Dokument; auf einer **flachen** Seite hält
+/// der Interpreter genau eines.
 ///
-/// Gemessen an einer Datei von 325 kB mit 300 verschiedenen
-/// `/Resources`-Objekten, die alle dieselben 20 Schriften mit je 2 000
-/// CMap-Einträgen aufzählen: ohne Decke 1 083 MB Spitzenspeicher gegenüber
-/// 15 MB vorher.
-const MAX_CACHED_FONT_MAPS: usize = 16;
+/// Gezählt wird jetzt, was wirklich Platz kostet: die Einträge der geladenen
+/// Tabellen, siehe [`FontInfo::weight`]. Jede Schrift wird dabei **genau
+/// einmal** berechnet — der Zwischenspeicher liegt auf der Objekt-Id des
+/// Schriftobjekts, nicht auf dem Ressourcennamen (siehe
+/// [`Budget::font_object`]). Zweihundert Namen auf dasselbe Objekt kosten
+/// deshalb einmal Tabelle und zweihundertmal einen Zeiger.
+///
+/// 400 000 Einträge sind nach der Abschätzung in [`FontInfo::weight`] rund
+/// 40 MB. Zum Vergleich: die größte ehrliche Schrift ist eine CJK-Schrift mit
+/// vollem Umfang, also höchstens 65 536 Einträge
+/// ([`crate::encoding::MAX_TO_UNICODE_BYTES`]) — sechs davon gleichzeitig
+/// gemerkt passen noch hinein, und eine Seite eines Kontoauszugs trägt eine
+/// Handvoll Schriften mit je ein paar hundert Einträgen.
+///
+/// Ist sie erreicht, wird wie beim Strom-Zwischenspeicher **nicht verdrängt**,
+/// sondern nur nichts mehr aufgenommen; was darüber liegt, wird je Platzierung
+/// neu geladen wie vor der Änderung.
+const MAX_CACHED_FONT_ENTRIES: usize = 400_000;
 
 /// Schriften eines Ressourcenverzeichnisses: Ressourcenname → Metriken.
-type FontMap = BTreeMap<Vec<u8>, FontInfo>;
+///
+/// Der Wert ist ein [`Rc`] und kein [`FontInfo`]: dieselbe Schrift steht oft
+/// unter mehreren Namen und in mehreren Verzeichnissen, und der Grafikzustand
+/// des Interpreters führt sie bei jedem `Tf` und jedem `q` mit. Als Wert
+/// gehalten war das der teuerste Einzelposten des Scanners — gemessen 3,8 ms
+/// je `Tf` bei einer Schrift mit 125 000 CMap-Einträgen, also linear in
+/// Operationen × Tabellengröße, bei einem Aufwandskonto, das 1 000 000
+/// Operationen zulässt.
+type FontMap = BTreeMap<Vec<u8>, Rc<FontInfo>>;
 
 /// Was ein Seiten-Scan an **Vorarbeit** gekostet hat.
 ///
@@ -156,7 +186,27 @@ pub struct ScanEffort {
     pub decoded_streams: usize,
     /// Wie oft ein `/Resources`-Verzeichnis in Schriftmetriken übersetzt
     /// wurde (`/ToUnicode`, `/W`, `/Widths`, eingebettete `cmap`).
+    ///
+    /// Nicht dasselbe wie „wie viele Schriften geparst wurden“: dieselbe
+    /// Schrift unter zwanzig Namen wird **einmal** geparst (siehe
+    /// [`Budget::font_object`]), das Verzeichnis aber einmal übersetzt.
     pub loaded_font_maps: usize,
+    /// Wie oft ein **Schriftobjekt** wirklich geparst wurde.
+    ///
+    /// Das ist die Zahl, an der die Arbeit hängt: `/ToUnicode` zu zerlegen
+    /// kostet Zeit *und* Platz, und dasselbe Objekt zweimal zu zerlegen kostet
+    /// beides doppelt. Ein Verzeichnis, das dieselbe Schrift unter dreihundert
+    /// Namen führt, muss hier **eins** liefern; die Datei wächst dafür um zehn
+    /// Byte je Name.
+    pub parsed_fonts: usize,
+    /// Wie oft die `/XObject`-Liste eines Ressourcenverzeichnisses durchgegangen
+    /// wurde, um der Senke die darin stehenden Formulare anzubieten.
+    ///
+    /// Die Zahl hängt an den **Verzeichnissen** der Datei, nicht an den
+    /// Platzierungen und nicht an den Strömen: *n* Formulare, die sich ein
+    /// Verzeichnis teilen, ergeben eine Durchsicht, nicht *n*. Siehe
+    /// [`DeclarationKey`].
+    pub declared_resources: usize,
 }
 
 /// Woher ein `/Resources`-Verzeichnis stammt — der Schlüssel des
@@ -243,6 +293,64 @@ impl PlacedStream {
     }
 }
 
+/// Was ein gemerkter [`PlacedStream`] gegen [`MAX_CACHED_OPERATIONS`] zählt.
+///
+/// Nicht nur die Operationen: der Eintrag hält auch eine **Kopie** des
+/// aufgelösten `/Resources`-Verzeichnisses, und die kann um Größenordnungen
+/// schwerer sein als der Rumpf. Ein Strom mit null Operationen zählte sonst
+/// null und käme unter jeder Decke durch, gleich wie fett sein Verzeichnis ist.
+fn stream_cost(placed: &PlacedStream) -> usize {
+    let resources = placed.resources.as_ref().map_or(0, dictionary_objects);
+    placed.operations().len().saturating_add(resources)
+}
+
+/// Wie viele Objekte in einem Dictionary stecken, Verschachtelung mitgezählt.
+///
+/// Iterativ und nicht rekursiv: das Verzeichnis stammt aus der Datei, und eine
+/// Schachtelungstiefe daraus darf nicht zum Stapelüberlauf werden. Gezählt wird
+/// nur bis [`MAX_CACHED_OPERATIONS`] — mehr braucht die Entscheidung
+/// „behalten oder nicht“ nicht zu wissen.
+fn dictionary_objects(dict: &Dictionary) -> usize {
+    let mut count = dict.len();
+    let mut todo: Vec<&Object> = dict.iter().map(|(_, value)| value).collect();
+    while let Some(object) = todo.pop() {
+        if count >= MAX_CACHED_OPERATIONS {
+            break;
+        }
+        match object {
+            Object::Dictionary(inner) => {
+                count = count.saturating_add(inner.len());
+                todo.extend(inner.iter().map(|(_, value)| value));
+            }
+            Object::Array(items) => {
+                count = count.saturating_add(items.len());
+                todo.extend(items.iter());
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+/// Woran die Sperre für [`declare_forms`] hängt.
+///
+/// Am **Verzeichnis**, nicht am Strom: die Arbeit ist, die `/XObject`-Liste
+/// durchzugehen und jeden Eintrag aufzulösen, und die hängt allein am
+/// Verzeichnis. *n* Formulare ohne eigenes `/Resources`, die dasselbe
+/// `/XObject` mit *n* Einträgen erben, ergaben mit einer Sperre je Strom *n*²
+/// Auflösungen — gemessen 4,65 s für 4 000 Formulare aus einer Datei von
+/// 564 kB und 21,9 s für 8 000 aus 1,1 MB, gegen 0,038 s bzw. 0,087 s danach.
+/// Quadratisch, aus einer Datei, die jede dokumentierte Grenze einhält.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DeclarationKey {
+    /// Die `/XObject`-Liste ist ein eigenes Objekt — dann teilen sich alle
+    /// Ströme, die sie erben, auch die Sperre.
+    XObjects(ObjectId),
+    /// Direkt im Verzeichnis eingebettet: dann gehört sie zu genau diesem
+    /// Strom, und der Strom ist der Ersatzschlüssel.
+    InStream(StreamKey),
+}
+
 /// Ein Eintrag des Strom-Zwischenspeichers.
 ///
 /// Der Eintrag wird für **jeden** einmal ausgepackten Strom angelegt, auch
@@ -292,9 +400,23 @@ struct Budget {
     streams: HashMap<ObjectId, CachedStream>,
     /// Einmal geladene Schriftenverzeichnisse, je Ressourcenobjekt.
     fonts: HashMap<ResourceKey, Rc<FontMap>>,
+    /// Einmal geparste Schriften, je **Schriftobjekt**.
+    ///
+    /// Das ist die Ebene, auf der das Parsen wirklich anfällt. Ein
+    /// Ressourcenverzeichnis nennt oft dieselbe Schrift mehrfach, und
+    /// verschiedene Verzeichnisse nennen erst recht dieselben Schriften;
+    /// gemessen kostete jeder dieser Namen vorher eine vollständige eigene
+    /// Kopie der Tabellen.
+    font_objects: HashMap<ObjectId, Rc<FontInfo>>,
+    /// Ressourcenverzeichnisse, deren `/XObject`-Liste schon angeboten wurde —
+    /// siehe [`declare_forms`].
+    declared_forms: HashSet<DeclarationKey>,
     /// Wie viele Operationen in [`Budget::streams`] liegen — die Decke ist
     /// [`MAX_CACHED_OPERATIONS`].
     cached_operations: usize,
+    /// Wie viele Schrift-Tabelleneinträge der Zwischenspeicher festhält — die
+    /// Decke ist [`MAX_CACHED_FONT_ENTRIES`].
+    cached_font_entries: usize,
     /// Die Vorarbeit, die wirklich anfiel — siehe [`ScanEffort`].
     effort: ScanEffort,
     /// Type3-Schriften, deren Glyphprozeduren schon untersucht wurden — je
@@ -316,7 +438,10 @@ impl Default for Budget {
             glyphs: MAX_GLYPHS_PER_SCAN,
             streams: HashMap::new(),
             fonts: HashMap::new(),
+            font_objects: HashMap::new(),
+            declared_forms: HashSet::new(),
             cached_operations: 0,
+            cached_font_entries: 0,
             effort: ScanEffort::default(),
             looked_at_type3: HashSet::new(),
             exceeded: None,
@@ -339,12 +464,10 @@ impl Budget {
             };
         }
         let body = Rc::new(self.load_stream(doc, Some(id), stream));
-        let keep = self
-            .cached_operations
-            .saturating_add(body.operations().len())
-            <= MAX_CACHED_OPERATIONS;
+        let cost = stream_cost(&body);
+        let keep = self.cached_operations.saturating_add(cost) <= MAX_CACHED_OPERATIONS;
         if keep {
-            self.cached_operations += body.operations().len();
+            self.cached_operations += cost;
         }
         self.streams.insert(
             id,
@@ -419,7 +542,7 @@ impl Budget {
             Some(key) => self.font_map(doc, key, resources),
             // Weder das Verzeichnis noch der Strom hat eine Objekt-Id: es
             // gibt nichts, worunter sich das merken ließe.
-            None => Rc::new(self.load_font_map(doc, Some(resources))),
+            None => Rc::new(self.load_font_map(doc, Some(resources)).0),
         })
     }
 
@@ -427,8 +550,8 @@ impl Budget {
     /// Verzeichnis.
     ///
     /// Siehe [`ResourceKey`] für die Begründung des Schlüssels und
-    /// [`MAX_CACHED_FONT_MAPS`] für die Decke. Über der Decke wird geladen wie
-    /// bisher, nur eben nicht behalten.
+    /// [`MAX_CACHED_FONT_ENTRIES`] für die Decke. Über der Decke wird geladen
+    /// wie bisher, nur eben nicht behalten.
     fn font_map(
         &mut self,
         doc: &Document,
@@ -438,8 +561,16 @@ impl Budget {
         if let Some(fonts) = self.fonts.get(&key) {
             return Rc::clone(fonts);
         }
-        let fonts = Rc::new(self.load_font_map(doc, Some(resources)));
-        if self.fonts.len() < MAX_CACHED_FONT_MAPS {
+        let (fonts, retained) = self.load_font_map(doc, Some(resources));
+        let fonts = Rc::new(fonts);
+        // Gemerkt wird nur, was den Tabellen **nichts** hinzufügt: jede Schrift
+        // darin liegt bereits in [`Budget::font_objects`] und ist dort gezählt.
+        // Sonst hielte dieses Verzeichnis Tabellen fest, die die Decke gerade
+        // abgelehnt hat — der Zwischenspeicher wäre die Hintertür an seiner
+        // eigenen Decke vorbei. Der Preis hier ist nur die Namensliste.
+        let names = fonts.len();
+        if retained && self.cached_font_entries.saturating_add(names) <= MAX_CACHED_FONT_ENTRIES {
+            self.cached_font_entries += names;
             self.fonts.insert(key, Rc::clone(&fonts));
         }
         fonts
@@ -447,9 +578,73 @@ impl Budget {
 
     /// Übersetzt ein `/Resources`-Verzeichnis in Schriftmetriken und zählt den
     /// Vorgang mit — die eine Stelle, an der das im Interpreter geschieht.
-    fn load_font_map(&mut self, doc: &Document, resources: Option<&Dictionary>) -> FontMap {
+    ///
+    /// Der zweite Rückgabewert sagt, ob **jede** Schrift des Verzeichnisses
+    /// gemerkt werden konnte; nur dann darf das Verzeichnis selbst gemerkt
+    /// werden (siehe [`Budget::font_map`]).
+    fn load_font_map(&mut self, doc: &Document, resources: Option<&Dictionary>) -> (FontMap, bool) {
         self.effort.loaded_font_maps += 1;
-        fonts_from_resources(doc, resources)
+        let mut out = FontMap::new();
+        let mut retained = true;
+        let Some(font_dict) = crate::font::font_dictionary(doc, resources) else {
+            return (out, retained);
+        };
+        for (name, object) in font_dict.iter() {
+            let Ok((id, resolved)) = doc.dereference(object) else {
+                continue;
+            };
+            let Ok(dict) = resolved.as_dict() else {
+                continue;
+            };
+            let (info, kept) = self.font_object(doc, id, dict);
+            retained &= kept;
+            out.insert(name.to_vec(), info);
+        }
+        (out, retained)
+    }
+
+    /// Eine geparste Schrift — **einmal je Schriftobjekt**.
+    ///
+    /// Das Ergebnis von [`font_from_dict`] hängt allein am Schriftobjekt und an
+    /// dem, was daran hängt (`/ToUnicode`, `/W`, `/Widths`, eingebettete
+    /// `cmap`). Weder Fundort noch Ressourcenname noch Grafikzustand gehen
+    /// ein — dieselbe Objekt-Id ergibt also immer dieselbe [`FontInfo`], und
+    /// sie mehrfach zu parsen ist reine Verschwendung. Gemessen: ein
+    /// Verzeichnis, das dieselbe schwere Schrift unter 40 Namen führt, belegte
+    /// vorher 279 MB und brauchte 2,38 s — der Zuwachs der Datei dafür betrug
+    /// 10 Byte je Name.
+    ///
+    /// `false` im zweiten Rückgabewert heißt: diese Schrift ist **nicht**
+    /// gemerkt (keine Objekt-Id, oder [`MAX_CACHED_FONT_ENTRIES`] ist voll).
+    fn font_object(
+        &mut self,
+        doc: &Document,
+        id: Option<ObjectId>,
+        dict: &Dictionary,
+    ) -> (Rc<FontInfo>, bool) {
+        if let Some(id) = id {
+            if let Some(info) = self.font_objects.get(&id) {
+                return (Rc::clone(info), true);
+            }
+        }
+        self.effort.parsed_fonts += 1;
+        let info = Rc::new(font_from_dict(doc, dict));
+        let cost = info.weight();
+        let room = self.cached_font_entries.saturating_add(cost) <= MAX_CACHED_FONT_ENTRIES;
+        match id {
+            Some(id) if room => {
+                self.cached_font_entries += cost;
+                self.font_objects.insert(id, Rc::clone(&info));
+                (info, true)
+            }
+            _ => (info, false),
+        }
+    }
+
+    /// `true` beim **ersten** Angebot der `/XObject`-Liste dieses
+    /// Verzeichnisses — siehe [`declare_forms`].
+    fn first_declaration(&mut self, key: DeclarationKey) -> bool {
+        self.declared_forms.insert(key)
     }
 
     /// Schreibt den Inhalt eines Stroms gut — einmal je Strom.
@@ -851,7 +1046,16 @@ pub trait ContentSink {
 
 #[derive(Debug, Clone)]
 struct TextState {
-    font: Option<FontInfo>,
+    /// Die Metriken des zuletzt gesetzten Fonts — **geteilt**, nicht kopiert.
+    ///
+    /// Der Grafikzustand wird bei jedem `q` kopiert und bei jedem `Tf` neu
+    /// gesetzt; stünde hier ein [`FontInfo`] als Wert, kopierte jedes `q` und
+    /// jedes `Tf` die vollständige `/ToUnicode`-Zuordnung mit. Gemessen an
+    /// einer Schrift mit 125 000 Einträgen: 3,8 ms je `Tf`, 4,1 ms je `q Q`,
+    /// linear wachsend — und das Aufwandskonto lässt 1 000 000 Operationen zu.
+    /// Es ist genau der Fall, den der Zwischenspeicher aus v0.4.0 **nicht**
+    /// abdeckt: der verhindert das erneute Parsen, nicht das Kopieren.
+    font: Option<Rc<FontInfo>>,
     /// Ressourcenname des zuletzt gesetzten Fonts.
     font_name: Vec<u8>,
     font_size: f64,
@@ -1198,6 +1402,7 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
         &operations,
         StreamKey::Page,
         resources.as_ref(),
+        true,
         None,
         Matrix::IDENTITY,
         &mut budget,
@@ -1293,6 +1498,7 @@ pub fn interpret(
         operations,
         stream,
         resources,
+        true,
         None,
         initial_ctm,
         &mut budget,
@@ -1309,12 +1515,19 @@ pub fn interpret(
 /// Erscheinungsstrom, an dem zweihundert Annotationen hängen, bringt seine
 /// eigenen Schriften genau einmal mit — sie hier erneut zu laden wäre
 /// dieselbe Vervielfachung wie beim Form-XObject.
+///
+/// `own_resources` sagt dasselbe für die `/XObject`-Liste: `true` heißt, dieser
+/// Strom bringt `resources` selbst mit und muss die darin stehenden Formulare
+/// anbieten. Ein Erscheinungsstrom, der die Ressourcen der Seite erbt, gibt
+/// hier `false` — die Seite hat sie bereits angeboten. Siehe
+/// [`DeclarationKey`].
 #[allow(clippy::too_many_arguments)]
 fn scan_with_budget(
     doc: &Document,
     operations: &[Operation],
     stream: StreamKey,
     resources: Option<&Dictionary>,
+    own_resources: bool,
     fonts: Option<&FontMap>,
     initial_ctm: Matrix,
     budget: &mut Budget,
@@ -1324,23 +1537,22 @@ fn scan_with_budget(
     let fonts = match fonts {
         Some(fonts) => fonts,
         None => {
-            loaded = budget.load_font_map(doc, resources);
+            loaded = budget.load_font_map(doc, resources).0;
             &loaded
         }
     };
     let mut visiting = HashSet::new();
-    let mut declared: HashSet<StreamKey> = HashSet::new();
     let mut stats = FontDecodeStats::default();
     scan_operations(
         doc,
         operations,
         stream,
         resources,
+        own_resources,
         fonts,
         initial_ctm,
         0,
         &mut visiting,
-        &mut declared,
         &mut stats,
         budget,
         sink,
@@ -1662,9 +1874,10 @@ fn scan_appearance(
     // Bringt der Erscheinungsstrom eigene Ressourcen mit, gelten sie samt
     // seiner schon geladenen Schriften; sonst die der Seite.
     let own_fonts = budget.fonts_of(doc, &appearance);
-    let (resources, fonts) = match (&appearance.resources, &own_fonts) {
-        (Some(own), Some(own_fonts)) => (Some(own.clone()), Some(&**own_fonts)),
-        _ => (page_resources.cloned(), None),
+    let (resources, own_resources, fonts) = match (&appearance.resources, &own_fonts) {
+        (Some(own), Some(own_fonts)) => (Some(own.clone()), true, Some(&**own_fonts)),
+        // Die Ressourcen der Seite hat der Seitenstrom schon angeboten.
+        _ => (page_resources.cloned(), false, None),
     };
 
     scan_with_budget(
@@ -1672,6 +1885,7 @@ fn scan_appearance(
         appearance.operations(),
         StreamKey::Form(id),
         resources.as_ref(),
+        own_resources,
         fonts,
         appearance_matrix(&matrix, bbox, rect),
         budget,
@@ -1922,14 +2136,34 @@ fn has_mirror_key(doc: &Document, dict: &Dictionary) -> bool {
 /// überhaupt Text steht, wäre hier zu teuer (sie liefe für jedes Formular auf
 /// jeder Ebene) und wird erst fällig, wenn feststeht, dass niemand es
 /// gezeichnet hat.
-fn declare_forms(doc: &Document, resources: Option<&Dictionary>, sink: &mut dyn ContentSink) {
-    let Some(xobjects) = resources
+///
+/// **Einmal je Verzeichnis**, nicht je Strom — siehe [`DeclarationKey`]. Die
+/// `/XObject`-Liste wird dafür ohnehin aufgelöst, und dabei fällt ihre
+/// Objekt-Id an; die Sperre kostet also nichts extra.
+fn declare_forms(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    stream: StreamKey,
+    budget: &mut Budget,
+    sink: &mut dyn ContentSink,
+) {
+    let Some((id, object)) = resources
         .and_then(|r| r.get(b"XObject").ok())
         .and_then(|o| doc.dereference(o).ok())
-        .and_then(|(_, o)| o.as_dict().ok())
     else {
         return;
     };
+    let Ok(xobjects) = object.as_dict() else {
+        return;
+    };
+    let key = match id {
+        Some(id) => DeclarationKey::XObjects(id),
+        None => DeclarationKey::InStream(stream),
+    };
+    if !budget.first_declaration(key) {
+        return;
+    }
+    budget.effort.declared_resources += 1;
     for (name, value) in xobjects.iter() {
         let Ok((Some(id), Object::Stream(stream))) = doc.dereference(value) else {
             continue;
@@ -1946,21 +2180,27 @@ fn scan_operations(
     operations: &[Operation],
     stream: StreamKey,
     resources: Option<&Dictionary>,
-    fonts: &BTreeMap<Vec<u8>, FontInfo>,
+    // `own_resources`: bringt **dieser** Strom das `/Resources` selbst mit?
+    // `false` heißt, es ist unverändert das des Aufrufers — dann hat der
+    // Aufrufer seine `/XObject`-Liste bereits angeboten, und sie ein zweites
+    // Mal durchzugehen wäre genau die Vervielfachung, gegen die
+    // [`DeclarationKey`] steht.
+    own_resources: bool,
+    fonts: &FontMap,
     initial_ctm: Matrix,
     depth: usize,
     visiting: &mut HashSet<ObjectId>,
-    declared: &mut HashSet<StreamKey>,
     stats: &mut FontDecodeStats,
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
     scan_marked_text(doc, operations, stream, resources, sink);
-    // Einmal je Strom, nicht einmal je Platzierung: ein zwanzigmal
-    // gezeichnetes Formular bietet zwanzigmal dieselben Ressourcen an, und die
-    // Liste durchzugehen kostet jedes Mal.
-    if declared.insert(stream) {
-        declare_forms(doc, resources, sink);
+    // Einmal je Verzeichnis, nicht einmal je Platzierung und nicht einmal je
+    // Strom: ein zwanzigmal gezeichnetes Formular bietet zwanzigmal dieselben
+    // Ressourcen an, und zwanzig Formulare, die sich dasselbe Verzeichnis
+    // teilen, ebenfalls.
+    if own_resources {
+        declare_forms(doc, resources, stream, budget, sink);
     }
     let graphics = sink.wants_graphics();
     let mut state = GraphicsState::new(initial_ctm);
@@ -2230,7 +2470,6 @@ fn scan_operations(
                         initial_ctm,
                         depth,
                         visiting,
-                        declared,
                         stats,
                         budget,
                         sink,
@@ -2298,7 +2537,6 @@ fn scan_operations(
                     &state,
                     depth,
                     visiting,
-                    declared,
                     stats,
                     budget,
                     sink,
@@ -2373,20 +2611,21 @@ fn scan_operations(
                         // Genau hier hängt das Ergebnis am Zusammenhang, und
                         // genau hier wird deshalb nichts gemerkt.
                         let own_fonts = budget.fonts_of(doc, &form);
-                        let (form_resources, form_fonts) = match (&form.resources, &own_fonts) {
-                            (Some(own), Some(own_fonts)) => (Some(own), &**own_fonts),
-                            _ => (resources, fonts),
-                        };
+                        let (form_resources, form_own, form_fonts) =
+                            match (&form.resources, &own_fonts) {
+                                (Some(own), Some(own_fonts)) => (Some(own), true, &**own_fonts),
+                                _ => (resources, false, fonts),
+                            };
                         scan_operations(
                             doc,
                             form.operations(),
                             StreamKey::Form(form_id),
                             form_resources,
+                            form_own,
                             form_fonts,
                             form_matrix.mul(&state.ctm),
                             depth + 1,
                             visiting,
-                            declared,
                             stats,
                             budget,
                             sink,
@@ -2451,7 +2690,6 @@ fn scan_soft_mask(
     state: &GraphicsState,
     depth: usize,
     visiting: &mut HashSet<ObjectId>,
-    declared: &mut HashSet<StreamKey>,
     stats: &mut FontDecodeStats,
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
@@ -2539,9 +2777,9 @@ fn scan_soft_mask(
     // Ohne eigenes `/Resources` gelten die des Aufrufers — samt seiner
     // bereits geladenen Schriften.
     let own_fonts = budget.fonts_of(doc, &group);
-    let (group_resources, group_fonts) = match (&group.resources, &own_fonts) {
-        (Some(own), Some(own_fonts)) => (Some(own), &**own_fonts),
-        _ => (resources, fonts),
+    let (group_resources, group_own, group_fonts) = match (&group.resources, &own_fonts) {
+        (Some(own), Some(own_fonts)) => (Some(own), true, &**own_fonts),
+        _ => (resources, false, fonts),
     };
     // Die Maske ist ein platzierter Strom wie ein Formular; sie muss auch so
     // gezählt werden, sonst hielte die Ressourcenprüfung sie für ungezeichnet.
@@ -2551,11 +2789,11 @@ fn scan_soft_mask(
         group.operations(),
         StreamKey::Form(group_id),
         group_resources,
+        group_own,
         group_fonts,
         matrix.mul(&state.ctm),
         depth + 1,
         visiting,
-        declared,
         stats,
         budget,
         sink,
@@ -2746,7 +2984,6 @@ fn scan_tiling_pattern(
     base_ctm: Matrix,
     depth: usize,
     visiting: &mut HashSet<ObjectId>,
-    declared: &mut HashSet<StreamKey>,
     stats: &mut FontDecodeStats,
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
@@ -2842,20 +3079,20 @@ fn scan_tiling_pattern(
     // Ohne eigenes `/Resources` gelten die des Aufrufers — samt seiner
     // bereits geladenen Schriften.
     let own_fonts = budget.fonts_of(doc, &pattern);
-    let (pattern_resources, pattern_fonts) = match (&pattern.resources, &own_fonts) {
-        (Some(own), Some(own_fonts)) => (Some(own), &**own_fonts),
-        _ => (resources, fonts),
+    let (pattern_resources, pattern_own, pattern_fonts) = match (&pattern.resources, &own_fonts) {
+        (Some(own), Some(own_fonts)) => (Some(own), true, &**own_fonts),
+        _ => (resources, false, fonts),
     };
     scan_operations(
         doc,
         pattern.operations(),
         StreamKey::Form(id),
         pattern_resources,
+        pattern_own,
         pattern_fonts,
         matrix.mul(&base_ctm),
         depth + 1,
         visiting,
-        declared,
         stats,
         budget,
         sink,
@@ -3008,7 +3245,17 @@ fn show_text(
     sink: &mut dyn ContentSink,
     emit_glyphs: bool,
 ) -> Option<ShowRecord> {
-    let font = state.text.font.clone().unwrap_or_default();
+    // Geliehen statt geklont: `Tj` kann Millionen Zeichen tragen, aber die
+    // Schrift ist dieselbe. Der Ersatz-Font entsteht nur, wenn gar kein `Tf`
+    // dastand — dann ist er auch billig.
+    let fallback;
+    let font: &FontInfo = match state.text.font.as_deref() {
+        Some(font) => font,
+        None => {
+            fallback = FontInfo::default();
+            &fallback
+        }
+    };
     let ts = &state.text;
 
     // Die Textargumente stehen bei ' und " nicht an erster Stelle.
@@ -3038,7 +3285,7 @@ fn show_text(
                     if !budget.glyph() {
                         break;
                     }
-                    stats.record(&ts.font_name, &font, &text);
+                    stats.record(&ts.font_name, font, &text);
                     let w0 = font.width(code, &text);
                     let is_space = nbytes == 1 && code == 32;
                     let displacement = (w0 * ts.font_size
@@ -3071,7 +3318,7 @@ fn show_text(
                             cx,
                             &GlyphEvent {
                                 font_name: &ts.font_name,
-                                font: &font,
+                                font,
                                 code,
                                 text: &text,
                                 trm,
@@ -3088,7 +3335,7 @@ fn show_text(
                     let char_count = text.chars().count().max(1);
                     if char_count == 1 {
                         items.push(ShowItem::Glyph(GlyphItem {
-                            bytes: raw_code_bytes(bytes, &font, code, nbytes),
+                            bytes: raw_code_bytes(bytes, font, code, nbytes),
                             text,
                             rect,
                             origin,
@@ -3096,7 +3343,7 @@ fn show_text(
                             baseline,
                         }));
                     } else {
-                        let bytes_for_code = raw_code_bytes(bytes, &font, code, nbytes);
+                        let bytes_for_code = raw_code_bytes(bytes, font, code, nbytes);
                         let width = rect.width() / char_count as f64;
                         for (i, ch) in text.chars().enumerate() {
                             let sub = Rect::new(
