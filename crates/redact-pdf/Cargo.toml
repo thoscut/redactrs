@@ -1,11 +1,12 @@
 [package]
 name = "redact-pdf"
-description = "PDF text extraction and true redaction (content-stream rewriting) for redact-rs"
+description = "PDF text extraction, true redaction (content-stream rewriting) and leak checking for redact-rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 redact-core.workspace = true

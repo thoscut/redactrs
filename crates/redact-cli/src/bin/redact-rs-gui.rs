@@ -13,13 +13,27 @@
 //! Alles Weitere — Buchungsliste, Musterauswahl, Stapelbetrieb — ist ein
 //! Fall für die Konsolenfassung.
 
-#![forbid(unsafe_code)]
+// `deny` statt `forbid` aus demselben Grund wie in `main.rs`: das geteilte
+// Modul unten enthält die eine `unsafe`-Stelle des Projekts.
+#![deny(unsafe_code)]
 #![windows_subsystem = "windows"]
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+// Jedes Binärziel ist ein eigenes Crate; dieselbe Datei wird deshalb
+// eingebunden statt importiert. Diese Fassung hält dieselben Geheimnisse wie
+// die Konsolenfassung und braucht dieselbe Absicherung — auch wenn sie unter
+// Windows, wo dieses Binärziel hingehört, wirkungslos bleibt.
+#[path = "../dumpable.rs"]
+mod dumpable;
+
 fn main() -> ExitCode {
+    // Ohne Konsole sieht eine Warnung hier niemand; der Rückgabewert bleibt.
+    // Das Abschalten selbst gehört trotzdem an dieselbe Stelle: vor allem,
+    // was den Klartext in den Speicher holt.
+    let _ = dumpable::deny_core_dumps();
+
     // Ein Argument, das nicht mit `-` beginnt: die zu öffnende Datei.
     let pdf: Option<PathBuf> = std::env::args_os()
         .skip(1)

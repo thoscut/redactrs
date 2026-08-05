@@ -25,6 +25,295 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 ---
 
+## Unveröffentlicht
+
+Vierter Durchgang, und diesmal fast nur an der **Doku** — mit demselben
+Maßstab wie am Code: jede Angabe hier stammt aus einem Lauf des gebauten
+Binaries, nicht aus dem Quelltext.
+
+### ⚠ Die README beschrieb ein Audit-Log, das es so nicht mehr gibt
+
+Seit 0.6.0 hat `effect` einen **fünften** Befund, `off_page`. Die README nannte
+weiter „vier Befunde“ und die Gleichung
+`applied + covered + degenerate + missing_page = requested`. **An dieser
+Gleichung rechnet ein Prüfer nach, ob er alle wirkungslosen Regionen gesehen
+hat** — und sie ging nicht mehr auf. Gemessen an der Demo mit drei manuellen
+Regionen (eine wirksam, eine neben dem Blatt, eine auf einer Seite, die es
+nicht gibt): `requested 3, applied 1, covered 0, degenerate 0, missing_page 1,
+off_page 1`, also `1 + 0 + 0 + 1 = 2 ≠ 3`. Genau eine wirkungslose Region wäre
+unbemerkt geblieben.
+
+`off_page` kam in README **und** `SECURITY.md` null mal vor. Beide nennen ihn
+jetzt: die Befundtabelle hat eine fünfte Zeile, die Gleichung fünf Summanden,
+der Beispiel-Auszug das Feld, und `SECURITY.md` warnt ausdrücklich davor, die
+vierteilige Fassung aus 0.5.0 weiterzubenutzen.
+
+### ⚠ `SECURITY.md` kannte `--check-leaks` nicht
+
+Der Schalter kam dort null mal vor. Der Abschnitt zum Rückgabewert 3 nannte nur
+die Stapelbedeutung („verarbeitet, aber nicht vollständig geprüft“) — wer ihn
+in ein Skript übernahm, deutete einen **Leckfund** als bloß unvollständige
+Prüfung. Der `--help`-Text des Binaries nennt seit 0.4.0 beide Fälle; jetzt tut
+es `SECURITY.md` auch, mit einem eigenen Abschnitt zum Schalter.
+
+Dort stand außerdem „Verbindlich ist `redact_pdf::leaks`“ — das ist die
+Bibliotheksfunktion und damit gerade nicht das, was jemand ohne Quelltext
+bedienen kann. Der Satz nennt jetzt beide Wege und sagt, dass es dieselbe
+Funktion ist.
+
+### ⚠ Kein Kernabzug mehr — und die Zusage zu `unsafe` ist enger geworden
+
+`redact-rs` schaltet Kernabzüge als **allererste** Anweisung in `main` ab
+(`prctl(PR_SET_DUMPABLE, 0)`). Ohne das schrieb der Kernel bei einem Absturz
+den gesamten Arbeitsspeicher weg — samt Klartext des Dokuments und, bei einer
+verschlüsselten Datei, dem Passwort.
+
+Am **gebauten Binary** nachgemessen (`core_pattern = core`,
+`ulimit -c unlimited`, Prozess mit `SIGABRT` beendet): ein `sleep` als
+Kontrolle hinterlässt im selben Aufruf eine 454 656 Byte große `core`-Datei,
+`redact-rs` **keine**; die Shell meldet nur noch `Aborted` statt
+`Aborted (core dumped)`, bei unverändertem Rückgabewert 134.
+
+**Die Zusage `#![forbid(unsafe_code)]` gilt jetzt für sieben statt acht
+Crates.** `redact-cli` steht unter `#![deny(unsafe_code)]` mit **einer**
+benannten Ausnahme an der `prctl`-Funktion. `SECURITY.md` sagte weiter „in
+allen acht“ und gab dazu ein `grep`, das seither eine Datei weniger findet —
+beides ist berichtigt, und die Ausnahme wird dort jetzt **beziffert** (zwei
+`unsafe`-Blöcke: einer im ausgelieferten Programm, einer im Test, der
+zurückliest, ob der Kernel den Zustand übernommen hat) statt behauptet.
+
+Ausgeschrieben steht dort auch, **was der Schutz nicht leistet**: unter Windows
+gibt es kein Gegenstück (`MiniDumpWriteDump` liegt beim Aufrufer, nicht beim
+Ziel) — ausgerechnet die Plattform der Zielgruppe —, und unter macOS und jedem
+anderen Nicht-Linux-System tut die Funktion nichts und liefert trotzdem `true`.
+Dazu der Nebeneffekt: der Prozess ist danach für `ptrace` durch denselben
+Benutzer unerreichbar, `gdb` und `strace` brauchen `root`.
+
+### Die Oberfläche prüft nach dem Export selbst nach
+
+Neu: nach jedem Export liest die Oberfläche die geschriebenen Bytes zurück und
+sucht darin mit `redact_pdf::leaks` die Texte, die sie gerade geschwärzt hat.
+Das ist die **stärkere Fassung** von `--check-leaks`, weil die Oberfläche
+etwas hat, was der Kommandozeilennutzer nicht hat: sie kennt die Suchbegriffe
+schon (in jeder geschwärzten Zeile steht der gefundene Text) und muss sie
+weder tippen lassen noch in Prozessliste und Shell-Historie schreiben. Für die
+Zielgruppe, die per Doppelklick arbeitet, war die Nachprüfung bis hierher gar
+nicht erreichbar.
+
+Drei Dinge stehen in der Zeile, die dabei entsteht, und zwar immer:
+
+* das Ergebnis — bei einem Fund zusätzlich ganz vorn in den Warnungen;
+* **derselbe Vorbehalt wie in der Kommandozeile**: geprüft ist *diese Liste*,
+  nicht die Datei;
+* **die Zahl der Rechtecke ohne bekannten Text.** Ein selbst gezogenes
+  Rechteck hat keinen; darüber kann die Prüfung nichts sagen, und dort bleibt
+  es bei der Sichtprüfung. Verschwiegen wäre die neue Anzeige an einem
+  Dokument mit lauter Handregionen selbst eine falsche Entwarnung.
+
+Gesucht werden höchstens 200 verschiedene Texte (`MAX_EXPORT_CHECK_NEEDLES`) —
+`leaks` liest die Datei je Begriff einmal ganz durch, und die Trefferliste darf
+100 000 Zeilen lang werden. Was darüber liegt, wird gesagt und nicht
+verschwiegen.
+
+### Drei Ungenauigkeiten der Oberfläche
+
+* **Eine deckungsgleiche Handregion konnte den Platz des wirklich blockierten
+  Mustertreffers verbrauchen.** `BlockedRegion` trägt nur Seite und Rechteck,
+  nicht die Herkunft; zweimal Strg+R legt zwei buchstäblich gleiche Regionen
+  an. Lag dort ein von der Negativliste gedeckter Mustertreffer derselben
+  Fläche, stand an einem **selbst gezogenen** Rechteck „geschützt durch Ihre
+  Liste“ (falsch — Handregionen überstimmen die Liste) und der wirklich
+  blockierte Treffer hieß „doppelt“. Der Zeiger fragt jetzt zusätzlich, ob die
+  Zeile überhaupt blockierbar ist. **Der Export war nie betroffen.**
+* **Die Absage bei Strg+Pfeil sprach vom Verschieben.** Wer die Größe ändern
+  wollte und dabei auf der falschen Seite stand, las „Nicht verschoben …“ und
+  suchte den Fehler an der falschen Stelle. Jetzt nennt sie das Verb, um das es
+  ging.
+* **Dieselbe Absage riet, zu Seite 8 zu blättern** — bei einem zweiseitigen
+  Dokument. Eine Zeile auf einer Seite, die es nicht gibt, kann nur eine
+  Review- oder Regionsdatei mitbringen; die Absage nennt jetzt die Seitenzahl
+  des Dokuments und einen gangbaren Ausweg.
+
+### Doku: drei weitere Stellen, an denen sie hinter dem Code stand
+
+* **Die Tastentabelle** kannte weder `Strg+R` noch `Strg+Pfeil`, und
+  `Umschalt+Tab` stand nirgends in der Datei. Der Abschnitt „Rechtecke
+  ziehen …“ sagte weiter „Ein neuer Bereich entsteht durch Aufziehen mit der
+  Maus“ — für den Nutzer, für den v0.5.0 den mauslosen Weg gebaut hat, war das
+  die falsche Auskunft. Beide Wege stehen jetzt nebeneinander, samt dem Knopf
+  „🔲 Rechteck“, den die README überhaupt nicht kannte.
+* **Die neuen Decken standen nirgends.** `MAX_TO_UNICODE_BYTES` (32 MB),
+  `MAX_CACHED_FONT_ENTRIES` (400 000 Tabelleneinträge) und die
+  MediaBox-Heilung („A4 angenommen“) kamen in README, `SECURITY.md` und dieser
+  Datei je null mal vor — obwohl der Kopf zu 0.6.0 die Decken zur Hauptsache
+  der Fassung erklärt. Die Grenzentabelle der README hat jetzt zwei weitere
+  feste Grenzen, jede mit dem Lauf, aus dem die Angabe stammt: eine 1 064 Byte
+  kleine Datei mit drei `bfrange`-Blöcken über je 65 536 Codes (rund 50 MB)
+  reißt die erste Decke und endet mit „NICHT GEPRÜFT“ und Rückgabewert 3;
+  dieselbe Datei mit einem Block (rund 16,8 MB) läuft mit 0 durch.
+* **„Erfasst sind alle Änderungen“** nannte sechs; `history.record` steht an
+  zehn Stellen. Es fehlten Größe ändern, Schwärzungsart, Ersatztext — und
+  **Analysieren**. Die Liste ist jetzt vollständig und sagt gemessen, was
+  Analysieren wirklich wegwirft: selbst gezogene Rechtecke trägt es hinüber,
+  die Entscheidungen an den Mustertreffern nicht.
+
+### Der Pfad des Build-Rechners ist jetzt vollständig draußen
+
+Der Eintrag zu 0.5.0 hielt fest, dass im glibc-Artefakt weiterhin **drei**
+Pfade des Build-Rechners stehen — Build-Skript-Ausgaben unter `OUT_DIR`, die
+der eine `--remap-path-prefix` nicht erfasst — und dass die Behebung im Bauweg
+aussteht. Sie ist erledigt: `RUSTFLAGS` trägt jetzt einen **zweiten** Prefix
+für `${CARGO_TARGET_DIR:-$PWD/target}`.
+
+**Gemessen, bevor die Zeile geschrieben wurde**, und mit einem auffälligen
+Ersatzpfad, damit das Ergebnis nicht zu verwechseln ist:
+
+```console
+$ RUSTFLAGS="--remap-path-prefix=$CARGO_HOME/registry/src=/cargo-registry \
+             --remap-path-prefix=$PWD/target=/ZWEITER-PREFIX" \
+    cargo build --release --locked -p redact-cli
+$ strings -a target/release/redact-rs | grep -c /home/user/redactrs
+0
+$ strings -a target/release/redact-rs | grep ZWEITER-PREFIX | sort -u
+/ZWEITER-PREFIX/release/build/glutin_egl_sys-…/out/egl_bindings.rs
+/ZWEITER-PREFIX/release/build/glutin_glx_sys-…/out/glx_bindings.rs
+/ZWEITER-PREFIX/release/build/glutin_glx_sys-…/out/glx_extra_bindings.rs
+```
+
+Vorher standen an genau diesen drei Stellen dieselben Zeilen mit dem echten
+Pfad des Arbeitsbaums — belegt am selben Baum mit nur einem Prefix
+(`grep -c /home/user/redactrs` ⇒ **3**). Auch `redact-rs-gui` ist danach bei 0.
+
+**Was hier nicht steht:** eine Zusage über das *veröffentlichte* Artefakt.
+Gemessen ist ein lokaler Bau mit derselben Toolchain (1.94.1) und denselben
+Schaltern; ob der Release-Job dasselbe liefert, zeigt erst der nächste Lauf.
+Genau diese Zusage war im Eintrag zu 0.4.0 schon einmal zu weit gefasst —
+deshalb diesmal die Trennung zwischen „gemessen“ und „zugesagt“.
+
+---
+
+## Unveröffentlicht
+
+Bereich: `git log v0.6.0..HEAD`.
+
+Vierter und letzter Durchgang der vereinbarten Schleife. Die Fehlerklasse
+dieser Runde steht schon im Eintrag zu 0.6.0 zwischen den Zeilen, hier wird
+sie ausgesprochen: **eine Zusicherung, die an ihrer Ursprungsstelle stimmt,
+wird an der nächsten stillschweigend mitgenommen.** Dreimal dasselbe Muster —
+und dreimal war die Abhilfe, die Zahl dort zu prüfen, wo sie *neu entsteht*,
+nicht dort, wo sie hereinkommt.
+
+### ⚠ Kein Kernabzug mehr
+
+Stürzte der Lauf ab, schrieb der Kernel den ganzen Arbeitsspeicher auf die
+Platte — mit dem Klartext des Dokuments und, bei einer verschlüsselten Datei,
+dem Passwort. Der Absturz ließ sich über eine präparierte Eingabedatei
+auslösen.
+
+Gemessen am laufenden Programm (`core_pattern = core`, `ulimit -c unlimited`,
+eine IBAN im Speicher, dann Absturz):
+
+| | Abzugsdatei | die IBAN darin |
+|---|---|---|
+| 0.6.0 | 487 424 Byte | **3 Fundstellen** |
+| 0.7.0 | keine | — |
+
+`prctl(PR_SET_DUMPABLE, 0)` als erste Anweisung beider Binärziele. Zwei
+Dinge, die dazugehören und nicht im Kleingedruckten stehen sollen:
+
+* **Unter Windows gibt es kein Gegenstück** — ein Prozess kann sich dort dem
+  Abbild nicht entziehen. Diese Absicherung schützt Linux und
+  macOS-artige Systeme, also nicht die Plattform, auf der die meisten Nutzer
+  dieses Werkzeugs sitzen.
+* Der Prozess ist danach auch für `ptrace` durch denselben Benutzer
+  unerreichbar. Für ein Werkzeug, das Kontoauszüge im Speicher hält, ist das
+  die richtige Richtung; wer mit `gdb` an einem Fehler arbeitet, braucht
+  dafür `root`.
+
+Damit steht `redact-cli` unter `#![deny(unsafe_code)]` statt `forbid`, mit
+**einer** benannten Ausnahme an genau der Funktion, die den `prctl`-Aufruf
+enthält. Die übrigen sieben Crates bleiben unter `forbid`. `libc` lag über
+`lopdf → getrandom` ohnehin in jedem Bau; es kommt keine Abhängigkeit hinzu.
+
+### ⚠ NaN und Überlauf: ein Rechteck ohne brauchbare Koordinaten
+
+`--padding nan` genügte, um **jede** Schwärzung wirkungslos zu machen — und
+der Lauf meldete trotzdem „Deck-Rechteck gezeichnet". In der Ausgabe stand
+dann `NaN NaN NaN NaN re f`. Ein NaN-Rechteck überdeckte rechnerisch *alles*
+(`intersection_area` lieferte die volle Fläche), und im `dedup` verschluckte
+es damit den echten IBAN-Treffer.
+
+Schwerer: aus **endlichen** Koordinaten konnte `∞ − ∞` entstehen. Der
+Wächter des Rechteckgitters prüfte `spanne > 64`, und das ist für `NaN`
+falsch — die Schleife lief danach bis `i64::MAX`. Gemessen an einem
+präparierten PDF: **vorher Abbruch nach 90 s, jetzt 0,01 s bei 9,1 MB.**
+
+Die Regel steht jetzt einmal (`Rect::is_usable`), und dort, wo eine Zahl neu
+entsteht, wird sie neu geprüft — am **Ergebnis**, nicht an der Eingabe.
+
+### ⚠ Der Speicher, den eine Datei vor jedem Scan kostet
+
+`--max-parsed-mb` zählte nur die entpackten Ströme. Der Rest der Datei —
+Objekte, Verzeichnisse, Namen — kostet gemessen **197 bis 274 Byte je
+Dictionary-Eintrag**, unabhängig von seiner Schreibweise. Eine dicht
+geschriebene 44-MB-Datei ergab damit ein 1 804 MB großes Dokument, und der
+Lauf endete mit Rückgabewert 0.
+
+| Datei | 0.6.0 | 0.7.0 |
+|---|---|---|
+| 44,3 MB, dichte Verzeichnisse | Exit 0, **3 756 MB**, 12,6 s | Exit 1, 50 MB, 0,35 s |
+| 49,9 MB, Verzeichnisse | Exit 0, 3 197 MB, 11,3 s | Exit 1, 56 MB, 0,44 s |
+| 81,7 MB, nur Zahlen | Exit 0, 670 MB, 2,6 s | Exit 1, 89 MB, 0,61 s |
+
+Dieselbe Bombe in einem *komprimierten* Objekt-Strom wurde seit jeher
+abgelehnt; der Unterschied war allein, ob sie komprimiert war — und das
+sucht sich ein Angreifer als Erstes aus. Gegenprobe an gewöhnlichen Dateien:
+ein 2 000-Seiter mit 100 000 Treffern braucht 11 MB des 16-MB-Budgets, ein
+300-seitiger Scan mit 600 MB Bilddaten 1 MB.
+
+### Die Nachprüfung kostet nicht mehr Begriffe × Dateigröße
+
+`--check-leaks` packte je Suchbegriff **die ganze Datei neu aus** und parste
+den Objektgraphen neu. Diese Arbeit hängt an der Datei, nicht am Begriff.
+
+| 792-kB-Datei | 0.6.0 | 0.7.0 |
+|---|---|---|
+| 1 Begriff | 0,13 s | 0,11 s |
+| 10 Begriffe | 0,88 s | 0,25 s |
+| 40 Begriffe | — | 0,69 s |
+
+`redact_pdf::leaks(bytes, begriff)` bleibt unverändert und benutzt intern
+denselben Durchgang. Neu ist eine Obergrenze von 1 000 Begriffen: die
+Byte-Grenze allein ließ rund eine Million Zeilen zu, was über vier Stunden
+Laufzeit ergäbe — von außen nicht von einem Hänger zu unterscheiden.
+
+### Der Beleg, den man ansehen kann
+
+`docs/vorher-nachher.md` zeigt dieselbe Seite vor und nach dem Lauf,
+gerendert vom Rasterizer dieses Programms, daneben die vollständigen
+`--check-leaks`-Läufe. Erzeugt von `./scripts/make-preview.sh`, bitgleich
+reproduzierbar.
+
+Bewusst nicht geschönt: „Kontoinhaber: Max Mustermann" steht im rechten Bild
+**unverändert da**, weil es für Namen kein Muster gibt. Und `pdftotext`
+steht dort als *Warnung* — mit Rückgabewert 1 („kein Treffer") direkt neben
+dem Lauf, der in derselben Datei noch etwas findet.
+
+### An der Fassungsgeschichte selbst
+
+Der Commit-Verlauf wurde einmalig umgeschrieben: 67 Nachrichten trugen eine
+Sitzungs-URL des Werkzeugs, mit dem sie entstanden sind. Sie sind entfernt;
+die `Co-Authored-By`-Zeilen bleiben, weil sie eine wahre Angabe sind.
+
+**Folge, die genannt gehört:** jeder Commit-SHA hat sich geändert, auch die
+der Tags `v0.1.0` bis `v0.6.0`. Der *Inhalt* ist an jedem Tag byteidentisch
+geblieben (nachgeprüft am Baum-Hash), die veröffentlichten Artefakte und
+Release-Notizen sind unberührt. Die Build-Provenienz der Releases 0.4.0 bis
+0.6.0 nennt aber weiterhin die **alten** SHAs; wer sie gegen den heutigen
+Verlauf prüft, findet dort eine Abweichung, die keine inhaltliche ist.
+
+---
+
 ## 0.6.0 — 2026-08-05
 
 Bereich: `git log v0.5.0..v0.6.0`.

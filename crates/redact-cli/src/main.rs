@@ -1,10 +1,15 @@
 //! redact-rs — lokales Schwärzen sensibler Daten in PDF-Dokumenten.
 
-#![forbid(unsafe_code)]
+// `deny` statt `forbid`: genau eine Funktion braucht `unsafe`, und sie trägt
+// die Ausnahme selbst — `dumpable::deny_core_dumps`, der `prctl`-Aufruf, der
+// den Kernabzug abschaltet. Jede andere Stelle im Crate bleibt verboten, und
+// die übrigen sieben Crates stehen unverändert unter `forbid`.
+#![deny(unsafe_code)]
 
 mod batch;
 mod check;
 mod cli;
+mod dumpable;
 
 use std::process::ExitCode;
 
@@ -66,6 +71,17 @@ pub const EXIT_USAGE: u8 = 2;
 pub const EXIT_INCOMPLETE: u8 = 3;
 
 fn main() -> ExitCode {
+    // Als Allererstes, noch vor dem Lesen der Kommandozeile: alles danach
+    // hielte den Klartext des Dokuments — und ein Absturz dort schriebe ihn
+    // in einen Kernabzug. Siehe `dumpable`.
+    if !dumpable::deny_core_dumps() {
+        eprintln!(
+            "Warnung: Kernabzüge liessen sich nicht abschalten. Stürzt dieser Lauf ab, \
+             kann der Abzug den Inhalt des Dokuments und ein eingegebenes Passwort \
+             enthalten."
+        );
+    }
+
     let cli = Cli::parse();
     match dispatch(&cli) {
         Ok(code) => code,

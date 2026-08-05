@@ -1,11 +1,12 @@
 [package]
 name = "redact-patterns"
-description = "Built-in and user-configurable regex patterns for redact-rs"
+description = "Built-in and user-configurable regex patterns with checksum validation for redact-rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 redact-core.workspace = true

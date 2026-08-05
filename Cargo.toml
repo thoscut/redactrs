@@ -9,6 +9,31 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/thoscut/redactrs"
 
+# NICHT AUF crates.io.
+#
+# Die acht Crates sind die Teile *eines* Programms, nicht acht Bibliotheken
+# fuer Fremdgebrauch. Ausgeliefert wird als fertiges Binary ueber die
+# GitHub-Releases (.github/workflows/release.yml), und nur `redact-cli`
+# bringt ueberhaupt ein Programm mit, das jemand aufruft.
+#
+# Warum ausdruecklich und nicht nur faktisch: `cargo publish` scheitert an
+# diesen Crates ohnehin, weil die Pfad-Abhaengigkeiten in
+# [workspace.dependencies] keine `version` tragen. Das ist aber ein Unfall,
+# keine Entscheidung — traegt jemand einmal eine Version nach, faellt die
+# Schranke lautlos weg. `publish = false` ist die Entscheidung.
+#
+# Zwei Dinge haengen daran:
+#   * `cargo publish`/`cargo package` lehnen jedes dieser Crates ab.
+#   * cargo-deny zaehlt die versionslosen Pfad-Abhaengigkeiten nicht mehr als
+#     Wildcards; deshalb steht in deny.toml jetzt `wildcards = "deny"`.
+#
+# Soll spaeter doch etwas auf crates.io: dann brauchen die betroffenen Crates
+# `keywords`, `categories`, `readme`, `homepage`, `documentation` und die
+# Pfad-Abhaengigkeiten eine `version` — und die Namen `redact-core`,
+# `redact-pdf`, `redact-render` waeren dort sehr allgemeine Namen, die man
+# nicht nebenbei belegt.
+publish = false
+
 [workspace.dependencies]
 redact-core = { path = "crates/redact-core" }
 redact-pdf = { path = "crates/redact-pdf" }

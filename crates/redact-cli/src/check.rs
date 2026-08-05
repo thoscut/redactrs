@@ -86,6 +86,21 @@ des Ergebnisses ersetzt sie nicht.";
 /// Pipe, wie viel Arbeitsspeicher der Lauf belegt.
 const MAX_NEEDLE_INPUT: u64 = redact_core::MAX_AUX_FILE_BYTES;
 
+/// Obergrenze für die **Zahl** der Suchbegriffe.
+///
+/// Die Byte-Grenze darüber allein reicht nicht: 16 MB fassen rund eine
+/// Million kurze Zeilen. Gemessen an einer 792-kB-Datei kostet ein Begriff
+/// etwa 16 ms (100 Begriffe 1,65 s, 1 000 Begriffe 15,9 s, 5 000 Begriffe
+/// 80,9 s — linear, der Speicher bleibt bei 20 MB). Eine Million Begriffe
+/// liefen also über vier Stunden, ohne dass irgendetwas kaputt wäre; das
+/// sieht von außen aus wie ein Hänger.
+///
+/// 1 000 ist großzügig für das, wofür der Schalter da ist: die Geheimnisse
+/// **eines** Dokuments, von Hand aufgeschrieben. Wer mehr hat, ruft zweimal
+/// auf — der Rückgabewert bleibt aussagekräftig, weil jeder Lauf für sich
+/// meldet.
+const MAX_NEEDLES: usize = 1_000;
+
 /// Führt die Prüfung aus. Rückgabe: [`crate::EXIT_OK`] oder
 /// [`crate::EXIT_INCOMPLETE`]; jeder Fehler wandert als [`RedactError`] nach
 /// oben und wird dort nach Art unterschieden (Konfiguration ⇒ 2, sonst 1).
@@ -183,6 +198,16 @@ fn needles(cli: &Cli) -> Result<Vec<String>> {
                 .into(),
         ));
     }
+    if out.len() > MAX_NEEDLES {
+        return Err(RedactError::Config(format!(
+            "--check-leaks mit {} Suchbegriffen; mehr als {MAX_NEEDLES} nimmt der Lauf \
+             nicht an. Die Prüfung kostet je Begriff einen Vergleich über die ganze \
+             Datei — bei dieser Zahl liefe sie so lange, dass sie wie ein Hänger \
+             aussieht. Teilen Sie die Liste auf und rufen Sie mehrmals auf; jeder Lauf \
+             meldet für sich.",
+            out.len()
+        )));
+    }
     Ok(out)
 }
 
@@ -228,9 +253,15 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
         println!("Geprüft: {name} ({} Byte)", bytes.len());
     }
 
+    // Ein Durchgang durch die Datei für alle Begriffe: das Entpacken der
+    // Streams und das Parsen des Objektgraphen hängt an der Datei, nicht am
+    // Suchbegriff. Zehn Begriffe kosten sonst zehnmal dieselbe Arbeit.
+    let by_needle: Vec<&str> = needles.iter().map(String::as_str).collect();
     let mut leaking = 0usize;
-    for needle in needles {
-        let hits = redact_pdf::leaks(bytes, needle);
+    for (needle, hits) in needles
+        .iter()
+        .zip(redact_pdf::leaks_many(bytes, &by_needle))
+    {
         if hits.is_empty() {
             if !cli.quiet {
                 println!("  nicht gefunden: {}", safe_text(needle));
@@ -320,9 +351,31 @@ mod tests {
         assert!(err.to_string().contains("leerem Text"), "{err}");
     }
 
+    // `the_caveat_names_what_was_not_checked` stand hier und prüfte
+    // `NO_CLEAN_BILL` gegen sich selbst — eine Konstante enthält ihre eigenen
+    // Teilzeichenketten, das gilt immer. Die Sache selbst ist am gebauten
+    // Binary abgedeckt: `check_leaks.rs::a_clean_run_says_what_it_does_not_prove`
+    // prüft, dass der Vorbehalt in der Ausgabe steht, dass er den Grund nennt
+    // und dass er auf stdout und nicht auf stderr landet.
+
+    /// Eine Begriffsliste, die der Lauf nicht in vertretbarer Zeit prüfen
+    /// kann, wird abgelehnt statt still stundenlang gerechnet.
     #[test]
-    fn the_caveat_names_what_was_not_checked() {
-        assert!(NO_CLEAN_BILL.contains("NICHT"));
-        assert!(NO_CLEAN_BILL.contains("Liste"));
+    fn too_many_needles_are_refused_with_a_reason() {
+        let mut args = vec!["redact-rs".to_string(), "a.pdf".to_string()];
+        for i in 0..=MAX_NEEDLES {
+            args.push("--check-leaks".to_string());
+            args.push(format!("Begriff{i}"));
+        }
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let err = needles(&cli(&borrowed)).expect_err("einer zu viel");
+        let text = err.to_string();
+        assert!(text.contains(&MAX_NEEDLES.to_string()), "{text}");
+        assert!(text.contains("Hänger"), "der Grund fehlt: {text}");
+
+        // Gegenprobe: genau an der Grenze geht es durch. Eine Decke, die
+        // schon den erlaubten Fall ablehnt, wäre keine Härtung.
+        let borrowed: Vec<&str> = borrowed[..borrowed.len() - 2].to_vec();
+        assert_eq!(needles(&cli(&borrowed)).unwrap().len(), MAX_NEEDLES);
     }
 }

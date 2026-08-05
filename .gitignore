@@ -3,3 +3,40 @@
 **/*.rs.bk
 *.pdb
 /dist
+
+# ---------------------------------------------------------------------------
+# Was dieses Werkzeug selbst erzeugt.
+#
+# Nicht Bequemlichkeit, sondern der Kern der Sache: `redact-rs kontoauszug.pdf`
+# legt seine Ergebnisse NEBEN die Eingabe. Wer zum Ausprobieren einen echten
+# Auszug ins Arbeitsverzeichnis legt, hat danach die Eingabe, die geschwaerzte
+# Ausgabe, das Review und das Audit-Log dort liegen - und `git add -A` nimmt
+# alles mit. In einem oeffentlichen Repository ist das unumkehrbar.
+#
+# Die Namenszusaetze stehen in crates/redact-core/src/naming.rs
+# (DEFAULT_OUTPUT_SUFFIX, REVIEW_SUFFIX, AUDIT_SUFFIX). Ein eigener
+# --output-suffix faellt hier natuerlich nicht darunter.
+*_geschwaerzt.pdf
+*_review.json
+*_audit.json
+
+# PDFs im Wurzelverzeichnis. Die Testdaten des Projekts liegen unter
+# crates/*/src/testdata/ bzw. crates/*/tests/data/ und sind davon nicht
+# betroffen; im Wurzelverzeichnis gehoert keine einzige PDF-Datei ins
+# Repository. Wer doch eine braucht: `git add -f`.
+/*.pdf
+
+# ---------------------------------------------------------------------------
+# Oertliche Werkzeug- und Systemreste
+# ---------------------------------------------------------------------------
+# Rechnerbezogene Einstellungen (Pfade, Freigaben) - gehoeren niemandem
+# ausser dem Rechner, auf dem sie entstanden sind.
+.claude/settings.local.json
+
+# Reste eines Merge/Rebase. Enthalten den kompletten Gegenstand des
+# Konflikts und werden gern uebersehen.
+*.orig
+*.rej
+
+.DS_Store
+Thumbs.db

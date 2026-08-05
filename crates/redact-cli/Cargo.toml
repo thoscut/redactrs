@@ -1,11 +1,12 @@
 [package]
 name = "redact-cli"
-description = "Command line interface for redact-rs"
+description = "The redact-rs program: command line and windowed launcher"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "redact-rs"
@@ -38,6 +39,13 @@ clap.workspace = true
 # Dateien). Steht bereits im Baum, es kommt keine Abhängigkeit hinzu.
 serde.workspace = true
 serde_json.workspace = true
+
+# Genau ein Aufruf: prctl(PR_SET_DUMPABLE, 0) in src/dumpable.rs, damit ein
+# Absturz den Klartext des Dokuments nicht in einen Kernabzug schreibt.
+# `libc` liegt über lopdf → getrandom ohnehin in jedem Bau; es kommt keine
+# Abhängigkeit in den Baum, nur eine ausgesprochene.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 redact-pdf.workspace = true
