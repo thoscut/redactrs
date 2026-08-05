@@ -25,9 +25,132 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 ---
 
-## Unveröffentlicht
+## 0.6.0 — 2026-08-05
 
-Bereich: wird beim Release eingetragen (`git log v0.4.0..<neuer Tag>`).
+Bereich: `git log v0.5.0..v0.6.0`.
+
+Dritter Durchgang. Er hat abgearbeitet, was die zweite Pruefung belegt
+hinterlassen hatte — und dabei ist dreimal dieselbe Fehlerklasse
+aufgetaucht: **eine Decke, die die falsche Einheit zaehlt.**
+
+### ⚠ Drei Schutzdecken, die kein Test hielt
+
+Ein Pruefer hatte sie alle drei auf „unbegrenzt" gesetzt: 1 034 Tests
+blieben gruen. Gemessen schalten die Mutationen mehrere hundert Megabyte
+Schutz und eine Quadratik ab. Sie haengen jetzt an deterministischen
+Zaehlern statt an einer Uhr.
+
+* Die Schriftendecke zaehlte **Verzeichnisse** — vierzig Namen in *einem*
+  Verzeichnis kosteten 279 MB bei Zaehlerstand 1. Sie zaehlt jetzt
+  Tabelleneintraege.
+* Die Operationsdecke sah den vollstaendigen `/Resources`-Klon nicht, den
+  der Zwischenspeicher daneben hielt: Stroeme mit null Operationen wogen
+  null und wurden deshalb ausnahmslos behalten.
+* Der Test fuer die Schichtdecke prueste gegen die Konstante, die er
+  absichern sollte — wer sie anhob, hob die Schranke mit an.
+
+### Leistung, jeweils an einer Messreihe belegt
+
+* Die Schwaerzung legte je Bereich einen Bitvektor ueber **alle** Zeichen
+  der Textoperation an und behielt ihn: 227 kB Eingabe kosteten 38,2 s und
+  1 860 MB, jetzt 0,213 s und 92 MB.
+* Die Vorauswahl der Bereiche war ein Streifen ueber **eine** Achse — bei
+  einer Spalte, wie sie ein Kontoauszug erzeugt, lieferte sie exakt das
+  volle Produkt und siebte damit nichts aus.
+* Die Schrift lag als **Wert** im Grafikzustand und wurde bei jeder
+  Fontwahl vollstaendig geklont. Der Zwischenspeicher aus 0.4.0
+  verhinderte das erneute Parsen, nicht das Klonen; der teure Fall hatte
+  sich nur verschoben.
+* Dieselbe Schrift wird jetzt je Seitendurchlauf einmal geparst, gleich
+  unter wie vielen Namen sie steht: 300 Namen auf dasselbe Objekt kosteten
+  rund 18 s und etwa 2 GB, jetzt 0,077 s und 54 MB.
+* In der Oberflaeche fielen zwei Rechnungen von 1,6 s und 26,7 s auf 0,109
+  und 0,144 s. Ein Schluessel war dafuer nicht noetig — aber die
+  Reihenfolge, auf die sich das stuetzt, war bisher nur eine
+  Implementierungseigenschaft und ist jetzt als Test zugesagt.
+
+### Geaendert
+
+* **Kommandozeile und Oberflaeche sagen bei einem Rechteck neben der Seite
+  dasselbe.** Die CLI meldete es als Schwaerzung und warnte erst hinterher;
+  jetzt faellt der Befund auch dort **vor** der Messung, mit denselben
+  Worten und einer eigenen Zahl in der Zusammenfassung.
+
+### An dieser Datei selbst
+
+* **Die Release-Notizen von 0.5.0 sind unvollstaendig, und zwar durch einen
+  Ablauffehler.** Waehrend 0.5.0 vorbereitet wurde, trug ein Beitrag seine
+  Punkte — darunter `--check-leaks` — unter „Unveroeffentlicht" ein, weil der
+  Abschnitt `## 0.5.0` zu dem Zeitpunkt schon geschrieben war. Der Job
+  schneidet beim Veroeffentlichen nur den Abschnitt der gebauten Version
+  heraus; die Punkte sind also **ausgeliefert**, standen aber nicht in den
+  Notizen. Sie sind hier unter 0.5.0 nachgetragen.
+
+  Die Lehre daraus steht im Kopf dieser Datei: wer waehrend einer laufenden
+  Freigabe etwas eintraegt, traegt es in den Abschnitt der Version ein, die
+  gerade gebaut wird — nicht darueber. Ein Rechenweg, der das erzwingt, waere
+  besser als eine Regel; solange es ihn nicht gibt, gehoert der Abgleich
+  zwischen `## <version>` und `git log` in den Freigabeweg.
+
+---
+
+## 0.5.0 — 2026-08-05
+
+Bereich: `git log v0.4.0..v0.5.0`.
+
+Zweiter vollstaendiger Pruefdurchgang. Er hat zuerst gegen die eigenen
+Aenderungen aus 0.4.0 gearbeitet — mit einem zweiten Abzug von 0.3.0 und
+einer randomisierten Differenzsuche ueber 1 300 Anordnungen, denn nur so
+laesst sich „Regression" von „war schon immer so" trennen.
+
+### ⚠ Zwei Regressionen aus 0.4.0
+
+* **Die Schichtwahl zerriss eine IBAN.** Der Code waehlte die Schicht mit
+  dem groessten erreichten Wert, obwohl der Kommentar „am dichtesten davor"
+  sagte — an einer gewoehnlichen Tabelle mit einem zu langen
+  Empfaengernamen wanderte das erste IBAN-Stueck dadurch in eine Schicht
+  und das zweite zurueck in die andere. 0.3.0 fand die IBAN, 0.4.0 meldete
+  null Treffer bei Rueckgabewert 0. Ueber 3 900 zufaellige Anordnungen
+  belegt: kein einziger Fall, den 0.3.0 fand und 0.5.0 verliert.
+* **Eine Bildmaske deckte wieder auf, was verborgen war.** Wo `/SMask` und
+  `/Mask` nebeneinander stehen, befolgte die eine Stelle das `/SMask` und
+  die andere schrieb das `/Mask` mit. Es gibt jetzt eine einzige
+  Entscheidungsstelle, aus der sich beide ableiten.
+
+### ⚠ Wege, den Rechner lahmzulegen
+
+* **Eine ToUnicode-Tabelle aus 6 kB ergab einen Abbruch**, aus 3 kB fast
+  7 GB. Die Decke zaehlt Bytes und nicht Eintraege — eine zweite Bombe in
+  derselben Funktion (ein sehr langer Zielstring) waere sonst durchgekommen.
+* Die Hilfsdatei-Leser, die Bildmasken-Rekursion und vier superlineare
+  Stellen sind geschlossen; die Konfliktaufloesung faellt von 74,6 s auf
+  0,21 s bei 100 000 Kandidaten, die Trefferkoordinaten von 42,3 s auf
+  0,078 s bei 32 000 Treffern.
+
+### Neu
+
+* **`--check-leaks <TEXT>` prueft eine fertige Datei auf Restdaten** — im
+  ausgelieferten Binary, ohne Quelltext und ohne Netz. Die Anleitung dazu
+  verlangte bisher eine Rust-Toolchain und einen Klon des Repositories. Die
+  Gegenprobe: bei einer IBAN in einem komprimierten Objektstrom geben
+  `pdftotext`, `strings` und `grep` uebereinstimmend Entwarnung.
+* **Die Oberflaeche ist ohne Maus benutzbar.** Ein Rechteck liess sich nur
+  mit der Maus erzeugen — und auf einem Kontoauszug sind Anschrift,
+  Kontonummer und Kontoinhabername genau die Stellen, die von Hand gezogen
+  werden muessen. `Strg+R` legt eines an, `Strg+Pfeil` aendert die Groesse.
+  Ausserdem zerschnitt ein einziges ausgegrautes Bedienelement die
+  Tabulator-Kette.
+* **Eine entartete Seitengroesse brachte Oberflaeche und Kommandozeile
+  auseinander**: die IBAN blieb im Fenster-Export stehen, waehrend die CLI
+  mit derselben Einstellung beide Seiten schwaerzte.
+
+
+### Nachgetragen
+
+> Die folgenden Punkte sind **mit 0.5.0 ausgeliefert**, standen beim
+> Veroeffentlichen aber noch unter „Unveroeffentlicht" und fehlen deshalb in
+> den Release-Notizen von 0.5.0 auf GitHub. Hier stehen sie an der richtigen
+> Stelle. Der Ablauf, der das verhindert, ist in 0.6.0 vermerkt.
 
 ### Neu
 
@@ -112,58 +235,6 @@ Bereich: wird beim Release eingetragen (`git log v0.4.0..<neuer Tag>`).
   gegen `SHA256SUMS-BINARIES` geprüft: `redact-rs.exe` 10 766 336,
   `redact-rs-gui.exe` 9 999 360, Linux/glibc 15 041 568, Linux/musl
   5 055 416 Byte — alle vier gewachsen, alle vier weit unter 30 MB.
-
----
-
-## 0.5.0 — 2026-08-05
-
-Bereich: `git log v0.4.0..v0.5.0`.
-
-Zweiter vollstaendiger Pruefdurchgang. Er hat zuerst gegen die eigenen
-Aenderungen aus 0.4.0 gearbeitet — mit einem zweiten Abzug von 0.3.0 und
-einer randomisierten Differenzsuche ueber 1 300 Anordnungen, denn nur so
-laesst sich „Regression" von „war schon immer so" trennen.
-
-### ⚠ Zwei Regressionen aus 0.4.0
-
-* **Die Schichtwahl zerriss eine IBAN.** Der Code waehlte die Schicht mit
-  dem groessten erreichten Wert, obwohl der Kommentar „am dichtesten davor"
-  sagte — an einer gewoehnlichen Tabelle mit einem zu langen
-  Empfaengernamen wanderte das erste IBAN-Stueck dadurch in eine Schicht
-  und das zweite zurueck in die andere. 0.3.0 fand die IBAN, 0.4.0 meldete
-  null Treffer bei Rueckgabewert 0. Ueber 3 900 zufaellige Anordnungen
-  belegt: kein einziger Fall, den 0.3.0 fand und 0.5.0 verliert.
-* **Eine Bildmaske deckte wieder auf, was verborgen war.** Wo `/SMask` und
-  `/Mask` nebeneinander stehen, befolgte die eine Stelle das `/SMask` und
-  die andere schrieb das `/Mask` mit. Es gibt jetzt eine einzige
-  Entscheidungsstelle, aus der sich beide ableiten.
-
-### ⚠ Wege, den Rechner lahmzulegen
-
-* **Eine ToUnicode-Tabelle aus 6 kB ergab einen Abbruch**, aus 3 kB fast
-  7 GB. Die Decke zaehlt Bytes und nicht Eintraege — eine zweite Bombe in
-  derselben Funktion (ein sehr langer Zielstring) waere sonst durchgekommen.
-* Die Hilfsdatei-Leser, die Bildmasken-Rekursion und vier superlineare
-  Stellen sind geschlossen; die Konfliktaufloesung faellt von 74,6 s auf
-  0,21 s bei 100 000 Kandidaten, die Trefferkoordinaten von 42,3 s auf
-  0,078 s bei 32 000 Treffern.
-
-### Neu
-
-* **`--check-leaks <TEXT>` prueft eine fertige Datei auf Restdaten** — im
-  ausgelieferten Binary, ohne Quelltext und ohne Netz. Die Anleitung dazu
-  verlangte bisher eine Rust-Toolchain und einen Klon des Repositories. Die
-  Gegenprobe: bei einer IBAN in einem komprimierten Objektstrom geben
-  `pdftotext`, `strings` und `grep` uebereinstimmend Entwarnung.
-* **Die Oberflaeche ist ohne Maus benutzbar.** Ein Rechteck liess sich nur
-  mit der Maus erzeugen — und auf einem Kontoauszug sind Anschrift,
-  Kontonummer und Kontoinhabername genau die Stellen, die von Hand gezogen
-  werden muessen. `Strg+R` legt eines an, `Strg+Pfeil` aendert die Groesse.
-  Ausserdem zerschnitt ein einziges ausgegrautes Bedienelement die
-  Tabulator-Kette.
-* **Eine entartete Seitengroesse brachte Oberflaeche und Kommandozeile
-  auseinander**: die IBAN blieb im Fenster-Export stehen, waehrend die CLI
-  mit derselben Einstellung beide Seiten schwaerzte.
 
 ---
 
