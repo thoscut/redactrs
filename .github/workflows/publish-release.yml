@@ -37,6 +37,12 @@ name: Publish Release
 # ist die erste Schranke; die `if`-Bedingungen an den Jobs sind die zweite
 # und pruefen gegen den *tatsaechlichen* Default-Branch des Repositories
 # (der Filter kann das nicht, er kennt nur Namen).
+#
+# Das galt lueckenlos nur fuer *diesen* Weg. `release.yml` liess sich
+# daneben per Tag-Push (`on: push: tags: v*`) oder `workflow_dispatch` mit
+# beliebigem `ref` von jedem Arbeitsstand aus ausloesen und kannte dabei gar
+# keinen Branch. Seit `verify` dort die Abstammung vom Default-Branch prueft,
+# gilt die Regel fuer alle Wege - nicht nur fuer den bequemsten.
 
 on:
   push:
@@ -60,7 +66,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.read.outputs.tag }}
-      prerelease: ${{ steps.read.outputs.prerelease }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -68,8 +73,6 @@ jobs:
       - name: Version aus .release-version lesen
         id: read
         shell: bash
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           # Kommentarzeilen (`#`) und Leerzeilen werden verworfen, damit in
@@ -77,9 +80,24 @@ jobs:
           # Release, und das sollte man ihr ansehen. Frueher wurde die ganze
           # Datei zur Version verdichtet; ein erklaerender Satz darin haette
           # eine unsinnige Version ergeben.
-          VERSION="$(grep -v '^[[:space:]]*#' .release-version | tr -d '[:space:]')"
+          #
+          # Der Rueckgabewert von `grep` wird ausgewertet und nicht
+          # verschluckt: bleibt keine Zeile uebrig (die Datei enthaelt nur
+          # noch Kommentare), endet `grep` mit 1, und unter `set -e` waere
+          # der Schritt an dieser Stelle *wortlos* gestorben - die
+          # freundliche Meldung darunter war unerreichbar. 0 und 1 sind
+          # Antworten, alles darueber ist ein Fehler.
+          set +e
+          VERSION="$(grep -v '^[[:space:]]*#' .release-version)"
+          RC=$?
+          set -e
+          if [ "$RC" -gt 1 ]; then
+            echo "::error::.release-version konnte nicht gelesen werden (grep endete mit $RC)"
+            exit 1
+          fi
+          VERSION="$(printf '%s' "$VERSION" | tr -d '[:space:]')"
           if [ -z "$VERSION" ]; then
-            echo "::error::.release-version enthaelt keine Version"
+            echo "::error::.release-version enthaelt keine Version (nur Kommentare oder Leerzeilen)"
             exit 1
           fi
           # Fuehrendes "v" tolerieren, aber intern immer ohne fuehrendes v rechnen.
@@ -94,15 +112,18 @@ jobs:
           # fehlgeschlagenem sed die komplette Zeile zurueck statt zu
           # scheitern - und sah nur das Workspace-Manifest, nicht das Crate,
           # aus dem das Binary entsteht.
-          if [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ]; then
-            PRERELEASE="false"
-          else
-            PRERELEASE="true"
-            echo "::notice::Release aus '$GITHUB_REF_NAME' (nicht Default-Branch) - wird als Vorabversion veroeffentlicht."
-          fi
+          #
+          # Hier stand bis eben ein Zweig, der einen Release aus einem
+          # anderen Branch als dem Default-Branch als Vorabversion
+          # gekennzeichnet haette. Seit 04da92c laeuft dieser Job nur noch
+          # auf dem Default-Branch (`branches`-Filter *und* `if:` an beiden
+          # Jobs) - der Zweig konnte also nicht mehr greifen. Toter Code in
+          # einem Ablauf, der oeffentliche Binaries erzeugt, liest sich wie
+          # eine vorhandene Schranke; deshalb ist er weg. Ob eine Fassung
+          # eine Vorabversion ist, entscheidet jetzt `verify` in release.yml
+          # an der Versionsnummer (`0.4.0-rc.1`).
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
-          echo "Release wird gebaut fuer v$VERSION (prerelease=$PRERELEASE)"
+          echo "Release wird gebaut fuer v$VERSION"
 
   release:
     name: Bauen und veroeffentlichen
@@ -116,4 +137,3 @@ jobs:
     with:
       tag: ${{ needs.version.outputs.tag }}
       ref: ${{ github.sha }}
-      prerelease: ${{ needs.version.outputs.prerelease == 'true' }}

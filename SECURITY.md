@@ -371,6 +371,10 @@ darin war er kein Zusatz mehr:
 output_suffix: "/../../ziel/alle"
 ```
 
+So sah der Lauf **vor der Korrektur** aus. Der Mitschnitt ist historisch: die
+Zusammenfassung nannte damals zwei Zahlen, seit 0.3.0 sind es drei, und den
+Aufruf selbst lässt das Programm heute gar nicht mehr zu (siehe unten).
+
 ```
 $ redact-rs b3/ --force
 b3/drei.pdf → b3/drei/../../ziel/alle.pdf (0 Schwärzung(en))
@@ -396,6 +400,44 @@ Geprüft wird jetzt an zwei Stellen: beim Lesen der Einstellungsdatei
 Oberfläche). Zusätzlich neutralisiert `redact_core::output_path_with_suffix`
 Pfadtrenner zu `_` — erreicht wird das im laufenden Programm nie, es ist die
 Bremse für einen künftigen Aufrufer, der beide Prüfungen vergisst.
+
+Derselbe Aufruf heute, mit dem ausgelieferten Binary 0.3.0
+(`x86_64-linux-musl`) auf drei unveränderten Kopien der Beispieldatei:
+
+```
+$ REDACT_RS_CONFIG=s.yaml redact-rs b3/ --force
+Fehler: Konfigurationsfehler: s.yaml: der Namenszusatz „/../../ziel/alle“ ist keiner: er enthält einen Pfadtrenner. Der Zusatz wird an den Dateinamen der Eingabe angehängt und darf deshalb nur aus Namensbestandteilen bestehen — mit einem Pfadtrenner darin ginge der Dateistamm verloren, im Stapel schriebe jede Datei auf dasselbe Ziel, und geschrieben würde außerhalb des Eingabeverzeichnisses. Wer die Ausgabe woanders haben will, gibt sie mit -o an.
+$ echo $?
+2
+```
+
+Dieselbe Ablehnung kommt über `--output-suffix`; dort ist sie ein
+Datei-Fehlschlag je Eingabe statt eines Abbruchs vor dem ersten Schreiben.
+
+Und ohne den Zusatz — so sieht die Zusammenfassung eines Stapels seit 0.3.0
+aus, drei Zahlen statt zweier:
+
+```
+$ redact-rs b3/ --force
+[1/3] b3/drei.pdf
+[2/3] b3/eins.pdf
+[3/3] b3/zwei.pdf
+b3/drei.pdf → b3/drei_geschwaerzt.pdf (7 Schwärzung(en))
+b3/eins.pdf → b3/eins_geschwaerzt.pdf (7 Schwärzung(en))
+b3/zwei.pdf → b3/zwei_geschwaerzt.pdf (7 Schwärzung(en))
+
+3 Datei(en): 3 vollständig geprüft, 0 verarbeitet (aber nicht vollständig geprüft), 0 fehlgeschlagen.
+$ echo $?
+0
+```
+
+Die mittlere Zahl steht für sich, weil „verarbeitet" vorher auch für Dateien
+galt, deren Text niemand gelesen hatte: zwanzig Auszüge ergaben „20
+verarbeitet, 0 fehlgeschlagen" und Rückgabewert 0, obwohl in einer davon eine
+Kontonummer unberührt stand. Zählt die mittlere Zahl über null und ist keine
+Datei gescheitert, endet der Lauf mit Rückgabewert 3 statt 0
+(`crates/redact-cli/src/batch.rs`, `exit_code`); eine gescheiterte Datei
+schlägt das mit 1.
 
 ### Fremde Zeichen auf dem Terminal
 
@@ -739,23 +781,77 @@ Limit ist die zweite Verteidigungslinie gegen einen Tippfehler.
 ### `unsafe` in Abhängigkeiten, die Angreiferdaten parsen
 
 `#![forbid(unsafe_code)]` gilt für den eigenen Code, nicht für den Unterbau.
-Diese Crates sehen Bytes aus dem Eingabe-PDF und enthalten `unsafe`
-(Vorkommen im jeweiligen `src/`):
+Diese Crates sehen Bytes aus dem Eingabe-PDF und enthalten `unsafe`.
 
-| Crate | `unsafe` | sieht Angreiferdaten |
+**Die erste Tabelle gilt schon für die reine Kommandozeile** — also für das
+musl-Archiv des Releases, gebaut mit `--no-default-features`. Hier stand
+früher eine Tabelle, in der die Oberfläche den größten Teil der Fläche
+stellte; das stimmte nicht, und die Empfehlung darunter („wer nur die
+Kommandozeile braucht, baut ohne die Oberfläche") las sich dadurch wie ein
+Ausweg. Sie **verkleinert** die Fläche, sie beseitigt sie nicht.
+
+| Crate | `unsafe` | wo die Angreiferdaten herkommen |
 |---|---|---|
-| `bytemuck` 1.25 | 368 | ja — unter `skrifa` und `tiny-skia` |
-| `tiny-skia` 0.12 | 152 | ja — rastert Pfade und Koordinaten aus dem PDF (Vorschau) |
-| `zune-jpeg` 0.5 | 85 | ja — dekodiert eingebettete JPEGs |
-| `flate2` 1.1 | 36 | ja — packt jeden komprimierten Stream aus |
-| `eframe` 0.29 | 21 | mittelbar — nur in der grafischen Oberfläche |
-| `skrifa` 0.33 / `read-fonts` 0.31 | 0 (selbst) | ja — liest eingebettete Schriften, stützt sich auf `bytemuck` |
+| `memchr` 2.8.3 | 340 | Substringsuche der Mustererkennung über den extrahierten PDF-Text (SIMD) |
+| `encoding_rs` 0.8.35 | 271 | UTF-16BE-Dekodierung der PDF-Strings (`lopdf/src/encodings/mod.rs:13`) |
+| `aho-corasick` 1.1.4 | 227 | Mehrmustersuche unter `regex-automata`/`fancy-regex`, ebenfalls über den PDF-Text |
+| `aes` 0.8.4 | 110 | entschlüsselt das Eingabe-PDF (`lopdf/src/encryption/algorithms.rs`) |
+| `zune-jpeg` 0.5.15 | 85 | dekodiert eingebettete JPEGs — auch ohne Oberfläche, für die Bildschwärzung |
+| `regex-automata` 0.4.16 | 57 | die Regex-Maschine selbst |
+| `flate2` 1.1.9 | 37 | packt jeden komprimierten Stream aus |
+| `simd-adler32` 0.3.10 | 36 | Prüfsumme jedes ausgepackten Streams (unter `miniz_oxide`) |
+| `miniz_oxide` 0.8.9 | 3 | der Inflate-Kern unter `flate2` |
+
+Nur im Bau **mit** Oberfläche kommen dazu:
+
+| Crate | `unsafe` | wo die Angreiferdaten herkommen |
+|---|---|---|
+| `bytemuck` 1.25.2 | 376 | unter `skrifa` und `tiny-skia` |
+| `tiny-skia` 0.12.0 | 152 | rastert Pfade und Koordinaten aus dem PDF (Vorschau) |
+| `eframe` 0.29.1 | 21 | mittelbar — das Fenster selbst |
+| `skrifa` 0.33.2 / `read-fonts` 0.31.3 | 0 (selbst) | lesen eingebettete Schriften, stützen sich auf `bytemuck` |
 
 Ein Speicherfehler in einer dieser Bibliotheken ist ein Speicherfehler in
 redact-rs. Wer ein PDF aus wirklich unbekannter Quelle verarbeitet, sollte das
-in einer Sandbox tun (Container, `bwrap`, eigenes Benutzerkonto) — und wer nur
-die Kommandozeile braucht, baut ohne die Oberfläche:
-`cargo build --release -p redact-cli --no-default-features`.
+in einer Sandbox tun (Container, `bwrap`, eigenes Benutzerkonto). Der Bau ohne
+Oberfläche (`cargo build --release -p redact-cli --no-default-features`) nimmt
+`bytemuck`, `tiny-skia` und `eframe` heraus — die neun Crates der ersten
+Tabelle bleiben.
+
+**Nachrechnen** statt glauben; die Zahlen oben stammen aus genau diesem Lauf
+(gezählt wird das Schlüsselwort `unsafe` in `src/`, Kommentare und
+Zeichenketten eingeschlossen — ein grobes Maß für Fläche, keine Prüfung):
+
+```bash
+cargo tree -p redact-cli --no-default-features -e normal --prefix none --no-dedupe \
+  | sed 's/ (proc-macro)//' | grep -v '^redact-' | sort -u \
+  | while read -r name ver; do
+      d=$(echo ~/.cargo/registry/src/*/"$name-${ver#v}")
+      [ -d "$d/src" ] && printf '%6s  %s %s\n' \
+        "$(grep -rho '\bunsafe\b' --include='*.rs' "$d/src" | wc -l)" "$name" "$ver"
+    done | sort -rn
+```
+
+Ohne `--no-default-features` zählt derselbe Aufruf den Graphen **mit**
+Oberfläche; dort stehen `linux-raw-sys`, `glow`, `rustix` und `winit` weit
+oben. Sie sehen keine PDF-Bytes — sie reden mit Kernel, Fenstersystem und
+Grafiktreiber — und stehen deshalb in keiner der beiden Tabellen.
+
+Zwei Nachbarn, die nicht in die Tabellen gehören, aber genannt sein sollen:
+
+* **`unsafe-libyaml` 0.2.11 (240 `unsafe`, transpiliertes C)** liegt unter
+  `serde_yaml` und liest Einstellungs- und Musterdatei; `serde_json` 1.0.151
+  (16) liest Review- und Regionsdateien. Nach dem Bedrohungsmodell sind das
+  alles vertrauenswürdige Eingaben — sie stehen deshalb nicht in der Tabelle.
+  Unter den Bibliotheken, die diese Dateien lesen, ist `unsafe-libyaml` mit
+  Abstand die größte `unsafe`-Fläche (`serde_yaml` selbst: 60, `serde_json`:
+  16, `csv`: 4). Wer Musterdateien aus fremder Hand einliest, verlässt das
+  Bedrohungsmodell an dieser Stelle.
+* **`ttf-parser` 0.25.1** ist nicht mehr gepflegt (RUSTSEC-2026-0192) und
+  liegt im Abhängigkeitsgraphen, ist aber ausschließlich über
+  `lopdf::FontData::new` erreichbar, und redact-rs ruft das nirgends auf
+  (`git grep FontData -- crates/` findet nichts). Kein Angreiferpfad,
+  nur toter Ballast.
 
 Anmerkung zur Einordnung: `lopdf` selbst enthält **kein** `unsafe` — und stürzte
 in 0.34 trotzdem ab (RUSTSEC-2026-0187). „Sicheres Rust“ schützt vor

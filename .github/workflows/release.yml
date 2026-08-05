@@ -7,9 +7,33 @@ name: Release
 #   * `workflow_call` aus publish-release.yml bzw. `workflow_dispatch` -
 #     der Tag wird erst vom Release selbst angelegt
 #
-# Beide Wege durchlaufen zwingend den Job `verify`. Vorher konnte der
+# Beide Wege durchlaufen zwingend `verify` und danach `ci`. Vorher konnte der
 # Tag-Weg an der Versionspruefung vorbei: `git tag v9.9.9` erzeugte ein
 # Archiv namens `redact-rs-9.9.9-...`, dessen Binary sich als 0.1.0 meldete.
+#
+# WARUM HIER EIN CI-TOR STEHT
+# `verify` hat immer nur Versionsnummer und Tag geprueft, nie den Code. Es gab
+# in diesem Workflow keinen einzigen Test-, Clippy-, fmt- oder deny-Schritt -
+# nur `cargo build --release`. Damit konnte aus rotem Code ein
+# oeffentliches Binary werden, und genau das ist passiert: Lauf 30740996889
+# ("Publish Release", Commit 9aa4808) endete `success` und hat v0.3.0
+# veroeffentlicht, waehrend die CI-Laeufe **desselben Commits**
+# (30740996865 und 30741004317) beide `failure` meldeten.
+#
+# Der Job `ci` ruft deshalb .github/workflows/ci.yml als wiederverwendbaren
+# Workflow auf - dieselbe Datei, die auch auf jedem Push laeuft, keine
+# Kopie, die auseinanderlaufen kann. Er ist Vorbedingung fuer `build` und
+# `release`. Das kostet die CI-Zeit ein zweites Mal; dafuer traegt sich der
+# Release selbst und haengt nicht daran, dass irgendwo ein fremder Lauf mit
+# einem brauchbaren Ergebnis herumliegt. Ein *fehlender* Lauf kann so gar
+# nicht erst als "in Ordnung" durchgehen: wenn ci.yml nicht aufloesbar ist,
+# startet der Workflow nicht.
+#
+# WELCHER COMMIT
+# `verify` loest den Ref genau einmal zu einer Commit-ID auf und gibt sie
+# weiter; `ci`, `build` und `release` checken diese ID aus. Vorher hat jeder
+# Job den Ref selbst aufgeloest - bei einem Branch-Ref konnten also getestet
+# und gebaut worden sein, was inzwischen zwei verschiedene Commits waren.
 
 on:
   push:
@@ -26,7 +50,7 @@ on:
         required: false
         type: string
       prerelease:
-        description: "Als Vorabversion kennzeichnen (fuer Releases ausserhalb des Default-Branches)"
+        description: "Als Vorabversion kennzeichnen (zusaetzlich zur Erkennung an der Versionsnummer)"
         required: false
         default: false
         type: boolean
@@ -70,6 +94,8 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      sha: ${{ steps.resolve.outputs.sha }}
       channel: ${{ steps.toolchain.outputs.channel }}
     steps:
       - name: Tag und Version bestimmen
@@ -77,6 +103,7 @@ jobs:
         shell: bash
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
           TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
@@ -85,14 +112,91 @@ jobs:
             echo "::error::'$TAG' ergibt keine gueltige Version (erwartet: v1.2.3)"
             exit 1
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Release wird gebaut fuer tag=$TAG version=$VERSION"
+          # Vorabversion: entweder ausdruecklich angefordert, oder an der
+          # Versionsnummer erkennbar. Frueher hing die Kennzeichnung allein an
+          # `inputs.prerelease` - auf dem Tag-Weg ist dieser Wert leer, also
+          # waere `v0.4.0-rc.1` als regulaerer Release erschienen. Das
+          # Build-Metadatum (`+...`) macht keine Vorabversion, deshalb wird es
+          # vorher abgeschnitten.
+          CORE="${VERSION%%+*}"
+          PRERELEASE="false"
+          case "$CORE" in
+            *-*) PRERELEASE="true" ;;
+          esac
+          if [ "${INPUT_PRERELEASE:-false}" = "true" ]; then
+            PRERELEASE="true"
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release wird gebaut fuer tag=$TAG version=$VERSION prerelease=$PRERELEASE"
 
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.ref || inputs.tag || github.ref }}
+          # Fuer die Abstammungspruefung im naechsten Schritt wird die
+          # Vorgeschichte gebraucht, nicht nur der Kopf.
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------------
+      # Ab hier steht *eine* Commit-ID fest, und nur die wird weitergereicht.
+      # Ein Branch- oder Tag-Name ist beweglich: `verify`, `ci`, `build` und
+      # `release` haben ihn frueher jeweils selbst aufgeloest und konnten
+      # damit auf verschiedenen Commits arbeiten.
+      # ---------------------------------------------------------------------
+      - name: Commit festnageln
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Gebaut und geprueft wird Commit $SHA"
+
+      # Ohne diese Pruefung veroeffentlicht `git tag v0.3.1 <arbeitsstand> &&
+      # git push --tags` ein oeffentliches Binary aus einem Arbeitsbranch.
+      # publish-release.yml laesst nur den Default-Branch zu, der Tag-Weg
+      # hierher (`on: push: tags`) und `workflow_dispatch` mit beliebigem
+      # `ref` kannten dagegen gar keinen Branch.
+      - name: Commit muss auf dem Default-Branch liegen
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          DEFAULT_BRANCH="$(gh api "repos/$GITHUB_REPOSITORY" --jq '.default_branch')"
+          if [ -z "$DEFAULT_BRANCH" ]; then
+            echo "::error::Default-Branch des Repositories nicht ermittelbar - Abbruch."
+            exit 1
+          fi
+          git fetch --no-tags --quiet origin "$DEFAULT_BRANCH"
+          # `git merge-base --is-ancestor` beantwortet die Frage mit dem
+          # Rueckgabewert: 0 = ja, 1 = nein, alles andere = die Frage wurde
+          # gar nicht beantwortet. Genau diese dritte Moeglichkeit ist der
+          # Grund fuer das ausgeschriebene `case` statt eines `if ! ...`:
+          # in diesem Repository hat schon einmal ein verschluckter
+          # Rueckgabewert einen roten Zustand gruen aussehen lassen.
+          set +e
+          git merge-base --is-ancestor "$SHA" FETCH_HEAD
+          RC=$?
+          set -e
+          case "$RC" in
+            0)
+              echo "$SHA liegt auf $DEFAULT_BRANCH - in Ordnung."
+              ;;
+            1)
+              echo "::error::Commit $SHA liegt nicht auf dem Default-Branch ($DEFAULT_BRANCH). Ein Release entsteht nur aus Code, der dort angekommen ist. Erst zusammenfuehren, dann veroeffentlichen."
+              exit 1
+              ;;
+            *)
+              echo "::error::Die Abstammungspruefung konnte nicht durchgefuehrt werden (git merge-base endete mit $RC). Kein Ergebnis ist kein gruenes Licht - Abbruch."
+              exit 1
+              ;;
+          esac
 
       - name: Rust-Channel aus rust-toolchain.toml lesen
         id: toolchain
@@ -154,8 +258,26 @@ jobs:
             # Versionsnummer — dadurch scheiterte *jeder* Weg zur
             # Veroeffentlichung an diesem Schritt (belegt an Lauf
             # 30696875815 auf main).
-            FILE_VERSION="$(grep -v '^[[:space:]]*#' .release-version | tr -d '[:space:]')"
+            #
+            # `grep` endet mit 1, wenn *keine* Zeile uebrig bleibt (Datei
+            # enthaelt nur Kommentare) - unter `set -e` haette der Schritt
+            # dann wortlos abgebrochen. Deshalb wird der Rueckgabewert hier
+            # ausgewertet statt verschluckt: 0/1 sind Antworten, alles
+            # darueber ist ein Fehler.
+            set +e
+            FILE_VERSION="$(grep -v '^[[:space:]]*#' .release-version)"
+            RC=$?
+            set -e
+            if [ "$RC" -gt 1 ]; then
+              echo "::error::.release-version konnte nicht gelesen werden (grep endete mit $RC)"
+              exit 1
+            fi
+            FILE_VERSION="$(printf '%s' "$FILE_VERSION" | tr -d '[:space:]')"
             FILE_VERSION="${FILE_VERSION#v}"
+            if [ -z "$FILE_VERSION" ]; then
+              echo "::error::.release-version enthaelt keine Version (nur Kommentare oder Leerzeilen)"
+              exit 1
+            fi
             if [ "$FILE_VERSION" != "$CRATE_VERSION" ]; then
               echo "::error::.release-version ($FILE_VERSION) und redact-cli ($CRATE_VERSION) stimmen nicht ueberein"
               exit 1
@@ -193,11 +315,42 @@ jobs:
           echo "Weder Release noch (zu erzeugender) Tag vorhanden - in Ordnung."
 
   # -------------------------------------------------------------------------
-  # 2. Bauen.
+  # 2. Die CI desselben Commits. Erst danach wird gebaut.
+  #
+  # Bewusst `uses: ./.github/workflows/ci.yml` statt einer Kopie der Schritte:
+  # eine Kopie laeuft mit der Zeit auseinander, und dann prueft der Release
+  # weniger als die CI, ohne dass es jemand merkt. So ist es dieselbe Datei -
+  # fmt, clippy, Tests (Linux und Windows), MSRV und cargo-deny/cargo-audit.
+  #
+  # `needs: verify` ist Absicht: eine falsche Versionsnummer soll nicht erst
+  # nach einem vollen CI-Durchlauf auffallen.
+  #
+  # Zwei Reste, die bewusst offen bleiben:
+  #
+  #  * Ein Job, den jemand in ci.yml per `if:` ueberspringen laesst, gilt als
+  #    erfolgreich - das ist GitHubs Regel fuer uebersprungene Jobs und gilt
+  #    fuer jede Form dieses Tors. Heute hat kein Job in ci.yml ein `if:`;
+  #    wer eines einbaut, nimmt den Release-Schutz mit heraus.
+  #  * Welche *Fassung* von ci.yml laeuft, entscheidet der Ref, auf dem der
+  #    Workflow ausgeloest wurde - nicht `inputs.ref`. Bei einem Tag-Push und
+  #    ueber publish-release.yml ist das derselbe Commit. Nur bei
+  #    `workflow_dispatch` von einem Branch mit abweichendem `ref` koennen
+  #    Pruefvorschrift und geprueftes Ziel auseinanderfallen; wer diesen Weg
+  #    nimmt, loest ihn auf dem Default-Branch aus.
+  # -------------------------------------------------------------------------
+  ci:
+    name: CI des Release-Commits
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.verify.outputs.sha }}
+
+  # -------------------------------------------------------------------------
+  # 3. Bauen.
   # -------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.suffix }}
-    needs: verify
+    needs: [verify, ci]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -250,7 +403,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.ref || inputs.tag || github.ref }}
+          ref: ${{ needs.verify.outputs.sha }}
 
       # Nur der glibc-Build enthaelt die GUI (eframe/egui mit glow, x11,
       # wayland) und braucht dafuer Entwicklungspakete. libgtk-3-dev und
@@ -285,10 +438,33 @@ jobs:
       # nicht aus einem Cache, den sich andere Laeufe und Branches teilen.
       # In ci.yml bleibt der Cache selbstverstaendlich erhalten.
 
+      # Der Pfad des Build-Rechners gehoert nicht ins ausgelieferte Binary.
+      # Gemessen an den Artefakten von v0.3.0: 178 Zeilen mit
+      # `/home/runner/.cargo/registry/...` im musl-Binary, 575 im
+      # glibc-Binary - die Ortsangaben, die `panic!` und `unwrap` mitbringen.
+      # `strip = true` entfernt sie nicht, das sind keine Symbole. Sie machen
+      # jeden Nachbau woanders zwangslaeufig verschieden, ohne dass sich an
+      # der Software etwas geaendert haette.
+      #
+      # `--remap-path-prefix` ist die Fassung, die auf stabilem Rust
+      # funktioniert. Die naheliegendere `[profile.release] trim-paths` ist
+      # es NICHT: cargo 1.94.1 - die hier gepinnte Toolchain - lehnt sie ab
+      # ("feature `trim-paths` is required ... not stabilized in this version
+      # of Cargo"). Sobald sie stabil ist, gehoert sie nach Cargo.toml und
+      # diese drei Zeilen koennen weg.
+      #
+      # Vorsicht beim Aendern: `RUSTFLAGS` in der Umgebung *ersetzt*
+      # `target.<triple>.rustflags` aus .cargo/config.toml, es wird nicht
+      # zusammengefuegt. Fuer die drei Targets dieser Matrix (msvc,
+      # linux-gnu, linux-musl) gibt es dort keinen solchen Abschnitt; wer
+      # einen anlegt, muss ihn hier beruecksichtigen.
       - name: redact-rs bauen
         shell: bash
         run: |
           set -euo pipefail
+          CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+          export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME_DIR}/registry/src=/cargo-registry"
+          echo "RUSTFLAGS=$RUSTFLAGS"
           cargo build --release --locked \
             --target "${{ matrix.target }}" \
             -p redact-cli ${{ matrix.features }}
@@ -321,8 +497,10 @@ jobs:
           fi
           # SECURITY.md gehoert dazu: die README verweist neunmal darauf
           # (Grenzen, Bedrohungsmodell, Schreibpfad). Wer nur das Archiv hat,
-          # lief bisher in tote Verweise.
-          for f in README.md SECURITY.md LICENSE-MIT LICENSE-APACHE LICENSE; do
+          # lief bisher in tote Verweise. CHANGELOG.md aus demselben Grund:
+          # wer eine aeltere Fassung ersetzt, muss ohne Netzzugang sehen
+          # koennen, welche Lecks dazwischen geschlossen wurden.
+          for f in README.md SECURITY.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE LICENSE; do
             if [ -f "$f" ]; then cp "$f" staging/; fi
           done
           # SIL Open Font License 1.1. Die egui-Standardschriften
@@ -352,9 +530,37 @@ jobs:
           set -euo pipefail
           bash scripts/make-archive.sh staging "$ARCHIVE"
 
-      # Das Archiv ist jetzt reproduzierbar, aber der interessante Teil ist
-      # das Binary selbst. Wer nachbauen will, vergleicht diesen Hash - er
-      # haengt an keiner Verpackung.
+      # Wozu diese Summe taugt - und wozu nicht.
+      #
+      # Sie bezeugt: diese Datei ist genau die, die aus diesem Lauf kam,
+      # unabhaengig davon, wie sie verpackt wurde. Wer ein Archiv entpackt,
+      # kann das Binary daran pruefen.
+      #
+      # Hier stand vorher: "Wer nachbauen will, vergleicht diesen Hash." Das
+      # war eine Zusage, die der Bau nicht einloest, und sie ist nachgemessen
+      # falsch gewesen: die v0.3.0-Artefakte tragen 178 (musl) bzw. 575
+      # (glibc) Zeilen mit `/home/runner/.cargo/registry/...` in sich, ein
+      # Nachbau anderswo entsprechend seine eigenen. Gleiche Crate-Versionen,
+      # gleiche Dateinamen - nur das Heimatverzeichnis des Build-Rechners
+      # unterscheidet sich. Nachzaehlen:
+      #
+      #   strings -a redact-rs | grep -c '/\.cargo/registry/'
+      #
+      # Der Bau-Schritt oben nimmt diesen Unterschied jetzt heraus. Gemessen
+      # mit Toolchain 1.94.1 und `-p redact-cli --no-default-features`, je
+      # zwei Baeume an verschiedenen Pfaden und mit verschiedenem CARGO_HOME:
+      #
+      #   ohne Umschreibung  x86_64-unknown-linux-gnu   verschieden
+      #                      (4 844 184 gegen 4 858 072 Byte, 177 fremde
+      #                       Registry-Pfade im zweiten Binary)
+      #   mit Umschreibung   x86_64-unknown-linux-gnu   bitgleich
+      #   mit Umschreibung   x86_64-unknown-linux-musl  bitgleich
+      #
+      # Was damit NICHT gezeigt ist: dass ein *anderer* Rechner dasselbe
+      # ergibt. Gemessen wurde auf einer Maschine; der glibc-Build linkt
+      # ausserdem mit dem System-Linker des Runners, und der gehoert nicht zur
+      # gepinnten Toolchain. Solange das niemand nachgemessen hat, verspricht
+      # diese Datei Herkunft, nicht Nachbaubarkeit.
       - name: Pruefsumme des rohen Binaries
         shell: bash
         env:
@@ -404,11 +610,11 @@ jobs:
           retention-days: 7
 
   # -------------------------------------------------------------------------
-  # 3. Veroeffentlichen.
+  # 4. Veroeffentlichen.
   # -------------------------------------------------------------------------
   release:
     name: GitHub Release veroeffentlichen
-    needs: [verify, build]
+    needs: [verify, ci, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -420,7 +626,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.ref || inputs.tag || github.ref }}
+          ref: ${{ needs.verify.outputs.sha }}
 
       - name: Build-Artefakte herunterladen
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -487,7 +693,7 @@ jobs:
         env:
           VERSION: ${{ needs.verify.outputs.version }}
           TAG: ${{ needs.verify.outputs.tag }}
-          PRERELEASE: ${{ inputs.prerelease }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
           # Entscheidet, ob die Notizen eine Herkunftsaussage versprechen
           # duerfen - GitHub erzeugt sie fuer private Repositories unter
           # einem Benutzerkonto nicht.
@@ -498,15 +704,47 @@ jobs:
           if [ -f dist/glibc-min.txt ]; then
             GLIBC_MIN="$(tr -d '[:space:]' < dist/glibc-min.txt)"
           fi
+          # Den Abschnitt dieser Version aus CHANGELOG.md holen, statt die
+          # Verhaltensaenderungen wieder nur in `git log` stehen zu lassen.
+          # Bis v0.3.0 enthielten diese Notizen Artefakttabelle, Pruefsummen
+          # und Herkunftshinweis - und keine einzige Verhaltensaenderung.
+          CHANGES=""
+          if [ -f CHANGELOG.md ]; then
+            CHANGES="$(awk -v v="$VERSION" '
+              BEGIN { esc = v; gsub(/\./, "\\.", esc); pat = "^## " esc "([^0-9.]|$)" }
+              $0 ~ pat { inside = 1; next }
+              inside && /^## / { exit }
+              inside && /^---[[:space:]]*$/ { next }
+              inside { print }
+            ' CHANGELOG.md)"
+            # Fuehrende und abschliessende Leerzeilen weg.
+            CHANGES="$(printf '%s\n' "$CHANGES" | sed -e '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba')"
+          fi
+          if [ -z "$CHANGES" ]; then
+            echo "::warning::CHANGELOG.md hat keinen Abschnitt fuer ${VERSION} - die Release-Notizen nennen deshalb keine Verhaltensaenderungen."
+          fi
           {
             echo "## redact-rs ${VERSION}"
             echo
             if [ "$PRERELEASE" = "true" ]; then
-              echo "> **Vorabversion.** Dieser Release wurde nicht vom"
-              echo "> Default-Branch gebaut und ist entsprechend gekennzeichnet."
+              echo "> **Vorabversion.** Diese Fassung ist als Vorabversion"
+              echo "> gekennzeichnet - entweder weil die Versionsnummer eine"
+              echo "> ist (\`0.4.0-rc.1\`) oder weil der Release ausdruecklich"
+              echo "> so angefordert wurde."
               echo
             fi
             echo "Vorkompilierte Binaries von \`redact-rs\` (Tag \`${TAG}\`)."
+            echo
+            echo "### Was sich geaendert hat"
+            echo
+            if [ -n "$CHANGES" ]; then
+              printf '%s\n' "$CHANGES"
+            else
+              echo "Fuer diese Fassung steht im Aenderungsverlauf kein Abschnitt."
+            fi
+            echo
+            echo "Der vollstaendige Verlauf:"
+            echo "[\`CHANGELOG.md\`](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/CHANGELOG.md)."
             echo
             echo "### Artefakte"
             echo
@@ -551,6 +789,16 @@ jobs:
             echo "Pruefen mit \`sha256sum -c SHA256SUMS\` (Linux) bzw."
             echo "\`Get-FileHash <datei> -Algorithm SHA256\` (PowerShell)."
             echo
+            echo "**Was diese Summen belegen - und was nicht.** Sie zeigen,"
+            echo "dass eine heruntergeladene Datei unveraendert die ist, die"
+            echo "aus diesem Lauf kam. Sie sind **keine** Zusage, dass ein"
+            echo "eigener Nachbau dieselbe Summe ergibt: gebaut wird mit der"
+            echo "in \`rust-toolchain.toml\` gepinnten Toolchain und dem"
+            echo "\`Cargo.lock\` dieses Commits, aber ob ein anderer Rechner"
+            echo "daraus dasselbe Byte-fuer-Byte-Ergebnis erzeugt, ist nicht"
+            echo "nachgemessen. Wer die Herkunft pruefen will, nimmt die"
+            echo "Signatur unten, nicht einen Nachbau."
+            echo
             echo "### Herkunft pruefen"
             echo
             if [ "${IS_PRIVATE}" = "true" ]; then
@@ -580,11 +828,14 @@ jobs:
         uses: softprops/action-gh-release@62c96d0c4e8a889135c1f3a25910db8dbe0e85f7 # v2.3.4
         with:
           tag_name: ${{ needs.verify.outputs.tag }}
-          target_commitish: ${{ inputs.ref || github.sha }}
+          # Die in `verify` festgenagelte Commit-ID, nicht ein Branch-Name:
+          # auf dem Datei-Weg legt dieser Schritt den Tag an, und der muss
+          # genau an dem Commit haengen, der geprueft und gebaut wurde.
+          target_commitish: ${{ needs.verify.outputs.sha }}
           name: redact-rs ${{ needs.verify.outputs.version }}
           body_path: release-notes.md
           draft: false
-          prerelease: ${{ inputs.prerelease || false }}
+          prerelease: ${{ needs.verify.outputs.prerelease == 'true' }}
           fail_on_unmatched_files: true
           files: |
             dist/redact-rs-*
