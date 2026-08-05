@@ -467,11 +467,30 @@ impl PatternMatcher {
     ///
     /// Die Ausgabereihenfolge ist deterministisch: Runs in Eingabereihenfolge,
     /// darin die Patterns in der Reihenfolge von [`PatternMatcher::defs`].
+    ///
+    /// ## Ein Zeiger je Muster und Lauf
+    ///
+    /// Die Bounding-Box eines Treffers kommt aus den Glyphen des Laufs, und
+    /// die Glyphen sind eine Liste ohne Byte-Index. Wer sie für jeden Treffer
+    /// von vorn durchzählt — und das tat diese Schleife —, bezahlt bei M
+    /// Treffern in einem Lauf aus G Glyphen G·M/2 Schritte: eine Zeile mit
+    /// 32 000 IBANs kostete 6,1 s, die halb so lange 1,2 s. Nicht die
+    /// Glyphenzahl war schuld, sondern die Zeilenlänge; dieselben Zeichen auf
+    /// viele Zeilen verteilt kosteten einen Bruchteil.
+    ///
+    /// Ein [`redact_core::geometry::GlyphCursor`] wandert stattdessen **einmal**
+    /// durch den Lauf. Er steht hier innerhalb der Muster-Schleife, weil jedes
+    /// Muster wieder am Anfang des Laufs zu suchen beginnt — ein Zeiger je Lauf
+    /// müsste beim Musterwechsel ohnehin zurückspulen. Ob die Treffer wirklich
+    /// aufsteigen, prüft der Zeiger selbst; er spult zurück, wenn nicht (das
+    /// kann passieren, wenn ein Muster aus `--patterns-config` seine Gruppe
+    /// `target` in ein Look-around legt).
     pub fn find_matches(&self, runs: &[TextRun]) -> Result<Vec<Region>> {
         let mut regions = Vec::new();
         for run in runs {
             for compiled in &self.compiled {
                 let def = &self.defs[compiled.def_index];
+                let mut cursor = run.glyph_cursor();
                 for found in compiled.regex.captures_iter(&run.text) {
                     let caps = found.map_err(|e| search_error(def, run, e))?;
                     // Gruppe 0 existiert bei jedem Treffer.
@@ -488,7 +507,7 @@ impl PatternMatcher {
                     if confidence < self.min_confidence {
                         continue;
                     }
-                    let Some(rect) = run.rect_for_byte_range(start, end) else {
+                    let Some(rect) = cursor.rect_for_byte_range(start, end) else {
                         continue;
                     };
                     regions.push(Region::new(
