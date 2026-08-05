@@ -163,7 +163,27 @@ fn load_font(doc: &Document, font: &Dictionary) -> FontInfo {
             .or_else(|_| stream.get_plain_content())
         {
             let parsed = parse_to_unicode(&data);
-            if !parsed.map.is_empty() {
+            // Über [`crate::encoding::MAX_TO_UNICODE_BYTES`] gilt der Font als
+            // einer **ohne** `/ToUnicode`.
+            //
+            // Abgelehnt statt abgeschnitten: ein Bruchstück wäre der stille
+            // Weg. `has_to_unicode()` wäre wahr, die Warnstatistik des
+            // Interpreters ließe den Font deshalb aus (siehe
+            // `content::FontDecodeStats::record`), und die fehlende Hälfte
+            // fiele niemandem auf.
+            //
+            // Abgelehnt statt die ganze Datei zurückzuweisen: der Weg für
+            // „Font ohne /ToUnicode“ ist schon da und sagt genau das Richtige.
+            // Bei einem Type0-Font wird erst noch aus dem eingebetteten
+            // Fontprogramm hergeleitet (unten); bleibt auch das erfolglos,
+            // liefert `CharMap::text_for` Ersatzzeichen, der Interpreter
+            // meldet „Font … hat kein /ToUnicode“, und das ist eine
+            // Deckungslücke — Rückgabewert 3, der Nutzer erfährt, dass diese
+            // Seite nicht vollständig geprüft ist. Bei einem einfachen Font
+            // deckt die Basistabelle (WinAnsi & Co.) die höchstens 256 Codes
+            // vollständig ab; dort geht nichts verloren, was eine Warnung wert
+            // wäre.
+            if !parsed.over_limit && !parsed.map.is_empty() {
                 info.charmap.set_to_unicode(parsed.map);
             }
         }

@@ -357,23 +357,95 @@ pub fn standard_encoding() -> [Option<char>; 256] {
 // ToUnicode-CMap
 // ---------------------------------------------------------------------------
 
+/// Wie viel Speicher **eine** `/ToUnicode`-Zuordnung belegen darf.
+///
+/// ## Warum es diese Grenze braucht
+///
+/// `apply_bfrange` deckelt *einen* Bereich auf 65 536 Codes. Die **Anzahl**
+/// der `bfrange`-Anweisungen war dagegen frei, und weil sich wiederholte
+/// Zeilen etwa 1000:1 flate-komprimieren, kostet eine Anweisung von rund
+/// 45 Byte im Dokument bis zu 65 536 Einträge. Gemessen am Release-Binary:
+/// 400 Anweisungen aus einer Datei von 3 032 Byte belegten 6 775 MB, 1 000
+/// Anweisungen brachten den Prozess um (SIGABRT).
+///
+/// Zwei Bomben, nicht eine. Die zweite zählt **Bytes** statt Einträgen: eine
+/// einzige `bfrange` über 65 536 Codes mit einem langen Zielstring kopiert
+/// diesen String für jeden Code. 1 131 Byte Datei ergaben so 530 MB, 1 253
+/// Byte den Abbruch. Eine Grenze, die nur Einträge zählt, sieht davon nichts
+/// — es bleiben 65 536 Einträge. Deshalb wird hier der Platzbedarf gezählt.
+///
+/// ## Warum dieser Wert
+///
+/// Eine **legitime** ToUnicode kann nicht beliebig groß werden: sie ordnet
+/// Zeichencodes zu, und mehr als 65 536 verschiedene Codes hat kein Font.
+/// Identity-H benutzt Zweibyte-Codes, und sfnt wie CFF können ohnehin nicht
+/// mehr als 65 535 Glyphen führen. Ein CJK-Font mit vollem Umfang ist damit
+/// der größte ehrliche Fall — gemessen 17 MB. 32 MB lassen ihn mit knapp dem
+/// Doppelten an Luft durch und liegen zugleich unter dem, was das Haus für
+/// eine Tabelle derselben Bauart schon zulässt ([`crate::font`],
+/// `MAX_CMAP_ENTRIES` = 200 000 Einträge ≈ 52 MB).
+///
+/// Der Kommentar an [`crate::content`] („`/ToUnicode` kann eine Million
+/// Einträge haben“) trägt für echte Dateien also **nicht**; er beschreibt
+/// genau den Fall, den diese Grenze ausschließt.
+pub const MAX_TO_UNICODE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Was ein Eintrag **neben** seinem Text kostet: Knoten im `BTreeMap`, der
+/// eigene Heap-Block des `String`, Verschnitt des Allokators.
+///
+/// Nachgemessen am Release-Binary: eine Zuordnung mit 65 295 Einträgen zu je
+/// 3 Byte Text belegte 17 MB, also 260 Byte je Eintrag. 256 ist die runde Zahl
+/// dazu. Ohne diesen Anteil wäre die Rechnung unehrlich — bei einer echten
+/// ToUnicode ist der Text 1 bis 3 Byte lang, der Rest ist Verwaltung.
+const ENTRY_OVERHEAD: usize = 256;
+
 /// Ergebnis des CMap-Parsers.
 #[derive(Debug, Default)]
 pub struct ToUnicode {
+    /// **Nur gültig, wenn [`ToUnicode::over_limit`] falsch ist.** Ein
+    /// abgebrochener Lauf hinterlässt hier ein Bruchstück, und ein Bruchstück
+    /// ist die gefährlichste aller Auskünfte: es sähe aus wie „der Font sagt
+    /// es selbst“, obwohl die halbe Tabelle fehlt.
     pub map: BTreeMap<u32, String>,
     /// Aus `codespacerange` abgeleitete Code-Breite, falls eindeutig.
     pub code_width: Option<CodeWidth>,
+    /// Die Zuordnung hat [`MAX_TO_UNICODE_BYTES`] gesprengt; das Parsen wurde
+    /// abgebrochen. Wer das ignoriert, benutzt ein Bruchstück — siehe
+    /// [`ToUnicode::map`].
+    pub over_limit: bool,
+}
+
+/// Nimmt einen Eintrag auf und schreibt seinen Preis fort.
+///
+/// `false` heißt: die Decke ist gerissen, ab hier wird nichts mehr aufgenommen.
+/// Ein Code, der schon dasteht, wird trotzdem berechnet — die strengere
+/// Richtung, und sie erspart eine zweite Buchführung.
+fn insert_capped(
+    map: &mut BTreeMap<u32, String>,
+    spent: &mut usize,
+    code: u32,
+    text: String,
+) -> bool {
+    *spent = spent.saturating_add(ENTRY_OVERHEAD + text.len());
+    if *spent > MAX_TO_UNICODE_BYTES {
+        return false;
+    }
+    map.insert(code, text);
+    true
 }
 
 /// Parst eine `/ToUnicode`-CMap (bfchar/bfrange/codespacerange).
 ///
 /// Der Parser ist bewusst tolerant: unbekannte Konstrukte werden übersprungen,
-/// statt die Extraktion scheitern zu lassen.
+/// statt die Extraktion scheitern zu lassen. **Nicht** tolerant ist er
+/// gegenüber der Größe — siehe [`MAX_TO_UNICODE_BYTES`] und
+/// [`ToUnicode::over_limit`].
 pub fn parse_to_unicode(data: &[u8]) -> ToUnicode {
     let tokens = tokenize(data);
     let mut result = ToUnicode::default();
+    let mut spent = 0usize;
     let mut i = 0;
-    while i < tokens.len() {
+    'cmap: while i < tokens.len() {
         match &tokens[i] {
             Token::Keyword(k) if k == "begincodespacerange" => {
                 i += 1;
@@ -399,7 +471,10 @@ pub fn parse_to_unicode(data: &[u8]) -> ToUnicode {
                     if let (Token::Hex(s), dst) = (src, dst) {
                         if let Some(code) = hex_to_u32(s) {
                             if let Some(text) = token_to_text(dst) {
-                                result.map.insert(code, text);
+                                if !insert_capped(&mut result.map, &mut spent, code, text) {
+                                    result.over_limit = true;
+                                    break 'cmap;
+                                }
                             }
                         }
                     }
@@ -414,7 +489,10 @@ pub fn parse_to_unicode(data: &[u8]) -> ToUnicode {
                     let dst = &tokens[i + 2];
                     if let (Token::Hex(l), Token::Hex(h)) = (lo, hi) {
                         if let (Some(lo), Some(hi)) = (hex_to_u32(l), hex_to_u32(h)) {
-                            apply_bfrange(&mut result.map, lo, hi, dst);
+                            if !apply_bfrange(&mut result.map, &mut spent, lo, hi, dst) {
+                                result.over_limit = true;
+                                break 'cmap;
+                            }
                         }
                     }
                     i += 3;
@@ -427,18 +505,29 @@ pub fn parse_to_unicode(data: &[u8]) -> ToUnicode {
     result
 }
 
-fn apply_bfrange(map: &mut BTreeMap<u32, String>, lo: u32, hi: u32, dst: &Token) {
+/// `false` heißt: [`MAX_TO_UNICODE_BYTES`] ist erschöpft.
+fn apply_bfrange(
+    map: &mut BTreeMap<u32, String>,
+    spent: &mut usize,
+    lo: u32,
+    hi: u32,
+    dst: &Token,
+) -> bool {
     // Schutz gegen absurde Bereiche aus kaputten Dateien.
     let hi = hi.min(lo.saturating_add(0xFFFF));
     match dst {
         Token::Array(items) => {
             for (offset, item) in items.iter().enumerate() {
-                let code = lo + offset as u32;
+                // `saturating_add`, weil `lo` aus der Datei stammt: `<FFFFFFFF>
+                // <FFFFFFFF> [<0041> <0042>]` ließ den Übertrag paniken.
+                let code = lo.saturating_add(offset as u32);
                 if code > hi {
                     break;
                 }
                 if let Some(text) = token_to_text(item) {
-                    map.insert(code, text);
+                    if !insert_capped(map, spent, code, text) {
+                        return false;
+                    }
                 }
             }
         }
@@ -446,24 +535,27 @@ fn apply_bfrange(map: &mut BTreeMap<u32, String>, lo: u32, hi: u32, dst: &Token)
             // Fortlaufende Zuordnung: das letzte UTF-16-Wort wird hochgezählt.
             let units = hex_to_utf16(bytes);
             if units.is_empty() {
-                return;
+                return true;
             }
             for code in lo..=hi {
                 let mut u = units.clone();
                 let last = u.len() - 1;
                 u[last] = u[last].wrapping_add((code - lo) as u16);
                 if let Some(text) = utf16_to_string(&u) {
-                    map.insert(code, text);
+                    if !insert_capped(map, spent, code, text) {
+                        return false;
+                    }
                 }
             }
         }
         Token::Name(name) => {
             if let Some(text) = glyph_name_to_text(name) {
-                map.insert(lo, text);
+                return insert_capped(map, spent, lo, text);
             }
         }
         _ => {}
     }
+    true
 }
 
 fn token_to_text(t: &Token) -> Option<String> {
