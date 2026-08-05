@@ -115,6 +115,58 @@ Bereich: wird beim Release eingetragen (`git log v0.4.0..<neuer Tag>`).
 
 ---
 
+## 0.5.0 — 2026-08-05
+
+Bereich: `git log v0.4.0..v0.5.0`.
+
+Zweiter vollstaendiger Pruefdurchgang. Er hat zuerst gegen die eigenen
+Aenderungen aus 0.4.0 gearbeitet — mit einem zweiten Abzug von 0.3.0 und
+einer randomisierten Differenzsuche ueber 1 300 Anordnungen, denn nur so
+laesst sich „Regression" von „war schon immer so" trennen.
+
+### ⚠ Zwei Regressionen aus 0.4.0
+
+* **Die Schichtwahl zerriss eine IBAN.** Der Code waehlte die Schicht mit
+  dem groessten erreichten Wert, obwohl der Kommentar „am dichtesten davor"
+  sagte — an einer gewoehnlichen Tabelle mit einem zu langen
+  Empfaengernamen wanderte das erste IBAN-Stueck dadurch in eine Schicht
+  und das zweite zurueck in die andere. 0.3.0 fand die IBAN, 0.4.0 meldete
+  null Treffer bei Rueckgabewert 0. Ueber 3 900 zufaellige Anordnungen
+  belegt: kein einziger Fall, den 0.3.0 fand und 0.5.0 verliert.
+* **Eine Bildmaske deckte wieder auf, was verborgen war.** Wo `/SMask` und
+  `/Mask` nebeneinander stehen, befolgte die eine Stelle das `/SMask` und
+  die andere schrieb das `/Mask` mit. Es gibt jetzt eine einzige
+  Entscheidungsstelle, aus der sich beide ableiten.
+
+### ⚠ Wege, den Rechner lahmzulegen
+
+* **Eine ToUnicode-Tabelle aus 6 kB ergab einen Abbruch**, aus 3 kB fast
+  7 GB. Die Decke zaehlt Bytes und nicht Eintraege — eine zweite Bombe in
+  derselben Funktion (ein sehr langer Zielstring) waere sonst durchgekommen.
+* Die Hilfsdatei-Leser, die Bildmasken-Rekursion und vier superlineare
+  Stellen sind geschlossen; die Konfliktaufloesung faellt von 74,6 s auf
+  0,21 s bei 100 000 Kandidaten, die Trefferkoordinaten von 42,3 s auf
+  0,078 s bei 32 000 Treffern.
+
+### Neu
+
+* **`--check-leaks <TEXT>` prueft eine fertige Datei auf Restdaten** — im
+  ausgelieferten Binary, ohne Quelltext und ohne Netz. Die Anleitung dazu
+  verlangte bisher eine Rust-Toolchain und einen Klon des Repositories. Die
+  Gegenprobe: bei einer IBAN in einem komprimierten Objektstrom geben
+  `pdftotext`, `strings` und `grep` uebereinstimmend Entwarnung.
+* **Die Oberflaeche ist ohne Maus benutzbar.** Ein Rechteck liess sich nur
+  mit der Maus erzeugen — und auf einem Kontoauszug sind Anschrift,
+  Kontonummer und Kontoinhabername genau die Stellen, die von Hand gezogen
+  werden muessen. `Strg+R` legt eines an, `Strg+Pfeil` aendert die Groesse.
+  Ausserdem zerschnitt ein einziges ausgegrautes Bedienelement die
+  Tabulator-Kette.
+* **Eine entartete Seitengroesse brachte Oberflaeche und Kommandozeile
+  auseinander**: die IBAN blieb im Fenster-Export stehen, waehrend die CLI
+  mit derselben Einstellung beide Seiten schwaerzte.
+
+---
+
 ## 0.4.0 — 2026-08-05
 
 Bereich: `git log 9aa4808..v0.4.0`.
