@@ -203,11 +203,6 @@ impl PageRenderer {
         Self::default()
     }
 
-    /// Anzahl der bislang geladenen Fontprogramme (Diagnose).
-    pub fn font_count(&self) -> usize {
-        self.fonts.len()
-    }
-
     /// Rendert eine Seite (0-basiert).
     ///
     /// Gibt **niemals** `Err` zurück und panickt nie: im schlimmsten Fall
