@@ -22,7 +22,7 @@ use redact_core::{
     AUDIT_SUFFIX, REVIEW_SUFFIX,
 };
 use redact_patterns::PatternDef;
-use redact_pdf::{page_boxes, PdfExtractor};
+use redact_pdf::{document::sane_page_boxes, PdfExtractor};
 use redact_pipeline::{sha256_bytes, Config, Outcome, ReviewIdentity, Secret};
 
 use crate::history::History;
@@ -46,6 +46,58 @@ pub const DEFAULT_PAGE_BOX: Rect = Rect {
 pub const PROTECTION_OVERRIDDEN: &str =
     "Achtung: Dieser Treffer war durch Ihre Schutzliste gedeckt. Von Hand angepasst \
      überstimmt er sie und wird jetzt geschwärzt — Strg+Z nimmt es zurück.";
+
+/// Statuszeile, wenn ein Pfeiltastendruck eine Region auf einer Seite träfe,
+/// die gerade niemand sieht.
+///
+/// Siehe [`AppState::move_selected`] und [`AppState::resize_selected`]. Der
+/// Satz nennt beide Auswege — zu der Seite blättern oder die Auswahl aufheben
+/// —, weil sonst nur „es passiert nichts“ übrig bliebe. `page` ist 0-basiert.
+pub fn selection_on_other_page(page: usize) -> String {
+    format!(
+        "Nicht verschoben — die ausgewählte Region liegt auf Seite {}, gezeigt wird \
+         eine andere. Zu ihr blättern, oder mit Esc die Auswahl aufheben (dann \
+         blättern die Pfeiltasten wieder).",
+        page + 1
+    )
+}
+
+/// Größe eines mit der Tastatur angelegten Rechtecks in Punkt (Breite, Höhe).
+///
+/// Grob eine Anschriftzeile auf A4 — groß genug, um es auf dem Blatt zu
+/// finden, klein genug, um nicht die halbe Seite zu verdecken. Siehe
+/// [`AppState::add_region_in_page_middle`].
+pub const NEW_REGION_SIZE: (f64, f64) = (200.0, 40.0);
+
+/// Kleinste Kantenlänge, auf die sich ein Rechteck mit der Tastatur schrumpfen
+/// lässt.
+pub const MIN_REGION_EXTENT: f64 = 2.0;
+
+/// Statuszeile nach [`AppState::add_region_in_page_middle`].
+///
+/// Nennt **beides**: wo das Rechteck liegt und wie es weitergeht. Ein neu
+/// angelegtes Rechteck, das nur „angelegt“ meldet, lässt den Tastaturnutzer
+/// vor der Frage stehen, wie er es dorthin bekommt, wo es hingehört.
+pub fn new_region_hint(page: usize) -> String {
+    format!(
+        "Rechteck in der Mitte von Seite {} angelegt und ausgewählt. Pfeiltasten \
+         schieben es (mit Umschalt 10 pt), Strg+Pfeil ändert seine Größe, Entf \
+         löscht es, Strg+Z nimmt es zurück.",
+        page + 1
+    )
+}
+
+/// Warnung zu einer Seite, deren MediaBox unbrauchbar war.
+///
+/// Ohne sie sähe die geheilte Seite aus wie jede andere — und was das Fenster
+/// zeigt, wäre nicht das, was in der Datei steht. `page` ist 0-basiert.
+pub fn healed_page_warning(page: usize) -> String {
+    format!(
+        "Seite {} nennt eine unbrauchbare Seitengröße; gerechnet und gezeichnet \
+         wird mit A4. Prüfen Sie dort besonders genau, ob die Rechtecke sitzen.",
+        page + 1
+    )
+}
 
 /// Vorgabe für den Ersatztext bei [`Action::Replace`].
 ///
@@ -229,6 +281,18 @@ pub enum HitOutcome {
     /// stillschweigend veränderte. Also wird sie stattdessen **angesagt** — vor
     /// dem Export und nicht erst als Warnung danach.
     OffPage,
+    /// Nennt eine Seite, die es in diesem Dokument nicht gibt.
+    ///
+    /// Der Nachbarfall von [`HitOutcome::OffPage`], und aus demselben Grund
+    /// hier: er kann kein Zeichen entfernen. Er hat trotzdem eine **eigene**
+    /// Zeile, weil er etwas anderes zu tun gibt — bei `OffPage` stimmen die
+    /// Koordinaten nicht, hier die Seitenzahl. „Liegt neben der Seite“ schickte
+    /// den Leser an den Rand von Seite 8, die es gar nicht gibt.
+    ///
+    /// Entstehen kann das nur über eine Review-Datei oder `--manual-regions`;
+    /// die Oberfläche selbst legt kein Rechteck auf einer Seite an, die sie
+    /// nicht anzeigen kann.
+    MissingPage,
 }
 
 impl HitOutcome {
@@ -250,6 +314,7 @@ impl HitOutcome {
             HitOutcome::Blocked => "geschützt durch Ihre Liste",
             HitOutcome::Duplicate => "doppelt",
             HitOutcome::OffPage => "liegt neben der Seite",
+            HitOutcome::MissingPage => "Seite gibt es nicht",
         }
     }
 }
@@ -275,6 +340,12 @@ pub struct HitSummary {
     /// Sie stecken **nicht** in [`HitSummary::redacted`] — sie können kein
     /// Zeichen entfernen. Siehe [`HitOutcome::OffPage`].
     pub off_page: usize,
+    /// Anzahl der Einträge auf einer Seite, die es im Dokument nicht gibt.
+    ///
+    /// Ebenfalls nicht in [`HitSummary::redacted`], und aus demselben Grund.
+    /// Eine eigene Zahl, weil sie etwas anderes zu tun gibt als
+    /// [`HitSummary::off_page`] — siehe [`HitOutcome::MissingPage`].
+    pub missing_page: usize,
     /// Hat dieser Lauf überhaupt automatisch gesucht?
     ///
     /// **Der Grund, warum das Feld hier steht** und nicht bloß am Schalter in
@@ -283,7 +354,18 @@ pub struct HitSummary {
     /// Wort dieselbe Zeile wie bei einem Dokument, in dem wirklich nichts
     /// steht. Das ist der eine Satz dieses Programms, der niemals zweideutig
     /// sein darf.
+    ///
+    /// Es hängt an [`AppState::any_pattern_runs`] und **nicht** am
+    /// Hauptschalter: zu „es wurde nicht gesucht“ führen zwei Wege, und der
+    /// zweite — jedes einzelne Kästchen abwählen — ließ die Vorwarnung sonst
+    /// verschwinden, obwohl genauso wenig gesucht wurde.
     pub automatic: bool,
+    /// Steht der Hauptschalter „Automatisch suchen“ auf an?
+    ///
+    /// Nur dafür da, den **Grund** in [`HitSummary::headline`] richtig zu
+    /// benennen: „Automatische Suche AUS“ neben einem gesetzten Häkchen
+    /// schickte den Leser an den falschen Schalter.
+    pub detection_switch: bool,
     /// Wie viele Muster einzeln abgeschaltet sind.
     pub disabled_patterns: usize,
 }
@@ -316,7 +398,14 @@ impl HitSummary {
     pub fn headline(&self) -> String {
         let mut text = String::new();
         if !self.automatic {
-            text.push_str("Automatische Suche AUS — nicht gesucht, nur von Hand: ");
+            // Derselbe Vorbehalt, aber am richtigen Bedienelement: der
+            // Hauptschalter und die Kästchen darunter führen beide hierher,
+            // und wer den falschen genannt bekommt, sucht am falschen Ort.
+            text.push_str(if self.detection_switch {
+                "Kein Muster läuft — nicht gesucht, nur von Hand: "
+            } else {
+                "Automatische Suche AUS — nicht gesucht, nur von Hand: "
+            });
         }
         text.push_str(&format!(
             "{} Treffer · {} werden geschwärzt",
@@ -331,9 +420,21 @@ impl HitSummary {
         if self.off_page > 0 {
             text.push_str(&format!(" · {} neben der Seite", self.off_page));
         }
+        // Und direkt daneben der Nachbarfall: eine Seitenzahl, die es nicht
+        // gibt. Auch das gehört **vor** den Export und nicht als Warnung
+        // danach.
+        if self.missing_page > 0 {
+            text.push_str(&format!(
+                " · {} auf einer Seite, die es nicht gibt",
+                self.missing_page
+            ));
+        }
         // Bei „ganz aus“ ist die Zahl der einzeln abgeschalteten Muster
-        // gegenstandslos — es läuft ohnehin keines.
-        if self.automatic && self.disabled_patterns > 0 {
+        // gegenstandslos — es läuft ohnehin keines. Am **Hauptschalter**
+        // gemessen und nicht an [`HitSummary::automatic`]: steht der Schalter
+        // auf „an“ und sind trotzdem alle Kästchen leer, ist genau diese Zahl
+        // die Auskunft, die weiterhilft.
+        if self.detection_switch && self.disabled_patterns > 0 {
             text.push_str(&format!(
                 " · {} Muster abgeschaltet",
                 self.disabled_patterns
@@ -528,8 +629,22 @@ pub struct AppState {
     /// Identität des Dokuments — sie steht in der Review-Datei und wird beim
     /// Anwenden verglichen (siehe [`review_identity`]).
     pub input_sha256: String,
-    /// MediaBox je Seite.
+    /// MediaBox je Seite — **geprüft**, siehe [`redact_pdf::document::sane_box`].
+    ///
+    /// Steht in der Datei eine unbrauchbare Angabe (`[0 0 0 0]`, negativ, NaN,
+    /// absurd groß), steht hier A4 — dieselbe Größe, die der Rasterizer für
+    /// diese Seite zeichnet. Die Rohangabe zu übernehmen hieße, dass die
+    /// Oberfläche eine Seite für einen Punkt groß hält, jedes Rechteck darauf
+    /// als „liegt neben der Seite“ aussortiert und die Datei ungeschwärzt
+    /// durchgeht. Welche Seiten so geheilt wurden, steht in
+    /// [`AppState::healed_pages`].
     pub page_boxes: Vec<Rect>,
+    /// Seiten (0-basiert), deren MediaBox unbrauchbar war und durch A4 ersetzt
+    /// wurde.
+    ///
+    /// **Die Warnung ist der wichtigere Teil der Heilung**: eine so geheilte
+    /// Seite sieht sonst aus wie jede andere.
+    pub healed_pages: Vec<usize>,
     /// `/Rotate` je Seite (0/90/180/270), inklusive Vererbung vom Seitenbaum.
     pub rotations: Vec<i64>,
     pub runs: Vec<TextRun>,
@@ -597,6 +712,7 @@ impl Default for AppState {
             document: None,
             input_sha256: String::new(),
             page_boxes: Vec::new(),
+            healed_pages: Vec::new(),
             rotations: Vec::new(),
             runs: Vec::new(),
             current_page: 0,
@@ -777,8 +893,27 @@ impl AppState {
             }
         };
         self.pending = None;
-        let (runs, warnings) = PdfExtractor::new().extract_with_warnings(&doc)?;
-        self.page_boxes = page_boxes(&doc);
+        let (runs, mut warnings) = PdfExtractor::new().extract_with_warnings(&doc)?;
+        // **Geprüfte** Seitengrößen, aus derselben Quelle wie die des
+        // Rasterizers. Über `page_boxes` kam bisher die Rohangabe herein; eine
+        // Seite mit `/MediaBox [0 0 0 0]` war damit im Fenster einen Punkt
+        // groß, `clamp_to_page` ließ von jedem Rechteck darauf nichts übrig,
+        // und der Export schwärzte dort nichts — ohne ein Wort, während
+        // `redact_pipeline::run` mit derselben `Config` beide Seiten schwärzte.
+        let checked = sane_page_boxes(&doc);
+        self.healed_pages = checked
+            .iter()
+            .enumerate()
+            .filter(|(_, box_)| box_.is_replaced())
+            .map(|(page, _)| page)
+            .collect();
+        self.page_boxes = checked.iter().map(|box_| box_.rect).collect();
+        // Vor die Warnungen des Extraktors: eine unbrauchbare Seitengröße
+        // erklärt, warum eine Seite anders aussieht, als sie in der Datei
+        // steht — das gehört zuerst gelesen.
+        for page in self.healed_pages.iter().rev() {
+            warnings.insert(0, healed_page_warning(*page));
+        }
         self.rotations = page_rotations(&doc);
         self.runs = runs;
         self.document = Some(Arc::new(doc));
@@ -1116,6 +1251,116 @@ impl AppState {
         Some(index)
     }
 
+    /// Legt ein Rechteck fester Größe in der **Mitte der aktuellen Seite** an,
+    /// wählt es aus und sagt in der Statuszeile, wie es weitergeht.
+    ///
+    /// `None`, solange kein Dokument geladen ist — dann gibt es keine Seite,
+    /// auf die es gehörte.
+    ///
+    /// ## Warum es diesen Weg gibt
+    ///
+    /// Er ist der einzige, der ohne Zeigegerät zu einem eigenen Rechteck
+    /// führt; siehe [`crate::toolbar::ToolAction::AddRegion`].
+    ///
+    /// ## Warum die Mitte
+    ///
+    /// Weil jede andere Wahl geraten wäre. Eine freie Stelle zu suchen hieße,
+    /// eine Vorstellung davon zu haben, was „frei“ ist — und das Ergebnis
+    /// wäre von Seite zu Seite ein anderes, ohne dass man es vorhersagen
+    /// könnte. Die Mitte ist immer dieselbe Stelle, und sie liegt immer im
+    /// Blatt.
+    ///
+    /// Der Einwand dagegen ist berechtigt: auf einem schon vollen Blatt ist
+    /// ein neues Rechteck in der Mitte schwer zu finden. Dagegen steht
+    /// dreierlei, und alles davon war ohnehin schon da: es ist **ausgewählt**
+    /// und wird deshalb mit dickem Rand und Eckgriffen gezeichnet
+    /// ([`crate::viewer::SELECTED_STROKE`]), im Detailbereich der Seitenleiste
+    /// stehen seine Koordinaten, und die Statuszeile nennt Seite und
+    /// Weiterweg. Eine eigene Suchlogik dafür wäre mehr Zustand als der Fall
+    /// wert ist.
+    ///
+    /// ## Größe
+    ///
+    /// [`NEW_REGION_SIZE`] — grob eine Anschriftzeile. Auf sehr kleinen
+    /// Blättern höchstens die halbe Seitenkante, damit noch zu sehen ist, dass
+    /// es ein Rechteck **auf** der Seite ist und nicht die Seite selbst.
+    /// Ändern lässt es sich danach mit Strg+Pfeil
+    /// ([`AppState::resize_selected`]).
+    pub fn add_region_in_page_middle(&mut self) -> Option<usize> {
+        let page = self.current_page;
+        let sheet = self.page_box(page)?.normalized();
+        let width = NEW_REGION_SIZE.0.min(sheet.width() / 2.0);
+        let height = NEW_REGION_SIZE.1.min(sheet.height() / 2.0);
+        let (cx, cy) = (
+            (sheet.ll.x + sheet.ur.x) / 2.0,
+            (sheet.ll.y + sheet.ur.y) / 2.0,
+        );
+        let index = self.add_manual_region(
+            page,
+            Rect::new(
+                cx - width / 2.0,
+                cy - height / 2.0,
+                cx + width / 2.0,
+                cy + height / 2.0,
+            ),
+            "mit der Tastatur angelegt",
+        )?;
+        self.status = new_region_hint(page);
+        Some(index)
+    }
+
+    /// Ändert die Größe der ausgewählten Region: die **linke untere** Ecke
+    /// bleibt stehen, die rechte obere wandert um `dx`/`dy`.
+    ///
+    /// Das Gegenstück zum Eckgriff, für die Tastatur. Ohne sie wäre der
+    /// Tastenweg zu einem eigenen Rechteck eine halbe Sache: eine feste Größe,
+    /// die sich nur verschieben lässt, deckt keine Anschrift ab — die ist
+    /// mehrzeilig, und wie breit sie ist, weiß nur, wer die Seite sieht.
+    ///
+    /// Der Weg geht durch [`AppState::set_region_rect`], also durch dieselbe
+    /// Funktion wie Maus und Pfeiltasten: Beschneiden auf das Blatt, Wechsel
+    /// zu [`Source::Manual`] und die Ansage bei überstimmtem Schutz gelten hier
+    /// genauso. **Beschnitten** wird hier richtigerweise (anders als beim
+    /// Schieben, siehe [`AppState::slide_onto_page`]): wer die Kante zieht,
+    /// will das Rechteck ändern, und am Blattrand ist Schluss.
+    ///
+    /// Kleiner als [`MIN_REGION_EXTENT`] wird es nicht — ein Rechteck von null
+    /// Fläche wäre eine Zeile in der Liste, die nichts überdeckt.
+    ///
+    /// Verlauf und Seitenprüfung wie bei [`AppState::move_selected`]; beide
+    /// teilen sich die Sitzung, weil beides dieselbe Handbewegung an derselben
+    /// Region ist.
+    pub fn resize_selected(&mut self, dx: f64, dy: f64) -> bool {
+        let Some(index) = self.selected_region else {
+            return false;
+        };
+        let Some(entry) = self.regions.get(index) else {
+            return false;
+        };
+        if entry.region.page != self.current_page {
+            self.status = selection_on_other_page(entry.region.page);
+            return false;
+        }
+        let (id, page, rect) = (entry.id, entry.region.page, entry.region.rect.normalized());
+        let target = Rect::new(
+            rect.ll.x,
+            rect.ll.y,
+            (rect.ur.x + dx).max(rect.ll.x + MIN_REGION_EXTENT),
+            (rect.ur.y + dy).max(rect.ll.y + MIN_REGION_EXTENT),
+        );
+        // Wie beim Schieben: was nichts ändert oder abgelehnt würde, kostet
+        // keinen Schritt „Rückgängig“.
+        if target == rect || self.clamp_to_page(page, target).is_none() {
+            return true;
+        }
+        if self.nudging != Some(id) {
+            self.end_edit_sessions();
+            self.history.record(&self.regions);
+            self.nudging = Some(id);
+        }
+        self.set_region_rect(index, target)
+    }
+
     /// Löscht die ausgewählte Region. `false`, wenn nichts ausgewählt war.
     pub fn delete_selected(&mut self) -> bool {
         let Some(index) = self.selected_region else {
@@ -1200,6 +1445,25 @@ impl AppState {
     /// Muster wie beim Tippen im Ersatzfeld ([`AppState::edit_replacement`])
     /// und beim Zug am Eckgriff ([`AppState::begin_manual_edit`]); beendet
     /// wird die Sitzung von [`AppState::end_edit_sessions`].
+    ///
+    /// ## Nur auf der Seite, die gezeigt wird
+    ///
+    /// Dieselbe Absicherung, die der Zug am **Eckgriff** seit v0.4.0 hat
+    /// (`crate::app::RedactApp::apply_pointer`, Fall 1: „Zug beendet — die
+    /// angefasste Region liegt auf einer anderen Seite“). Sie fehlte hier, und
+    /// der Weg dorthin ist einer, den man von selbst geht: Trefferzeile
+    /// anklicken (die Auswahl bleibt), Bild ab, dann Pfeil links für „eine
+    /// Seite zurück“. Geblättert wird dabei nicht — [`crate::app::key_commands`]
+    /// macht aus jedem Pfeil eine Verschiebung, sobald *irgendetwas*
+    /// ausgewählt ist —, sondern der Balken auf der **nicht gezeigten** Seite
+    /// wandert. Zehn Anschläge sind 100 pt; gemessen stand die IBAN danach
+    /// halb überdeckt und wieder lesbar in der exportierten Datei, während die
+    /// Kopfzeile unverändert „2 werden geschwärzt“ versprach.
+    ///
+    /// Die Alternative — die Auswahl beim Blättern aufheben — nimmt die
+    /// gewollte Arbeitsweise „Zeile anklicken, Seite springt mit“
+    /// (`crate::sidebar`) kaputt. Also stattdessen: nichts tun und **sagen**,
+    /// warum ([`selection_on_other_page`]).
     pub fn move_selected(&mut self, dx: f64, dy: f64) -> bool {
         let Some(index) = self.selected_region else {
             return false;
@@ -1207,6 +1471,10 @@ impl AppState {
         let Some(entry) = self.regions.get(index) else {
             return false;
         };
+        if entry.region.page != self.current_page {
+            self.status = selection_on_other_page(entry.region.page);
+            return false;
+        }
         let (id, page, rect) = (entry.id, entry.region.page, entry.region.rect);
         let target = self.slide_onto_page(
             page,
@@ -1528,13 +1796,31 @@ impl AppState {
     /// Liegt diese Region vollständig neben ihrem Blatt?
     ///
     /// Dieselbe Rechnung wie [`AppState::clamp_to_page`] — was dort nichts
-    /// übrig lässt, kann auch nichts schwärzen. Ohne geladenes Dokument
-    /// (und für Seiten, die es nicht gibt) ist die Frage nicht zu beantworten;
-    /// dann lautet die Antwort `false`, und der Export meldet den Fall als
-    /// `missing_page_redactions`.
+    /// übrig lässt, kann auch nichts schwärzen.
+    ///
+    /// **Eine Seite, die es im Dokument nicht gibt, zählt genauso.** Das war
+    /// nicht so: die Antwort lautete dort `false`, weil die Frage „liegt es
+    /// neben dem Blatt?“ ohne Blatt nicht zu beantworten sei, und der Export
+    /// meldete den Fall hinterher als `missing_page_redactions`. Die
+    /// Begründung trägt nur, solange **kein Dokument geladen** ist; ist eines
+    /// da, ist die Frage sehr wohl zu beantworten, und die Antwort lautet: das
+    /// Rechteck kann kein Zeichen treffen. Eine Review-Datei mit einem Eintrag
+    /// auf Seite 8 eines zweiseitigen Dokuments ließ die Kopfzeile sonst „2
+    /// werden geschwärzt“ versprechen, ohne Vorbehalt, und die Wahrheit kam
+    /// als Warnung **nach** dem Export — wortwörtlich der Fehler, den
+    /// [`HitOutcome::OffPage`] für den Nachbarfall abgestellt hat.
     pub fn is_off_page(&self, region: &Region) -> bool {
-        self.page_box(region.page).is_some()
-            && self.clamp_to_page(region.page, region.rect).is_none()
+        match self.page_box(region.page) {
+            Some(_) => self.clamp_to_page(region.page, region.rect).is_none(),
+            // Ohne geladenes Dokument gibt es überhaupt keine Seiten; dann ist
+            // die Frage wirklich offen und die Region bleibt stehen.
+            None => self.has_document(),
+        }
+    }
+
+    /// Ist ein Dokument geladen?
+    pub fn has_document(&self) -> bool {
+        self.document.is_some()
     }
 
     /// Ergebnis der Konfliktauflösung nach [`redact_core::resolve_conflicts`].
@@ -1576,7 +1862,13 @@ impl AppState {
                 // als Fund), und ein abgewählter bleibt abgewählt — das ist
                 // die Entscheidung der Nutzerin und der nähere Grund.
                 if self.is_off_page(&entry.region) {
-                    return HitOutcome::OffPage;
+                    // Zwei Gründe, dasselbe Ergebnis — aber verschiedene
+                    // Abhilfen: fehlt die Seite, ist die Seitenzahl falsch;
+                    // sonst die Koordinaten.
+                    return match self.page_box(entry.region.page) {
+                        Some(_) => HitOutcome::OffPage,
+                        None => HitOutcome::MissingPage,
+                    };
                 }
                 if let Some(slot) = redact
                     .iter_mut()
@@ -1602,8 +1894,16 @@ impl AppState {
             protecting,
             redacted: resolution.redact.len(),
             off_page: count(HitOutcome::OffPage),
+            missing_page: count(HitOutcome::MissingPage),
             outcomes,
-            automatic: self.patterns_enabled(),
+            // **Nicht** `patterns_enabled()`: das ist nur der Hauptschalter.
+            // Wer das letzte laufende Muster einzeln abwählt, sucht ebenso
+            // wenig — und die Kopfzeile verlor dabei ihre Vorwarnung und sagte
+            // „0 Treffer · 0 werden geschwärzt“, denselben Satz wie bei einem
+            // Dokument, in dem wirklich nichts steht. `any_pattern_runs` zählt
+            // ausdrücklich beide Wege.
+            automatic: self.any_pattern_runs(),
+            detection_switch: self.patterns_enabled(),
             disabled_patterns: self.disabled_pattern_count(),
         }
     }
@@ -2208,6 +2508,11 @@ mod tests {
         assert!(state.regions[0].enabled);
         assert_eq!(state.regions[0].color, RegionColor::Manual);
 
+        // Verschoben wird nur auf der Seite, die gezeigt wird — die Region
+        // liegt auf Seite 2 (siehe [`AppState::move_selected`]). Beim Klick
+        // auf eine Trefferzeile springt die Seite von selbst mit; hier von
+        // Hand.
+        state.current_page = 1;
         assert!(state.move_selected(5.0, -3.0));
         assert_eq!(state.regions[0].region.rect.ll, Point::new(15.0, 17.0));
         assert_eq!(state.regions[0].region.rect.ur, Point::new(55.0, 37.0));

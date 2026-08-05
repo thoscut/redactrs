@@ -494,6 +494,12 @@ fn b3_anything_in_between_starts_a_new_nudge_session() {
     press(&mut other, keys(|k| k.right = true));
     let depth = other.state.history.undo_depth();
     other.state.selected_region = Some(1);
+    // Mit der Auswahl auch die Seite: der zweite Treffer liegt auf Seite 2,
+    // und seit Runde 6 verschiebt der Pfeil nur, was auch gezeigt wird
+    // ([`AppState::move_selected`]). Beim Klick auf eine Trefferzeile macht
+    // das die Seitenleiste von selbst.
+    let page = other.state.regions[1].region.page;
+    other.state.set_page(page);
     press(&mut other, keys(|k| k.right = true));
     assert_eq!(other.state.history.undo_depth(), depth + 1);
 }

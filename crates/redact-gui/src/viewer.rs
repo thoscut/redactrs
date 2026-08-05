@@ -350,6 +350,43 @@ impl<'a> PagePreview<'a> {
     }
 }
 
+/// Schriftgröße des Hinweises auf einem Blatt, auf dem nichts gezeichnet wurde.
+pub const NOTICE_FONT_SIZE: f32 = 14.0;
+/// Luft zwischen Text und Rahmen des Hinweises.
+pub const NOTICE_PADDING: f32 = 10.0;
+/// Eckenrundung des Hinweisfeldes.
+pub const NOTICE_ROUNDING: f32 = 4.0;
+
+/// Legt einen Satz quer über ein leer gebliebenes Blatt.
+///
+/// Sichtbar hinterlegt, nicht bloß graue Schrift auf Weiß: der Satz muss auch
+/// dann auffallen, wenn man die Seite nur überfliegt. Er wird auf das Blatt
+/// beschnitten (der Aufrufer malt ohnehin durch einen `painter_at`), und bei
+/// einem sehr kleinen Blatt bleibt er mittig — abgeschnitten ist besser als
+/// weggelassen.
+///
+/// Warum es ihn gibt, steht bei [`crate::render::PageCache::nothing_drawn`].
+pub fn paint_blank_notice(painter: &egui::Painter, sheet: egui::Rect, text: &str) {
+    let galley = painter.layout_no_wrap(
+        text.to_owned(),
+        FontId::proportional(NOTICE_FONT_SIZE),
+        Color32::from_gray(30),
+    );
+    let box_rect = Align2::CENTER_CENTER
+        .anchor_size(sheet.center(), galley.size())
+        .expand(NOTICE_PADDING);
+    painter.rect(
+        box_rect,
+        NOTICE_ROUNDING,
+        Color32::from_rgb(255, 244, 214),
+        Stroke::new(SHEET_STROKE, Color32::from_rgb(190, 140, 20)),
+    );
+    let at = Align2::CENTER_CENTER
+        .anchor_size(sheet.center(), galley.size())
+        .min;
+    painter.galley(at, galley, Color32::from_gray(30));
+}
+
 /// Wie ein Rechteck im Seitenbild aussieht.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionStyle {
@@ -368,7 +405,7 @@ impl RegionStyle {
         match outcome {
             Redacted => RegionStyle::Redacted,
             Protecting => RegionStyle::Outlined,
-            Disabled | Blocked | Duplicate | OffPage => RegionStyle::Discarded,
+            Disabled | Blocked | Duplicate | OffPage | MissingPage => RegionStyle::Discarded,
         }
     }
 }

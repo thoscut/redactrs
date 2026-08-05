@@ -379,6 +379,38 @@ impl PageCache {
         self.entries.get(&page)
     }
 
+    /// Hat der Rasterizer auf dieser Seite **nichts** gezeichnet?
+    ///
+    /// `false`, solange noch kein Bild dieser Seite vorliegt — dann ist die
+    /// Frage nicht beantwortet, und ein Hinweis auf eine Seite, die gerade
+    /// gerechnet wird, wäre eine Falschaussage für die Dauer eines Auftrags.
+    ///
+    /// ## Wozu
+    ///
+    /// Der Notnagel-Pfad des Rasterizers (`RenderedPage::degraded`) ist von
+    /// einem fremden PDF aus praktisch nicht zu erreichen: `lopdf`s
+    /// `get_page_content` schluckt jeden Fehler und liefert `Ok(vec![])`, also
+    /// gelingt `page_ops` mit **null** Operationen und der Rasterizer meldet
+    /// eine gewöhnliche, leere Seite — kein `degraded`, keine Warnung. Fünf
+    /// Wege, den Inhaltsstrom unlesbar zu machen (fehlende Referenz, Zahl,
+    /// Dictionary, Array mit Loch, FlateDecode ohne Deflate), enden alle dort.
+    ///
+    /// Der Nutzer sah dann ein reinweißes Blatt ohne ein Wort, während die
+    /// Kopfzeile „1 Treffer · 1 werden geschwärzt“ sagte — die schematische
+    /// Vorschau kann auch nichts zeigen, denn der Extraktor findet auf
+    /// derselben Seite ebenso nichts. Die Auskunft dafür lag schon bereit und
+    /// wurde nirgends gelesen: [`PageMeta::drawn_ops`].
+    ///
+    /// Bewusst **nicht** an `degraded` gehängt und bewusst nicht an „Seite
+    /// ohne Text“: eine echte Leerseite löst das hier ebenfalls aus, und das
+    /// ist richtig so — auf ihr wurde tatsächlich nichts durchsucht. Der Satz
+    /// ist deshalb so gewählt, dass er auch dann stimmt.
+    pub fn nothing_drawn(&self, page: usize) -> bool {
+        self.entries
+            .get(&page)
+            .is_some_and(|entry| entry.best().is_some() && entry.meta.drawn_ops == 0)
+    }
+
     /// Warnungen des Rasterizers zur angegebenen Seite.
     pub fn warnings(&self, page: usize) -> &[String] {
         self.entries

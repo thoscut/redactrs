@@ -651,7 +651,98 @@ pub fn page_count(doc: &Document) -> usize {
     doc.get_pages().len()
 }
 
+/// Ersatz-Seitengröße, wenn im Dokument keine oder eine unbrauchbare MediaBox
+/// steht.
+pub const A4: Rect = Rect {
+    ll: redact_core::Point { x: 0.0, y: 0.0 },
+    ur: redact_core::Point {
+        x: 595.276,
+        y: 841.89,
+    },
+};
+
+/// Kleinste noch plausible Seitenkante in Punkt (≈ 0,35 mm).
+pub const MIN_PAGE_EXTENT: f64 = 1.0;
+/// Größte noch plausible Seitenkante in Punkt (≈ 70 m).
+pub const MAX_PAGE_EXTENT: f64 = 200_000.0;
+
+/// Eine MediaBox, nachdem sie auf Brauchbarkeit geprüft wurde.
+///
+/// **Warum das hier steht und nicht beim Rasterizer.** Die Prüfung gab es
+/// bisher nur in `redact_render::raster`; [`page_box`] lieferte die Rohangabe
+/// aus der Datei ungeprüft weiter. Damit gab es zwei Antworten auf dieselbe
+/// Frage „wie groß ist diese Seite?“, und sie liefen auseinander: der
+/// Rasterizer zeichnete eine Seite mit `/MediaBox [0 0 0 0]` ganz gewöhnlich
+/// auf A4, während die Oberfläche sie für 0 × 0 Punkt groß hielt, jedes
+/// Rechteck darauf als „liegt neben der Seite“ aussortierte und die IBAN
+/// dieser Seite ungeschwärzt in die Ausgabe schrieb — dieselbe Datei, die
+/// `redact_pipeline::run` mit derselben `Config` vollständig schwärzte.
+///
+/// Jetzt gibt es **eine** Stelle mit der Regel, und beide Seiten fragen dort.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SaneBox {
+    /// Die Größe, mit der weitergerechnet werden darf.
+    pub rect: Rect,
+    /// Die Angabe aus der Datei, falls sie ersetzt werden musste.
+    ///
+    /// `Some` heißt: was hier steht, ist **nicht** die MediaBox des Dokuments,
+    /// sondern [`A4`]. Das gehört gesagt — eine so geheilte Seite sieht sonst
+    /// aus wie jede andere.
+    pub replaced: Option<Rect>,
+}
+
+impl SaneBox {
+    /// Musste die Angabe der Datei ersetzt werden?
+    pub fn is_replaced(&self) -> bool {
+        self.replaced.is_some()
+    }
+
+    /// Der Satz, der dazu gesagt werden muss — `None`, wenn alles in Ordnung
+    /// war.
+    ///
+    /// Der Wortlaut ist der des Rasterizers; er stand dort seit jeher in den
+    /// `warnings` einer gerenderten Seite und wird jetzt auch von der
+    /// Oberfläche benutzt, damit beide Wege denselben Satz sagen.
+    pub fn warning(&self) -> Option<String> {
+        let raw = self.replaced?;
+        Some(format!(
+            "Unbrauchbare MediaBox ({} x {}), A4 angenommen",
+            raw.normalized().width(),
+            raw.normalized().height()
+        ))
+    }
+}
+
+/// Prüft eine MediaBox und ersetzt sie durch [`A4`], wenn sie unbrauchbar ist.
+///
+/// Unbrauchbar heißt: nicht endlich (NaN, ∞) oder eine Kante außerhalb von
+/// [`MIN_PAGE_EXTENT`] … [`MAX_PAGE_EXTENT`]. Das deckt Nullgröße, negative
+/// und absurd große Angaben ab.
+pub fn sane_box(raw: Rect) -> SaneBox {
+    let rect = raw.normalized();
+    let finite = [rect.ll.x, rect.ll.y, rect.ur.x, rect.ur.y]
+        .iter()
+        .all(|v| v.is_finite());
+    let (w, h) = (rect.width(), rect.height());
+    if finite
+        && (MIN_PAGE_EXTENT..=MAX_PAGE_EXTENT).contains(&w)
+        && (MIN_PAGE_EXTENT..=MAX_PAGE_EXTENT).contains(&h)
+    {
+        return SaneBox {
+            rect,
+            replaced: None,
+        };
+    }
+    SaneBox {
+        rect: A4,
+        replaced: Some(raw),
+    }
+}
+
 /// MediaBox jeder Seite (0-basiert), inklusive Vererbung vom Seitenbaum.
+///
+/// **Ungeprüft** — was in der Datei steht. Wer damit rechnet oder zeichnet,
+/// nimmt [`sane_page_boxes`].
 pub fn page_boxes(doc: &Document) -> Vec<Rect> {
     doc.get_pages()
         .values()
@@ -659,16 +750,18 @@ pub fn page_boxes(doc: &Document) -> Vec<Rect> {
         .collect()
 }
 
-/// MediaBox einer Seite; Standard ist A4, falls nichts angegeben ist.
-pub fn page_box(doc: &Document, page_id: lopdf::ObjectId) -> Rect {
-    const A4: Rect = Rect {
-        ll: redact_core::Point { x: 0.0, y: 0.0 },
-        ur: redact_core::Point {
-            x: 595.276,
-            y: 841.89,
-        },
-    };
+/// Wie [`page_boxes`], aber jede Seite durch [`sane_box`] geschickt.
+pub fn sane_page_boxes(doc: &Document) -> Vec<SaneBox> {
+    page_boxes(doc).into_iter().map(sane_box).collect()
+}
 
+/// MediaBox einer Seite; Standard ist A4, falls nichts angegeben ist.
+///
+/// Liefert die Angabe **so, wie sie in der Datei steht** — auch wenn sie
+/// unbrauchbar ist. Geprüft wird sie von [`sane_box`]; der Rasterizer tut das
+/// unmittelbar vor dem Zeichnen, damit die Warnung an der Seite hängt, die
+/// gerade gerastert wird.
+pub fn page_box(doc: &Document, page_id: lopdf::ObjectId) -> Rect {
     // /MediaBox kann von /Pages geerbt werden.
     let mut current = Some(page_id);
     let mut depth = 0;

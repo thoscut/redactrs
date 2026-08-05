@@ -56,18 +56,12 @@ use crate::fonts::{FontCache, GlyphFont, GlyphKey, Outline, Seg};
 // ---------------------------------------------------------------------------
 
 /// Notnagel-Seitengröße, wenn die MediaBox unbrauchbar ist.
-const A4: Rect = Rect {
-    ll: Point { x: 0.0, y: 0.0 },
-    ur: Point {
-        x: 595.276,
-        y: 841.89,
-    },
-};
+///
+/// Steht seit dieser Runde in [`redact_pdf::document`] — zusammen mit der
+/// Regel, die entscheidet, wann sie einspringt. Zwei Fassungen derselben Regel
+/// sind hier schon auseinandergelaufen; siehe [`redact_pdf::document::SaneBox`].
+const A4: Rect = redact_pdf::document::A4;
 
-/// Kleinste noch plausible Seitenkante in Punkt (≈ 0,35 mm).
-const MIN_PAGE_EXTENT: f64 = 1.0;
-/// Größte noch plausible Seitenkante in Punkt (≈ 70 m).
-const MAX_PAGE_EXTENT: f64 = 200_000.0;
 /// Harte Obergrenze für eine Bildkante, egal was die Optionen sagen.
 const MAX_EDGE_LIMIT: u32 = 20_000;
 /// Unterhalb dieser Gerätebreite wird ein Strich zur Haarlinie.
@@ -444,23 +438,19 @@ fn normalize_rotation(rotate: i64) -> i64 {
 }
 
 /// MediaBox auf etwas Zeichenbares stutzen.
+///
+/// Die Entscheidung selbst fällt in [`redact_pdf::document::sane_box`]; hier
+/// wird nur noch der Satz dazu in die Warnungen dieser Seite gelegt. Vorher
+/// stand die Regel an dieser Stelle allein — die Oberfläche kam über
+/// `redact_pdf::page_boxes` an die **ungeprüfte** Angabe und hielt eine Seite
+/// mit `/MediaBox [0 0 0 0]` für 0 × 0 Punkt groß, während der Rasterizer sie
+/// gleich daneben auf A4 zeichnete.
 fn sane_box(raw: Rect, warnings: &mut Vec<String>) -> Rect {
-    let rect = raw.normalized();
-    let finite = [rect.ll.x, rect.ll.y, rect.ur.x, rect.ur.y]
-        .iter()
-        .all(|v| v.is_finite());
-    let (w, h) = (rect.width(), rect.height());
-    if finite
-        && (MIN_PAGE_EXTENT..=MAX_PAGE_EXTENT).contains(&w)
-        && (MIN_PAGE_EXTENT..=MAX_PAGE_EXTENT).contains(&h)
-    {
-        return rect;
+    let checked = redact_pdf::document::sane_box(raw);
+    if let Some(note) = checked.warning() {
+        push_once(warnings, note);
     }
-    push_once(
-        warnings,
-        format!("Unbrauchbare MediaBox ({w} x {h}), A4 angenommen"),
-    );
-    A4
+    checked.rect
 }
 
 /// MediaBox und `/Rotate` direkt aus dem Dokument, wenn `page_ops` versagt hat.

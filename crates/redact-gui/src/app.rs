@@ -41,6 +41,25 @@ use redact_pipeline::Config;
 /// zum Ziel führen.
 pub const EMPTY_DOCUMENT_HINT: &str = "Noch kein PDF geladen — öffnen oder hierher ziehen";
 
+/// Was quer über einem Blatt steht, auf dem der Rasterizer nichts gezeichnet
+/// hat.
+///
+/// Siehe [`crate::render::PageCache::nothing_drawn`]: `degraded` läuft von
+/// einem fremden PDF aus praktisch nie an, ein unlesbarer Inhaltsstrom endet
+/// als **gewöhnliche leere Seite**. Ohne diesen Satz sieht sie aus wie eine
+/// geprüfte Leerseite, während die Kopfzeile ihre Zahlen ohne Vorbehalt nennt.
+///
+/// Der Wortlaut muss für beide Fälle stimmen — unlesbar **und** wirklich leer:
+/// gezeichnet wurde in beiden Fällen nichts, und in beiden Fällen hat die
+/// Analyse hier nichts gesehen.
+pub const NOTHING_DRAWN_NOTICE: &str = "Auf dieser Seite wurde nichts dargestellt.\n\
+     Sie ist entweder leer, oder ihr Inhalt war nicht lesbar —\n\
+     was hier steht, wurde nicht durchsucht.";
+
+/// Zeichen neben der Seitenzahl in der Miniaturspalte, wenn auf einer Seite
+/// nichts gezeichnet wurde.
+pub const NOTHING_DRAWN_MARK: &str = "⚠";
+
 /// Rand zwischen Scrollbereich und Seitenblatt.
 const SHEET_MARGIN: f32 = 24.0;
 /// Schrittweite der Pfeiltasten im PDF-User-Space (Punkt).
@@ -202,6 +221,87 @@ pub fn classify_drop(files: &[egui::DroppedFile]) -> DropAction {
 }
 
 // ---------------------------------------------------------------------------
+// Ausgegraute Bedienelemente und der Tabulator
+// ---------------------------------------------------------------------------
+
+/// Ein Knopf, der ausgegraut werden darf, ohne die Tabulatorkette zu
+/// zerschneiden.
+///
+/// **Das Problem.** „Ausgegraut statt weggelassen“ ist die erklärte Regel
+/// dieser Leiste ([`toolbar::is_enabled`]) — und sie machte die Leiste vorwärts
+/// unbedienbar. egui 0.29 meldet ein abgeschaltetes Widget zuerst als
+/// fokusinteressiert und nimmt ihm den Fokus im selben Aufruf wieder weg
+/// (`Ui::add_enabled` → `Response::interact` mit einem `disabled`-Ui). Der
+/// Tastendruck ist damit verbraucht: der Fokus liegt danach **nirgends**, und
+/// der nächste Tabulator beginnt wieder ganz vorn. Alles hinter dem ersten
+/// grauen Knopf ist vorwärts unerreichbar.
+///
+/// Im Alltag heißt das: „Wiederholen“ ist grau, solange nichts zurückgenommen
+/// wurde — also sind Kleiner, Größer, Passend, 100 %, Zurück und Vor mit dem
+/// Tabulator nicht zu erreichen. (Umschalt+Tab kommt durch; das steht nirgends,
+/// und „bedienbar, wenn man rückwärts geht“ ist keine Antwort.)
+///
+/// **Die Abhilfe.** Ein abgeschalteter Knopf bekommt [`egui::Sense::hover`]
+/// statt [`egui::Sense::click`]. Damit ist er nicht mehr fokussierbar, der
+/// Tabulator geht an ihm vorbei zum nächsten benutzbaren Element, und der
+/// Tastendruck ist nicht verbraucht. Optisch ändert sich nichts: `add_enabled`
+/// zeichnet ihn weiterhin grau, und die Sprechblase mit dem Grund bleibt.
+fn greyable_button(label: String, enabled: bool) -> egui::Button<'static> {
+    egui::Button::new(label).sense(if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    })
+}
+
+/// Die Knopfreihe der Symbolleiste — ohne Zoomregler und Themenschalter.
+///
+/// Eigene Funktion und nicht bloß eine Schleife in
+/// [`RedactApp::top_bar`], damit die Reihe **ohne** den Rest des Fensters
+/// gezeichnet werden kann: woran der Tabulator hängen bleibt, entscheidet sich
+/// hier und nirgends sonst, und ein Test, der die Reihe nachbaut, prüft seinen
+/// eigenen Nachbau statt der Leiste.
+///
+/// Gibt zurück, welcher Knopf gedrückt wurde.
+fn tool_row(ui: &mut egui::Ui, context: &ToolContext) -> Option<ToolAction> {
+    let mut clicked = None;
+    for item in toolbar::items() {
+        match item {
+            ToolItem::Separator => {
+                ui.separator();
+            }
+            ToolItem::Button(button) => {
+                let enabled = toolbar::is_enabled(button.action, context);
+                // Ein grauer Knopf sagt „geht gerade nicht“; **warum** steht in
+                // der Sprechblase. Für „Analysieren“ ist der Grund einer, den
+                // der Nutzer selbst gesetzt hat und selbst zurücknehmen kann —
+                // der gehört genannt.
+                //
+                // Ausdrücklich an `can_find_anything` und nicht an `!enabled`:
+                // ohne Dokument ist derselbe Knopf auch grau, aber aus einem
+                // ganz anderen Grund.
+                let hint = if button.action == ToolAction::Analyze
+                    && context.loaded
+                    && !context.can_find_anything
+                {
+                    toolbar::ANALYZE_OFF_HINT
+                } else {
+                    button.hint
+                };
+                if ui
+                    .add_enabled(enabled, greyable_button(button.label(), enabled))
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    clicked = Some(button.action);
+                }
+            }
+        }
+    }
+    clicked
+}
+
+// ---------------------------------------------------------------------------
 // Tastatur
 // ---------------------------------------------------------------------------
 
@@ -225,6 +325,8 @@ pub struct KeyState {
     pub key_s: bool,
     pub key_z: bool,
     pub key_y: bool,
+    /// Strg+R — Rechteck anlegen, siehe [`KeyCommand::AddRegion`].
+    pub key_r: bool,
     /// Liegt der Eingabefokus in einem Textfeld?
     pub text_focus: bool,
 }
@@ -240,6 +342,21 @@ pub enum KeyCommand {
         dx: f64,
         dy: f64,
     },
+    /// Ausgewählte Region in der Größe ändern: die linke untere Ecke bleibt
+    /// stehen, die rechte obere wandert (Strg+Pfeil).
+    ///
+    /// Das Gegenstück zum Eckgriff. Ohne es bliebe der Tastenweg zu einem
+    /// eigenen Rechteck auf eine feste Größe festgelegt — und eine Anschrift
+    /// hat keine feste Größe.
+    Resize {
+        dx: f64,
+        dy: f64,
+    },
+    /// Rechteck fester Größe in der Mitte der aktuellen Seite anlegen (Strg+R).
+    ///
+    /// Siehe [`crate::toolbar::ToolAction::AddRegion`]: der einzige Weg zu
+    /// einem eigenen Rechteck, der ohne Zeigegerät auskommt.
+    AddRegion,
     PrevPage,
     NextPage,
     FirstPage,
@@ -281,6 +398,28 @@ pub fn key_commands(keys: KeyState, has_selection: bool) -> Vec<KeyCommand> {
         }
         if keys.key_y {
             commands.push(KeyCommand::Redo);
+        }
+        if keys.key_r {
+            commands.push(KeyCommand::AddRegion);
+        }
+        // Strg+Pfeil ändert die Größe der Auswahl — dieselbe Schrittweite wie
+        // beim Schieben, mit Umschalt dieselbe große. Ohne Auswahl gibt es
+        // nichts zu ändern; ein Blättern wäre hier die falsche Antwort, denn
+        // dafür genügt der Pfeil allein.
+        if has_selection {
+            let step = if keys.shift { NUDGE_FAST } else { NUDGE };
+            if keys.left {
+                commands.push(KeyCommand::Resize { dx: -step, dy: 0.0 });
+            }
+            if keys.right {
+                commands.push(KeyCommand::Resize { dx: step, dy: 0.0 });
+            }
+            if keys.up {
+                commands.push(KeyCommand::Resize { dx: 0.0, dy: step });
+            }
+            if keys.down {
+                commands.push(KeyCommand::Resize { dx: 0.0, dy: -step });
+            }
         }
         return commands;
     }
@@ -874,39 +1013,7 @@ impl RedactApp {
         let mut clicked: Option<ToolAction> = None;
 
         ui.horizontal_wrapped(|ui| {
-            for item in toolbar::items() {
-                match item {
-                    ToolItem::Separator => {
-                        ui.separator();
-                    }
-                    ToolItem::Button(button) => {
-                        let enabled = toolbar::is_enabled(button.action, &context);
-                        // Ein grauer Knopf sagt „geht gerade nicht“; **warum**
-                        // steht in der Sprechblase. Für „Analysieren“ ist der
-                        // Grund einer, den der Nutzer selbst gesetzt hat und
-                        // selbst zurücknehmen kann — der gehört genannt.
-                        //
-                        // Ausdrücklich an `can_find_anything` und nicht an
-                        // `!enabled`: ohne Dokument ist derselbe Knopf auch
-                        // grau, aber aus einem ganz anderen Grund.
-                        let hint = if button.action == ToolAction::Analyze
-                            && context.loaded
-                            && !context.can_find_anything
-                        {
-                            toolbar::ANALYZE_OFF_HINT
-                        } else {
-                            button.hint
-                        };
-                        if ui
-                            .add_enabled(enabled, egui::Button::new(button.label()))
-                            .on_hover_text(hint)
-                            .clicked()
-                        {
-                            clicked = Some(button.action);
-                        }
-                    }
-                }
-            }
+            clicked = tool_row(ui, &context);
 
             ui.separator();
             ui.label("Zoom");
@@ -953,6 +1060,9 @@ impl RedactApp {
             ToolAction::Analyze => {
                 self.analyze();
             }
+            // Über dieselbe Stelle wie Strg+R, aus demselben Grund wie bei
+            // Rückgängig: Knopf und Kürzel müssen dasselbe tun.
+            ToolAction::AddRegion => self.apply_key_commands(&[KeyCommand::AddRegion]),
             ToolAction::Booking => self.booking_dialog(),
             ToolAction::Export => self.export_dialog(),
             ToolAction::ReviewSave => self.review_save_dialog(),
@@ -1277,6 +1387,15 @@ impl RedactApp {
                 }
                 if show_schematic {
                     preview.paint_text(&painter, origin);
+                }
+
+                // --- „Hier wurde nichts gezeichnet“ ---
+                //
+                // Quer über das Blatt und nicht in die Statuszeile: ein
+                // reinweißes Blatt sieht aus wie eine geprüfte, leere Seite,
+                // und wer es dafür hält, blättert weiter.
+                if self.pages.nothing_drawn(page) {
+                    viewer::paint_blank_notice(&painter, sheet, NOTHING_DRAWN_NOTICE);
                 }
 
                 // --- Regionen ---
@@ -1657,6 +1776,7 @@ impl RedactApp {
             key_s: i.key_pressed(Key::S),
             key_z: i.key_pressed(Key::Z),
             key_y: i.key_pressed(Key::Y),
+            key_r: i.key_pressed(Key::R),
             text_focus: self
                 .text_focus
                 .owns_keys(in_field, i.key_pressed(Key::Escape)),
@@ -1701,6 +1821,21 @@ impl RedactApp {
                 }
                 KeyCommand::Move { dx, dy } => {
                     self.state.move_selected(dx, dy);
+                }
+                KeyCommand::Resize { dx, dy } => {
+                    self.state.resize_selected(dx, dy);
+                }
+                KeyCommand::AddRegion => {
+                    // Wie beim Ziehen mit der Maus: ein laufender Zug am
+                    // Eckgriff und ein halb aufgezogenes Rechteck haben nach
+                    // einem neuen Rechteck nichts mehr zu suchen.
+                    self.selector.cancel();
+                    self.resize = None;
+                    if self.state.add_region_in_page_middle().is_none() {
+                        self.state.status =
+                            "Kein Dokument geladen — es gibt keine Seite für ein Rechteck"
+                                .to_string();
+                    }
                 }
                 KeyCommand::PrevPage => self.state.prev_page(),
                 KeyCommand::NextPage => self.state.next_page(),
@@ -1815,6 +1950,12 @@ impl eframe::App for RedactApp {
 #[path = "rev5_tests.rs"]
 mod rev5_tests;
 
+// Prüfrunde 6: Bedienung ohne Maus, der Notnagel-Pfad und die Umbauten aus
+// v0.4.0. Aus demselben Grund Kindmodul von `app` wie die Runde davor.
+#[cfg(test)]
+#[path = "rev6_tests.rs"]
+mod rev6_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1866,6 +2007,7 @@ mod tests {
             key_s: true,
             key_z: true,
             key_y: true,
+            key_r: true,
             text_focus: true,
         };
         assert!(key_commands(every_key, true).is_empty());
@@ -2363,15 +2505,26 @@ mod tests {
             vec![KeyCommand::Redo]
         );
 
-        // Strg + Pfeiltaste verschiebt nichts und blättert nicht — das Kürzel
-        // gehört dem Betriebssystem bzw. der Textnavigation.
+        // Strg + Pfeiltaste blättert **nicht** und verschiebt nicht — es
+        // ändert seit dieser Runde die Größe der Auswahl (das Gegenstück zum
+        // Eckgriff, siehe [`KeyCommand::Resize`]). Ohne Auswahl gibt es nichts
+        // zu ändern, und blättern soll es ausdrücklich nicht: dafür genügt der
+        // Pfeil allein. In einem Textfeld kommt es ohnehin nicht an — dort
+        // greift `text_focus` schon vor diesem Zweig.
         let ctrl_and_arrow = KeyState {
             ctrl: true,
             left: true,
             delete: true,
             ..KeyState::default()
         };
-        assert!(key_commands(ctrl_and_arrow, true).is_empty());
+        assert_eq!(
+            key_commands(ctrl_and_arrow, true),
+            vec![KeyCommand::Resize {
+                dx: -NUDGE,
+                dy: 0.0
+            }]
+        );
+        assert!(key_commands(ctrl_and_arrow, false).is_empty());
 
         // Ohne Steuerungstaste sind O, S, Z und Y gewöhnliche Buchstaben.
         let letters = KeyState {

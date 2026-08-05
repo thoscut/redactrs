@@ -109,6 +109,20 @@ pub fn show(
                             ui.label(RichText::new(format!("{hits}")).small().weak())
                                 .on_hover_text("Schwärzungen auf dieser Seite");
                         }
+                        // Ein Zeichen statt einer Zahl: auf dieser Seite hat
+                        // der Rasterizer nichts gezeichnet. In der Spalte, mit
+                        // der man am Ende durchgeht, ob nirgends etwas stehen
+                        // geblieben ist, gehört das genannt — das Kleinbild
+                        // selbst ist ja weiß und sagt nichts. Siehe
+                        // [`crate::render::PageCache::nothing_drawn`].
+                        if pages.nothing_drawn(page) {
+                            ui.label(
+                                RichText::new(crate::app::NOTHING_DRAWN_MARK)
+                                    .small()
+                                    .color(ui.visuals().warn_fg_color),
+                            )
+                            .on_hover_text(crate::app::NOTHING_DRAWN_NOTICE);
+                        }
                         response
                     })
                     .inner;

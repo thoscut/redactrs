@@ -14,6 +14,16 @@
 pub enum ToolAction {
     Open,
     Analyze,
+    /// Legt ein Rechteck fester Größe in der Mitte der aktuellen Seite an.
+    ///
+    /// **Der einzige Weg zu einem eigenen Rechteck, der ohne Zeigegerät
+    /// auskommt.** `AppState::add_manual_region` wurde bis hierher an genau
+    /// einer Stelle gerufen — aus einem `PointerFrame`. Auf einem Kontoauszug
+    /// sind Anschrift, Kontonummer und der Name des Kontoinhabers aber genau
+    /// die Stellen, die kein Muster zuverlässig findet: sie *müssen* von Hand
+    /// gezogen werden. Wer keine Maus benutzen kann, konnte diese Datei also
+    /// nicht vollständig schwärzen.
+    AddRegion,
     Booking,
     Export,
     ReviewSave,
@@ -82,6 +92,13 @@ pub fn items() -> Vec<ToolItem> {
             "Analysieren",
             "Muster und Buchungsliste erneut suchen",
             ToolAction::Analyze,
+        ),
+        button(
+            "🔲",
+            "Rechteck",
+            "Rechteck in der Mitte der Seite anlegen und auswählen (Strg+R) — \
+             danach mit den Pfeiltasten schieben und mit Strg+Pfeil in der Größe ändern",
+            ToolAction::AddRegion,
         ),
         button(
             "🗐",
@@ -179,9 +196,19 @@ pub fn buttons() -> Vec<ToolButton> {
 /// **abgeschaltet und der Grund steht daneben**. Ein Knopf, der sich drücken
 /// lässt und dann eine leere Trefferliste hinterlässt, ist die schlechtere
 /// Antwort — er sähe aus wie „nichts gefunden“.
-pub const ANALYZE_OFF_HINT: &str = "Die automatische Suche ist abgeschaltet, und es \
-     steht weder eine Buchungsliste noch eine Regionsdatei dahinter — es gäbe nichts \
-     zu finden. Häkchen „Automatisch suchen“ in der Trefferliste setzen oder eine \
+///
+/// **Beide Wege zu „kein Muster läuft“ stehen darin.** Der Satz kannte nur den
+/// Hauptschalter und riet, ein Häkchen zu setzen, das im zweiten Fall längst
+/// gesetzt ist: wer das letzte laufende Muster einzeln abwählt, liest sonst
+/// eine Anweisung, die er nicht befolgen kann.
+/// [`crate::state::AppState::any_pattern_runs`] zählt beide Wege, also muss
+/// der Hinweis daneben beide nennen. Die Liste heißt
+/// [`crate::sidebar::PATTERN_LIST_TITLE`]; dass der Name hier wörtlich steht,
+/// hält der Test `the_hint_names_both_ways_to_switch_detection_off` fest.
+pub const ANALYZE_OFF_HINT: &str = "Es läuft kein Muster, und es steht weder eine \
+     Buchungsliste noch eine Regionsdatei dahinter — es gäbe nichts zu finden. \
+     Abhilfe: das Häkchen „Automatisch suchen“ in der Trefferliste setzen, unter \
+     „Muster einzeln“ wieder mindestens ein Muster ankreuzen, oder eine \
      Buchungsliste laden.";
 
 /// Woran hängt, ob ein Knopf benutzbar ist.
@@ -216,7 +243,8 @@ pub fn is_enabled(action: ToolAction, context: &ToolContext) -> bool {
         // [`crate::app::RedactApp::top_bar`] mit [`ANALYZE_OFF_HINT`]). Dasselbe
         // Muster wie beim Feld „Namenszusatz“, das mit `-o` nichts bewirkt.
         ToolAction::Analyze => context.loaded && context.can_find_anything,
-        ToolAction::Booking
+        ToolAction::AddRegion
+        | ToolAction::Booking
         | ToolAction::Export
         | ToolAction::ReviewSave
         | ToolAction::ReviewLoad
@@ -291,6 +319,17 @@ mod tests {
                     button.text
                 );
             }
+            // Dieselbe Regel gilt für jedes andere Zeichen, das die Oberfläche
+            // als Symbol benutzt. Das Zeichen in der Miniaturspalte steht
+            // neben einem **weißen** Kleinbild; erschiene es als leeres
+            // Kästchen, wäre der Hinweis nicht bloß hässlich, sondern
+            // unlesbar. Siehe [`crate::render::PageCache::nothing_drawn`].
+            assert!(
+                fonts.has_glyphs(&font, crate::app::NOTHING_DRAWN_MARK),
+                "Zeichen {:?} für „auf dieser Seite wurde nichts gezeichnet“ \
+                 fehlt in der Standardschrift",
+                crate::app::NOTHING_DRAWN_MARK
+            );
         });
     }
 

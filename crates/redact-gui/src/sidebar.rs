@@ -147,9 +147,18 @@ fn detection(ui: &mut egui::Ui, state: &AppState) -> Option<PatternToggle> {
         .show(ui, |ui| {
             // Bei „alles aus“ ändert ein einzelnes Häkchen nichts — es bleibt
             // trotzdem stehen (nicht ausgeblendet), damit die gemerkte Auswahl
-            // sichtbar ist.
-            ui.add_enabled_ui(state.patterns_enabled(), |ui| {
+            // sichtbar ist. Schaltbar ist es dann nicht, und aus demselben
+            // Grund wie bei den Schutzeinträgen steht dort ein
+            // [`inert_checkbox`]: ein abgeschaltetes Kästchen verschluckt den
+            // Tabulator, und dahinter liegt die ganze Trefferliste.
+            let switch_on = state.patterns_enabled();
+            ui.add_enabled_ui(switch_on, |ui| {
                 for def in state.pattern_states() {
+                    if !switch_on {
+                        ui.add(inert_checkbox(def.enabled, &def.id))
+                            .on_hover_text(&def.description);
+                        continue;
+                    }
                     let mut single = def.enabled;
                     if ui
                         .checkbox(&mut single, &def.id)
@@ -194,6 +203,15 @@ fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
                 // Feste Kennung — siehe [`crate::focus`]: daran erkennt die
                 // Tastenauswertung ein Textfeld.
                 .id(crate::focus::id(crate::focus::OUTPUT_SUFFIX))
+                // **Zusätzlich** zu `add_enabled`, nicht statt seiner: ein
+                // abgeschaltetes Widget verschluckt in egui 0.29 den
+                // Tabulator (siehe `crate::app::greyable_button`), und dieses
+                // Feld steht **ganz oben** in der Spalte. Ein Aufruf
+                // `redact-rs --gui -o ziel.pdf` machte damit keine einzige
+                // Trefferzeile vorwärts ertabbar — die Liste, um die es in
+                // dieser Spalte geht. `interactive(false)` nimmt dem Feld die
+                // Fokussierbarkeit; grau gezeichnet wird es weiterhin.
+                .interactive(!fixed)
                 .desired_width(SUFFIX_FIELD_WIDTH)
                 .hint_text(redact_core::DEFAULT_OUTPUT_SUFFIX),
         )
@@ -288,10 +306,20 @@ fn hits(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
         let tooltip = format!("{}\n{}", entry.description(), outcome_tooltip(outcome));
 
         ui.horizontal(|ui| {
-            // Negativlisten-Treffer sind nicht schaltbar.
-            let checkbox = ui.add_enabled(!blocking, egui::Checkbox::new(&mut enabled, ""));
-            if checkbox.changed() {
-                toggle = Some(index);
+            // Negativlisten-Treffer sind nicht schaltbar. Für sie steht hier
+            // ein Platzhalter statt eines abgeschalteten Kästchens: ein
+            // abgeschaltetes Widget verschluckt in egui 0.29 den Tabulator
+            // (siehe [`crate::app::greyable_button`]), und dieses Kästchen ist
+            // das **erste** Bedienelement jeder Trefferzeile. Eine
+            // Buchungsliste mit einem Schutzeintrag an erster Stelle machte
+            // damit keine einzige Trefferzeile vorwärts ertabbar.
+            if blocking {
+                ui.add_enabled(false, inert_checkbox(enabled, ""));
+            } else {
+                let checkbox = ui.add(egui::Checkbox::new(&mut enabled, ""));
+                if checkbox.changed() {
+                    toggle = Some(index);
+                }
             }
             ui.label(RichText::new(color.marker()).color(dot_color(color)));
 
@@ -305,7 +333,8 @@ fn hits(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
                 HitOutcome::Disabled
                 | HitOutcome::Blocked
                 | HitOutcome::Duplicate
-                | HitOutcome::OffPage => {
+                | HitOutcome::OffPage
+                | HitOutcome::MissingPage => {
                     text = text.weak().strikethrough();
                 }
             }
@@ -334,6 +363,85 @@ fn hits(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     }
 }
 
+/// Ein Kästchen, das nur aussieht wie eins — nicht anklickbar, nicht
+/// fokussierbar, und deshalb kein Hindernis für den Tabulator.
+///
+/// Gezeichnet wird Zug um Zug wie [`egui::Checkbox`] im abgeschalteten
+/// Zustand: dieselben Maße (`icon_width`, `interact_size`), dieselben
+/// Rechtecke (`icon_rectangles`) und ausdrücklich die `inactive`-Farben, die
+/// egui einem abgeschalteten Kästchen gibt. Die Ausgrauung selbst kommt
+/// weiterhin von [`egui::Ui::add_enabled`], das den Maler abblendet. Optisch
+/// ist der Unterschied zum bisherigen Stand also keiner.
+///
+/// Der Unterschied liegt in [`egui::Sense::hover`]: ohne Klickabsicht ist das
+/// Element nicht fokussierbar, der Tabulator geht daran vorbei zur nächsten
+/// Zeile, und der Tastendruck ist nicht verbraucht.
+fn inert_checkbox(checked: bool, text: &str) -> impl egui::Widget + '_ {
+    move |ui: &mut egui::Ui| {
+        let (icon_width, icon_spacing) = {
+            let spacing = ui.spacing();
+            (spacing.icon_width, spacing.icon_spacing)
+        };
+        let interact_height = ui.spacing().interact_size.y;
+        let (galley, mut size) = if text.is_empty() {
+            (None, egui::vec2(icon_width, 0.0))
+        } else {
+            let extra = egui::vec2(icon_width + icon_spacing, 0.0);
+            let wrap_width = ui.available_width() - extra.x;
+            let galley = egui::WidgetText::from(text).into_galley(
+                ui,
+                None,
+                wrap_width,
+                egui::TextStyle::Button,
+            );
+            let size = (extra + galley.size()).max(ui.spacing().interact_size);
+            (Some(galley), size)
+        };
+        size = size.max(egui::Vec2::splat(interact_height));
+        size.y = size.y.max(icon_width);
+
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+        // Für Hilfsmittel bleibt es ein Kästchen — es ist nur keines, das man
+        // umschalten könnte.
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Checkbox,
+                false,
+                checked,
+                galley.as_ref().map_or("", |g| g.text()),
+            )
+        });
+        if ui.is_rect_visible(rect) {
+            let visuals = ui.visuals().widgets.inactive;
+            let (small, big) = ui.spacing().icon_rectangles(rect);
+            ui.painter().add(egui::epaint::RectShape::new(
+                big.expand(visuals.expansion),
+                visuals.rounding,
+                visuals.bg_fill,
+                visuals.bg_stroke,
+            ));
+            if checked {
+                ui.painter().add(egui::Shape::line(
+                    vec![
+                        egui::pos2(small.left(), small.center().y),
+                        egui::pos2(small.center().x, small.bottom()),
+                        egui::pos2(small.right(), small.top()),
+                    ],
+                    visuals.fg_stroke,
+                ));
+            }
+            if let Some(galley) = galley {
+                let at = egui::pos2(
+                    rect.min.x + icon_width + icon_spacing,
+                    rect.center().y - 0.5 * galley.size().y,
+                );
+                ui.painter().galley(at, galley, visuals.text_color());
+            }
+        }
+        response
+    }
+}
+
 /// Ein ganzer Satz zum Ergebnis — für die Sprechblase.
 pub fn outcome_tooltip(outcome: HitOutcome) -> &'static str {
     match outcome {
@@ -352,6 +460,10 @@ pub fn outcome_tooltip(outcome: HitOutcome) -> &'static str {
         HitOutcome::OffPage => {
             "Dieses Rechteck liegt vollständig neben dem Blatt und wird nicht geschwärzt — \
              es kann dort kein Zeichen treffen."
+        }
+        HitOutcome::MissingPage => {
+            "Dieses Rechteck nennt eine Seite, die es in diesem Dokument nicht gibt. \
+             Es wird nicht geschwärzt — zu berichtigen ist die Seitenzahl, nicht die Lage."
         }
     }
 }
@@ -476,6 +588,7 @@ mod tests {
             HitOutcome::Blocked,
             HitOutcome::Duplicate,
             HitOutcome::OffPage,
+            HitOutcome::MissingPage,
         ];
         for outcome in outcomes {
             let text = outcome_tooltip(outcome);
