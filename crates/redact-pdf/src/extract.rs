@@ -477,6 +477,53 @@ fn print_runs(items: &[(usize, GlyphItem)]) -> Vec<usize> {
     out
 }
 
+/// Welche der belegten Schichten eine Folge `[start, start + length)`
+/// aufnimmt — oder `None`, wenn keine passt und eine neue fällig ist.
+///
+/// In Frage kommt eine Schicht nur, wenn sie höchstens innerhalb der Toleranz
+/// überlappt (siehe [`OVERPRINT_RATIO`] und [`OVERPRINT_FLOOR_IN_SPACES`]).
+/// Unter den in Frage kommenden gewinnt die, deren Text **am dichtesten** an
+/// `start` endet — gemessen als Abstand `|reached − start|`, nicht als größtes
+/// `reached`.
+///
+/// Der Unterschied ist der ganze Befund. „Das größte `reached`“ nimmt die
+/// Schicht, die am weitesten *hineinragt*: ein zu langer Empfängername, der 26
+/// pt in die Wertspalte reicht, schlägt damit die Schicht, in der das erste
+/// IBAN-Stück lückenlos endet — und holt sich das zweite Stück. Keine der
+/// beiden Zeilen enthält die IBAN dann noch ganz.
+///
+/// Umgekehrt darf „anschließend“ auch nicht bedingungslos gewinnen: zwei
+/// aufeinanderfolgende `Tj` überlappen sich in der Praxis um Bruchteile eines
+/// Punktes (gerundete Metriken), und eine 28 pt zurückliegende Schicht wäre
+/// dann „davor“, aber gewiss nicht die Fortsetzung. Der Abstand entscheidet;
+/// bei gleichem Abstand die Schicht, die nicht überlappt.
+fn best_layer(layers: &[(f64, f64, f64)], start: f64, length: f64, space: f64) -> Option<usize> {
+    let mut best: Option<(usize, f64, bool)> = None;
+    for (index, (reached, last_length, last_space)) in layers.iter().enumerate() {
+        let overlap = reached - start;
+        if overlap > 0.0 {
+            let tolerance = (OVERPRINT_RATIO * length.min(*last_length))
+                .max(OVERPRINT_FLOOR_IN_SPACES * space.max(*last_space));
+            if overlap > tolerance {
+                continue;
+            }
+        }
+        let distance = overlap.abs();
+        let overlaps = overlap > 0.0;
+        let better = match best {
+            None => true,
+            Some((_, best_distance, best_overlaps)) => {
+                distance < best_distance
+                    || (distance == best_distance && best_overlaps && !overlaps)
+            }
+        };
+        if better {
+            best = Some((index, distance, overlaps));
+        }
+    }
+    best.map(|(index, _, _)| index)
+}
+
 /// Zerlegt eine Zeile in **Druckschichten**.
 ///
 /// Die Zeile kommt bereits in Leserichtung sortiert; jede Glyphe trägt die
@@ -486,10 +533,11 @@ fn print_runs(items: &[(usize, GlyphItem)]) -> Vec<usize> {
 /// **überdeckt**, eröffnet eine neue Schicht.
 ///
 /// Gesucht wird dabei nicht die erstbeste freie Schicht, sondern die, deren
-/// Text am dichtesten davor endet. So findet ein Textstück, das nach einem
-/// Überdruck an der ursprünglichen Stelle weitergeht (der klassische
-/// Akzent-Überdruck `(Cr) Tj … (´) Tj … (dit) Tj`), zurück in seine eigene
-/// Schicht.
+/// Text am dichtesten davor endet ([`best_layer`] — dort steht, warum
+/// „dichtesten“ und nicht „am weitesten reichend“). So findet ein Textstück,
+/// das nach einem Überdruck an der ursprünglichen Stelle weitergeht (der
+/// klassische Akzent-Überdruck `(Cr) Tj … (´) Tj … (dit) Tj`), zurück in seine
+/// eigene Schicht.
 fn split_layers(line: Vec<(usize, GlyphItem)>) -> Vec<Vec<GlyphItem>> {
     // Spanne und Leerzeichenmaß je Druckfolge.
     let mut spans: BTreeMap<usize, (f64, f64, f64)> = BTreeMap::new();
@@ -531,30 +579,19 @@ fn split_layers(line: Vec<(usize, GlyphItem)>) -> Vec<Vec<GlyphItem>> {
     for run in order {
         let (start, end, space) = spans[&run];
         let length = (end - start).max(0.0);
-        let mut chosen: Option<usize> = None;
-        // Die am weitesten zurückliegende Schicht — der Ausweg, wenn die
-        // Obergrenze erreicht ist.
-        let mut fallback = 0usize;
-        for (index, (reached, last_length, last_space)) in layers.iter().enumerate() {
-            if *reached < layers[fallback].0 {
-                fallback = index;
-            }
-            let overlap = reached - start;
-            let tolerance = (OVERPRINT_RATIO * length.min(*last_length))
-                .max(OVERPRINT_FLOOR_IN_SPACES * space.max(*last_space));
-            if overlap > tolerance {
-                continue;
-            }
-            if chosen.is_none_or(|best| *reached > layers[best].0) {
-                chosen = Some(index);
-            }
-        }
+        let mut chosen = best_layer(&layers, start, length, space);
         // Jenseits der Obergrenze wird nicht weiter aufgefächert: die Suche
         // ist linear in der Zahl der Schichten, und eine Datei, die tausend
         // Texte an dieselbe Stelle druckt, machte daraus quadratischen
         // Aufwand. Kein Satz übereinander gedruckter Texte reicht so weit.
         if chosen.is_none() && layers.len() >= MAX_PRINT_LAYERS {
-            chosen = Some(fallback);
+            // Die am weitesten zurückliegende Schicht — der Ausweg, wenn die
+            // Obergrenze erreicht ist.
+            chosen = layers
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(index, _)| index);
         }
         match chosen {
             Some(index) => {

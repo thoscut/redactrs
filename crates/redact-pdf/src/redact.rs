@@ -65,6 +65,26 @@ pub struct RedactionReport {
     pub drawn_rects: usize,
     /// Anzahl entfernter Annotationen.
     pub removed_annotations: usize,
+    /// **Was** dabei verschwunden ist — je entfernter Annotation ein Eintrag
+    /// „Seite N /Subtype „Feldname““, in derselben Reihenfolge wie gezählt.
+    ///
+    /// Entfernt wird jede Annotation, deren `/Rect` einen Schwärzungsbereich
+    /// schneidet, samt allen Erscheinungszuständen ([`remove_annotations`]).
+    /// Das ist die sichere Richtung und bleibt es — aber es nimmt mehr mit, als
+    /// die Schwärzung verlangt hat: ein Formularfeld ist danach ganz weg, nicht
+    /// nur der überdeckte Teil seines Textes.
+    ///
+    /// Die bloße Zahl sagt das nicht. „Entfernte Annotationen: 1“ liest sich
+    /// wie eine aufgeräumte Kleinigkeit; `/Subtype` und `/T` stehen in der
+    /// Datei und benennen den Verlust.
+    ///
+    /// Bewusst **kein** Eintrag in [`RedactionReport::warnings`]: diese Liste
+    /// entscheidet in `redact_pipeline::coverage` über den Rückgabewert, und
+    /// eine Über-Schwärzung ist keine Deckungslücke — sie dort einzutragen
+    /// machte aus jedem Lauf mit einer überlappenden Annotation einen
+    /// Rückgabewert 3. Am Verhalten ändert sich nichts, nur die Meldung wird
+    /// vollständig.
+    pub removed_annotation_details: Vec<String>,
     /// Anzahl Bilder, deren Pixel überschrieben wurden.
     pub redacted_images: usize,
     /// Davon: Kopien, die angelegt wurden, weil das Bild mehrfach benutzt wird.
@@ -386,7 +406,10 @@ impl PdfRedactor {
                 &mut report,
                 &mut content_users,
             )?;
-            report.removed_annotations += remove_annotations(doc, *page_id, &rects)?;
+            let mut lost = Vec::new();
+            report.removed_annotations +=
+                remove_annotations(doc, page_index, *page_id, &rects, &mut lost)?;
+            report.removed_annotation_details.append(&mut lost);
         }
 
         // Form-XObjects werden einmalig neu geschrieben — auch die, in denen
@@ -1251,7 +1274,17 @@ fn rewrite_form(
 }
 
 /// Entfernt Annotationen, die in einen Schwärzungsbereich ragen.
-fn remove_annotations(doc: &mut Document, page_id: ObjectId, rects: &[Rect]) -> Result<usize> {
+///
+/// `lost` bekommt je entfernter Annotation einen Kurzbeschreiber angehängt —
+/// siehe [`annotation_label`] und
+/// [`RedactionReport::removed_annotation_details`].
+fn remove_annotations(
+    doc: &mut Document,
+    page_index: usize,
+    page_id: ObjectId,
+    rects: &[Rect],
+    lost: &mut Vec<String>,
+) -> Result<usize> {
     if rects.is_empty() {
         return Ok(0);
     }
@@ -1266,15 +1299,25 @@ fn remove_annotations(doc: &mut Document, page_id: ObjectId, rects: &[Rect]) -> 
     let mut kept = Vec::new();
     let mut removed = 0usize;
     for annot in annots {
-        let rect = doc
+        let dict = doc
             .dereference(&annot)
             .ok()
             .and_then(|(_, o)| o.as_dict().ok())
+            .cloned();
+        let rect = dict
+            .as_ref()
             .and_then(|d| d.get(b"Rect").ok())
             .and_then(|o| doc.dereference(o).ok())
             .and_then(|(_, o)| rect_from_object(o));
         match rect {
             Some(r) if rects.iter().any(|target| r.intersects(target)) => {
+                lost.push(format!(
+                    "Seite {} {}",
+                    page_index + 1,
+                    dict.as_ref()
+                        .map(|d| annotation_label(doc, d))
+                        .unwrap_or_else(|| "Annotation ohne Dictionary".into())
+                ));
                 if let Object::Reference(id) = annot {
                     doc.objects.remove(&id);
                 }
@@ -1291,6 +1334,34 @@ fn remove_annotations(doc: &mut Document, page_id: ObjectId, rects: &[Rect]) -> 
         page.set("Annots", Object::Array(kept));
     }
     Ok(removed)
+}
+
+/// Wie eine entfernte Annotation zu benennen ist: `/Subtype` und, falls
+/// vorhanden, der Feldname `/T`.
+///
+/// Beides steht in der Datei und sagt der Nutzerin, *was* ihr fehlt. Eine
+/// bloße Zahl sagt es nicht: „Entfernte Annotationen: 1“ liest sich wie eine
+/// aufgeräumte Kleinigkeit, gemeint ist aber unter Umständen ein
+/// Formularfeld samt allem sichtbaren Text darin.
+fn annotation_label(doc: &Document, dict: &Dictionary) -> String {
+    let subtype = dict
+        .get(b"Subtype")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_name().ok())
+        .map(|n| format!("/{}", String::from_utf8_lossy(n)))
+        .unwrap_or_else(|| "ohne /Subtype".into());
+    let title = dict
+        .get(b"T")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_str().ok())
+        .map(crate::audit_bytes::decode_pdf_string)
+        .filter(|s| !s.is_empty());
+    match title {
+        Some(name) => format!("{subtype} „{name}“"),
+        None => subtype,
+    }
 }
 
 /// Weist auf Rasterbilder hin, deren Inhalt niemand gelesen hat.

@@ -891,23 +891,11 @@ fn fill_page(
                 // Eine Maske, die das Neukodieren nicht überstünde, ist ein
                 // Abbruchgrund und **kein** Fall für eine Näherung: was die
                 // Eingabe versteckt, stünde sonst in der Ausgabe sichtbar da.
-                let mask = match mask_to_carry(doc, first) {
-                    Ok(mask) => mask,
+                let carry = match mask_to_carry(doc, first) {
+                    Ok(carry) => carry,
                     Err(reason) => {
-                        let what = format!("{} {reason}", first.label(page_index));
-                        if options.allow_undecodable {
-                            outcome.warnings.push(format!(
-                                "{what}. Das Bild bleibt deshalb ungeschwärzt; die Bildpunkte im \
-                                 Schwärzungsbereich blieben in der Datei."
-                            ));
-                            continue;
-                        }
-                        let message = format!(
-                            "{what}. Die Datei wird nicht als geschwärzt ausgegeben, statt die \
-                             Maske stillschweigend fallen zu lassen — die versteckten Bildpunkte \
-                             stünden sonst sichtbar in der Ausgabe."
-                        );
-                        return Err(RedactError::Pdf(message));
+                        mask_failure(options, outcome, &first.label(page_index), &reason)?;
+                        continue;
                     }
                 };
                 // Was [`crate::ops`] ohnehin nicht auspackt, kostet auch kein
@@ -920,6 +908,36 @@ fn fill_page(
                     0
                 };
                 let (raster, note) = decode_placement(doc, first);
+                // Der Farbschlüssel auf verlustbehaftet kodierten Daten wird
+                // **hier** entschieden und nicht schon am Dictionary: die Frage
+                // „trifft er überhaupt einen Bildpunkt?“ ist nur am dekodierten
+                // Bild zu beantworten, und dekodiert wird nur an dieser Stelle
+                // — hinter `budget.reserve`, also innerhalb von
+                // `--max-image-mb`.
+                //
+                // Vor der Prüfung „ließ sich das Bild überhaupt dekodieren?“,
+                // und zwar mit Absicht: ging das Dekodieren schief, ist die
+                // Maske der schwerer wiegende der beiden Befunde. „Was der
+                // Schlüssel versteckt, weiß ich nicht“ nennt den Grund, aus dem
+                // die Datei nicht geschrieben werden darf; „Filter unbekannt“
+                // nennt nur den Anlass.
+                let mask = match carry {
+                    Carry::Nothing => None,
+                    Carry::Keep(object) => Some(object),
+                    Carry::Probe(filter) => match probe_color_key(doc, first, &raster, &filter) {
+                        Ok(note) => {
+                            outcome
+                                .warnings
+                                .push(format!("{} {note}", first.label(page_index)));
+                            None
+                        }
+                        Err(reason) => {
+                            budget.cancel(reserved);
+                            mask_failure(options, outcome, &first.label(page_index), &reason)?;
+                            continue;
+                        }
+                    },
+                };
                 if raster.placeholder {
                     budget.cancel(reserved);
                     // Der **echte** Grund steht in `note` — der Filter ist nur
@@ -1009,15 +1027,96 @@ fn decode_placement(doc: &Document, placement: &Placement) -> (RasterImage, Opti
 }
 
 /// Was von der `/Mask` dieses Bildes in die Ausgabe muss.
+#[derive(Debug, Clone, PartialEq)]
+enum Carry {
+    /// Nichts mitzuschreiben: kein `/Mask`, oder die Maske steckt im
+    /// Alphakanal und wird von dort neu aufgebaut.
+    Nothing,
+    /// Diesen `/Mask`-Verweis unverändert mitschreiben (Stencil-Strom).
+    Keep(Object),
+    /// Erst am **dekodierten** Bild zu entscheiden: Farbschlüssel auf
+    /// verlustbehaftet kodierten Daten. Der Text ist der Filtername.
+    Probe(String),
+}
+
+/// Was mit einer Maske geschieht, die sich nicht ohne stille Näherung
+/// übertragen ließe.
 ///
-/// `Ok(Some(objekt))` heißt „unverändert mitschreiben“, `Ok(None)` „nichts zu
-/// tun“ (kein `/Mask`, oder die Maske steckt im Alphakanal). `Err(grund)` ist
-/// eine Maske, die sich nicht ohne stille Näherung übertragen ließe — dann ist
-/// Abbrechen die einzig ehrliche Antwort. Siehe [`crate::ops::MaskPlan`].
-fn mask_to_carry(
+/// `Ok(())` heißt „gewarnt, weiter mit dem nächsten Bild“ — das gibt es nur
+/// mit `--allow-undecodable-images`. Sonst bricht der Lauf ab: was die Eingabe
+/// versteckt, stünde in der Ausgabe sonst sichtbar da, und eine Datei, die
+/// aussieht wie geschwärzt, ist schlimmer als keine.
+///
+/// Der Fluchtweg wird **genannt**. Er wirkt an genau dieser Stelle; ohne den
+/// Hinweis endet der Lauf mit Rückgabewert 1 und ohne Ausgabedatei, und im
+/// Stapel fällt die Datei ersatzlos aus.
+fn mask_failure(
+    options: &ImageOptions,
+    outcome: &mut ImageOutcome,
+    label: &str,
+    reason: &str,
+) -> Result<()> {
+    let what = format!("{label} {reason}");
+    if options.allow_undecodable {
+        outcome.warnings.push(format!(
+            "{what}. Das Bild bleibt deshalb ungeschwärzt; die Bildpunkte im \
+             Schwärzungsbereich blieben in der Datei."
+        ));
+        return Ok(());
+    }
+    Err(RedactError::Pdf(format!(
+        "{what}. Die Datei wird nicht als geschwärzt ausgegeben, statt die Maske \
+         stillschweigend fallen zu lassen — die versteckten Bildpunkte stünden sonst sichtbar in \
+         der Ausgabe. Mit --allow-undecodable-images läuft der Lauf trotzdem durch: das Bild \
+         bleibt dann ungeschwärzt, und die Ausgabedatei entsteht."
+    )))
+}
+
+/// Sieht am dekodierten Bild nach, ob der Farbschlüssel überhaupt etwas
+/// verbirgt (siehe [`crate::ops::MaskPlan::ProbeColorKey`]).
+///
+/// `Ok(text)` heißt: er trifft keinen einzigen Bildpunkt, die Maske darf mit
+/// diesem Hinweis entfallen. `Err(grund)` heißt: sie verbirgt etwas (oder es
+/// ist nicht zu entscheiden) — dann ist Abbrechen die ehrliche Antwort.
+fn probe_color_key(
     doc: &Document,
     placement: &Placement,
-) -> std::result::Result<Option<Object>, String> {
+    raster: &crate::ops::RasterImage,
+    filter: &str,
+) -> std::result::Result<String, String> {
+    let resources = placement.resources.as_deref();
+    let Target::XObject { name, .. } = &placement.target else {
+        return Err("trägt einen Farbschlüssel als Inline-Bild".into());
+    };
+    let Some(stream) = image_stream(doc, resources, name) else {
+        return Err("ist nicht mehr auflösbar".into());
+    };
+    match crate::ops::color_key_reach(doc, resources, &stream.dict, raster) {
+        crate::ops::ColorKeyReach::NothingHidden => Ok(format!(
+            "trägt eine Farbschlüssel-Maske und ist mit {filter} kodiert. Im dekodierten Bild \
+             fällt kein einziger Abtastwert in den Schlüsselbereich — auch nicht mit großzügigem \
+             Band für den verlustbehafteten Decoder. Die Maske verbirgt nichts und ist deshalb \
+             entfallen; alle Bildpunkte bleiben sichtbar wie in der Eingabe."
+        )),
+        crate::ops::ColorKeyReach::Hides(pixels) => Err(format!(
+            "hat eine Farbschlüssel-Maske und ist mit {filter} kodiert. {pixels} Bildpunkt(e) \
+             fallen in den Schlüsselbereich, die Maske verbirgt dort also etwas. Der Schlüssel \
+             vergleicht Abtastwerte; welche ein verlustbehafteter Decoder liefert, ist von Decoder \
+             zu Decoder verschieden — welche Bildpunkte die Datei genau versteckt, lässt sich \
+             damit nicht sicher genug bestimmen"
+        )),
+        crate::ops::ColorKeyReach::Undecidable(why) => Err(format!(
+            "hat eine Farbschlüssel-Maske und ist mit {filter} kodiert; ob sie Bildpunkte \
+             verbirgt, ist am dekodierten Bild nicht nachzuprüfen ({why})"
+        )),
+    }
+}
+
+/// Was von der `/Mask` dieses Bildes in die Ausgabe muss — siehe [`Carry`].
+///
+/// `Err(grund)` ist eine Maske, die sich nicht ohne stille Näherung übertragen
+/// ließe. Siehe [`crate::ops::MaskPlan`].
+fn mask_to_carry(doc: &Document, placement: &Placement) -> std::result::Result<Carry, String> {
     let resources = placement.resources.as_deref();
     let dict = match &placement.target {
         Target::Inline { dict, .. } => {
@@ -1036,17 +1135,18 @@ fn mask_to_carry(
                     ));
                 }
             }
-            return Ok(None);
+            return Ok(Carry::Nothing);
         }
         Target::XObject { name, .. } => match image_stream(doc, resources, name) {
             Some(stream) => stream.dict.clone(),
             // Nicht auflösbar: das meldet `decode_placement` gleich darauf.
-            None => return Ok(None),
+            None => return Ok(Carry::Nothing),
         },
     };
     match crate::ops::mask_plan(doc, resources, &dict) {
-        crate::ops::MaskPlan::None | crate::ops::MaskPlan::InAlpha => Ok(None),
-        crate::ops::MaskPlan::Keep(object) => Ok(Some(object)),
+        crate::ops::MaskPlan::None | crate::ops::MaskPlan::InAlpha => Ok(Carry::Nothing),
+        crate::ops::MaskPlan::Keep(object) => Ok(Carry::Keep(object)),
+        crate::ops::MaskPlan::ProbeColorKey(filter) => Ok(Carry::Probe(filter)),
         crate::ops::MaskPlan::Unsupported(reason) => Err(reason),
     }
 }
@@ -1226,6 +1326,15 @@ fn encode_xobject(work: &Work) -> Encoded {
     // gibt es dann nicht: beides nebeneinander ist regelwidrig (PDF 32000-1,
     // Tabelle 89), und die Alphaebene, die hier vorläge, wäre nichts anderes
     // als dieselbe Maske — auf die Auflösung des Bildes heruntergebrochen.
+    //
+    // Dass die Alphaebene hier wirklich *dieselbe* Maske trägt, ist keine
+    // Annahme, sondern folgt aus `crate::ops::Honoured`: `work.mask` ist genau
+    // dann gesetzt, wenn der Stencil-`/Mask`-Strom die befolgte Maske ist —
+    // und dann hat `apply_soft_mask` genau ihn in den Alphakanal gerechnet.
+    // Steht daneben ein `/SMask`, gilt das `/SMask`, `mask_plan` liefert
+    // `InAlpha`, `work.mask` bleibt leer, und der Alphakanal geht unten als
+    // neues `/SMask` in die Ausgabe. Diese Verzweigung darf deshalb nie eine
+    // Alphaebene wegwerfen, die etwas anderes sagt als das `/Mask`.
     if let Some(mask) = &work.mask {
         dict.set("Mask", mask.clone());
         return Encoded {

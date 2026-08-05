@@ -1596,6 +1596,27 @@ fn scan_appearance(
     let Ok(stream) = doc.get_object(id).and_then(|o| o.as_stream()) else {
         return;
     };
+    // Ein Erscheinungsstrom ist ein platzierter Strom wie ein Formular; er muss
+    // auch so gezählt werden. Zwei Dinge hängen daran, und beide gingen ohne
+    // diese Zeile schief:
+    //
+    // * Die Ressourcenprüfung ([`crate::extract::PdfExtractor`]) hielte ihn für
+    //   ungezeichnet, sobald er zusätzlich in einem `/Resources /XObject`
+    //   steht — was Erzeuger für Stempel und Logos regelmäßig tun. Der Lauf
+    //   meldete dann „sein Text wurde nicht durchsucht“ und setzte
+    //   Rückgabewert 3, obwohl er durchsucht *und* geschwärzt wurde. Das ist
+    //   die Umkehrung der Wahrheit an genau der Stelle, an der Rückgabewert 3
+    //   etwas bedeuten soll.
+    // * [`crate::redact::warn_about_shared_form`] feuerte nie für einen
+    //   Erscheinungsstrom, den sich zwei Widgets auf zwei Seiten teilen —
+    //   obwohl der Modulkopf von `crate::redact` genau das verspricht. Die
+    //   zweite Seite ändert sich beim Schwärzen mit; ungesagt ist das eine
+    //   Überraschung in einer Datei, die danach weitergegeben wird.
+    //
+    // Vor den Lesbarkeitsprüfungen: *dass* er platziert ist, steht in der
+    // Datei, gleichgültig ob wir ihn lesen konnten. Ließ er sich nicht
+    // dekodieren, sagt das die Warnung darunter — und die sagt es richtig.
+    sink.form(id);
     // Mehrere Annotationen dürfen sich denselben Erscheinungsstrom teilen;
     // ausgepackt wird er trotzdem nur einmal.
     let appearance = budget.stream(doc, id, stream);

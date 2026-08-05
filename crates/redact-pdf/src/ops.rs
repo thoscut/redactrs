@@ -1277,7 +1277,49 @@ fn decode_jpeg(data: &[u8], decode: Option<&[f64]>) -> Option<RasterImage> {
     })
 }
 
+/// Welche Maske eines Bildes ein Betrachter **wirklich befolgt**.
+///
+/// Das ist die eine Stelle, an der diese Frage entschieden wird. Sie hat zwei
+/// Abnehmer, die sich nicht widersprechen dürfen: [`apply_soft_mask`] rechnet
+/// die hier benannte Maske in den Alphakanal, und [`mask_plan`] entscheidet
+/// daraus, was in die Ausgabe geschrieben wird. Liefen die beiden auseinander,
+/// behielte das Bild eine Maske, an die sich niemand hält, und verlöre die, an
+/// die sich alle halten — genau der Weg, auf dem eine Bildmaske schon einmal
+/// wieder aufgedeckt hat, was verborgen war.
+///
+/// `/SMask` und `/Mask` nebeneinander sind nach PDF 32000-1 (Tabelle 89)
+/// regelwidrig. Erzeuger schreiben es trotzdem, die Betrachter rendern es
+/// anstandslos — und halten sich dabei an `/SMask`. Also gilt hier dasselbe.
+enum Honoured<'a> {
+    /// Weder `/SMask` noch `/Mask`.
+    None,
+    /// `/SMask`-Strom: Graustufen-Alpha. Hat Vorrang vor jedem `/Mask`.
+    Soft(&'a Stream),
+    /// `/Mask`-Strom: Stencil („die Null malt“).
+    Stencil(&'a Stream),
+    /// `/Mask` ist da, aber kein Strom — ein Farbschlüssel-Array oder etwas,
+    /// das keine Maske sein kann. Wie damit umzugehen ist, entscheidet
+    /// [`mask_plan`] am Eintrag selbst.
+    OtherMask(&'a Object),
+}
+
+/// Siehe [`Honoured`].
+fn honoured_mask<'a>(doc: &'a Document, dict: &'a Dictionary) -> Honoured<'a> {
+    if let Some(soft) = deref(doc, dict.get(b"SMask").ok()).and_then(|o| o.as_stream().ok()) {
+        return Honoured::Soft(soft);
+    }
+    let Ok(entry) = dict.get(b"Mask") else {
+        return Honoured::None;
+    };
+    match deref(doc, Some(entry)).and_then(|o| o.as_stream().ok()) {
+        Some(stencil) => Honoured::Stencil(stencil),
+        None => Honoured::OtherMask(entry),
+    }
+}
+
 /// `/SMask` (Graustufen-Alpha) bzw. `/Mask` (Stencil) auf das Bild anwenden.
+///
+/// Welche der beiden gilt, sagt [`honoured_mask`] — und nur die.
 ///
 /// Der Rückgabewert nennt den Grund, wenn das Bild **nicht** so dargestellt
 /// werden kann, wie die Datei es meint. Er entsteht nur für `/SMask`: dessen
@@ -1292,15 +1334,13 @@ fn apply_soft_mask(
     dict: &Dictionary,
     image: &mut RasterImage,
 ) -> Option<String> {
-    let soft = deref(doc, dict.get(b"SMask").ok()).and_then(|o| o.as_stream().ok());
-    // `/Mask` als Array ist eine Farbschlüssel-Maske; sie steckt bereits im
-    // Alphakanal (siehe `apply_color_key`) und ist hier kein Strom.
-    let stencil = deref(doc, dict.get(b"Mask").ok()).and_then(|o| o.as_stream().ok());
-    // `/SMask` hat Vorrang: eine Datei mit beidem ist regelwidrig (PDF 32000-1,
-    // Tabelle 89), und die Betrachter halten sich an `/SMask`.
-    let (stream, is_stencil) = soft
-        .map(|s| (s, false))
-        .or_else(|| stencil.map(|s| (s, true)))?;
+    let (stream, is_stencil) = match honoured_mask(doc, dict) {
+        Honoured::Soft(stream) => (stream, false),
+        Honoured::Stencil(stream) => (stream, true),
+        // Ein Farbschlüssel-Array steckt bereits im Alphakanal (siehe
+        // `apply_color_key`) und ist hier kein Strom.
+        Honoured::None | Honoured::OtherMask(_) => return None,
+    };
     let (mask, note) = decode_image_inner(
         doc,
         resources,
@@ -1406,103 +1446,223 @@ pub enum MaskPlan {
     /// unbeschadet und in voller Auflösung. Ihn in eine Alphaebene des Bildes
     /// umzurechnen, hieße ihn auf dessen Auflösung herunterzubrechen.
     Keep(Object),
-    /// `/Mask` ist ein Farbschlüssel-Array: es steckt bereits im Alphakanal und
-    /// darf **nicht** übernommen werden.
+    /// Die Maske steckt bereits im Alphakanal; ein `/Mask` darf **nicht**
+    /// übernommen werden.
     ///
-    /// Ein Farbschlüssel benennt Abtastwerte, keine Bildstellen. Nach dem
-    /// Schwärzen stehen an den geschwärzten Stellen andere Werte, und der
-    /// Farbraum kann sich beim Neukodieren ohnehin ändern: derselbe Schlüssel
-    /// träfe in der Ausgabe andere Bildpunkte — im schlimmsten Fall die
-    /// geschwärzten, die damit wieder durchsichtig würden.
+    /// Zwei Fälle führen hierher:
+    ///
+    /// * Ein Farbschlüssel-Array. Es benennt Abtastwerte, keine Bildstellen.
+    ///   Nach dem Schwärzen stehen an den geschwärzten Stellen andere Werte,
+    ///   und der Farbraum kann sich beim Neukodieren ohnehin ändern: derselbe
+    ///   Schlüssel träfe in der Ausgabe andere Bildpunkte — im schlimmsten
+    ///   Fall die geschwärzten, die damit wieder durchsichtig würden.
+    /// * Ein `/Mask` **neben** einem `/SMask`. Befolgt wird dann das `/SMask`
+    ///   ([`Honoured`]), und das steht im Alphakanal. Das `/Mask` mitzuschreiben
+    ///   hieße, dem Bild in der Ausgabe die einzige Maske zu geben, an die sich
+    ///   kein Betrachter gehalten hat — und ihm die zu nehmen, an die sich alle
+    ///   halten.
     InAlpha,
+    /// Farbschlüssel auf **verlustbehaftet** kodierten Daten (`/DCTDecode`,
+    /// `/JPXDecode`).
+    ///
+    /// Ob der Schlüssel überhaupt einen Bildpunkt trifft, ist dem Dictionary
+    /// nicht anzusehen; das entscheidet [`color_key_reach`] am *dekodierten*
+    /// Bild — und zwar dort, wo das Bild ohnehin ausgepackt wird und die
+    /// Bildgrenze (`--max-image-mb`) bereits greift. Der Text nennt den
+    /// Filter, damit die Meldung ihn nennen kann.
+    ProbeColorKey(String),
     /// Diese Maske lässt sich nicht ohne stille Näherung übernehmen.
     Unsupported(String),
 }
 
 /// Siehe [`MaskPlan`].
 pub fn mask_plan(doc: &Document, resources: Option<&Dictionary>, dict: &Dictionary) -> MaskPlan {
-    let Ok(entry) = dict.get(b"Mask") else {
-        return MaskPlan::None;
-    };
     let is_stencil_image = dict_bool(doc, dict, b"ImageMask", b"IM");
-    match deref(doc, Some(entry)) {
-        Some(Object::Stream(_)) if is_stencil_image => {
-            // Ein Bild, das selbst eine Stencil-Maske ist, wird als Bitmuster
-            // neu geschrieben; die Maske steckt dann im Alphakanal und damit in
-            // den Bits. Ein `/Mask` daneben wäre doppelt gemoppelt.
-            MaskPlan::InAlpha
-        }
+    match honoured_mask(doc, dict) {
+        Honoured::None => MaskPlan::None,
+        // Der Alphakanal trägt das `/SMask` — und der wird beim Neukodieren zu
+        // einem frischen `/SMask`. Ein `/Mask` daneben ist regelwidrig und wird
+        // von keinem Betrachter befolgt; mitgeschrieben verdrängte es das
+        // `/SMask` und deckte damit genau die Bildpunkte auf, die die Eingabe
+        // verbirgt.
+        Honoured::Soft(_) if dict.get(b"Mask").is_ok() => MaskPlan::InAlpha,
+        Honoured::Soft(_) => MaskPlan::None,
+        // Ein Bild, das selbst eine Stencil-Maske ist, wird als Bitmuster
+        // neu geschrieben; die Maske steckt dann im Alphakanal und damit in
+        // den Bits. Ein `/Mask` daneben wäre doppelt gemoppelt.
+        Honoured::Stencil(_) if is_stencil_image => MaskPlan::InAlpha,
         // Übernommen wird der **Verweis**. Ein Strom, der direkt im
         // Bild-Dictionary stünde, wäre keiner: Ströme sind eigene Objekte
         // (PDF 32000-1, 7.3.8), und mitgeschrieben ergäbe er eine Datei, die
         // kein Betrachter mehr liest.
-        Some(Object::Stream(_)) => match entry {
-            Object::Reference(_) => MaskPlan::Keep(entry.clone()),
+        Honoured::Stencil(_) => match dict.get(b"Mask") {
+            Ok(entry @ Object::Reference(_)) => MaskPlan::Keep(entry.clone()),
             _ => MaskPlan::Unsupported(
                 "hat einen /Mask-Strom, der kein eigenes Objekt ist; er ließe sich nicht \
                  mitschreiben"
                     .into(),
             ),
         },
-        Some(Object::Array(items)) => {
-            if is_stencil_image {
-                return MaskPlan::Unsupported(
-                    "hat eine Farbschlüssel-Maske, ist aber selbst eine Stencil-Maske (/ImageMask) \
-                     und hat gar keine Farbwerte"
-                        .into(),
-                );
-            }
-            let filters = filter_names(doc, dict);
-            if let Some(lossy) = filters
-                .iter()
-                .find(|f| matches!(f.as_str(), "DCTDecode" | "DCT" | "JPXDecode"))
-            {
-                return MaskPlan::Unsupported(format!(
-                    "hat eine Farbschlüssel-Maske und ist mit {lossy} kodiert. Der Schlüssel \
-                     vergleicht Abtastwerte; welche Werte ein verlustbehafteter Decoder liefert, \
-                     ist von Decoder zu Decoder verschieden. Welche Bildpunkte die Datei \
-                     versteckt, lässt sich damit nicht sicher genug bestimmen"
-                ));
-            }
-            let comps = dict
-                .get(b"ColorSpace")
-                .or_else(|_| dict.get(b"CS"))
-                .ok()
-                .map(|o| crate::content::ColorSpace::resolve(doc, resources, o))
-                .unwrap_or(crate::content::ColorSpace::Gray)
-                .components();
-            if items.len() != comps * 2 {
-                return MaskPlan::Unsupported(format!(
-                    "hat eine Farbschlüssel-Maske mit {} Einträgen, der Farbraum hat aber {comps} \
-                     Komponente(n) (erwartet: {}). Welche Bildpunkte die Datei versteckt, ist \
-                     damit nicht zu bestimmen",
-                    items.len(),
-                    comps * 2
-                ));
-            }
-            if color_key_ranges(doc, dict).is_none() {
-                return MaskPlan::Unsupported(
-                    "hat eine Farbschlüssel-Maske, deren Einträge keine ganzen Zahlen sind".into(),
-                );
-            }
-            MaskPlan::InAlpha
-        }
-        // Ein Verweis, der ins Leere zeigt: die Datei *wollte* eine Maske, und
-        // ein Werkzeug, das eine beschädigte Querverweistabelle anders
-        // repariert, findet sie vielleicht. Was sie versteckt, ist hier nicht
-        // zu ermitteln.
-        None => MaskPlan::Unsupported(
-            "hat ein /Mask, dessen Verweis sich nicht auflösen lässt. Ob es Bildpunkte versteckt, \
-             ist damit nicht zu bestimmen"
+        Honoured::OtherMask(entry) => match deref(doc, Some(entry)) {
+            Some(Object::Array(items)) => color_key_plan(doc, resources, dict, items),
+            // Ein Verweis, der ins Leere zeigt: die Datei *wollte* eine Maske,
+            // und ein Werkzeug, das eine beschädigte Querverweistabelle anders
+            // repariert, findet sie vielleicht. Was sie versteckt, ist hier
+            // nicht zu ermitteln.
+            None => MaskPlan::Unsupported(
+                "hat ein /Mask, dessen Verweis sich nicht auflösen lässt. Ob es Bildpunkte \
+                 versteckt, ist damit nicht zu bestimmen"
+                    .into(),
+            ),
+            // Alles andere kann in keinem regelkonformen Betrachter etwas
+            // verstecken (`/Mask` ist Strom oder Array, PDF 32000-1 Tabelle 89;
+            // `null` gilt nach 7.3.9 als nicht vorhanden). Es fällt deshalb weg,
+            // ohne dass dabei etwas sichtbar werden könnte — und der Lauf an
+            // einer Datei abzubrechen, die überall sonst unauffällig aussieht,
+            // wäre der schlechtere Handel.
+            Some(_) => MaskPlan::None,
+        },
+    }
+}
+
+/// Der Teil von [`mask_plan`], der für ein Farbschlüssel-Array zuständig ist.
+fn color_key_plan(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    dict: &Dictionary,
+    items: &[Object],
+) -> MaskPlan {
+    if dict_bool(doc, dict, b"ImageMask", b"IM") {
+        return MaskPlan::Unsupported(
+            "hat eine Farbschlüssel-Maske, ist aber selbst eine Stencil-Maske (/ImageMask) und hat \
+             gar keine Farbwerte"
                 .into(),
-        ),
-        // Alles andere kann in keinem regelkonformen Betrachter etwas
-        // verstecken (`/Mask` ist Strom oder Array, PDF 32000-1 Tabelle 89;
-        // `null` gilt nach 7.3.9 als nicht vorhanden). Es fällt deshalb weg,
-        // ohne dass dabei etwas sichtbar werden könnte — und der Lauf an einer
-        // Datei abzubrechen, die überall sonst unauffällig aussieht, wäre der
-        // schlechtere Handel.
-        Some(_) => MaskPlan::None,
+        );
+    }
+    let comps = color_key_components(doc, resources, dict);
+    if items.len() != comps * 2 {
+        return MaskPlan::Unsupported(format!(
+            "hat eine Farbschlüssel-Maske mit {} Einträgen, der Farbraum hat aber {comps} \
+             Komponente(n) (erwartet: {}). Welche Bildpunkte die Datei versteckt, ist damit nicht \
+             zu bestimmen",
+            items.len(),
+            comps * 2
+        ));
+    }
+    if color_key_ranges(doc, dict).is_none() {
+        return MaskPlan::Unsupported(
+            "hat eine Farbschlüssel-Maske, deren Einträge keine ganzen Zahlen sind".into(),
+        );
+    }
+    // Verlustbehaftet kodiert: der Schlüssel vergleicht Abtastwerte, und welche
+    // ein JPEG-Decoder liefert, ist von Decoder zu Decoder um ein paar Stufen
+    // verschieden. Ob das überhaupt eine Rolle spielt, hängt daran, ob
+    // irgendein Wert in die Nähe des Schlüssels kommt — das ist am Dictionary
+    // nicht zu sehen und wird deshalb am dekodierten Bild nachgesehen.
+    let filters = filter_names(doc, dict);
+    if let Some(lossy) = filters
+        .iter()
+        .find(|f| matches!(f.as_str(), "DCTDecode" | "DCT" | "JPXDecode"))
+    {
+        return MaskPlan::ProbeColorKey(lossy.clone());
+    }
+    MaskPlan::InAlpha
+}
+
+/// Zahl der Farbkomponenten, gegen die ein Farbschlüssel zu zählen ist.
+fn color_key_components(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    dict: &Dictionary,
+) -> usize {
+    dict.get(b"ColorSpace")
+        .or_else(|_| dict.get(b"CS"))
+        .ok()
+        .map(|o| crate::content::ColorSpace::resolve(doc, resources, o))
+        .unwrap_or(crate::content::ColorSpace::Gray)
+        .components()
+}
+
+/// Wie weit ein Abtastwert neben dem Schlüsselbereich liegen darf und trotzdem
+/// als „womöglich getroffen“ gilt.
+///
+/// Ein JPEG-Decoder liefert nicht dieselben Werte, die der Erzeuger kodiert
+/// hat; zwischen zwei Decodern liegen ein paar Stufen, an harten Kanten auch
+/// mehr. Das Band ist bewusst großzügig: es entscheidet nur darüber, ob wir
+/// den Fall für harmlos erklären, und „harmlos“ soll die Ausnahme sein.
+const COLOR_KEY_BAND: i64 = 24;
+
+/// Ob ein Farbschlüssel im **dekodierten** Bild überhaupt etwas verbirgt.
+///
+/// Siehe [`MaskPlan::ProbeColorKey`]. Gearbeitet wird auf dem fertigen
+/// RGBA-Puffer: dort liegen bei einem JPEG genau die Abtastwerte, die der
+/// Decoder ausgegeben hat (ein- und dreikomponentig unverändert, `/Decode
+/// [1 0 …]` eingerechnet). Vier Komponenten (CMYK) sind nach der
+/// Farbumrechnung nicht mehr zurückzurechnen, ebenso wenig ein Bild, das gar
+/// nicht dekodiert werden konnte — dort bleibt es beim ehrlichen „weiß ich
+/// nicht“.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColorKeyReach {
+    /// Kein Abtastwert liegt im Schlüsselbereich (samt Band): die Maske
+    /// verbirgt nichts und darf entfallen.
+    NothingHidden,
+    /// So viele Bildpunkte liegen im Band.
+    Hides(u64),
+    /// Am dekodierten Bild nicht nachzuprüfen.
+    Undecidable(String),
+}
+
+/// Siehe [`ColorKeyReach`].
+pub fn color_key_reach(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    dict: &Dictionary,
+    image: &RasterImage,
+) -> ColorKeyReach {
+    let Some(ranges) = color_key_ranges(doc, dict) else {
+        return ColorKeyReach::Undecidable("die Bereiche sind keine ganzen Zahlen".into());
+    };
+    if image.placeholder {
+        return ColorKeyReach::Undecidable("das Bild ließ sich nicht dekodieren".into());
+    }
+    let comps = color_key_components(doc, resources, dict);
+    if ranges.len() != comps * 2 || !matches!(comps, 1 | 3) {
+        return ColorKeyReach::Undecidable(format!(
+            "der Farbraum hat {comps} Komponente(n); aus den fertigen Farben sind die \
+             Abtastwerte dann nicht zurückzurechnen"
+        ));
+    }
+    let bpc = dict_int(doc, dict, b"BitsPerComponent", b"BPC").unwrap_or(8);
+    if bpc != 8 {
+        return ColorKeyReach::Undecidable(format!(
+            "die Abtastwerte haben {bpc} Bit; der dekodierte Puffer hat 8"
+        ));
+    }
+    // `/Decode [1 0 …]` dreht die Werte um — dieselbe Regel wie in
+    // [`decode_jpeg`], sonst verglichen wir gegen die falschen Zahlen.
+    let inverted = dict
+        .get(b"Decode")
+        .or_else(|_| dict.get(b"D"))
+        .ok()
+        .and_then(|o| deref(doc, Some(o)))
+        .and_then(|o| o.as_array().ok())
+        .and_then(|a| a.first().and_then(as_f64))
+        .map(|v| v > 0.5)
+        .unwrap_or(false);
+
+    let mut hits = 0u64;
+    for pixel in image.rgba.chunks_exact(4) {
+        let hidden = (0..comps).all(|c| {
+            let raw = i64::from(if comps == 1 { pixel[0] } else { pixel[c] });
+            let raw = if inverted { 255 - raw } else { raw };
+            raw >= ranges[2 * c] - COLOR_KEY_BAND && raw <= ranges[2 * c + 1] + COLOR_KEY_BAND
+        });
+        hits += u64::from(hidden);
+    }
+    if hits == 0 {
+        ColorKeyReach::NothingHidden
+    } else {
+        ColorKeyReach::Hides(hits)
     }
 }
 
