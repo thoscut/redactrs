@@ -525,38 +525,73 @@ fn bestzeit(f: impl Fn() -> usize) -> (Duration, usize) {
     (beste, treffer)
 }
 
-/// **Die Kurve ist gerade geworden.** Doppelt so viele Treffer in *einer*
-/// Zeile dürfen die Suche nicht vervierfachen.
+/// **Die Kurve ist gerade geworden** — gemessen als Verhältnis zur alten
+/// Fassung, nicht als Verhältnis zweier getrennt gestoppter Zeiten.
 ///
-/// Gemessen wird mit Luft (Faktor 2,6 statt 2), weil eine Testmaschine unter
-/// Last schwankt — der Unterschied, um den es geht, ist 4 gegen 1. Je Größe
-/// zählt der Bestwert aus [`MESSLAEUFE`] Läufen; fremde Last macht eine
-/// Messung langsamer, nie schneller.
+/// Der erste Anlauf verglich die Zeit bei 4 000 Treffern mit der bei 8 000
+/// und verlangte einen Faktor unter 2,6. Das flatterte: zwei Agenten haben
+/// unabhängig Werte zwischen 1,72 und 3,84 gemessen — allein grün, unter
+/// paralleler Last rot. Zwei *getrennt* gestoppte Zeiten driften eben
+/// auseinander, und eine Zusicherung, die in einem von fünf Läufen ohne
+/// Grund fehlschlägt, ist keine: `cargo test` bricht nach dem ersten roten
+/// Testbinary ab, ein Flattern verdeckt also die halbe Suite.
 ///
-/// Gegenprobe eingebaut: die Trefferzahl muss wirklich mitverdoppeln. Sonst
-/// wäre der Test auch dann grün, wenn die Suche nur nichts mehr findet.
+/// Deshalb steht hier ein Verhältnis, das Fremdlast **beide Seiten
+/// gleichzeitig** trifft: dieselbe Eingabe, einmal durch die alte Fassung
+/// (`referenz_find_matches`, in dieser Datei ausgeschrieben) und einmal
+/// durch die neue, abwechselnd gemessen. Der Unterschied ist keine
+/// Feinheit — gemessen wurden 66-fach bei 8 000 Treffern und 543-fach bei
+/// 32 000 —, die Schranke von 8 lässt also eine Größenordnung Luft.
+///
+/// Gegenprobe eingebaut: beide Fassungen müssen dieselbe Trefferzahl
+/// liefern. Sonst wäre der Test auch dann grün, wenn die neue nur nichts
+/// mehr findet.
 #[test]
-fn die_suche_waechst_linear_mit_der_trefferzahl() {
+fn die_suche_ist_um_groessenordnungen_schneller_als_die_alte_fassung() {
     let matcher = PatternMatcher::new(&["iban_de".to_string()]).expect("iban_de");
+    // Dieselbe Musterauswahl wie der Matcher: nur `iban_de` bleibt an.
+    let defs: Vec<PatternDef> = builtin_patterns()
+        .into_iter()
+        .map(|mut d| {
+            d.enabled = d.id == "iban_de";
+            d
+        })
+        .collect();
+    let laeufe = [lauf(0, &ibanzeile(8_000))];
 
-    let kurz = [lauf(0, &ibanzeile(4_000))];
-    let lang = [lauf(0, &ibanzeile(8_000))];
+    let mut t_alt = Duration::MAX;
+    let mut t_neu = Duration::MAX;
+    let (mut n_alt, mut n_neu) = (0usize, 0usize);
+    // Abwechselnd, nicht nacheinander: ein Lastberg trifft sonst nur die
+    // Seite, die gerade an der Reihe ist.
+    for _ in 0..MESSLAEUFE {
+        let start = Instant::now();
+        n_alt = referenz_find_matches(&defs, DEFAULT_MIN_CONFIDENCE, &laeufe)
+            .expect("Referenz")
+            .len();
+        t_alt = t_alt.min(start.elapsed());
 
-    let (t_kurz, n_kurz) = bestzeit(|| matcher.find_matches(&kurz).expect("kurz").len());
-    let (t_lang, n_lang) = bestzeit(|| matcher.find_matches(&lang).expect("lang").len());
+        let start = Instant::now();
+        n_neu = matcher.find_matches(&laeufe).expect("neu").len();
+        t_neu = t_neu.min(start.elapsed());
+    }
 
-    assert_eq!(n_kurz, 4_000, "die kurze Zeile trifft nicht wie erwartet");
-    assert_eq!(n_lang, 8_000, "die lange Zeile trifft nicht wie erwartet");
+    assert_eq!(n_alt, 8_000, "die alte Fassung trifft nicht wie erwartet");
+    assert_eq!(
+        n_neu, n_alt,
+        "die neue Fassung findet etwas anderes als die alte"
+    );
 
-    let faktor = t_lang.as_secs_f64() / t_kurz.as_secs_f64().max(1e-9);
+    let faktor = t_alt.as_secs_f64() / t_neu.as_secs_f64().max(1e-9);
     println!(
-        "eine Zeile: 4 000 Treffer {t_kurz:?}, 8 000 Treffer {t_lang:?} — \
-         Faktor {faktor:.2} (Bestwert aus je {MESSLAEUFE} Läufen)"
+        "8 000 Treffer in einer Zeile: alt {t_alt:?}, neu {t_neu:?} — \
+         Faktor {faktor:.1} (Bestwert aus je {MESSLAEUFE} Läufen, abwechselnd)"
     );
     assert!(
-        faktor < 2.6,
-        "die Suche wächst überlinear mit der Trefferzahl (Faktor {faktor:.2}): \
-         {t_kurz:?} → {t_lang:?}"
+        faktor > 8.0,
+        "die neue Fassung ist nur {faktor:.1}-fach schneller als die alte — \
+         das reicht nicht, um quadratisch von linear zu unterscheiden \
+         (alt {t_alt:?}, neu {t_neu:?})"
     );
 }
 
