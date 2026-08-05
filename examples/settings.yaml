@@ -34,6 +34,15 @@ output_suffix: _geschwaerzt
 # alle verfügbaren mit ihrer Konfidenz.
 patterns: []
 
+# Standardmäßig abgeschaltete Muster (--disable-pattern).
+# Für Muster, die im eigenen Bestand mehr Fehltreffer als Funde erzeugen.
+# Die Kommandozeile schlägt die Datei: eine nicht leere Angabe hinter
+# --disable-pattern ersetzt diese Liste.
+#
+# Ein „alles aus" gibt es hier bewusst NICHT: --no-patterns ist ein Schalter
+# ohne Gegenstück und ließe sich von der Kommandozeile nicht mehr widerrufen.
+disabled_patterns: []
+
 # Mindestvertrauen eines Treffers (--min-confidence), 0.0 … 1.0.
 # Auskommentiert lassen heißt „nicht festgelegt" — nur dann behält eine
 # eigene Musterkonfiguration (--patterns-config) ihre eigene Schwelle.

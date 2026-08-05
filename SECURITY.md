@@ -189,8 +189,10 @@ läuft und an einer verschlüsselten Datei nur die Hälfte sehen kann:
 Erst *nach* dem Laden zu prüfen ist nur deshalb vertretbar, weil das Laden
 selbst billig ist: `lopdf` legt Streams als Rohbytes ab und packt sie nicht aus.
 Der teure Teil — die Zerlegung des Seiteninhalts in Operationen, je nach Form
-des Stroms 62 bis rund 100 Byte Arbeitsspeicher je Byte Stream (siehe
-„Dekompressionsbomben“) — kommt erst danach.
+des Stroms 62 bis rund 100 Byte Arbeitsspeicher je Byte Stream **für den
+`Operation`-Vektor allein** (siehe „Dekompressionsbomben“) — kommt erst danach.
+Der Spitzenbedarf eines Laufs liegt darüber; für die einzelne Textseite deutlich,
+siehe „Was die Zahl 62–100 nicht ist“.
 
 **Richtigstellung.** Bis einschließlich dieser Fassung stand hier: *„Wer ein
 verschlüsseltes PDF öffnet, gibt ihm ausdrücklich mehr Vertrauen als einem
@@ -634,6 +636,58 @@ folgt daraus eine Obergrenze von etwa **1,6 GB**, nicht 1 GB.
 Wer das gegen eine Maschine mit wenig Arbeitsspeicher absichern will, setzt
 `--max-parsed-mb` herunter; der Wert wirkt linear.
 
+### Was die Zahl 62–100 nicht ist
+
+Sie ist der Preis des **`Operation`-Vektors**, nicht der Spitzenbedarf eines
+Laufs. Wo Text auf der Seite steht, kommen die `ShowRecord`s und `GlyphItem`s
+des Interpreters und die `TextRun`/`Glyph`-Liste des Extraktors dazu — und die
+wiegen mehr als die Operationen, aus denen sie entstehen. Für die **einzelne
+Seite** ist die Zahl damit um das Vier- bis Sechsfache zu klein.
+
+Nachgemessen (Release, `/usr/bin/time -f %M`, `--no-patterns`, unkomprimierte
+Ströme, je 20 000 Textzeilen zu 36 Zeichen pro Seite):
+
+| Aufbau | geparster Strom | Spitzenspeicher | Byte je Byte |
+|---|---:|---:|---:|
+| 1 Seite × 20 000 Zeilen | 1,448 MB | 492 MB | **340** |
+| 2 Seiten × 20 000 Zeilen | 2,895 MB | 531 MB | 183 |
+| 4 Seiten × 20 000 Zeilen | 5,791 MB | 598 MB | 103 |
+| 8 Seiten × 27 000 Zeilen | 15,635 MB | 969 MB | 62 |
+
+Über mehrere Seiten fällt das Verhältnis, weil der Arbeitssatz einer Seite
+freigegeben wird, bevor die nächste beginnt. Die letzte Zeile ist der
+ungünstigste Textfall, der überhaupt durchkommt: acht Seiten mit je 972 000
+Zeichen, also je dicht unter der Glyphengrenze, und zusammen dicht unter
+`--max-parsed-mb`. Sie landet auf 62. Auf **Dokumentebene** passt die Zahl
+62–100 also; für die **einzelne Seite** passt sie nicht.
+
+Und für eine Textseite zieht die wirksame Obergrenze ohnehin nicht
+`--max-parsed-mb`, sondern die Deckelung auf **eine Million Zeichen je Seite**
+(`MAX_GLYPHS_PER_SCAN` in `crates/redact-pdf/src/content.rs`). Sie greift schon
+bei rund 2 MB Seiteninhalt, also weit vor dem 16-MB-Budget:
+
+| Eine Seite | geparster Strom | Ergebnis |
+|---|---:|---|
+| 972 000 Zeichen | 1,954 MB | Exit 0, **658 MB** |
+| 1 044 000 Zeichen | 2,099 MB | Exit 1 (Glyphengrenze), 421 MB |
+
+**Eine pfadlastige Seite umgeht diese Deckelung** — das Glyphenbudget zählt
+Zeichen, und `re`/`l`/`c` setzen keine. Ein Loch ist das nicht: aus einem Pfad
+bleibt nichts liegen (der Seiten-Scan hält Textoperationen, Marked Content und
+Formularplatzierungen, keine Pfaddaten), der Spitzenbedarf ist also der des
+`Operation`-Vektors und wird von `--max-parsed-mb` gedeckelt. Nachgemessen,
+jeweils eine Seite dicht unter dem 16-MB-Budget:
+
+| Eine Seite | geparster Strom | Spitzenspeicher | Byte je Byte |
+|---|---:|---:|---:|
+| nur Pfade, `x y 40 10 re f` | 15,79 MB | 1 183 MB | 75 |
+| nur Pfade, `m … l … c S` | 15,89 MB | 1 139 MB | 72 |
+| 972 000 Zeichen **und** Pfade | 15,10 MB | 1 308 MB | 87 |
+
+Der schlimmste hier gemessene Einzelseitenfall bleibt damit unter den 1,6 GB,
+die aus der 100-Byte-Zeile oben folgen. Die Deckelung wird umgangen, die
+Obergrenze nicht.
+
 ### Verschlüsselte Bomben
 
 Dieselben beiden Bomben wie oben, nur RC4-verschlüsselt (Standard-Handler,
@@ -838,12 +892,22 @@ $ echo $?
 | 200 | 105 600 | 22,4 s |
 | 500 | 264 000 | 132,6 s |
 
-Vervierfachung bei Verdopplung — das Verhalten ist **quadratisch**. Ursache ist
-`dedup` in `crates/redact-core/src/conflict.rs`: jede Region wird gegen alle
-bereits behaltenen geprüft. Eine knappe Megabyte-Datei genügte damit, um die
-Maschine eine Stunde zu beschäftigen. Bis das dort behoben ist (Bucketing nach
-Seite macht daraus O(n log n)), begrenzt die Kette die Zahl der
-Trefferkandidaten; der Lauf endet dann nach 4,7 s mit Exit 2.
+Vervierfachung bei Verdopplung — das Verhalten war zum Zeitpunkt dieser Messung
+**quadratisch**. Eine knappe Megabyte-Datei genügte damit, um die Maschine eine
+Stunde zu beschäftigen.
+
+Die Tabelle ist ein Befund von damals und keine Zusage von heute: wie schnell
+die Konfliktauflösung im Einzelnen ist, hängt am jeweiligen Verfahren in
+`crates/redact-core/src/conflict.rs` und ändert sich mit ihm. Was sich **nicht**
+ändert, ist die Form der Frage — welche Regionen überlappen einander, ist eine
+Frage über *Paare*, und die Zahl der Paare wächst schneller als die Zahl der
+Treffer. Ein Verfahren kann den Regelfall gut treffen und in einer ungünstigen
+Anordnung trotzdem entarten, etwa wenn sehr viele Treffer dieselbe Spalte
+belegen (eine IBAN auf jeder Zeile).
+
+Deshalb begrenzt die Kette unabhängig davon die Zahl der Trefferkandidaten
+(`--max-candidates`, Vorgabe 100 000); jenseits der Grenze endet der Lauf mit
+Exit 2, statt beliebig lange zu rechnen.
 
 ### Rechenzeit über die Seitenzahl (Aufgabe #59)
 
@@ -986,9 +1050,12 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
   wieviel Speicher der Dekoder dabei belegt, ist nicht vorab begrenzt. Über
   16 MB Rohgröße wird die Datei abgelehnt. `LZWDecode` ist ein Filter aus der
   Zeit vor PDF 1.4 und kommt in heutigen Dateien praktisch nicht mehr vor.
-* **Rechenzeit unterhalb der Grenzen.** 100 000 Trefferkandidaten kosten
-  rund 17 s. Das ist gewollt großzügig; wer engere Zusagen braucht, setzt
-  `--max-candidates` herunter.
+* **Rechenzeit unterhalb der Grenzen.** Bis zu 100 000 Trefferkandidaten werden
+  ohne weitere Frage aufgelöst. Wie lange das dauert, hängt nicht nur an ihrer
+  Zahl, sondern an ihrer **Anordnung**: viele Treffer in derselben Spalte sind
+  teurer als dieselbe Zahl über die Fläche verteilt. Eine Sekundenzusage steht
+  hier deshalb bewusst nicht. Wer eine braucht, setzt `--max-candidates`
+  herunter; der Schalter wirkt vor der Auflösung.
 * **Sehr große Bilder.** Ihre entpackte Größe zählt gegen das große Budget.
 
   **Richtigstellung — das war eine Lücke, keine Feinheit.** Hier stand bis

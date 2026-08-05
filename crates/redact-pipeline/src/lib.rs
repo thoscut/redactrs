@@ -396,7 +396,10 @@ pub struct Outcome {
     pub removed_annotations: usize,
     /// Bilder, deren Bildpunkte überschrieben wurden.
     ///
-    /// Neu kodiert wird verlustfrei; die Datei wird dadurch größer.
+    /// Neu kodiert wird verlustfrei; die Datei wird dadurch meist größer — aus
+    /// einem JPEG-Stream wird ein Flate-Stream. Nicht immer: ein Flate-Bild
+    /// kann schrumpfen, weil eine große schwarze Fläche sich besser packt
+    /// (gemessen 57 516 → 49 031 Byte).
     pub redacted_images: usize,
     /// Davon Kopien für mehrfach benutzte Bilder.
     pub copied_images: usize,
@@ -537,8 +540,9 @@ pub fn load_document(bytes: &[u8], config: &Config) -> Result<Document> {
 /// Erst *nach* dem Laden zu prüfen ist nur deshalb vertretbar, weil das Laden
 /// selbst billig ist: `lopdf` legt Streams als Rohbytes ab und packt sie nicht
 /// aus. Der teure Teil ist das, was danach kommt — die Zerlegung des
-/// Seiteninhalts in Operationen (rund 60 Byte Arbeitsspeicher je Byte
-/// Stream) — und der kommt erst nach dieser Prüfung.
+/// Seiteninhalts in Operationen (rund 60 bis 100 Byte je Byte Stream **für den
+/// `Operation`-Vektor allein**; der Spitzenbedarf eines Laufs liegt höher,
+/// siehe `SECURITY.md`) — und der kommt erst nach dieser Prüfung.
 pub fn check_limits_after_decryption(doc: &Document, limits: &Limits) -> Result<()> {
     let bytes = save_to_bytes(doc)?;
     prescan(&bytes, limits).map_err(|e| match e {
@@ -685,8 +689,9 @@ pub fn run(config: &Config) -> Result<Outcome> {
     //
     // Sonst merkt man erst nach dem Schwärzen, dass das Ziel die Eingabedatei
     // ist — und bei `--force` wäre das Original dann schon weg. Geprüft wird
-    // hier, geschrieben später; `write_file` prüft ein zweites Mal.
-    plan_outputs(config)?;
+    // hier, geschrieben später; `write_file` prüft ein zweites Mal. Den Pfad
+    // holt sich `apply` selbst, hier zählt allein, dass die Prüfung durchgeht.
+    let _ = plan_outputs(config)?;
 
     // 1. PDF laden (streng geprüft, keine Reparaturversuche).
     //
@@ -804,6 +809,10 @@ pub fn run(config: &Config) -> Result<Outcome> {
 ///
 /// `outcome` wird ergänzt, nicht ersetzt: bereits eingetragene Warnungen (etwa
 /// die des Extraktors) bleiben stehen und landen mit im Log.
+///
+/// `blocked` ist die maßgebliche Liste: [`Outcome::blocked`] wird daraus
+/// gesetzt, nicht damit verrechnet. Wer hier eine Liste übergibt, sagt damit,
+/// was dieser Lauf blockiert hat.
 pub fn apply(
     doc: &mut Document,
     redactions: &[Redaction],
@@ -812,7 +821,7 @@ pub fn apply(
     outcome: &mut Outcome,
 ) -> Result<()> {
     outcome.redactions = redactions.len();
-    outcome.blocked = outcome.blocked.max(blocked.len());
+    outcome.blocked = blocked.len();
 
     // Ganz vorn und für beide Programme an derselben Stelle: wonach dieser Lauf
     // **nicht** gesucht hat. Die Oberfläche kommt nur hier vorbei (sie hat kein
@@ -829,7 +838,7 @@ pub fn apply(
     // gerechnet wurden.
     let pages = redact_pdf::page_count(doc);
 
-    let output = plan_outputs(config)?.output.ok_or_else(|| {
+    let output = plan_outputs(config)?.ok_or_else(|| {
         RedactError::Config("ohne --review muss das Ausgabeziel feststehen".into())
     })?;
 
@@ -906,21 +915,29 @@ pub fn push_warnings(target: &mut Vec<String>, warnings: Vec<String>) {
     }
 }
 
-/// Zeitbremse: die Konfliktauflösung wächst quadratisch mit der Trefferzahl.
+/// Zeitbremse: die Konfliktauflösung wächst **überproportional** mit der
+/// Trefferzahl.
 ///
-/// Gemessen (Release, 500 Seiten × 88 Zeilen aus einer 212-kB-Datei): 264 000
-/// Treffer kosten 133 s, 52 800 Treffer 4,7 s — Vervierfachung bei
-/// Verdopplung. Ursache ist `dedup` in `redact-core::conflict`, das jede
-/// Region gegen alle bereits behaltenen prüft. Solange das so ist, braucht die
-/// Kette eine Obergrenze, sonst reicht eine knappe Megabyte-Datei, um die
-/// Maschine eine Stunde zu beschäftigen.
+/// Das ist keine Eigenheit eines bestimmten Verfahrens, sondern die Frage, die
+/// dort beantwortet wird: welche Regionen überlappen einander? Das ist eine
+/// Frage über *Paare*, und die Zahl der Paare wächst schneller als die Zahl der
+/// Treffer. Ein Verfahren kann den Regelfall gut treffen und in einer
+/// ungünstigen Anordnung trotzdem entarten — etwa wenn sehr viele Treffer in
+/// derselben Spalte stehen, wie eine IBAN auf jeder Zeile.
+///
+/// Deshalb steht hier absichtlich **keine** Aussage über die innere Bauart von
+/// `redact-core::conflict` und keine Sekundenzahl: beides gälte nur für den
+/// Stand, an dem es gemessen wurde. Die Grenze gilt unabhängig davon — sie
+/// verhindert, dass eine knappe Megabyte-Datei die Maschine beliebig lange
+/// beschäftigt, und bleibt richtig, auch wenn die Auflösung schneller wird.
 fn check_candidate_budget(config: &Config, candidates: usize) -> Result<()> {
     if candidates > config.max_candidates {
         return Err(RedactError::Config(format!(
             "{candidates} Trefferkandidaten überschreiten die Obergrenze von {}. \
-             Die Konfliktauflösung wächst quadratisch; eine solche Datei würde \
-             die Maschine über Gebühr beschäftigen. Mit --max-candidates lässt \
-             sich die Grenze anheben, wenn die Datei wirklich so aussieht.",
+             Der Aufwand, die Treffer gegeneinander aufzulösen, wächst schneller \
+             als ihre Zahl; eine solche Datei würde die Maschine über Gebühr \
+             beschäftigen. Mit --max-candidates lässt sich die Grenze anheben, \
+             wenn die Datei wirklich so aussieht.",
             config.max_candidates
         )));
     }
@@ -1266,19 +1283,15 @@ pub fn secret_options(config: &Config) -> WriteOptions {
     output_options(config).private(true)
 }
 
-/// Alle Schreibziele eines Laufs, vorab geprüft.
-#[derive(Debug)]
-pub struct OutputPlan {
-    pub output: Option<PathBuf>,
-}
-
 /// Prüft die Schreibziele, bevor gerechnet wird.
+///
+/// Liefert die Ausgabe-PDF — `None` im Review-Modus, der keine schreibt.
 ///
 /// Bis hierher hatte jeder Ausgabeweg seine eigene (oder gar keine) Prüfung:
 /// `--write-demo`, `--review-out` und `--audit-log` haben `--force` schlicht
 /// ignoriert, und der Vergleich „Ausgabe == Eingabe“ verglich rohe Pfade und
 /// war damit über `./in.pdf`, `dir/../in.pdf` oder einen Symlink zu umgehen.
-pub fn plan_outputs(config: &Config) -> Result<OutputPlan> {
+pub fn plan_outputs(config: &Config) -> Result<Option<PathBuf>> {
     // Der Namenszusatz bestimmt jeden Pfad, der hier gleich geprüft wird —
     // also gehört er selbst vor die Prüfung. Die Einstellungsdatei prüft ihn
     // schon beim Lesen; hier gilt es zusätzlich für `--output-suffix`, für das
@@ -1287,7 +1300,7 @@ pub fn plan_outputs(config: &Config) -> Result<OutputPlan> {
 
     if config.review {
         check_target(&review_target(config), &secret_options(config))?;
-        return Ok(OutputPlan { output: None });
+        return Ok(None);
     }
 
     let output = output_path(config);
@@ -1299,9 +1312,7 @@ pub fn plan_outputs(config: &Config) -> Result<OutputPlan> {
         check_target(path, &secret_options(config).protect(target.path()))?;
     }
 
-    Ok(OutputPlan {
-        output: Some(output),
-    })
+    Ok(Some(output))
 }
 
 /// Zusätzlich verfügbare Blocker-Informationen für die Ausgabe.

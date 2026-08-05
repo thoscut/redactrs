@@ -1,6 +1,6 @@
 //! # redact-core
 //!
-//! Domänenmodell, Traits und Fehlertypen für redact-rs.
+//! Domänenmodell und Fehlertypen für redact-rs.
 //!
 //! Dieses Crate hat bewusst keine Logik zum Parsen von PDFs oder zum Matchen von
 //! Text — es definiert nur die gemeinsame Sprache, die alle anderen Crates

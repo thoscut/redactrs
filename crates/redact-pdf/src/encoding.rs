@@ -800,9 +800,12 @@ endbfrange";
         assert_eq!(cm.text_for(0x81), REPLACEMENT.to_string());
     }
 
+    /// Der Test ist bestanden, wenn dieser Aufruf zurückkehrt: kaputte
+    /// `/ToUnicode`-Daten dürfen nicht paniken. Eine Zusicherung über das
+    /// Ergebnis gibt es hier bewusst nicht — welche Reste ein abgeschnittenes
+    /// `beginbfchar` hinterlässt, ist nicht festgelegt und soll es nicht sein.
     #[test]
     fn tolerates_broken_cmap() {
-        let r = parse_to_unicode(b"beginbfchar <00 endbfchar garbage [ ] >>");
-        assert!(r.map.is_empty() || !r.map.is_empty()); // darf nur nicht paniken
+        parse_to_unicode(b"beginbfchar <00 endbfchar garbage [ ] >>");
     }
 }

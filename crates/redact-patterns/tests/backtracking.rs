@@ -74,6 +74,39 @@ fn suche(id: &str, text: &str) -> (redact_core::Result<Vec<redact_core::Region>>
     (result, start.elapsed())
 }
 
+/// Wie viele Läufe je Größe in [`bestzeit`] gemessen werden.
+const MESSLAEUFE: usize = 3;
+
+/// Der **Bestwert** aus [`MESSLAEUFE`] Läufen.
+///
+/// ## Warum nicht eine einzelne Messung
+///
+/// Weil eine einzelne Messung keine Aussage über die Laufzeit ist, sondern
+/// über die Maschine in genau dieser Sekunde. Gemessen an fünf Läufen des
+/// Testbinaries mit `--test-threads=1` ergab derselbe Code die Faktoren 2,23 /
+/// 1,61 / 2,14 / 2,32 / **2,52** — einer von fünf riss die Schwelle 2,5, ohne
+/// dass sich am Verhalten irgendetwas geändert hätte. Und ein rotes
+/// Testbinary beendet `cargo test`: der eine flatternde Test verdeckte damit
+/// den halben Rest der Suite.
+///
+/// Der Bestwert ist gegen genau das robust, und zwar einseitig: fremde Last,
+/// ein Kontextwechsel, ein Interrupt machen eine Messung **langsamer**, nie
+/// schneller. Das Minimum ist damit die beste Schätzung der reinen Rechenzeit,
+/// die sich ohne Zähler im Inneren gewinnen lässt.
+///
+/// Der erste Lauf wärmt zugleich auf — er zahlt das Kompilieren des Musters
+/// mit —, deshalb steht daneben kein eigener Aufwärmlauf mehr.
+fn bestzeit(id: &str, text: &str) -> Duration {
+    (0..MESSLAEUFE)
+        .map(|_| {
+            let (result, dauer) = suche(id, text);
+            result.unwrap_or_else(|e| panic!("{id} an {} Zeichen: {e}", text.chars().count()));
+            dauer
+        })
+        .min()
+        .expect("MESSLAEUFE ist größer als null")
+}
+
 /// Der Kern des Befunds: eine Zeile aus lauter Buchstaben.
 ///
 /// 1 600 war die gemessene Schwelle; 8 000 und 100 000 zeigen, dass es keine
@@ -107,23 +140,36 @@ fn eine_zeile_aus_buchstaben_sprengt_kein_muster() {
 /// Verdopplung der Zeilenlänge darf die Suche nicht vervierfachen. Gemessen
 /// wird mit reichlich Luft (Faktor 2,5 statt 2), weil eine Testmaschine unter
 /// Last schwankt — der Unterschied, um den es geht, ist ein Faktor 4 gegen 1.
+/// Gemessen wird je Größe der Bestwert aus mehreren Läufen, siehe
+/// [`bestzeit`]; erst damit trägt die Schwelle 2,5 wirklich.
+///
+/// **Das ist nicht die eigentliche Absicherung.** Die steht in
+/// `redact-patterns/src/builtin.rs`: der Test
+/// `no_builtin_pattern_has_an_unguarded_unbounded_quantifier` prüft die
+/// **Bauform** jedes eingebauten Musters, kostet nichts, hängt an keiner
+/// Maschine und fängt genau den Fehler ab, um den es hier geht — mit dem alten
+/// `[a-zäöüß]*konto` als ausgeschriebener Gegenprobe. Was hier gemessen wird,
+/// ist die Bestätigung, dass die Bauformregel sich auch in Laufzeit
+/// niederschlägt. Eine Uhr ist dafür das schwächere, aber das einzige direkte
+/// Mittel; sie darf deshalb nicht schärfer eingestellt sein, als sie messen
+/// kann.
+///
+/// Gemessen (Bestwert aus je fünf Läufen, Debug-Build, fünf Verdopplungen):
+/// 50 k → 1,55 s, 100 k → 3,07 s, 200 k → 6,10 s, 400 k → 12,08 s,
+/// 800 k → 25,04 s. Das sind ×1,98 / ×1,99 / ×1,98 / ×2,07.
 #[test]
 fn konto_nr_waechst_linear_mit_der_zeilenlaenge() {
     // Groß genug, dass die Messung über dem Rauschen liegt.
     let kurz = "a".repeat(200_000);
     let lang = "a".repeat(400_000);
 
-    // Ein Aufwärmlauf: der erste Aufruf zahlt das Kompilieren mit.
-    let _ = suche("konto_nr", &kurz);
-
-    let (a, t_kurz) = suche("konto_nr", &kurz);
-    let (b, t_lang) = suche("konto_nr", &lang);
-    a.expect("200 000 Buchstaben");
-    b.expect("400 000 Buchstaben");
+    let t_kurz = bestzeit("konto_nr", &kurz);
+    let t_lang = bestzeit("konto_nr", &lang);
 
     let faktor = t_lang.as_secs_f64() / t_kurz.as_secs_f64().max(1e-9);
     println!(
-        "konto_nr: 200 000 Zeichen {t_kurz:?}, 400 000 Zeichen {t_lang:?} — Faktor {faktor:.2}"
+        "konto_nr: 200 000 Zeichen {t_kurz:?}, 400 000 Zeichen {t_lang:?} — \
+         Faktor {faktor:.2} (Bestwert aus je {MESSLAEUFE} Läufen)"
     );
     assert!(
         faktor < 2.5,
@@ -365,8 +411,14 @@ fn der_begrenzte_praefix_findet_genau_dasselbe_wie_der_alte() {
 
 /// Realistischer Kontoauszugstext — die Gegenprobe „es ist nicht nur schnell,
 /// weil es nichts mehr findet".
+///
+/// Die Laufzeit steht in der Ausgabe, wird aber **nicht** zugesichert, und der
+/// Name sagt das jetzt auch. 8 000 Zeichen sind zu wenig für eine Schranke an
+/// der Wanduhr: die Messung läge im Rauschen, und eine Schwelle darüber wäre
+/// genau der flatternde Test, den [`bestzeit`] weiter oben abstellt. Zugesichert
+/// ist hier allein, was sich zusichern lässt — dass die Treffer noch da sind.
 #[test]
-fn realistischer_auszugstext_bleibt_schnell_und_findet_weiterhin() {
+fn realistischer_auszugstext_findet_weiterhin_alles() {
     const ZEILEN: &[&str] = &[
         "Musterbank AG - Kontoauszug Nr. 1/2026",
         "IBAN: DE89 3704 0044 0532 0130 00",

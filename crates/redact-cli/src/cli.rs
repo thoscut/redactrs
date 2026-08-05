@@ -179,8 +179,15 @@ pub struct Cli {
     /// Davon: Obergrenze für die Streams, die geparst werden
     /// (Seiteninhalt und Objekt-Streams).
     ///
-    /// Aus einem Byte Seiteninhalt werden beim Parsen rund 60 Byte
-    /// Arbeitsspeicher — deshalb ist diese Grenze deutlich enger.
+    /// Aus einem Byte Seiteninhalt werden beim Parsen 60 bis 100 Byte
+    /// `lopdf::content::Operation` — deshalb ist diese Grenze deutlich enger.
+    ///
+    /// Das ist **nicht** der Spitzenbedarf: die Zahl gilt für den
+    /// Operationsvektor allein, bei Text kommen die Glyphen dazu. Gemessen an
+    /// einer Seite mit 20 000 Textzeilen: 1,448 MB Seiteninhalt, 492 MB
+    /// Spitzenspeicher — 340 Byte je Byte. Für eine Textseite zieht ohnehin
+    /// nicht diese Grenze, sondern die Deckelung auf eine Million Zeichen je
+    /// Seite. Die Messreihe steht in `SECURITY.md`.
     #[arg(long, value_name = "MB", default_value_t = 16)]
     pub max_parsed_mb: u64,
 
@@ -211,9 +218,10 @@ pub struct Cli {
 
     /// Obergrenze für die Zahl der Trefferkandidaten in einer Datei.
     ///
-    /// Die Konfliktauflösung wächst quadratisch mit dieser Zahl; ohne Grenze
-    /// genügt eine kleine Datei mit sehr vielen Treffern, um die Maschine
-    /// stundenlang zu beschäftigen.
+    /// Die Treffer müssen gegeneinander aufgelöst werden, und dieser Aufwand
+    /// wächst schneller als ihre Zahl — es ist eine Frage über Paare. Ohne
+    /// Grenze genügt eine kleine Datei mit sehr vielen Treffern, um die
+    /// Maschine stundenlang zu beschäftigen.
     #[arg(long, value_name = "N", default_value_t = redact_pipeline::DEFAULT_MAX_CANDIDATES)]
     pub max_candidates: usize,
 

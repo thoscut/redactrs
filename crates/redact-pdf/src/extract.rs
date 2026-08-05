@@ -70,28 +70,28 @@ const MAX_PRINT_LAYERS: usize = 64;
 /// den Lauf aufhalten; jenseits der Grenze wird zusammengefasst gemeldet.
 const MAX_INSPECTED_UNPLACED_FORMS: usize = 64;
 
-/// Extrahiert Textzeilen mit zeichengenauen Koordinaten.
-#[derive(Debug, Clone)]
-pub struct PdfExtractor {
-    /// Toleranz (in Punkt), innerhalb derer Glyphen zur selben Zeile zählen.
-    pub baseline_tolerance: f64,
-    /// Ab welchem Anteil der **Leerzeichenbreite des Fonts** eine über den
-    /// natürlichen Vorschub hinausgehende Lücke als Leerzeichen gilt.
-    pub space_ratio: f64,
-}
+/// Toleranz (in Punkt), innerhalb derer Glyphen zur selben Zeile zählen.
+const BASELINE_TOLERANCE: f64 = 2.0;
 
-impl Default for PdfExtractor {
-    fn default() -> Self {
-        Self {
-            baseline_tolerance: 2.0,
-            space_ratio: 0.5,
-        }
-    }
-}
+/// Ab welchem Anteil der **Leerzeichenbreite des Fonts** eine über den
+/// natürlichen Vorschub hinausgehende Lücke als Leerzeichen gilt.
+const SPACE_RATIO: f64 = 0.5;
+
+/// Extrahiert Textzeilen mit zeichengenauen Koordinaten.
+///
+/// Ohne Zustand: die beiden Maße der Zeilenbildung stehen als
+/// [`BASELINE_TOLERANCE`] und [`SPACE_RATIO`] fest. Sie waren einmal
+/// öffentliche Felder — verstellt hat sie nie jemand, weder ein Schalter noch
+/// die Oberfläche noch ein Test, alle Konstruktionsstellen im Arbeitsbereich
+/// lauten `new()` bzw. `default()`. Ein Feld, das nur einen Wert annimmt, ist
+/// keine Einstellung, sondern eine Zusage, die niemand einlöst; die *Werte*
+/// bleiben von den Tests gedeckt.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PdfExtractor;
 
 impl PdfExtractor {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     /// Extrahiert die Zeilen einer einzelnen Seite (0-basiert).
@@ -101,7 +101,7 @@ impl PdfExtractor {
             return Ok(Vec::new());
         };
         let scan = scan_page(doc, *page_id)?;
-        Ok(self.build_lines(page_index, glyph_items(&scan)))
+        Ok(Self::build_lines(page_index, glyph_items(&scan)))
     }
 
     /// Wie [`PdfExtractor::extract`], liefert aber zusätzlich die Warnungen des
@@ -130,7 +130,7 @@ impl PdfExtractor {
                 declared.entry(*id).or_insert_with(|| name.clone());
             }
             placed.extend(scan.form_placements.keys().copied());
-            runs.extend(self.build_lines(index, glyph_items(&scan)));
+            runs.extend(Self::build_lines(index, glyph_items(&scan)));
         }
         for warning in unplaced_form_warnings(doc, &declared, &placed) {
             if !warnings.contains(&warning) {
@@ -151,7 +151,7 @@ impl PdfExtractor {
     /// ([`glyph_items`]). Die entscheidet **nicht** über die Zeilenbildung —
     /// sie hält nur fest, welche Glyphen in *einem Zug* gesetzt wurden, und
     /// daraus werden in [`print_runs`] die Druckfolgen.
-    fn build_lines(&self, page: usize, items: Vec<(usize, GlyphItem)>) -> Vec<TextRun> {
+    fn build_lines(page: usize, items: Vec<(usize, GlyphItem)>) -> Vec<TextRun> {
         // Codes ohne Textzuordnung fliegen raus, Ersatzzeichen bleiben erhalten:
         // sie halten die Position und verhindern falsche Zusammenschreibung.
         let items: Vec<(usize, GlyphItem)> = items
@@ -176,7 +176,7 @@ impl PdfExtractor {
         // „von oben nach unten, dann von links nach rechts“. Die
         // Quantisierung des Zeilenabstands fängt kleine
         // Grundlinien-Schwankungen ab.
-        let tol = self.baseline_tolerance.max(0.1);
+        let tol = BASELINE_TOLERANCE.max(0.1);
         glyphs.sort_by(|(_, a), (_, b)| {
             sort_key(a, tol)
                 .partial_cmp(&sort_key(b, tol))
@@ -223,7 +223,7 @@ impl PdfExtractor {
         lines
             .into_iter()
             .flat_map(split_layers)
-            .filter_map(|layer| self.assemble_line(page, layer))
+            .filter_map(|layer| Self::assemble_line(page, layer))
             .collect()
     }
 
@@ -234,7 +234,7 @@ impl PdfExtractor {
     /// Glyphe; würde man wie früher den Abstand der Glyphenkästen messen,
     /// stünde ab `Tc > 1,4 pt` zwischen jedem Zeichen ein Leerzeichen — und
     /// eine gesperrt gesetzte IBAN wäre nicht mehr zu erkennen.
-    fn assemble_line(&self, page: usize, items: Vec<GlyphItem>) -> Option<TextRun> {
+    fn assemble_line(page: usize, items: Vec<GlyphItem>) -> Option<TextRun> {
         if items.is_empty() {
             return None;
         }
@@ -283,7 +283,7 @@ impl PdfExtractor {
                 // Ein Leerzeichen liegt vor, wenn der Überschuss — nach Abzug
                 // eines etwaigen Rastervorschubs — mindestens die halbe
                 // Leerzeichenbreite dieses Fonts erreicht.
-                let threshold = space_width_of(p) * self.space_ratio;
+                let threshold = space_width_of(p) * SPACE_RATIO;
                 let last_is_space = glyphs.last().map(|g| g.ch == ' ').unwrap_or(true);
                 if extra - pitch > threshold && !last_is_space {
                     glyphs.push(Glyph {
@@ -739,13 +739,12 @@ mod tests {
 
     #[test]
     fn groups_glyphs_into_lines() {
-        let e = PdfExtractor::new();
         let glyphs = vec![
             glyph("A", 0.0, 100.0, 5.0),
             glyph("B", 5.0, 100.0, 5.0),
             glyph("C", 0.0, 80.0, 5.0),
         ];
-        let lines = e.build_lines(0, one_show(glyphs));
+        let lines = PdfExtractor::build_lines(0, one_show(glyphs));
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "AB");
         assert_eq!(lines[1].text, "C");
@@ -753,13 +752,12 @@ mod tests {
 
     #[test]
     fn inserts_space_for_large_gaps() {
-        let e = PdfExtractor::new();
         let glyphs = vec![
             glyph("D", 0.0, 100.0, 5.0),
             glyph("E", 5.0, 100.0, 5.0),
             glyph("8", 40.0, 100.0, 5.0),
         ];
-        let lines = e.build_lines(0, one_show(glyphs));
+        let lines = PdfExtractor::build_lines(0, one_show(glyphs));
         assert_eq!(lines[0].text, "DE 8");
         // Die Glyph-Liste muss zeichenweise deckungsgleich bleiben.
         assert_eq!(lines[0].glyphs.len(), lines[0].text.chars().count());
@@ -767,24 +765,22 @@ mod tests {
 
     #[test]
     fn sorts_out_of_order_glyphs_left_to_right() {
-        let e = PdfExtractor::new();
         let glyphs = vec![glyph("Z", 20.0, 100.0, 5.0), glyph("A", 0.0, 100.0, 5.0)];
-        let lines = e.build_lines(0, one_show(glyphs));
+        let lines = PdfExtractor::build_lines(0, one_show(glyphs));
         assert!(lines[0].text.starts_with('A'));
     }
 
     #[test]
     fn ligature_glyph_keeps_char_alignment() {
-        let e = PdfExtractor::new();
         let glyphs = vec![glyph("fi", 0.0, 100.0, 8.0), glyph("x", 8.0, 100.0, 5.0)];
-        let lines = e.build_lines(0, one_show(glyphs));
+        let lines = PdfExtractor::build_lines(0, one_show(glyphs));
         assert_eq!(lines[0].text, "fix");
         assert_eq!(lines[0].glyphs.len(), 3);
     }
 
     #[test]
     fn empty_input_yields_no_lines() {
-        assert!(PdfExtractor::new().build_lines(0, vec![]).is_empty());
+        assert!(PdfExtractor::build_lines(0, vec![]).is_empty());
     }
 
     #[test]

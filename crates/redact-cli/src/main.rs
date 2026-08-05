@@ -221,10 +221,16 @@ fn report(outcome: &Outcome) {
             // wird verlustfrei mit Flate), die *Datei* ist danach aber eine
             // andere — aus einem JPEG-Stream wird ein Flate-Stream, und die
             // Ausgabe wächst dadurch spürbar.
+            //
+            // „meist“ und nicht „immer“: gemessen ging ein Flate-Bild von
+            // 57 516 auf 49 031 Byte zurück, weil eine große schwarze Fläche
+            // sich besser packt als das, was vorher dort stand. Die längere
+            // Warnung daneben sagt es genauso; eine Zusammenfassung, die mehr
+            // behauptet als die Warnung, ist die falsche von beiden.
             if outcome.redacted_images > 0 {
                 println!(
                     "Überschriebene Bilder: {} (neu kodiert: außerhalb der \
-                     Schwärzung verlustfrei, Datei dadurch größer)",
+                     Schwärzung verlustfrei, Datei meist größer)",
                     outcome.redacted_images
                 );
             }

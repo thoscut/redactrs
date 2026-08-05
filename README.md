@@ -747,7 +747,7 @@ Schwärzungen:       1
 Entfernte Zeichen:  0
 Deck-Rechtecke:     1
 Überschriebene Bilder: 1 (neu kodiert: außerhalb der Schwärzung verlustfrei,
-                          Datei dadurch größer)
+                          Datei meist größer)
 ```
 
 Die Zeile „ohne Textfund“ ist hier der Normalfall und kein Mangel: in einem
@@ -795,8 +795,10 @@ am Rand der Schwärzung könnten Reste der ursprünglichen Pixel zurücktragen.
 Die Datei wird dafür deutlich größer — **beim JPEG.** Bei einem Flate-Bild kann
 sie auch schrumpfen: dieselbe Region über dem Flate-Bild oben ergab 57 516 →
 49 031 Byte, weil eine große schwarze Fläche sich besser packen lässt als das,
-was vorher dort stand. Die Zusammenfassung sagt trotzdem pauschal „Datei
-dadurch größer“; gemeint ist der Regelfall.
+was vorher dort stand. Genau deshalb sagt die Zusammenfassung „Datei **meist**
+größer“ und nicht „dadurch größer“ — die längere Warnung daneben sagt es
+ebenso, und eine Zusammenfassung, die mehr behauptet als die Warnung, wäre die
+falsche von beiden.
 
 Ehrlich dazugesagt: **verlustfrei heißt pixelgleich, nicht bytegleich** — und
 „pixelgleich“ heißt bei einem JPEG etwas Schwächeres, als es zunächst klingt:
