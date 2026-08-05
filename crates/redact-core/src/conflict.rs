@@ -106,7 +106,7 @@ pub fn resolve_conflicts(regions: Vec<Region>) -> Resolution {
             None
         } else {
             grids.get(&cand.page).and_then(|grid| {
-                grid.candidates(&cand.rect)
+                grid.candidates_covering(&cand.rect)
                     .filter(|&i| {
                         cand.rect.covered_fraction(&negatives[i].rect) >= BLOCK_COVERAGE_THRESHOLD
                     })
@@ -211,7 +211,7 @@ fn dedup(regions: &mut Vec<Region>) {
             grid.clear();
         }
 
-        let covered = grid.candidates(&region.rect).any(|k| {
+        let covered = grid.candidates_covering(&region.rect).any(|k| {
             regions[k].source == region.source
                 && region.rect.covered_fraction(&regions[k].rect) >= CONTAINMENT_THRESHOLD
         });
@@ -243,11 +243,27 @@ const MAX_CELLS_PER_RECT: f64 = 64.0;
 /// Ein grobes Gitter über eine Seite: jedes eingetragene Rechteck steht in
 /// allen Zellen, die es überdeckt.
 ///
-/// ## Warum die Abfrage nur eine einzige Zelle ansehen muss
+/// ## Zwei Fragen, zwei Abfragen
 ///
-/// Gefragt ist immer dasselbe: Gibt es ein eingetragenes Rechteck, das ein
-/// gegebenes Rechteck zu mindestens `t` überdeckt? Für `t >= 0.5` genügt es,
-/// die Zelle des **Mittelpunkts** abzusuchen.
+/// * [`RectGrid::candidates_covering`] beantwortet „welches eingetragene
+///   Rechteck überdeckt dieses zu mindestens der Hälfte?“ und sieht dafür
+///   **nur die Zelle des Mittelpunkts** an — Begründung gleich darunter.
+/// * [`RectGrid::touching_into`] beantwortet „welches eingetragene Rechteck
+///   **berührt** dieses?“ und muss dafür **alle** Zellen absuchen, die das
+///   abgefragte Rechteck belegt. Die Mittelpunktsregel trägt für Berührung
+///   nicht: ein Zeichen, das nur mit seiner rechten Kante in einen
+///   Schwärzungsbereich ragt, hat seinen Mittelpunkt weit außerhalb.
+///
+/// Beide teilen sich Zellenmaß, Eintragung und die Behandlung unbrauchbarer
+/// Koordinaten; nur die Zellenauswahl der Abfrage unterscheidet sich. Die
+/// Zusicherungen `const _: () = assert!(… >= 0.5)` weiter oben gehören allein
+/// zur ersten Abfrage und werden von der zweiten weder gebraucht noch berührt.
+///
+/// ## Warum die erste Abfrage nur eine einzige Zelle ansehen muss
+///
+/// Gefragt ist dort immer dasselbe: Gibt es ein eingetragenes Rechteck, das
+/// ein gegebenes Rechteck zu mindestens `t` überdeckt? Für `t >= 0.5` genügt
+/// es, die Zelle des **Mittelpunkts** abzusuchen.
 ///
 /// Beweis in einem Satz: Läge der Mittelpunkt von `self` nicht in `other`,
 /// dann endete `other` vor der Mitte einer der beiden Achsen, die Schnittmenge
@@ -297,7 +313,7 @@ const MAX_CELLS_PER_RECT: f64 = 64.0;
 /// Kontoauszug erzeugt es nicht: dort sind die Treffer entweder
 /// deckungsgleich (dann fällt bis auf einen alles weg) oder um mindestens eine
 /// Zeilenhöhe versetzt (dann trennt sie das Gitter).
-struct RectGrid {
+pub struct RectGrid {
     origin_x: f64,
     origin_y: f64,
     cell_w: f64,
@@ -308,6 +324,12 @@ struct RectGrid {
     /// mitgeprüft — das ist immer korrekt und nur dann teuer, wenn es viele
     /// sind.
     everywhere: Vec<usize>,
+    /// Alle eingetragenen Indizes in Eintragungsreihenfolge. Gebraucht wird
+    /// die Liste nur als Rückfallebene von [`RectGrid::touching_into`]: ein
+    /// abgefragtes Rechteck, das selbst zu viele Zellen belegt, wird gegen
+    /// alles geprüft statt gegen eine Nachbarschaft. Ein `usize` je Eintrag
+    /// neben den bis zu 64 Zelleneinträgen desselben Rechtecks.
+    inserted: Vec<usize>,
 }
 
 /// Nur endliche Koordinaten lassen sich auf Zellen abbilden.
@@ -323,7 +345,7 @@ impl RectGrid {
     /// deutlich größer würden alles in dieselbe Zelle legen. Der Mittelwert
     /// wächst mit, wenn viele große Rechtecke dabei sind, und lässt sich von
     /// einem einzelnen Ausreißer kaum verschieben.
-    fn new<'a>(rects: impl Iterator<Item = &'a Rect>) -> Self {
+    pub fn new<'a>(rects: impl Iterator<Item = &'a Rect>) -> Self {
         let mut count = 0usize;
         let mut sum_w = 0.0;
         let mut sum_h = 0.0;
@@ -353,13 +375,15 @@ impl RectGrid {
             cell_h: mean(sum_h),
             cells: HashMap::new(),
             everywhere: Vec::new(),
+            inserted: Vec::new(),
         }
     }
 
     /// Leert den Inhalt, behält aber die Zellengröße (Seitenwechsel).
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.cells.clear();
         self.everywhere.clear();
+        self.inserted.clear();
     }
 
     /// Zellenkoordinaten eines Punktes, noch als `f64`. Absichtlich nicht
@@ -374,7 +398,8 @@ impl RectGrid {
         )
     }
 
-    fn insert(&mut self, idx: usize, rect: &Rect) {
+    pub fn insert(&mut self, idx: usize, rect: &Rect) {
+        self.inserted.push(idx);
         if !usable(rect) {
             self.everywhere.push(idx);
             return;
@@ -403,7 +428,10 @@ impl RectGrid {
     /// Alle Einträge, die `rect` zu mindestens der Hälfte überdecken *könnten*
     /// — ohne Wiederholungen, aber ungeordnet. Wer es genauer braucht, prüft
     /// die gelieferten Kandidaten selbst nach.
-    fn candidates<'a>(&'a self, rect: &Rect) -> impl Iterator<Item = usize> + 'a {
+    ///
+    /// **Nur für Schwellen ab 0,5 vollständig** (siehe Mittelpunktsbeweis am
+    /// Typ). Wer nach bloßer *Berührung* fragt, nimmt [`RectGrid::touching_into`].
+    pub fn candidates_covering<'a>(&'a self, rect: &Rect) -> impl Iterator<Item = usize> + 'a {
         const NONE: &[usize] = &[];
         let center = rect.center();
         let cell = if center.x.is_finite() && center.y.is_finite() {
@@ -417,6 +445,67 @@ impl RectGrid {
             NONE
         };
         cell.iter().chain(self.everywhere.iter()).copied()
+    }
+
+    /// Alle Einträge, die `rect` **berühren** könnten — ohne Wiederholungen,
+    /// aber ungeordnet, geschrieben nach `out`.
+    ///
+    /// `out` wird zuvor geleert und ist als wiederverwendeter Puffer gedacht:
+    /// diese Abfrage läuft je Zeichen einer Seite, nicht je Seite.
+    ///
+    /// ## Warum hier alle Zellen abgesucht werden
+    ///
+    /// Berührung heißt: die Rechtecke haben mindestens einen Punkt `p`
+    /// gemeinsam (Kante eingeschlossen). Beide belegen dann die Zelle von `p`
+    /// — das eingetragene, weil [`RectGrid::insert`] es in **alle** von ihm
+    /// belegten Zellen schreibt, und das abgefragte, weil hier ebenfalls über
+    /// alle belegten Zellen gelaufen wird. Der Mittelpunktsbeweis von
+    /// [`RectGrid::candidates_covering`] wird dafür weder gebraucht noch
+    /// abgeschwächt: er gilt nur für Überdeckung ab der Hälfte, und ein bloß
+    /// mit der Kante hineinragendes Rechteck erfüllt das gerade nicht.
+    ///
+    /// Belegt das **abgefragte** Rechteck selbst zu viele Zellen (ein
+    /// riesenhaftes Zeichen bei winzigen Bereichen), wäre das Absuchen teurer
+    /// als das Prüfen: dann wird alles Eingetragene geliefert. Das ist immer
+    /// korrekt, nur langsamer.
+    pub fn touching_into(&self, rect: &Rect, out: &mut Vec<usize>) {
+        out.clear();
+        if !usable(rect) {
+            // Ein Rechteck mit unbrauchbaren Koordinaten berührt nichts:
+            // jeder Vergleich mit NaN ist falsch. Die Einträge aus
+            // `everywhere` bleiben trotzdem dabei — dort steht auch, was
+            // selbst unbrauchbare Koordinaten hat.
+            out.extend_from_slice(&self.everywhere);
+            return;
+        }
+        let (lx, hx) = (rect.ll.x.min(rect.ur.x), rect.ll.x.max(rect.ur.x));
+        let (ly, hy) = (rect.ll.y.min(rect.ur.y), rect.ll.y.max(rect.ur.y));
+        let (x0, y0) = self.floor_cell(lx, ly);
+        let (x1, y1) = self.floor_cell(hx, hy);
+        if (x1 - x0 + 1.0) * (y1 - y0 + 1.0) > MAX_CELLS_PER_RECT {
+            // `inserted` enthält jeden Eintrag genau einmal, `everywhere` ist
+            // eine Teilmenge davon — hier ist nichts zu entdoppeln.
+            out.extend_from_slice(&self.inserted);
+            return;
+        }
+        let mut cells = 0usize;
+        for x in x0 as i64..=x1 as i64 {
+            for y in y0 as i64..=y1 as i64 {
+                if let Some(cell) = self.cells.get(&(x, y)) {
+                    out.extend_from_slice(cell);
+                    cells += 1;
+                }
+            }
+        }
+        // Ein Eintrag kann in mehreren der abgesuchten Zellen stehen — aber
+        // nur, wenn es überhaupt mehrere waren. Der Normalfall ist eine
+        // einzige Zelle, und dann wäre Sortieren reine Arbeit ohne Wirkung.
+        if cells > 1 {
+            out.sort_unstable();
+            out.dedup();
+        }
+        // Was in `everywhere` steht, steht in keiner Zelle.
+        out.extend_from_slice(&self.everywhere);
     }
 }
 
@@ -926,6 +1015,77 @@ mod tests {
                 erwartet.blocked, bekommen.blocked,
                 "Fall {case} (n={n}, mode={mode}): andere Blockierungen als die Referenz"
             );
+        }
+    }
+
+    /// Die Berührungsabfrage darf nichts verlieren.
+    ///
+    /// Gegenprobe über alle Paare zufälliger Anordnungen: `touching_into` muss
+    /// jedes Rechteck liefern, das sich mit dem abgefragten berührt — Kante
+    /// eingeschlossen. Das ist die Eigenschaft, an der `redact_pdf::redact`
+    /// hängt: dort entscheidet danach `covered_fraction` bzw. der Mittelpunkt,
+    /// und beides setzt Berührung voraus.
+    ///
+    /// Bewusst **nicht** gegen `candidates_covering` geprüft: die
+    /// Mittelpunktsregel gilt nur ab halber Überdeckung, für Berührung wäre
+    /// sie unvollständig — genau deshalb gibt es zwei Abfragen.
+    #[test]
+    fn die_beruehrungsabfrage_verliert_nichts() {
+        fn beruehrt(a: &Rect, b: &Rect) -> bool {
+            a.ll.x <= b.ur.x && b.ll.x <= a.ur.x && a.ll.y <= b.ur.y && b.ll.y <= a.ur.y
+        }
+
+        let mut rng = Rng(0xB00C_1234_5678_9ABD);
+        let mut out = Vec::new();
+        for fall in 0..200 {
+            let n = 1 + rng.below(40) as usize;
+            // Mal grobe, mal feine Rechtecke: das Zellenmaß richtet sich nach
+            // dem Eingetragenen, die Abfrage darf davon unabhängig sein.
+            let scale = if fall % 3 == 0 { 0.5 } else { 7.0 };
+            let rects: Vec<Rect> = (0..n)
+                .map(|_| {
+                    let x = rng.coord(40, scale);
+                    let y = rng.coord(40, scale);
+                    Rect::new(
+                        x,
+                        y,
+                        x + rng.coord(6, scale) + 1.0,
+                        y + rng.coord(6, scale) + 1.0,
+                    )
+                })
+                .collect();
+            let mut grid = RectGrid::new(rects.iter());
+            for (i, rect) in rects.iter().enumerate() {
+                grid.insert(i, rect);
+            }
+
+            for _ in 0..40 {
+                let x = rng.coord(60, 1.0);
+                let y = rng.coord(60, 1.0);
+                // Auch entartete Abfragen (Breite oder Höhe 0) kommen vor —
+                // ein Leerzeichen hat keine Fläche.
+                let frage = Rect::new(x, y, x + rng.coord(4, 1.0), y + rng.coord(4, 1.0));
+                grid.touching_into(&frage, &mut out);
+
+                let mut geliefert: Vec<usize> = out
+                    .iter()
+                    .copied()
+                    .filter(|&i| beruehrt(&rects[i], &frage))
+                    .collect();
+                geliefert.sort_unstable();
+                let erwartet: Vec<usize> =
+                    (0..n).filter(|&i| beruehrt(&rects[i], &frage)).collect();
+                assert_eq!(geliefert, erwartet, "Fall {fall}, Abfrage {frage:?}");
+
+                let mut ohne_wiederholung = out.clone();
+                ohne_wiederholung.sort_unstable();
+                ohne_wiederholung.dedup();
+                assert_eq!(
+                    ohne_wiederholung.len(),
+                    out.len(),
+                    "Fall {fall}: die Vorauswahl liefert Wiederholungen"
+                );
+            }
         }
     }
 }

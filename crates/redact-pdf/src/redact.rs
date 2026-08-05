@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
+use redact_core::conflict::RectGrid;
 use redact_core::{Rect, RedactError, Redaction, Result};
 
 use crate::content::{MarkedTextRecord, ShowItem, ShowRecord, StreamKey, MIRROR_KEYS};
@@ -108,6 +109,96 @@ enum PlanItem {
     Adjust(f64),
 }
 
+/// Die von **einer** Schwärzung verdeckten Zeichen einer Text-Operation, als
+/// aufsteigende, disjunkte, nicht aneinandergrenzende Läufe `[start, end)`.
+///
+/// ## Warum nicht ein `Vec<bool>` je Bereich
+///
+/// Vorher stand hier je Bereich ein Bitvektor über **alle** Zeichen der
+/// Operation — und er wurde behalten. Der Speicher einer Seite war damit
+/// Σ(Zeichen) × (treffende Bereiche), und beide wachsen mit dem Seiteninhalt,
+/// weil die Bereiche ja aus dem Text entstehen. Gemessen an einer Seite mit
+/// k Geheimnissen in **einer** `Tj` (jedes Geheimnis ein Bereich):
+///
+/// (`--release`, bestes von drei Läufen; Speicher ist `VmHWM` des Prozesses,
+/// dessen Grundlast bei k = 8 000 schon 59,6 MB beträgt.)
+///
+/// | k     | Datei  |   vorher |  nachher |  vorher |  nachher |
+/// |------:|-------:|---------:|---------:|--------:|---------:|
+/// |   500 |  14 kB |  0,103 s |  0,014 s | 16,5 MB |   9,8 MB |
+/// | 1 000 |  28 kB |  0,572 s |  0,023 s | 42,6 MB |  15,2 MB |
+/// | 2 000 |  57 kB |  2,059 s |  0,050 s |136,4 MB |  26,2 MB |
+/// | 4 000 | 113 kB |  8,724 s |  0,117 s |489,8 MB |  48,6 MB |
+/// | 8 000 | 227 kB | 38,215 s |  0,213 s |1 860 MB |  91,9 MB |
+///
+/// Die genauen Überdeckungsprüfungen (Zeichen × Bereich) gingen dabei von
+/// 7,25 Mio. / 29 Mio. / 116 Mio. / 464 Mio. auf 28 399 / 56 770 / 113 570 /
+/// 227 199 zurück — aus einer Vervierfachung je Verdopplung wurde eine
+/// Verdopplung. Die Schranke `rev4_speicher_je_bereich.rs` hält das fest.
+///
+/// Ein Bereich verdeckt aber immer nur einen winzigen Teil einer langen
+/// Operation, und weil er ein Rechteck ist, liegen die getroffenen Zeichen
+/// in aller Regel **zusammenhängend**. Als Lauf gespeichert kostet ein
+/// Bereich damit nicht mehr Platz als das, was er tatsächlich trifft.
+///
+/// Bewusst Läufe und nicht bloß eine **Zahl**: [`merge_plan`] vereinigt
+/// mehrere Platzierungen desselben Formulars, und ein Zeichen, das in zwei
+/// Platzierungen von derselben Region verdeckt wird, darf nur einmal zählen.
+/// Eine Zahl könnte das nicht — sie ließe nur die Wahl zwischen Doppelzählen
+/// (Summe) und Unterschlagen (Maximum). Die Läufe geben dieselbe Vereinigung
+/// wie der Bitvektor, Zeichen für Zeichen.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct HiddenRuns(Vec<(usize, usize)>);
+
+impl HiddenRuns {
+    /// Nimmt den Lauf `[start, end)` auf. Erwartet **aufsteigende** Aufrufe —
+    /// so entstehen sie in [`hidden_flags`], das die Zeichen der Reihe nach
+    /// abarbeitet.
+    fn push(&mut self, start: usize, end: usize) {
+        debug_assert!(start < end);
+        match self.0.last_mut() {
+            Some(last) if last.1 >= start => last.1 = last.1.max(end),
+            _ => self.0.push((start, end)),
+        }
+    }
+
+    /// Wie viele Zeichen insgesamt.
+    fn count(&self) -> usize {
+        self.0.iter().map(|(a, b)| b - a).sum()
+    }
+
+    /// Vereinigung — dasselbe Ergebnis wie ein bitweises ODER zweier
+    /// Bitvektoren, nur ohne die Bitvektoren.
+    fn union(&self, other: &Self) -> Self {
+        let mut out = Self(Vec::with_capacity(self.0.len() + other.0.len()));
+        let (mut i, mut j) = (0, 0);
+        while i < self.0.len() || j < other.0.len() {
+            let next = match (self.0.get(i), other.0.get(j)) {
+                (Some(a), Some(b)) => {
+                    if a.0 <= b.0 {
+                        i += 1;
+                        *a
+                    } else {
+                        j += 1;
+                        *b
+                    }
+                }
+                (Some(a), None) => {
+                    i += 1;
+                    *a
+                }
+                (None, Some(b)) => {
+                    j += 1;
+                    *b
+                }
+                (None, None) => unreachable!("Schleifenbedingung"),
+            };
+            out.push(next.0, next.1);
+        }
+        out
+    }
+}
+
 /// Welche Zeichen einer Text-Operation verdeckt sind — insgesamt und je
 /// Schwärzung.
 #[derive(Debug, Clone, Default)]
@@ -118,7 +209,7 @@ struct Selection {
     ///
     /// Nur Bereiche, die überhaupt etwas treffen, stehen hier. Getrennt
     /// geführt, weil sich nur so je Region sagen lässt, ob sie gewirkt hat.
-    per_redaction: BTreeMap<usize, Vec<bool>>,
+    per_redaction: BTreeMap<usize, HiddenRuns>,
 }
 
 impl Selection {
@@ -175,7 +266,7 @@ impl Plan {
         self.selection
             .per_redaction
             .get(&index)
-            .map(|flags| flags.iter().filter(|h| **h).count())
+            .map(HiddenRuns::count)
             .unwrap_or(0)
     }
 }
@@ -632,55 +723,64 @@ fn encode_inline_image(dict: &Dictionary, data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Die Schwärzungsbereiche einer Seite, nach x vorsortiert.
+/// Die Schwärzungsbereiche einer Seite, im Gitter über **beide** Achsen.
 ///
-/// ## Warum
+/// ## Warum kein Streifenzug über x
 ///
-/// Ohne Vorsortierung legte [`hidden_flags`] für **jeden** Bereich einen
-/// `Vec<bool>` über **alle** Zeichen der Operation an. Der Aufwand einer Seite
-/// war damit Σ(Zeichen) × Anzahl Bereiche — und beide wachsen mit dem
-/// Seiteninhalt, weil die Bereiche ja aus dem Text entstehen. Gemessen (200
-/// Zeilen, Kandidaten 24 → 1 536): die Analyse blieb linear, die Schwärzung
-/// wuchs mit dem Produkt.
+/// Hier stand ein `RectIndex`: nach `ll.x` sortiert, mit einem Präfixmaximum
+/// der rechten Kanten, und je Textoperation zwei binäre Suchen über die
+/// Bereiche links und rechts ihrer Hülle. Genau diesen Streifenzug hat
+/// [`redact_core::conflict`] schon einmal verworfen, und aus demselben Grund:
+/// auf einem Kontoauszug bilden IBAN, Kontonummer und Betrag je eine
+/// **Spalte** — gleiche x-Spanne, verschiedene y. Aus dem Streifen fällt dann
+/// nie etwas heraus.
 ///
-/// Eine Textoperation belegt aber nur ihre eigene Hülle. Bereiche, die diese
-/// nicht einmal berühren, können kein Zeichen daraus treffen — sie brauchen
-/// weder einen Vektor noch einen Zeichendurchlauf. Die Sortierung nach `ll.x`
-/// macht daraus zwei binäre Suchen statt eines Durchlaufs durch alle.
+/// Gemessen an k Geheimnissen untereinander (jedes ein eigener `Tj`, jedes ein
+/// eigener Bereich), gezählt werden die von der Vorauswahl gelieferten Paare:
+///
+/// | k      | Paare (Streifen) | möglich (k×k) | Paare (Gitter) | Zeichen |
+/// |-------:|-----------------:|--------------:|---------------:|--------:|
+/// |  2 000 |        4 000 000 |     4 000 000 |        158 598 |  54 000 |
+/// |  4 000 |       16 000 000 |    16 000 000 |        317 304 | 108 000 |
+/// |  8 000 |       64 000 000 |    64 000 000 |        634 554 | 216 000 |
+/// | 16 000 |      256 000 000 |   256 000 000 |      1 269 270 | 432 000 |
+///
+/// Der Streifen siebte in dieser Anordnung **nichts** aus — er lieferte genau
+/// das volle Produkt. Das Gitter liefert knapp drei Bereiche je Zeichen und
+/// wächst damit linear; bei k = 16 000 sind das 200-mal weniger Paare.
+/// Die Wanduhr war schon vorher klein (die Berührungsprüfung ist billig):
+/// 0,910 s gegen 0,641 s, bestes von drei Läufen. Die Wachstumsordnung ist
+/// der Punkt — sie war der Multiplikator vor [`HiddenRuns`].
+///
+/// ## Warum je Zeichen und nicht je Operation
+///
+/// Die Hülle einer langen `Tj` überdeckt die ganze Zeile; jeder Bereich der
+/// Zeile berührt sie. Eine Vorauswahl über Hüllen kann dort nichts sparen,
+/// egal wie gut sie ist — deshalb fragt [`hidden_flags`] jetzt je **Zeichen**.
+/// Ein Zeichenrechteck ist klein, seine Nachbarschaft im Gitter auch.
 struct RectIndex {
-    /// (Index in der übergebenen Schwärzungsliste, Bereich), nach `ll.x`
-    /// aufsteigend sortiert.
+    /// (Index in der übergebenen Schwärzungsliste, Bereich) — die Reihenfolge
+    /// ist die der Eingabe, `grid` verweist mit genau diesen Positionen.
     rects: Vec<(usize, Rect)>,
-    /// `right[k]` ist das größte `ur.x` unter `rects[0..=k]`. Als Präfixmaximum
-    /// wächst es monoton und lässt sich deshalb binär durchsuchen.
-    right: Vec<f64>,
+    grid: RectGrid,
 }
 
 impl RectIndex {
     fn new(rects: &[(usize, Rect)]) -> Self {
-        let mut rects = rects.to_vec();
-        // `total_cmp` statt `partial_cmp`: eine NaN-Koordinate darf die
-        // Sortierung nicht in eine Panik oder eine kaputte Ordnung führen.
-        rects.sort_by(|a, b| a.1.ll.x.total_cmp(&b.1.ll.x));
-        let mut right = Vec::with_capacity(rects.len());
-        let mut max = f64::NEG_INFINITY;
-        for (_, rect) in &rects {
-            max = max.max(rect.ur.x);
-            right.push(max);
+        let mut grid = RectGrid::new(rects.iter().map(|(_, r)| r));
+        for (position, (_, rect)) in rects.iter().enumerate() {
+            grid.insert(position, rect);
         }
-        Self { rects, right }
+        Self {
+            rects: rects.to_vec(),
+            grid,
+        }
     }
 
-    /// Die Bereiche, die `hull` überhaupt berühren **können**.
-    ///
-    /// Ausgeschlossen wird nur, was sicher ausscheidet: alles links davon
-    /// (Präfixmaximum der rechten Kanten unter `hull.ll.x`) und alles rechts
-    /// davon (linke Kante über `hull.ur.x`). Die genaue Entscheidung fällt
-    /// danach [`touches`].
-    fn candidates(&self, hull: &Rect) -> &[(usize, Rect)] {
-        let hi = self.rects.partition_point(|(_, r)| r.ll.x <= hull.ur.x);
-        let lo = self.right[..hi].partition_point(|x| *x < hull.ll.x);
-        &self.rects[lo..hi]
+    /// Die Bereiche, die `rect` überhaupt berühren **können** — als Positionen
+    /// in [`RectIndex::rects`], aufsteigend und ohne Wiederholungen.
+    fn candidates(&self, rect: &Rect, out: &mut Vec<usize>) {
+        self.grid.touching_into(rect, out);
     }
 }
 
@@ -691,8 +791,50 @@ impl RectIndex {
 /// `Rect::contains` aus, und das zählt die Kante mit. Eine Vorauswahl, die
 /// die Kante ausschlösse, könnte ein solches Zeichen übergehen — ein stiller
 /// Fehler genau in der Richtung, die wehtut.
+///
+/// Umgekehrt ist das hier auch der **Torwächter gegen NaN**: `f64::min` und
+/// `f64::max` liefern bei einem NaN-Operanden den anderen zurück, weshalb
+/// `Rect::intersection_area` gegen ein NaN-Rechteck die volle Fläche des
+/// Zeichens ausweist — ein Bereich mit unbrauchbaren Koordinaten träfe damit
+/// **alles**. Jeder Vergleich mit NaN ist dagegen falsch, dieser Test also
+/// auch: ein solcher Bereich kommt gar nicht erst zur genauen Prüfung.
 fn touches(a: &Rect, b: &Rect) -> bool {
     a.ll.x <= b.ur.x && b.ll.x <= a.ur.x && a.ll.y <= b.ur.y && b.ll.y <= a.ur.y
+}
+
+/// Zerlegt die Elemente einer Text-Operation in **Zeichencodes**.
+///
+/// Eine Ligatur ist im Strom **ein** Code, steht aber für mehrere Zeichen.
+/// [`crate::content`] teilt sie in Teilzeichen auf, damit Text und Geometrie
+/// zeichenweise zusammenpassen; die Originalbytes trägt dabei nur das erste
+/// Teilzeichen, alle weiteren haben `bytes` leer.
+///
+/// Beim Neuschreiben entscheidet deshalb allein das erste Teilzeichen, ob der
+/// Code wieder in den Strom geschrieben wird — und mit ihm **alle** seine
+/// Zeichen. Beginnt der Treffer erst beim zweiten Teilzeichen, überlebte die
+/// Ligatur also vollständig und bliebe mit `pdftotext` lesbar, obwohl das
+/// Deck-Rechteck sie halb verdeckt.
+///
+/// Eine nur teilweise getroffene Ligatur muss deshalb **ganz** verschwinden.
+/// Das ist auch die sichere Richtung: lieber ein Zeichen zu viel entfernt als
+/// ein Geheimnis halb stehen gelassen. [`hidden_flags`] entscheidet darum je
+/// Gruppe, nicht je Element — was einen Teil trifft, trifft die Gruppe.
+///
+/// Was keinen Code eröffnet (ein `TJ`-Kerningwert, und der theoretische Fall
+/// eines Teilzeichens ohne vorangehenden Code), bildet eine Gruppe für sich.
+fn code_groups(items: &[ShowItem]) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    let mut index = 0usize;
+    std::iter::from_fn(move || {
+        let start = index;
+        let item = items.get(start)?;
+        index += 1;
+        if matches!(item, ShowItem::Glyph(g) if !g.bytes.is_empty()) {
+            while matches!(items.get(index), Some(ShowItem::Glyph(g)) if g.bytes.is_empty()) {
+                index += 1;
+            }
+        }
+        Some(start..index)
+    })
 }
 
 /// Welche Glyphen einer Text-Operation liegen im Schwärzungsbereich?
@@ -700,43 +842,61 @@ fn touches(a: &Rect, b: &Rect) -> bool {
 /// `index` sind die (bereits um `padding` erweiterten) Bereiche zusammen mit
 /// ihrem Index in der übergebenen Schwärzungsliste. Der Index wird
 /// mitgeschleppt, damit der Bericht je Region Rechenschaft ablegen kann.
+///
+/// Gefragt wird je **Zeichencode**: für jedes seiner Zeichen liefert das
+/// Gitter die Bereiche der Nachbarschaft, und getroffen ist der Code, sobald
+/// eines seiner Zeichen getroffen ist (siehe [`code_groups`]).
 fn hidden_flags(record: &ShowRecord, index: &RectIndex) -> Selection {
     let mut selection = Selection {
         hidden: vec![false; record.items.len()],
         per_redaction: BTreeMap::new(),
     };
-    // Die Hülle über alle Zeichen dieser Operation. Ohne Zeichen gibt es
-    // nichts zu verdecken.
-    let Some(hull) = redact_core::bounding_box(record.glyphs().map(|g| &g.rect)) else {
-        return selection;
-    };
-    // Ein Puffer für alle Bereiche: übernommen wird er nur, wenn er trifft.
-    let mut flags: Vec<bool> = Vec::with_capacity(record.items.len());
-    for (redaction, rect) in index.candidates(&hull) {
-        // Jedes Zeichenrechteck liegt in der Hülle. Berührt ein Bereich sie
-        // nicht, kann er auch kein Zeichen daraus überdecken — weder über
-        // `covered_fraction` noch über den Mittelpunkt.
-        if !touches(rect, &hull) {
-            continue;
+    // Wiederverwendete Puffer: die Abfrage läuft je Zeichen, nicht je Seite.
+    let mut nearby: Vec<usize> = Vec::new();
+    // Die Bereiche, die diesen Zeichencode treffen — und dieselbe Auskunft
+    // noch einmal als Kennfeld. Ein `Vec::contains` wäre hier linear und
+    // brächte die Quadratik über einen anderen Weg zurück: ein Zeichen unter
+    // zehntausend deckungsgleichen Bereichen prüfte dann zehntausend Einträge
+    // gegen eine wachsende Liste.
+    let mut hitting: Vec<usize> = Vec::new();
+    let mut known = vec![false; index.rects.len()];
+    for group in code_groups(&record.items) {
+        for candidate in hitting.drain(..) {
+            known[candidate] = false;
         }
-        flags.clear();
-        flags.extend(record.items.iter().map(|item| match item {
-            ShowItem::Glyph(g) => {
-                g.rect.covered_fraction(rect) >= GLYPH_COVERAGE_THRESHOLD
-                    || rect.contains(g.rect.center())
+        for position in group.clone() {
+            let ShowItem::Glyph(glyph) = &record.items[position] else {
+                continue;
+            };
+            index.candidates(&glyph.rect, &mut nearby);
+            for candidate in nearby.iter().copied() {
+                // Schon bekannt — die genaue Prüfung erübrigt sich.
+                if known[candidate] {
+                    continue;
+                }
+                let rect = &index.rects[candidate].1;
+                if touches(rect, &glyph.rect)
+                    && (glyph.rect.covered_fraction(rect) >= GLYPH_COVERAGE_THRESHOLD
+                        || rect.contains(glyph.rect.center()))
+                {
+                    known[candidate] = true;
+                    hitting.push(candidate);
+                }
             }
-            ShowItem::Adjust(_) => false,
-        }));
-        // Erst je Bereich verbreitern, dann vereinigen: eine Region, die nur
-        // eine Hälfte einer Ligatur trifft, hat auch die andere zu verantworten.
-        widen_over_ligatures(&record.items, &mut flags);
-        if !flags.iter().any(|h| *h) {
+        }
+        if hitting.is_empty() {
             continue;
         }
-        for (all, one) in selection.hidden.iter_mut().zip(&flags) {
-            *all = *all || *one;
+        for flag in &mut selection.hidden[group.clone()] {
+            *flag = true;
         }
-        selection.per_redaction.insert(*redaction, flags.clone());
+        for candidate in hitting.iter().copied() {
+            selection
+                .per_redaction
+                .entry(index.rects[candidate].0)
+                .or_default()
+                .push(group.start, group.end);
+        }
     }
     selection
 }
@@ -747,44 +907,6 @@ fn add_per_redaction<'a>(report: &mut RedactionReport, plans: impl Iterator<Item
         for index in plan.selection.per_redaction.keys() {
             if let Some(slot) = report.per_redaction.get_mut(*index) {
                 *slot += plan.count_for(*index);
-            }
-        }
-    }
-}
-
-/// Zieht die Auswahl über ganze Zeichencodes zusammen.
-///
-/// Eine Ligatur ist im Strom **ein** Code, steht aber für mehrere Zeichen.
-/// [`crate::content`] teilt sie in Teilzeichen auf, damit Text und Geometrie
-/// zeichenweise zusammenpassen; die Originalbytes trägt dabei nur das erste
-/// Teilzeichen, alle weiteren haben `bytes` leer.
-///
-/// Beim Neuschreiben entscheidet deshalb allein das erste Teilzeichen, ob der
-/// Code wieder in den Strom geschrieben wird — und mit ihm **alle** seine
-/// Zeichen. Beginnt der Treffer erst beim zweiten Teilzeichen, überlebt die
-/// Ligatur also vollständig und bleibt mit `pdftotext` lesbar, obwohl das
-/// Deck-Rechteck sie halb verdeckt.
-///
-/// Eine nur teilweise getroffene Ligatur muss deshalb **ganz** verschwinden.
-/// Das ist auch die sichere Richtung: lieber ein Zeichen zu viel entfernt als
-/// ein Geheimnis halb stehen gelassen.
-fn widen_over_ligatures(items: &[ShowItem], flags: &mut [bool]) {
-    let mut index = 0;
-    while index < items.len() {
-        // Ein Code beginnt bei der Glyphe, die die Originalbytes trägt.
-        let starts_code = matches!(&items[index], ShowItem::Glyph(g) if !g.bytes.is_empty());
-        if !starts_code {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        index += 1;
-        while matches!(items.get(index), Some(ShowItem::Glyph(g)) if g.bytes.is_empty()) {
-            index += 1;
-        }
-        if index - start > 1 && flags[start..index].iter().any(|h| *h) {
-            for flag in &mut flags[start..index] {
-                *flag = true;
             }
         }
     }
@@ -802,15 +924,11 @@ fn merge_plan(target: &mut BTreeMap<usize, Plan>, record: &ShowRecord, selection
             for (a, b) in existing.selection.hidden.iter_mut().zip(&selection.hidden) {
                 *a = *a || *b;
             }
-            for (index, flags) in selection.per_redaction {
+            for (index, runs) in selection.per_redaction {
                 match existing.selection.per_redaction.get_mut(&index) {
-                    Some(known) if known.len() == flags.len() => {
-                        for (a, b) in known.iter_mut().zip(&flags) {
-                            *a = *a || *b;
-                        }
-                    }
-                    _ => {
-                        existing.selection.per_redaction.insert(index, flags);
+                    Some(known) => *known = known.union(&runs),
+                    None => {
+                        existing.selection.per_redaction.insert(index, runs);
                     }
                 }
             }
@@ -1975,20 +2093,51 @@ mod tests {
             .collect()
     }
 
-    /// **Die Aufwandsschranke.** Eine Textoperation, die nur einen Bereich
-    /// überdeckt, darf auch nur eine Handvoll Bereiche *anschauen* — sonst ist
-    /// die Schwärzung wieder das Produkt aus Zeichen und Bereichen.
+    /// `count` Bereiche **untereinander** — eine Spalte, gleiche x-Spanne.
+    fn spalte(count: usize) -> Vec<(usize, Rect)> {
+        (0..count)
+            .map(|k| {
+                let y = k as f64 * 20.0;
+                (k, Rect::new(100.0, y, 220.0, y + 10.0))
+            })
+            .collect()
+    }
+
+    fn auswahl(index: &RectIndex, rect: &Rect) -> Vec<usize> {
+        let mut out = Vec::new();
+        index.candidates(rect, &mut out);
+        out.into_iter().map(|k| index.rects[k].0).collect()
+    }
+
+    /// **Die Aufwandsschranke.** Ein Zeichen, das nur einen Bereich berührt,
+    /// darf auch nur eine Handvoll Bereiche *anschauen* — sonst ist die
+    /// Schwärzung wieder das Produkt aus Zeichen und Bereichen.
+    ///
+    /// Geprüft in **beiden** Anordnungen: nebeneinander (das kann ein
+    /// Streifenzug über x auch) und untereinander (das kann er nicht — dort
+    /// haben alle Bereiche dieselbe x-Spanne, und der Streifen siebt nichts
+    /// aus).
     #[test]
     fn die_vorauswahl_waechst_nicht_mit_der_zahl_der_bereiche() {
         for count in [10usize, 100, 1_000, 10_000] {
-            let index = RectIndex::new(&kette(count));
-            // Eine Hülle über genau einen Bereich, in der Mitte der Kette.
+            let rects = kette(count);
+            let index = RectIndex::new(&rects);
             let mitte = (count / 2) as f64 * 20.0;
-            let hull = Rect::new(mitte + 1.0, 101.0, mitte + 9.0, 109.0);
+            let zeichen = Rect::new(mitte + 1.0, 101.0, mitte + 9.0, 109.0);
             assert_eq!(
-                index.candidates(&hull).len(),
-                1,
-                "{count} Bereiche, aber nur einer liegt an dieser Stelle"
+                auswahl(&index, &zeichen),
+                vec![count / 2],
+                "{count} Bereiche nebeneinander, aber nur einer an dieser Stelle"
+            );
+
+            let rects = spalte(count);
+            let index = RectIndex::new(&rects);
+            let mitte = (count / 2) as f64 * 20.0;
+            let zeichen = Rect::new(101.0, mitte + 1.0, 109.0, mitte + 9.0);
+            assert_eq!(
+                auswahl(&index, &zeichen),
+                vec![count / 2],
+                "{count} Bereiche untereinander, aber nur einer an dieser Stelle"
             );
         }
     }
@@ -2000,12 +2149,13 @@ mod tests {
         let rects = kette(50);
         let index = RectIndex::new(&rects);
         for (k, rect) in &rects {
-            // Eine Hülle, die diesen Bereich nur an der linken Kante berührt.
-            let hull = Rect::new(rect.ur.x, 100.0, rect.ur.x, 110.0);
-            let ids: Vec<usize> = index.candidates(&hull).iter().map(|(i, _)| *i).collect();
+            // Ein Zeichen, das diesen Bereich nur an der rechten Kante berührt
+            // — und selbst keine Fläche hat.
+            let zeichen = Rect::new(rect.ur.x, 100.0, rect.ur.x, 110.0);
+            let ids = auswahl(&index, &zeichen);
             assert!(
                 ids.contains(k),
-                "Bereich {k} berührt die Hülle und muss in der Vorauswahl bleiben: {ids:?}"
+                "Bereich {k} berührt das Zeichen und muss in der Vorauswahl bleiben: {ids:?}"
             );
         }
     }
@@ -2025,42 +2175,132 @@ mod tests {
         let index = RectIndex::new(&rects);
         for x0 in 0..60 {
             for y0 in 0..60 {
-                let hull = Rect::new(x0 as f64, y0 as f64, x0 as f64 + 3.0, y0 as f64 + 2.0);
-                let ausgewaehlt: Vec<usize> = index
-                    .candidates(&hull)
-                    .iter()
-                    .filter(|(_, r)| touches(r, &hull))
-                    .map(|(i, _)| *i)
+                let zeichen = Rect::new(x0 as f64, y0 as f64, x0 as f64 + 3.0, y0 as f64 + 2.0);
+                let mut ausgewaehlt: Vec<usize> = auswahl(&index, &zeichen)
+                    .into_iter()
+                    .filter(|k| touches(&rects[*k].1, &zeichen))
                     .collect();
                 let alle: Vec<usize> = rects
                     .iter()
-                    .filter(|(_, r)| touches(r, &hull))
+                    .filter(|(_, r)| touches(r, &zeichen))
                     .map(|(i, _)| *i)
                     .collect();
-                let mut ausgewaehlt = ausgewaehlt;
                 ausgewaehlt.sort_unstable();
-                assert_eq!(ausgewaehlt, alle, "Hülle bei ({x0}, {y0})");
+                assert_eq!(ausgewaehlt, alle, "Zeichen bei ({x0}, {y0})");
             }
         }
     }
 
-    /// Eine NaN-Koordinate darf die Sortierung weder zum Absturz bringen noch
-    /// die Ordnung zerstören — eine Region kommt aus einer JSON-Datei.
+    /// Ein sehr großes Zeichen bei sehr kleinen Bereichen belegt mehr Zellen,
+    /// als das Gitter einzeln absucht. Dann muss **alles** geliefert werden —
+    /// langsamer, aber vollständig.
+    #[test]
+    fn ein_riesiges_zeichen_bekommt_alle_bereiche() {
+        let rects: Vec<(usize, Rect)> = (0..200)
+            .map(|k| {
+                let x = k as f64;
+                (k, Rect::new(x, x, x + 0.5, x + 0.5))
+            })
+            .collect();
+        let index = RectIndex::new(&rects);
+        let zeichen = Rect::new(-10.0, -10.0, 300.0, 300.0);
+        let mut ids = auswahl(&index, &zeichen);
+        ids.sort_unstable();
+        assert_eq!(ids, (0..200).collect::<Vec<_>>());
+    }
+
+    /// Eine NaN-Koordinate darf die Vorauswahl weder zum Absturz bringen noch
+    /// die endlichen Bereiche verlieren — eine Region kommt aus einer
+    /// JSON-Datei.
     #[test]
     fn nan_bringt_die_vorauswahl_nicht_aus_dem_tritt() {
         let mut rects = kette(5);
         rects.push((5, Rect::new(f64::NAN, 100.0, f64::NAN, 110.0)));
         let index = RectIndex::new(&rects);
-        let hull = Rect::new(0.0, 100.0, 200.0, 110.0);
-        // Alles Endliche muss weiterhin gefunden werden.
-        let ids: Vec<usize> = index
-            .candidates(&hull)
-            .iter()
-            .filter(|(_, r)| touches(r, &hull))
-            .map(|(i, _)| *i)
-            .collect();
-        for k in 0..5 {
+        for (k, (_, zeichen)) in rects.iter().enumerate().take(5) {
+            let ids = auswahl(&index, zeichen);
             assert!(ids.contains(&k), "Bereich {k} fehlt: {ids:?}");
+            // Der unbrauchbare Bereich wird bei jeder Abfrage mitgeliefert und
+            // scheitert erst an der genauen Prüfung.
+            assert!(ids.contains(&5), "der NaN-Bereich fehlt: {ids:?}");
         }
+    }
+
+    /// Ein Bereich über die volle `f64`-Spanne belegt zu viele Zellen und
+    /// wandert in die „überall“-Liste — gefunden werden muss er trotzdem.
+    ///
+    /// Dass die Vorauswahl daneben auch den kleinen Bereich liefert, ist kein
+    /// Fehler: seine Kantenlänge geht in das Zellenmaß ein, und `f64::MAX
+    /// − f64::MIN` ist unendlich — das Gitter besteht dann aus **einer**
+    /// Zelle. Vollständig bleibt es; aussieben kann es hier nichts mehr.
+    #[test]
+    fn ein_seitenfuellender_bereich_bleibt_auffindbar() {
+        let rects = vec![
+            (0usize, Rect::new(100.0, 100.0, 110.0, 110.0)),
+            (1usize, Rect::new(f64::MIN, f64::MIN, f64::MAX, f64::MAX)),
+        ];
+        let index = RectIndex::new(&rects);
+        for zeichen in [
+            Rect::new(500.0, 500.0, 505.0, 510.0),
+            Rect::new(101.0, 101.0, 105.0, 105.0),
+            Rect::new(-1e300, -1e300, -1e300, -1e300),
+        ] {
+            let ids = auswahl(&index, &zeichen);
+            assert!(ids.contains(&1), "der volle Bereich fehlt bei {zeichen:?}");
+        }
+        assert!(auswahl(&index, &Rect::new(101.0, 101.0, 105.0, 105.0)).contains(&0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Die Zählung je Bereich
+    // -----------------------------------------------------------------------
+
+    /// [`HiddenRuns`] muss sich verhalten wie der Bitvektor, den sie ersetzt.
+    /// Gegenprobe über alle Paare von Teilmengen einer kleinen Grundmenge.
+    #[test]
+    fn laeufe_verhalten_sich_wie_bitvektoren() {
+        fn runs_of(bits: u16, width: usize) -> HiddenRuns {
+            let mut runs = HiddenRuns::default();
+            for i in 0..width {
+                if bits & (1 << i) != 0 {
+                    runs.push(i, i + 1);
+                }
+            }
+            runs
+        }
+        let width = 10;
+        for a in 0u16..(1 << width) {
+            let ra = runs_of(a, width);
+            assert_eq!(ra.count(), a.count_ones() as usize, "Zählung für {a:b}");
+            for b in [
+                0u16,
+                1,
+                0b1010101010,
+                0b0101010101,
+                0b1111100000,
+                u16::MAX >> 6,
+            ] {
+                let vereinigt = ra.union(&runs_of(b, width));
+                assert_eq!(
+                    vereinigt.count(),
+                    (a | b).count_ones() as usize,
+                    "Vereinigung {a:b} | {b:b}"
+                );
+                assert_eq!(vereinigt, runs_of(a | b, width), "Form von {a:b} | {b:b}");
+            }
+        }
+    }
+
+    /// Die Läufe wachsen mit dem, was **getroffen** ist — nicht mit der Länge
+    /// der Operation. Genau daran hing der quadratische Speicher.
+    #[test]
+    fn ein_zusammenhaengender_treffer_ist_ein_einziger_lauf() {
+        let mut runs = HiddenRuns::default();
+        for i in 3..1_000 {
+            runs.push(i, i + 1);
+        }
+        assert_eq!(runs.0.len(), 1);
+        assert_eq!(runs.0[0], (3, 1_000));
+        assert_eq!(runs.count(), 997);
     }
 }

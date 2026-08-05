@@ -1060,15 +1060,32 @@ mod tests {
         // Die Zuordnung sucht linear über die belegten Schichten. Ohne
         // Obergrenze wäre eine Datei, die hundertfach an dieselbe Stelle
         // druckt, quadratischer Aufwand — und die kann sich jeder bauen.
+        //
+        // Die Schranke steht hier als **feste Zahl**, nicht als
+        // `MAX_PRINT_LAYERS`. Gegen die Konstante geprüft wüchse sie mit ihr
+        // mit und könnte gar nicht fehlschlagen — 100 Schichten sind auch
+        // dann noch „höchstens 1 000 000“. Genau das ist passiert: mit
+        // `MAX_PRINT_LAYERS = 1_000_000` blieb der Test grün, während die
+        // Extraktion einer Datei mit n Drucken an derselben Stelle
+        // quadratisch wurde (`--release`):
+        //
+        //     n         Decke 64     Decke 1 000 000
+        //      20 000    0,388 s      0,763 s
+        //      50 000    0,906 s      3,148 s
+        //     100 000    2,951 s     15,801 s
+        //
+        // Doppelte Eingabe, fünffache Zeit. 64 ist die Decke, die dieses
+        // Programm hält; wer sie anhebt, ändert Laufzeitverhalten und soll
+        // das hier begründen müssen.
         let mut content = String::new();
         for _ in 0..100 {
             content.push_str("BT /F1 10 Tf 1 0 0 1 72 700 Tm (4711000) Tj ET ");
         }
         let lines = lines_of(&content);
-        assert!(
-            lines.len() <= MAX_PRINT_LAYERS,
-            "mehr Schichten als erlaubt: {}",
-            lines.len()
+        assert_eq!(
+            lines.len(),
+            64,
+            "hundert Überdrucke, Decke 64 — es müssen genau 64 Schichten sein"
         );
         // Jenseits der Grenze fallen Drucke wieder zusammen und verschränken
         // sich — die Schichten davor bleiben aber sauber, und darauf kommt es
