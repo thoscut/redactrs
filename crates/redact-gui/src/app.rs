@@ -1398,6 +1398,24 @@ impl RedactApp {
                     "Zug beendet — die angefasste Region gibt es nicht mehr".to_string();
                 return;
             };
+            // Die Kennung schützt vor der falschen **Region**, nicht vor der
+            // falschen **Seite**. Bild ab, Pos1 und Ende blättern laut
+            // `key_commands` immer — auch mit gedrückter Maustaste. Danach
+            // zeichnet die Oberfläche eine andere Seite und ruft diese Funktion
+            // mit deren `view`/`page`; der Zug rechnete weiter, und die Region
+            // auf der alten Seite änderte sich unsichtbar mit — gerechnet mit
+            // der Geometrie der neuen. Gemeldet wurde „Rechteck angepasst“.
+            //
+            // Also genauso beenden wie bei verschwundener Kennung: kleiner als
+            // die Blättertasten zu sperren, und es lässt den bisher gezogenen
+            // Stand stehen, statt ihn zu verwerfen.
+            if self.state.regions[index].region.page != page {
+                self.resize = None;
+                self.selector.cancel();
+                self.state.status =
+                    "Zug beendet — die angefasste Region liegt auf einer anderen Seite".to_string();
+                return;
+            }
             // Das Druckbild fasst den Griff nur an; verändert wird erst, wenn
             // sich der Zeiger danach bewegt hat. `down` gehört dazu: unterhalb
             // der Klickschwelle meldet egui weder `dragged` noch sonst etwas,
@@ -1743,7 +1761,13 @@ impl eframe::App for RedactApp {
             .default_width(crate::thumbnails::PANEL_WIDTH)
             .width_range(crate::thumbnails::PANEL_MIN_WIDTH..=crate::thumbnails::PANEL_MAX_WIDTH)
             .show(ctx, |ui| {
-                crate::thumbnails::show(ui, &mut self.state, &mut self.pages, page_changed);
+                crate::thumbnails::show(
+                    ui,
+                    &mut self.state,
+                    &mut self.pages,
+                    &summary,
+                    page_changed,
+                );
             });
 
         let toggle = egui::SidePanel::left("sidebar")
@@ -1783,6 +1807,13 @@ impl eframe::App for RedactApp {
         self.paint_drop_hint(ctx);
     }
 }
+
+// Prüfrunde 5: Bedienfolgen quer durch Tastatur, Maus und Verlauf. Eigene
+// Datei, weil sie mit den Prüfrunden wächst — aber **Kindmodul von `app`**,
+// denn sie fährt `apply_pointer` und `resize` unmittelbar an.
+#[cfg(test)]
+#[path = "rev5_tests.rs"]
+mod rev5_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3371,7 +3402,7 @@ mod tests {
                 egui::SidePanel::left("thumbnails").show(ctx, |ui| {
                     let mut app = app.borrow_mut();
                     let RedactApp { state, pages, .. } = &mut *app;
-                    crate::thumbnails::show(ui, state, pages, false);
+                    crate::thumbnails::show(ui, state, pages, &summary, false);
                 });
                 egui::CentralPanel::default().show(ctx, |ui| {
                     if app.borrow().state.is_loaded() {

@@ -13,7 +13,7 @@
 use egui::{Align, Color32, Pos2, RichText, Sense, Stroke, Vec2};
 
 use crate::render::PageCache;
-use crate::state::AppState;
+use crate::state::{AppState, HitSummary};
 use crate::viewer::{PageView, NO_ROUNDING};
 
 /// Breite der Spalte.
@@ -49,10 +49,27 @@ pub fn thumb_size(view: &PageView, width: f32) -> Vec2 {
 ///
 /// `scroll_to_current` bringt die markierte Seite in den sichtbaren Bereich —
 /// nötig, wenn die Seite über Tastatur oder Trefferliste gewechselt wurde.
+///
+/// ## Warum die Bilanz hereingereicht wird
+///
+/// Die Zahl neben einem Kleinbild kam aus `AppState::regions_on_page(page).len()`
+/// und zählte damit **jede** Zeile der Seite mit: abgewählte, blockierte,
+/// doppelte und Schutzeinträge der Negativliste. Eine Seite, auf der ein
+/// Schutzeintrag alles blockiert und drei Handrechtecke abgewählt sind, trug
+/// so die **5** mit der Sprechblase „Treffer auf dieser Seite“ — geschwärzt
+/// wird dort nichts. Genau dieser Fehler war in der Kopfzeile der Seitenleiste
+/// schon abgestellt („Schutzeinträge sind keine Funde“); hier stand er noch,
+/// und hier ist er gefährlicher: die Spalte ist die Übersicht, mit der man am
+/// Ende durchgeht, ob auf keiner Seite etwas stehen geblieben ist.
+///
+/// [`crate::app`] rechnet die Bilanz ohnehin einmal je Bild aus. Sie hier zu
+/// benutzen behebt zugleich den Aufwand: siehe
+/// [`AppState::redactions_per_page`].
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut AppState,
     pages: &mut PageCache,
+    summary: &HitSummary,
     scroll_to_current: bool,
 ) {
     ui.heading("Seiten");
@@ -65,6 +82,9 @@ pub fn show(
 
     let width = (ui.available_width() - 44.0).clamp(48.0, THUMB_WIDTH);
     let mut jump: Option<usize> = None;
+    // Ein Durchlauf über die Regionen für die ganze Spalte statt einer je
+    // Kleinbild.
+    let redactions = state.redactions_per_page(summary);
 
     egui::ScrollArea::vertical()
         .id_salt("thumbnails")
@@ -73,7 +93,7 @@ pub fn show(
             for page in 0..count {
                 let current = page == state.current_page;
                 let size = thumb_size(&state.page_view(page), width);
-                let hits = state.regions_on_page(page).len();
+                let hits = redactions.get(page).copied().unwrap_or(0);
 
                 let response = ui
                     .horizontal(|ui| {
@@ -87,7 +107,7 @@ pub fn show(
                         paint_thumb(ui, rect, pages, page, current);
                         if hits > 0 {
                             ui.label(RichText::new(format!("{hits}")).small().weak())
-                                .on_hover_text("Treffer auf dieser Seite");
+                                .on_hover_text("Schwärzungen auf dieser Seite");
                         }
                         response
                     })
@@ -197,8 +217,15 @@ mod tests {
 
         // Ohne Dokument: nur der leere Zustand.
         let empty = RefCell::new(state);
+        let summary = empty.borrow().hit_summary();
         egui::__run_test_ui(|ui| {
-            show(ui, &mut empty.borrow_mut(), &mut pages.borrow_mut(), false);
+            show(
+                ui,
+                &mut empty.borrow_mut(),
+                &mut pages.borrow_mut(),
+                &summary,
+                false,
+            );
         });
         assert!(!pages.borrow().is_busy());
 
@@ -210,8 +237,15 @@ mod tests {
             .borrow_mut()
             .set_document(state.document.clone().unwrap());
         let loaded = RefCell::new(state);
+        let summary = loaded.borrow().hit_summary();
         egui::__run_test_ui(|ui| {
-            show(ui, &mut loaded.borrow_mut(), &mut pages.borrow_mut(), true);
+            show(
+                ui,
+                &mut loaded.borrow_mut(),
+                &mut pages.borrow_mut(),
+                &summary,
+                true,
+            );
         });
         assert!(
             pages.borrow().is_busy(),

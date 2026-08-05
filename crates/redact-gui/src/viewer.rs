@@ -368,7 +368,7 @@ impl RegionStyle {
         match outcome {
             Redacted => RegionStyle::Redacted,
             Protecting => RegionStyle::Outlined,
-            Disabled | Blocked | Duplicate => RegionStyle::Discarded,
+            Disabled | Blocked | Duplicate | OffPage => RegionStyle::Discarded,
         }
     }
 }
@@ -672,6 +672,7 @@ mod tests {
             HitOutcome::Disabled,
             HitOutcome::Blocked,
             HitOutcome::Duplicate,
+            HitOutcome::OffPage,
         ] {
             assert_ne!(
                 RegionStyle::from_outcome(outcome),

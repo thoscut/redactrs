@@ -302,7 +302,10 @@ fn hits(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
                 // Schützt Text — kein Durchstreichen, das hieße „gestrichen“.
                 HitOutcome::Protecting => text = text.color(dot_color(color)),
                 // Verworfen bzw. abgewählt: ausgegraut und durchgestrichen.
-                HitOutcome::Disabled | HitOutcome::Blocked | HitOutcome::Duplicate => {
+                HitOutcome::Disabled
+                | HitOutcome::Blocked
+                | HitOutcome::Duplicate
+                | HitOutcome::OffPage => {
                     text = text.weak().strikethrough();
                 }
             }
@@ -345,6 +348,10 @@ pub fn outcome_tooltip(outcome: HitOutcome) -> &'static str {
         }
         HitOutcome::Duplicate => {
             "Wird nicht eigens geschwärzt — ein anderer Treffer deckt dieselbe Stelle bereits ab."
+        }
+        HitOutcome::OffPage => {
+            "Dieses Rechteck liegt vollständig neben dem Blatt und wird nicht geschwärzt — \
+             es kann dort kein Zeichen treffen."
         }
     }
 }
@@ -468,6 +475,7 @@ mod tests {
             HitOutcome::Disabled,
             HitOutcome::Blocked,
             HitOutcome::Duplicate,
+            HitOutcome::OffPage,
         ];
         for outcome in outcomes {
             let text = outcome_tooltip(outcome);

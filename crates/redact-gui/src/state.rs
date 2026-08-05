@@ -218,6 +218,17 @@ pub enum HitOutcome {
     Blocked,
     /// Doppelt bzw. vollständig in einem anderen Treffer enthalten.
     Duplicate,
+    /// Liegt vollständig neben dem Blatt und kann kein Zeichen treffen.
+    ///
+    /// Selbst gezogen entsteht so etwas nicht ([`AppState::add_manual_region`]
+    /// klemmt), über einen Eckgriff auch nicht ([`AppState::set_region_rect`]),
+    /// über die Pfeiltasten seit dieser Runde ebenfalls nicht
+    /// ([`AppState::move_selected`]). Eine **Review-Datei** kann solche
+    /// Rechtecke aber weiterhin mitbringen: sie ist eine Liste von Koordinaten
+    /// und wird nicht beschnitten, weil das die Angabe der Nutzerin
+    /// stillschweigend veränderte. Also wird sie stattdessen **angesagt** — vor
+    /// dem Export und nicht erst als Warnung danach.
+    OffPage,
 }
 
 impl HitOutcome {
@@ -238,6 +249,7 @@ impl HitOutcome {
             HitOutcome::Disabled => "abgewählt",
             HitOutcome::Blocked => "geschützt durch Ihre Liste",
             HitOutcome::Duplicate => "doppelt",
+            HitOutcome::OffPage => "liegt neben der Seite",
         }
     }
 }
@@ -258,6 +270,11 @@ pub struct HitSummary {
     pub protecting: usize,
     /// Anzahl derer, die wirklich geschwärzt werden.
     pub redacted: usize,
+    /// Anzahl der Einträge, deren Rechteck vollständig neben dem Blatt liegt.
+    ///
+    /// Sie stecken **nicht** in [`HitSummary::redacted`] — sie können kein
+    /// Zeichen entfernen. Siehe [`HitOutcome::OffPage`].
+    pub off_page: usize,
     /// Hat dieser Lauf überhaupt automatisch gesucht?
     ///
     /// **Der Grund, warum das Feld hier steht** und nicht bloß am Schalter in
@@ -307,6 +324,12 @@ impl HitSummary {
         ));
         if self.protecting > 0 {
             text.push_str(&format!(" · {} geschützt", self.protecting));
+        }
+        // Vor den Mustern und direkt hinter den Zahlen, die es berichtigt: wer
+        // „3 Treffer · 2 werden geschwärzt“ liest, soll im selben Atemzug
+        // erfahren, warum aus dem dritten nichts wird.
+        if self.off_page > 0 {
+            text.push_str(&format!(" · {} neben der Seite", self.off_page));
         }
         // Bei „ganz aus“ ist die Zahl der einzeln abgeschalteten Muster
         // gegenstandslos — es läuft ohnehin keines.
@@ -556,6 +579,12 @@ pub struct AppState {
     /// Siehe [`AppState::edit_replacement`]: eine Tippsitzung ist **ein**
     /// Schritt im Verlauf, nicht einer je Anschlag.
     replacing: Option<RegionId>,
+    /// Region, die gerade mit den Pfeiltasten geschoben wird.
+    ///
+    /// Dasselbe Muster wie [`AppState::replacing`] und aus demselben Grund:
+    /// eine Schiebe-Sitzung ist **ein** Schritt im Verlauf, nicht einer je
+    /// Anschlag. Siehe [`AppState::move_selected`].
+    nudging: Option<RegionId>,
 }
 
 impl Default for AppState {
@@ -581,6 +610,7 @@ impl Default for AppState {
             history: History::new(),
             pending: None,
             replacing: None,
+            nudging: None,
         }
     }
 }
@@ -770,7 +800,7 @@ impl AppState {
         self.current_page = 0;
         self.selected_region = None;
         self.regions.clear();
-        self.replacing = None;
+        self.end_edit_sessions();
         self.extract_warnings = warnings.clone();
         self.warnings = warnings;
         // Der Verlauf gehörte zum vorigen Dokument.
@@ -831,14 +861,6 @@ impl AppState {
 
     pub fn page_count(&self) -> usize {
         self.page_boxes.len()
-    }
-
-    /// MediaBox der aktuellen Seite (A4, solange nichts geladen ist).
-    pub fn current_page_box(&self) -> Rect {
-        self.page_boxes
-            .get(self.current_page)
-            .copied()
-            .unwrap_or(DEFAULT_PAGE_BOX)
     }
 
     /// Drehung der angegebenen Seite (0, solange nichts geladen ist).
@@ -928,11 +950,6 @@ impl AppState {
         self.zoom > MIN_ZOOM
     }
 
-    /// Text-Runs der angegebenen Seite.
-    pub fn runs_on_page(&self, page: usize) -> Vec<&TextRun> {
-        self.runs.iter().filter(|r| r.page == page).collect()
-    }
-
     /// Indizes aller Regionen der angegebenen Seite (in Anlagereihenfolge).
     pub fn regions_on_page(&self, page: usize) -> Vec<usize> {
         self.regions
@@ -1010,9 +1027,9 @@ impl AppState {
             .collect();
 
         let annotated: Vec<AnnotatedRegion> = found.into_iter().map(|r| self.annotate(r)).collect();
-        // Die Trefferliste wird ausgetauscht — eine laufende Tippsitzung im
-        // Ersatzfeld gehört zum alten Stand.
-        self.replacing = None;
+        // Die Trefferliste wird ausgetauscht — eine laufende Tipp- oder
+        // Schiebe-Sitzung gehört zum alten Stand.
+        self.end_edit_sessions();
         self.history.record(&self.regions);
         self.regions = annotated;
         self.regions.extend(manual);
@@ -1028,8 +1045,9 @@ impl AppState {
 
     /// Das Blatt dieser Seite, sofern ein Dokument geladen ist.
     ///
-    /// Anders als [`AppState::current_page_box`] **ohne** Rückfall auf A4: wo
-    /// es keine Seite gibt, gibt es auch nichts zu beschneiden.
+    /// **Ohne** Rückfall auf A4: wo es keine Seite gibt, gibt es auch nichts zu
+    /// beschneiden. Ein Rückfall meldete hier ein Blatt, das im Dokument nicht
+    /// vorkommt, und [`AppState::clamp_to_page`] beschnitte darauf.
     pub fn page_box(&self, page: usize) -> Option<Rect> {
         self.page_boxes.get(page).copied()
     }
@@ -1089,6 +1107,7 @@ impl AppState {
             },
         );
         let entry = self.annotate(region);
+        self.end_edit_sessions();
         self.history.record(&self.regions);
         self.regions.push(entry);
         let index = self.regions.len() - 1;
@@ -1106,7 +1125,7 @@ impl AppState {
             self.selected_region = None;
             return false;
         }
-        self.replacing = None;
+        self.end_edit_sessions();
         self.history.record(&self.regions);
         self.regions.remove(index);
         self.selected_region = None;
@@ -1114,20 +1133,109 @@ impl AppState {
         true
     }
 
+    /// Schiebt ein Rechteck so weit zurück, dass es wieder ganz auf dem Blatt
+    /// liegt — **ohne** seine Größe zu ändern.
+    ///
+    /// Der Unterschied zu [`AppState::clamp_to_page`] ist der Unterschied
+    /// zwischen Schieben und Ziehen. Wer eine Ecke zieht, will das Rechteck
+    /// ändern; dort ist Beschneiden richtig. Wer mit den Pfeiltasten schiebt,
+    /// will es *versetzen* — würde dabei beschnitten, schrumpfte der schwarze
+    /// Balken am Blattrand bei jedem weiteren Anschlag, und ein Stück der
+    /// IBAN käme darunter hervor. Also stößt das Rechteck am Rand an und
+    /// bleibt ganz.
+    ///
+    /// Ohne geladenes Dokument gibt es keine Seite und nichts zu schieben.
+    /// Ist das Rechteck größer als das Blatt, wird es an der unteren linken
+    /// Ecke ausgerichtet; den Überhang schneidet danach
+    /// [`AppState::set_region_rect`] weg.
+    fn slide_onto_page(&self, page: usize, rect: Rect) -> Rect {
+        let Some(sheet) = self.page_box(page) else {
+            return rect;
+        };
+        let (sheet, rect) = (sheet.normalized(), rect.normalized());
+        let shift = |low: f64, high: f64, edge_low: f64, edge_high: f64| {
+            if low < edge_low {
+                edge_low - low
+            } else if high > edge_high {
+                edge_high - high
+            } else {
+                0.0
+            }
+        };
+        let dx = shift(rect.ll.x, rect.ur.x, sheet.ll.x, sheet.ur.x);
+        let dy = shift(rect.ll.y, rect.ur.y, sheet.ll.y, sheet.ur.y);
+        Rect::new(
+            rect.ll.x + dx,
+            rect.ll.y + dy,
+            rect.ur.x + dx,
+            rect.ur.y + dy,
+        )
+    }
+
     /// Verschiebt die ausgewählte Region um `dx`/`dy` im PDF-User-Space
     /// (Y zeigt nach oben). `false`, wenn nichts ausgewählt war.
+    ///
+    /// **Der Weg geht über [`AppState::set_region_rect`]** — dieselbe Funktion,
+    /// die der Eckgriff benutzt. Das war er lange nicht, und daran hingen drei
+    /// Befunde auf einmal:
+    ///
+    /// * *Neben das Blatt geschoben.* Hundert Anschläge auf Umschalt+Pfeil
+    ///   links legten das Rechteck vollständig neben die Seite. Zu sehen war
+    ///   davon nichts (`ui.painter_at` schneidet weg), die Kopfzeile zählte es
+    ///   weiter als „wird geschwärzt“, und der Export meldete den Fehlschlag
+    ///   erst hinterher als Warnung. Jetzt stößt es am Blattrand an
+    ///   ([`AppState::slide_onto_page`]).
+    /// * *Keine Handarbeit.* Ein so korrigierter Treffer blieb
+    ///   [`Source::Pattern`]; [`AnnotatedRegion::is_hand_made`] sah die
+    ///   Korrektur nicht, und „Analysieren“ warf sie **ohne Rückfrage** weg —
+    ///   während die vier anderen Wege zum selben Verlust fragten. Der
+    ///   Quellwechsel steckt in `set_region_rect`.
+    /// * *Ansage bei überstimmtem Schutz.* Auch [`PROTECTION_OVERRIDDEN`]
+    ///   stand nur im Ziehweg.
+    ///
+    /// Der Verlauf bekommt **einen** Schnappschuss je Schiebe-Sitzung, nicht
+    /// einen je Anschlag: fünfzig Antipper — mit Tastenwiederholung etwa eine
+    /// Sekunde — schoben sonst bei [`crate::HISTORY_LIMIT`] = 50 jeden älteren
+    /// Stand hinaus, auch den vor einem versehentlichen Löschen. Dasselbe
+    /// Muster wie beim Tippen im Ersatzfeld ([`AppState::edit_replacement`])
+    /// und beim Zug am Eckgriff ([`AppState::begin_manual_edit`]); beendet
+    /// wird die Sitzung von [`AppState::end_edit_sessions`].
     pub fn move_selected(&mut self, dx: f64, dy: f64) -> bool {
         let Some(index) = self.selected_region else {
             return false;
         };
-        if index >= self.regions.len() {
+        let Some(entry) = self.regions.get(index) else {
             return false;
+        };
+        let (id, page, rect) = (entry.id, entry.region.page, entry.region.rect);
+        let target = self.slide_onto_page(
+            page,
+            Rect::new(
+                rect.ll.x + dx,
+                rect.ll.y + dy,
+                rect.ur.x + dx,
+                rect.ur.y + dy,
+            ),
+        );
+        // Am Blattrand angekommen: nichts ändert sich, also gehört auch nichts
+        // in den Verlauf. Sonst kostete jeder weitere Anschlag gegen den Rand
+        // einen Schritt „Rückgängig“, der sichtbar nichts zurücknimmt.
+        if target == rect {
+            return true;
         }
-        self.history.record(&self.regions);
-        let entry = &mut self.regions[index];
-        let r = entry.region.rect;
-        entry.region.rect = Rect::new(r.ll.x + dx, r.ll.y + dy, r.ur.x + dx, r.ur.y + dy);
-        true
+        // `set_region_rect` beschneidet noch einmal und lehnt ab, was dabei
+        // leer wird. Erst fragen, dann den Verlauf anfassen — ein abgelehnter
+        // Anschlag darf keinen Schritt „Rückgängig“ kosten.
+        if self.clamp_to_page(page, target).is_none() {
+            return true;
+        }
+        // Der eine Schnappschuss dieser Sitzung.
+        if self.nudging != Some(id) {
+            self.end_edit_sessions();
+            self.history.record(&self.regions);
+            self.nudging = Some(id);
+        }
+        self.set_region_rect(index, target)
     }
 
     /// Beginnt eine Änderung, die über mehrere Bilder läuft.
@@ -1138,6 +1246,7 @@ impl AppState {
     /// „Rückgängig“ führte nicht mehr zum Stand vor der Korrektur, sondern
     /// einen Mauszuck weit zurück.
     pub fn begin_manual_edit(&mut self) {
+        self.end_edit_sessions();
         self.history.record(&self.regions);
     }
 
@@ -1230,6 +1339,7 @@ impl AppState {
         // Nur echte Änderungen kommen in den Verlauf — sonst kostete ein
         // Rückgängig mehrere Klicks, bevor sichtbar etwas passiert.
         if entry.enabled != enabled {
+            self.end_edit_sessions();
             self.history.record(&self.regions);
             self.regions[index].enabled = enabled;
         }
@@ -1251,9 +1361,9 @@ impl AppState {
             return false;
         };
         if entry.action != action {
-            // Eine neue Art beendet eine laufende Tippsitzung: der nächste
-            // Anschlag im Ersatzfeld gehört dann zu einem neuen Schritt.
-            self.replacing = None;
+            // Eine neue Art beendet die laufenden Sitzungen: der nächste
+            // Anschlag gehört dann zu einem neuen Schritt.
+            self.end_edit_sessions();
             self.history.record(&self.regions);
             self.regions[index].action = action;
         }
@@ -1300,6 +1410,7 @@ impl AppState {
         }
         let id = entry.id;
         if self.replacing != Some(id) {
+            self.end_edit_sessions();
             self.history.record(&self.regions);
             self.replacing = Some(id);
         }
@@ -1309,12 +1420,30 @@ impl AppState {
 
     /// Beendet eine Tippsitzung im Ersatzfeld.
     pub fn end_replacement_edit(&mut self) {
-        self.replacing = None;
+        self.end_edit_sessions();
     }
 
     /// Läuft gerade eine Tippsitzung (nur für Tests und Erklärungen)?
     pub fn is_editing_replacement(&self) -> bool {
         self.replacing.is_some()
+    }
+
+    /// Läuft gerade eine Schiebe-Sitzung (nur für Tests und Erklärungen)?
+    pub fn is_nudging(&self) -> bool {
+        self.nudging.is_some()
+    }
+
+    /// Beendet beide Sitzungen, die mehrere Bedienschritte zu **einem**
+    /// Verlaufsschritt zusammenfassen: das Tippen im Ersatzfeld
+    /// ([`AppState::edit_replacement`]) und das Schieben mit den Pfeiltasten
+    /// ([`AppState::move_selected`]).
+    ///
+    /// Ruft, wer selbst einen Schnappschuss ablegt. Ohne das flösse eine
+    /// dazwischenliegende Änderung — löschen, abwählen, Art umstellen — in den
+    /// laufenden Schritt hinein, und ein Rückgängig führte an ihr vorbei.
+    fn end_edit_sessions(&mut self) {
+        self.replacing = None;
+        self.nudging = None;
     }
 
     // ------------------------------------------- Rückgängig / Wiederholen
@@ -1332,7 +1461,7 @@ impl AppState {
     /// Die Auswahl wird dabei aufgehoben: nach einem Schritt zurück kann der
     /// Eintrag, auf den der Index zeigte, verschwunden oder ein anderer sein.
     pub fn undo(&mut self) -> bool {
-        self.replacing = None;
+        self.end_edit_sessions();
         match self.history.undo(&self.regions) {
             Some(previous) => {
                 self.regions = previous;
@@ -1349,7 +1478,7 @@ impl AppState {
 
     /// Nimmt ein Rückgängig zurück.
     pub fn redo(&mut self) -> bool {
-        self.replacing = None;
+        self.end_edit_sessions();
         match self.history.redo(&self.regions) {
             Some(next) => {
                 self.regions = next;
@@ -1366,17 +1495,46 @@ impl AppState {
 
     // --------------------------------------------------- Konfliktauflösung
 
+    /// Zählt dieser Eintrag bei der Konfliktauflösung mit?
+    ///
+    /// Alle aktivierten Treffer **plus** sämtliche Negativlisten-Treffer.
+    /// Letztere sind nie `enabled` (sie werden ja nicht geschwärzt), müssen
+    /// aber trotzdem als Blocker mitgegeben werden.
+    ///
+    /// **Diese eine Vorauswahl gilt überall.** Sie stand früher nur in
+    /// [`AppState::conflict_input`]; [`AppState::enabled_redactions`] suchte
+    /// die Schwärzungsart dagegen über *alle* Zeilen. Bei zwei deckungsgleichen
+    /// Einträgen — so entstehen sie beim Laden einer Review-Datei mit doppeltem
+    /// Eintrag — gewann damit die Art des **abgewählten**: die Oberfläche zeigte
+    /// „Ersetzen [IBAN]“, exportiert wurde `Blackout`.
+    fn counts_for_resolution(entry: &AnnotatedRegion) -> bool {
+        entry.is_blocking() || entry.enabled
+    }
+
     /// Regionen, die in die Konfliktauflösung gehen.
     ///
-    /// Das sind alle aktivierten Treffer **plus** sämtliche Negativlisten-
-    /// Treffer. Letztere sind nie `enabled` (sie werden ja nicht geschwärzt),
-    /// müssen aber trotzdem als Blocker mitgegeben werden.
+    /// Ohne die, die vollständig neben ihrem Blatt liegen: sie können kein
+    /// Zeichen entfernen, und mitgezählt behaupteten sie das Gegenteil. Siehe
+    /// [`HitOutcome::OffPage`].
     fn conflict_input(&self) -> Vec<Region> {
         self.regions
             .iter()
-            .filter(|a| a.is_blocking() || a.enabled)
+            .filter(|a| Self::counts_for_resolution(a))
+            .filter(|a| !self.is_off_page(&a.region))
             .map(|a| a.region.clone())
             .collect()
+    }
+
+    /// Liegt diese Region vollständig neben ihrem Blatt?
+    ///
+    /// Dieselbe Rechnung wie [`AppState::clamp_to_page`] — was dort nichts
+    /// übrig lässt, kann auch nichts schwärzen. Ohne geladenes Dokument
+    /// (und für Seiten, die es nicht gibt) ist die Frage nicht zu beantworten;
+    /// dann lautet die Antwort `false`, und der Export meldet den Fall als
+    /// `missing_page_redactions`.
+    pub fn is_off_page(&self, region: &Region) -> bool {
+        self.page_box(region.page).is_some()
+            && self.clamp_to_page(region.page, region.rect).is_none()
     }
 
     /// Ergebnis der Konfliktauflösung nach [`redact_core::resolve_conflicts`].
@@ -1408,6 +1566,18 @@ impl AppState {
                 if !entry.enabled {
                     return HitOutcome::Disabled;
                 }
+                // Vor der Suche im Ergebnis: neben dem Blatt liegende
+                // Rechtecke sind gar nicht erst hineingegangen und fielen
+                // sonst als „doppelt“ heraus — ein falscher Grund für das
+                // richtige Ergebnis.
+                //
+                // **Hinter** den beiden Prüfungen davor: ein Schutzeintrag
+                // bleibt ein Schutzeintrag (sonst zählte ihn `found` plötzlich
+                // als Fund), und ein abgewählter bleibt abgewählt — das ist
+                // die Entscheidung der Nutzerin und der nähere Grund.
+                if self.is_off_page(&entry.region) {
+                    return HitOutcome::OffPage;
+                }
                 if let Some(slot) = redact
                     .iter_mut()
                     .find(|slot| slot.is_some_and(|r| *r == entry.region))
@@ -1425,18 +1595,40 @@ impl AppState {
             })
             .collect();
 
-        let protecting = outcomes
-            .iter()
-            .filter(|o| **o == HitOutcome::Protecting)
-            .count();
+        let count = |wanted: HitOutcome| outcomes.iter().filter(|o| **o == wanted).count();
+        let protecting = count(HitOutcome::Protecting);
         HitSummary {
             found: outcomes.len() - protecting,
             protecting,
             redacted: resolution.redact.len(),
+            off_page: count(HitOutcome::OffPage),
             outcomes,
             automatic: self.patterns_enabled(),
             disabled_patterns: self.disabled_pattern_count(),
         }
+    }
+
+    /// Wie viele Schwärzungen je Seite wirklich passieren.
+    ///
+    /// Der Index ist die Seitenzahl, die Länge [`AppState::page_count`].
+    ///
+    /// **Einmal je Bild, nicht einmal je Miniaturansicht.** Die Spalte links
+    /// rief früher für jedes Kleinbild `regions_on_page`, und das lief über
+    /// *alle* Regionen und legte dafür einen `Vec<usize>` an — nur um dessen
+    /// Länge zu nehmen. Bei 1 600 Seiten und 96 000 Regionen (beides noch
+    /// unter `--max-candidates`) kostete allein diese Zahl 0,50 s je Bild:
+    /// zwei Bilder je Sekunde, ohne dass irgendetwas gezeichnet worden wäre.
+    /// Hier ist es ein Durchlauf über die Regionen für die ganze Spalte.
+    pub fn redactions_per_page(&self, summary: &HitSummary) -> Vec<usize> {
+        let mut counts = vec![0usize; self.page_count()];
+        for (index, entry) in self.regions.iter().enumerate() {
+            if summary.outcome(index).is_redacted() {
+                if let Some(slot) = counts.get_mut(entry.region.page) {
+                    *slot += 1;
+                }
+            }
+        }
+        counts
     }
 
     /// Steckt in den Regionen Handarbeit, die beim Verwerfen verloren ginge?
@@ -1468,6 +1660,12 @@ impl AppState {
     /// Negativlisten-Treffer fallen heraus, ebenso alles, was von ihnen zu
     /// mindestens 50 % überdeckt wird. Manuelle Regionen überstimmen die
     /// Negativliste (das entscheidet `resolve_conflicts`).
+    ///
+    /// **Die Schwärzungsart kommt aus derselben Vorauswahl**, die auch in die
+    /// Konfliktauflösung ging ([`AppState::counts_for_resolution`]). Ohne sie
+    /// entschied bei zwei deckungsgleichen Zeilen die **erste** — auch wenn sie
+    /// abgewählt war und die andere eine andere Art trug. *Ob* geschwärzt wird,
+    /// stimmte dabei; *wie*, nicht.
     pub fn enabled_redactions(&self) -> Vec<Redaction> {
         self.resolution()
             .redact
@@ -1476,6 +1674,7 @@ impl AppState {
                 let action = self
                     .regions
                     .iter()
+                    .filter(|a| Self::counts_for_resolution(a))
                     .find(|a| a.region == region)
                     .map(|a| a.action.clone())
                     // Ohne Zeile in der Liste gilt die Schwärzungsart des
@@ -1738,7 +1937,7 @@ impl AppState {
             self.config.allow_unverified_review,
         )?;
 
-        self.replacing = None;
+        self.end_edit_sessions();
         self.history.record(&self.regions);
         self.regions = review
             .items

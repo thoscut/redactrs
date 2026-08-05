@@ -60,7 +60,11 @@
 //!   Schnappschüsse der Trefferliste, Strg+Z und Strg+Y.
 //! * Tastatur: Bild auf/ab und Pos1/Ende blättern, Pfeiltasten verschieben die
 //!   Auswahl (sonst blättern sie), Entf löscht, Strg+O öffnet, Strg+S
-//!   exportiert. Liegt der Fokus in einem **Textfeld**, gehören **alle** Tasten
+//!   exportiert. Verschieben geht durch **denselben** Weg wie der Eckgriff
+//!   ([`AppState::set_region_rect`]): das Rechteck stößt am Blattrand an, der
+//!   Treffer gilt danach als von Hand bearbeitet, und ein Halten der Taste
+//!   kostet **einen** Schritt im Verlauf, nicht fünfzig. Liegt der Fokus in
+//!   einem **Textfeld**, gehören **alle** Tasten
 //!   dorthin — siehe [`key_commands`] und [`focus`]. „Textfeld“ heißt dabei
 //!   genau das: ein Knopf mit Fokus (nach einem Druck auf Tabulator) ist keins,
 //!   und Escape gehört noch dem Feld, dem egui den Fokus schon genommen hat.
