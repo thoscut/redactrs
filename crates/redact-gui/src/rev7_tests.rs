@@ -195,7 +195,12 @@ fn die_reihenfolgepruefung_schlaegt_an_wenn_die_zusage_faellt() {
     // (a) nach linker Kante sortiert — genau das, was ein Umbau von `dedup`
     //     zurückgäbe, der die innere Ordnung durchreicht.
     let mut nach_kante = kandidaten.clone();
-    nach_kante.sort_by(|l, r| l.rect.ll.x.partial_cmp(&r.rect.ll.x).unwrap());
+    // `total_cmp` statt `partial_cmp(..).unwrap()`: dieselbe Ordnung für alles,
+    // was hier vorkommt, aber ohne die Panik, sobald eine Kante einmal NaN ist.
+    // Dieselbe Bauart wie der NaN-Befund in `AppState::clamp_to_page` — nur
+    // hier im Test, wo der Schaden ein irreführender Absturz statt einer
+    // falschen Schwärzung wäre.
+    nach_kante.sort_by(|l, r| l.rect.ll.x.total_cmp(&r.rect.ll.x));
     assert_ne!(nach_kante, kandidaten, "die Umsortierung tut nichts");
     assert!(
         ist_teilfolge(&nach_kante, &kandidaten).is_err(),

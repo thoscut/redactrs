@@ -799,19 +799,26 @@ fn space_event() -> egui::Event {
 }
 
 // ===========================================================================
-// Z8 — Die geheilte Seite: Oberfläche warnt, Kommandozeile schweigt
+// Z8 — Die geheilte Seite: beide Wege sagen es jetzt
 // ===========================================================================
 
 /// **Beide Programme sollen dasselbe sagen** — `cli_and_gui_agree.rs`
 /// vergleicht das Audit-Log Feld für Feld, und `warnings` ist eines davon.
 ///
-/// Auf einer Seite mit unbrauchbarer MediaBox tun sie es nicht: die
-/// Oberfläche stellt [`crate::state::healed_page_warning`] an den Anfang
-/// ihrer Warnungsliste (und damit in ihr Audit-Log), `redact_pipeline::run`
-/// kennt den Satz überhaupt nicht. Gerechnet wird in beiden Fällen mit A4 —
-/// nur erfährt es auf der Kommandozeile niemand.
+/// ## Was hier einmal stand
+///
+/// Dieser Test hieß `z8_die_geheilte_seite_warnt_nur_in_der_oberflaeche` und
+/// hielt einen **Befund** fest: auf einer Seite mit unbrauchbarer MediaBox
+/// warnte die Oberfläche, `redact_pipeline::run` kannte den Satz überhaupt
+/// nicht. Gerechnet wurde in beiden Fällen mit A4 — nur erfuhr es auf der
+/// Kommandozeile niemand.
+///
+/// Er ist fehlgeschlagen, sobald der Befund behoben war, und genau dafür war
+/// er da. Umgedreht statt gelöscht: er hält jetzt die Zusage, die an die
+/// Stelle des Befundes getreten ist — **beide** Wege melden die geheilte
+/// Seite, und sie schwärzen weiterhin dieselbe Stelle.
 #[test]
-fn z8_die_geheilte_seite_warnt_nur_in_der_oberflaeche() {
+fn z8_die_geheilte_seite_meldet_sich_auf_beiden_wegen() {
     let bytes = healed_pdf();
     let dir = tmp("z8");
     let input = dir.join("geheilt.pdf");
@@ -843,11 +850,18 @@ fn z8_die_geheilte_seite_warnt_nur_in_der_oberflaeche() {
         gui_outcome.warnings
     );
     assert!(
-        !cli_outcome
+        cli_outcome
             .warnings
             .iter()
             .any(|w| w.contains("MediaBox") || w.contains("unbrauchbare Seitengröße")),
-        "**Befund**: die Kommandozeile schweigt dazu — {:?}",
+        "die Kommandozeile schweigt wieder zur geheilten Seite — {:?}",
+        cli_outcome.warnings
+    );
+    // Und sie nennt die Seite in Menschenzählung, wie jede andere Meldung
+    // dieses Programms: die entartete Seite ist die zweite.
+    assert!(
+        cli_outcome.warnings.iter().any(|w| w.contains("Seite 2")),
+        "die Warnung nennt die Seite nicht: {:?}",
         cli_outcome.warnings
     );
     // Gerechnet wird trotzdem gleich: beide schwärzen dieselbe Stelle.

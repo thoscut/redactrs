@@ -259,18 +259,30 @@ pub struct Cli {
     #[arg(long, value_name = "MB", default_value_t = 1024)]
     pub max_decompressed_mb: u64,
 
-    /// Davon: Obergrenze für die Streams, die geparst werden
-    /// (Seiteninhalt und Objekt-Streams).
+    /// Davon: Obergrenze für alles, woraus PDF-**Syntax** wird — die
+    /// geparsten Streams (Seiteninhalt, Objekt-Streams) **und** der Rumpf der
+    /// Datei selbst (Objektköpfe, Dictionaries, Arrays, Querverweistabelle,
+    /// Trailer). Beide Klassen zusammen gegen dieselbe Zahl; eine Datei ganz
+    /// ohne Streams kann sie allein ausschöpfen.
     ///
-    /// Aus einem Byte Seiteninhalt werden beim Parsen 60 bis 100 Byte
-    /// `lopdf::content::Operation` — deshalb ist diese Grenze deutlich enger.
+    /// Ob ein Stream hierher zählt, entscheidet sein **ausgepackter Inhalt**,
+    /// nicht sein Dictionary: sieht er wie PDF-Syntax aus statt wie Nutzlast,
+    /// gilt dieses engere Budget. Auch ein Bild kann darunterfallen, wenn
+    /// seine Bildpunkte wie druckbarer Text aussehen — ein dunkler
+    /// Graustufen-Scan tut das.
     ///
-    /// Das ist **nicht** der Spitzenbedarf: die Zahl gilt für den
-    /// Operationsvektor allein, bei Text kommen die Glyphen dazu. Gemessen an
-    /// einer Seite mit 20 000 Textzeilen: 1,448 MB Seiteninhalt, 492 MB
-    /// Spitzenspeicher — 340 Byte je Byte. Für eine Textseite zieht ohnehin
-    /// nicht diese Grenze, sondern die Deckelung auf eine Million Zeichen je
-    /// Seite. Die Messreihe steht in `SECURITY.md`.
+    /// Das ist **nicht** der Spitzenbedarf, und der Aufblähfaktor ist keine
+    /// Konstante: er hängt an der *Form* der Syntax, nicht an ihrer Länge.
+    /// Gemessen an einer Seite mit 20 000 Textzeilen: 1,31 MB Seiteninhalt,
+    /// 477 MB Spitzenspeicher — 363 Byte je Byte. Für eine Textseite zieht
+    /// ohnehin meist nicht diese Grenze, sondern die Deckelung auf eine
+    /// Million Zeichen je Seite. Die Messreihe steht in `SECURITY.md`.
+    ///
+    /// Genau weil sich aus Dateibytes kein Speicher ablesen lässt, deckelt
+    /// derselbe Schalter noch eine zweite Größe: den *gerechneten* Speicher
+    /// der Objekte, die daraus entstehen. Beide Decken hängen an dieser einen
+    /// Zahl und bewegen sich zusammen — wer eine wirklich so große Datei
+    /// durchlassen will, hebt nur sie.
     #[arg(long, value_name = "MB", default_value_t = 16)]
     pub max_parsed_mb: u64,
 
@@ -279,8 +291,12 @@ pub struct Cli {
     /// Eine Schwärzung auf einem Bild überschreibt dessen Bildpunkte, dafür
     /// muss das Bild nach RGBA8 ausgepackt werden: 4 Byte je Bildpunkt. Ein
     /// gewöhnlicher Schwarzweiß-Scan (`/BitsPerComponent 1`) wächst dabei um
-    /// den Faktor 32 — deshalb greifen `--max-decompressed-mb` und
-    /// `--max-parsed-mb` hier nicht, die zählen die Rohbytes des Streams.
+    /// den Faktor 32 — deshalb genügen `--max-decompressed-mb` und
+    /// `--max-parsed-mb` hier nicht: die zählen die **ausgepackten**
+    /// Streambytes, also die Bildpunkte in der Form, in der sie in der Datei
+    /// stehen, nicht das RGBA8 danach. (Roh gezählt wird nirgends: eine
+    /// 82 679 Byte kleine Datei mit einem FlateDecode-Bild von 19 998 784 Byte
+    /// entpackt scheitert an `--max-decompressed-mb 8`.)
     ///
     /// Reicht die Grenze nicht, bricht der Lauf mit einer Meldung ab, statt
     /// die Speicheranforderung scheitern zu lassen. Sie deckt nicht den
@@ -927,5 +943,160 @@ mod tests {
         // Aufrufbar bleibt er in beiden Fassungen — sonst käme statt der
         // erklärenden Meldung ein „unexpected argument“.
         assert!(Cli::try_parse_from(["redact-rs", "--gui"]).is_ok());
+    }
+
+    // ------------------------------------- Der Hilfetext und was wirklich zählt
+    //
+    // Beide Tests hier prüfen **eine Aussage des Hilfetextes**, und zwar an
+    // der Tat statt am Wortlaut: der Text sagt, *welche Menge* ein Budget
+    // zählt, und genau daran hing schon zweimal eine falsche Zusicherung.
+    // Geprüft wird deshalb immer dieselbe Datei mit zwei Werten desselben
+    // Schalters — zählte das Programm die andere Menge, liefe sie beide Male
+    // durch, und der Test fiele auf.
+
+    /// Ein PDF-Rumpf **ohne einen einzigen Stream**: `ballast` Dictionaries,
+    /// die niemand referenziert.
+    fn rumpf_ohne_stream(ballast: usize) -> Vec<u8> {
+        use lopdf::xref::XrefType;
+        use lopdf::{dictionary, Document, Object};
+
+        let mut doc = Document::with_version("1.4");
+        // Klassische Querverweistabelle statt Querverweis-*Stream*: `lopdf`
+        // schreibt sonst einen, und dann hätte diese Datei doch einen Stream —
+        // was den Versuch gerade um seinen Kern brächte.
+        doc.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1_i64,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+
+        for _ in 0..ballast {
+            let mut d = lopdf::Dictionary::new();
+            for k in 0..500 {
+                d.set(format!("k{k}"), Object::Integer(0));
+            }
+            doc.add_object(Object::Dictionary(d));
+        }
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).expect("speicherbar");
+        bytes
+    }
+
+    /// Ein PDF mit einem komprimierten Bildstrom: auf der Platte klein,
+    /// ausgepackt `megabytes` MB **Nutzlast** (Bytes über 126, damit der
+    /// Inhalt nicht wie PDF-Syntax aussieht).
+    fn bild_das_sich_aufblaeht(megabytes: usize) -> Vec<u8> {
+        use lopdf::{dictionary, Document, Object, Stream};
+
+        let punkte: Vec<u8> = (0..megabytes * 1024 * 1024)
+            .map(|i| 128u8.wrapping_add((i % 128) as u8))
+            .collect();
+        let mut bild = Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 1024_i64,
+                "Height" => (megabytes * 1024) as i64,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8_i64,
+            },
+            punkte,
+        );
+        bild.compress().expect("komprimierbar");
+
+        let mut doc = Document::with_version("1.5");
+        let bild_id = doc.add_object(bild);
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => bild_id } },
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1_i64,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).expect("speicherbar");
+        bytes
+    }
+
+    /// `--max-parsed-mb` zählt **auch den Rumpf** der Datei, nicht nur die
+    /// geparsten Streams — so steht es im Hilfetext, seit dort der halbe Satz
+    /// stand. Diese Datei hat keinen einzigen Stream; zählte nur, was in
+    /// Streams steht, käme sie durch beide Werte.
+    #[test]
+    fn das_parse_budget_zaehlt_auch_den_rumpf_ohne_jeden_stream() {
+        let pdf = rumpf_ohne_stream(700);
+        assert!(
+            pdf.len() > 2 * 1024 * 1024,
+            "Rumpf zu klein für den Versuch: {} Byte",
+            pdf.len()
+        );
+        let stelle = pdf.windows(6).position(|w| w == b"stream");
+        let umfeld = stelle
+            .map(|i| String::from_utf8_lossy(&pdf[i.saturating_sub(80)..i]).into_owned())
+            .unwrap_or_default();
+        assert!(
+            stelle.is_none(),
+            "diese Datei darf keinen Stream enthalten, hat aber einen: {umfeld}"
+        );
+
+        let eng = Cli::parse_from(["redact-rs", "in.pdf", "--max-parsed-mb", "1"]).limits();
+        let weit = Cli::parse_from(["redact-rs", "in.pdf", "--max-parsed-mb", "8"]).limits();
+        assert!(
+            redact_pdf::document::prescan(&pdf, &eng).is_err(),
+            "ein Rumpf über dem Budget muss abgelehnt werden"
+        );
+        assert!(
+            redact_pdf::document::prescan(&pdf, &weit).is_ok(),
+            "derselbe Rumpf unter dem Budget muss durchlaufen"
+        );
+    }
+
+    /// `--max-decompressed-mb` zählt die **ausgepackten** Streambytes, nicht
+    /// die rohen — so steht es beim Hilfetext von `--max-image-mb`, seit dort
+    /// „Rohbytes“ stand. Die Datei hier ist auf der Platte weit unter jeder
+    /// der beiden Grenzen; nur ausgepackt reißt sie die engere.
+    #[test]
+    fn das_dekompressionsbudget_zaehlt_die_ausgepackten_streambytes() {
+        let pdf = bild_das_sich_aufblaeht(4);
+        assert!(
+            pdf.len() < 1024 * 1024,
+            "roh gezählt müsste die Datei unter 1 MB bleiben, ist aber {} Byte",
+            pdf.len()
+        );
+
+        let eng = Cli::parse_from(["redact-rs", "in.pdf", "--max-decompressed-mb", "1"]).limits();
+        let weit = Cli::parse_from(["redact-rs", "in.pdf", "--max-decompressed-mb", "8"]).limits();
+        assert!(
+            redact_pdf::document::prescan(&pdf, &eng).is_err(),
+            "4 MB ausgepackt müssen an 1 MB scheitern"
+        );
+        assert!(
+            redact_pdf::document::prescan(&pdf, &weit).is_ok(),
+            "dieselben 4 MB müssen unter 8 MB durchlaufen"
+        );
     }
 }

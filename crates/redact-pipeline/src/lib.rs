@@ -46,8 +46,8 @@ use redact_core::{
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::document::{
-    check_target, load_from_bytes_with_limits, prescan, save_to_bytes, validate, write_file,
-    Limits, WriteOptions,
+    check_target, load_from_bytes_with_limits, prescan, sane_page_boxes, save_to_bytes, validate,
+    write_file, Limits, SaneBox, WriteOptions,
 };
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
@@ -939,6 +939,31 @@ pub fn run(config: &Config) -> Result<Outcome> {
                 }
                 write_review_file(&path, &review, config)?;
                 outcome.review_out = Some(path.display().to_string());
+
+                // **Und die geheilte Seite gehört auch hier gesagt** — aus
+                // demselben Grund wie [`detection_notice`] drei Dutzend Zeilen
+                // weiter oben, nur schärfer: `--review` ist die Stelle, an der
+                // jemand die Koordinaten von Hand prüft, und die in der Datei
+                // stehenden Rechtecke sind auf einem Blatt gerechnet, das
+                // dieses Dokument nicht angibt. Gemessen (vor dieser Zeile):
+                // `--review` über eine Seite mit `/MediaBox [0 0 0 0]` schrieb
+                // `{ll:(100.9,697.8), ur:(239.89,707.5)}` — A4-Koordinaten für
+                // ein Blatt, das sich selbst als 0 x 0 ausgibt —, sagte kein
+                // Wort dazu und endete mit Rückgabewert 0, Zeile für Zeile wie
+                // dieselbe Datei mit gesunder MediaBox.
+                //
+                // Die Trennlinie, an der das hier entschieden wird: eine
+                // Aussage über das **gelesene Dokument** gehört auf beide Wege,
+                // eine Aussage über das **Ergebnis der Schwärzung** nur auf den
+                // Weg, der schwärzt. Der Satz kommt aus `sane_page_boxes(doc)`,
+                // fragt also allein das geladene Dokument — und steht deshalb
+                // hier. Was [`apply`] danach anfügt (Wirkungsprüfung,
+                // Bildkodierung), gibt es ohne Schwärzung nicht und fehlt hier
+                // zu Recht.
+                push_warnings(
+                    &mut outcome.warnings,
+                    healed_page_warnings(&sane_page_boxes(&doc)),
+                );
                 return Ok(outcome);
             }
 
@@ -1000,10 +1025,19 @@ pub fn apply(
     // `redact_pdf::document::sane_page_boxes` genauso. Nähme diese Stelle die
     // Rohangabe, fiele auf so einer Seite **jedes** Rechteck als „neben dem
     // Blatt“ heraus — dieselbe Divergenz, nur andersherum.
-    let sheets: Vec<Rect> = redact_pdf::document::sane_page_boxes(doc)
-        .into_iter()
-        .map(|box_| box_.rect)
-        .collect();
+    let checked = sane_page_boxes(doc);
+
+    // **Und die Heilung gehört gesagt**, auf beiden Wegen. Bis hierher war sie
+    // still: die Kommandozeile ersetzte die unbrauchbare Angabe, rechnete
+    // weiter und schrieb eine Zusammenfassung, die von einer gewöhnlichen
+    // Datei nicht zu unterscheiden war. Die Oberfläche sagte es (ihr eigener
+    // Satz beim Laden) — dieselbe Klasse Fehler wie eine Kette, die nur eines
+    // der beiden Programme durchläuft. Der Satz kommt deshalb aus derselben
+    // Quelle wie die Entscheidung selbst, [`SaneBox::warning`], und steht hier
+    // in der gemeinsamen Hälfte.
+    push_warnings(&mut outcome.warnings, healed_page_warnings(&checked));
+
+    let sheets: Vec<Rect> = checked.iter().map(|box_| box_.rect).collect();
 
     let output = plan_outputs(config)?.ok_or_else(|| {
         RedactError::Config("ohne --review muss das Ausgabeziel feststehen".into())
@@ -1078,12 +1112,161 @@ pub fn apply(
 /// Wirkungsprüfung — und beschreiben teils denselben Befund (etwa ein
 /// Rasterbild, das sowohl beim Lesen als auch beim Überdecken auffällt). Im
 /// Audit-Log soll jeder Befund genau einmal stehen.
+///
+/// # Warum ein Set und keine lineare Suche
+///
+/// `target.contains(&warning)` vergleicht die neue Warnung mit **jeder** schon
+/// eingetragenen; über eine ganze Liste ist das Aufwand mal Aufwand. Gemessen
+/// an Warnungen von je rund 130 Zeichen (`cargo test -p redact-pipeline
+/// --release`): 10 000 Stück 0,148 s, 20 000 Stück 0,359 s, 40 000 Stück
+/// 2,528 s — die vierfache Menge kostete das Siebzehnfache.
+///
+/// Ein Absturz oder Hänger war das nicht (die Seitenzahl ist durch das
+/// Parse-Budget gedeckelt), aber es ist dieselbe Bauart, die in dieser Runde an
+/// drei anderen Stellen ersetzt wurde. Das Set macht daraus einen Durchgang je
+/// Aufruf. Gegen präparierte Eingaben trägt es zusätzlich: Rusts
+/// Vorgabe-Hasher ist je Prozess zufällig gesalzen, Kollisionen lassen sich
+/// also nicht aus einer Datei heraus erzwingen.
+///
+/// Die Reihenfolge bleibt die alte — erste Nennung gewinnt, spätere Dubletten
+/// fallen weg. Das Audit-Log vergleicht `cli_and_gui_agree` Feld für Feld.
 pub fn push_warnings(target: &mut Vec<String>, warnings: Vec<String>) {
-    for warning in warnings {
-        if !target.contains(&warning) {
+    // Zwei Durchgänge, damit `bekannt` (das in `target` **und** `warnings`
+    // hineinzeigt) ausgelaufen ist, bevor `target` wächst. Kopiert wird dabei
+    // nichts: der Merkzettel ist ein Bit je Warnung.
+    let behalten: Vec<bool> = {
+        let mut bekannt: std::collections::HashSet<&str> =
+            target.iter().map(String::as_str).collect();
+        warnings
+            .iter()
+            .map(|w| bekannt.insert(w.as_str()))
+            .collect()
+    };
+    for (warning, behalten) in warnings.into_iter().zip(behalten) {
+        if behalten {
             target.push(warning);
         }
     }
+}
+
+/// Was einer geheilten Seite hinterhergesagt werden muss.
+///
+/// Der Schlussteil jedes Satzes aus [`healed_page_warnings`]. Er steht getrennt,
+/// weil der Anfang aus [`SaneBox::warning`] kommt — dem Satz, den auch der
+/// Rasterizer benutzt — und weil er nur **einmal je Satz** vorkommt, nicht
+/// einmal je Seite.
+///
+/// Deshalb spricht er von „dort“ und nicht von „dieser Seite“: seit die Sätze
+/// zusammengefasst werden, kann ein Satz für eine Seite gelten oder für
+/// zwanzigtausend.
+const HEALED_PAGE_CONSEQUENCE: &str = "Was die Datei über die Größe dort sagt, \
+     gilt damit nicht. Das Deck-Rechteck wird an der Stelle gezeichnet, an der der \
+     Text stand; ob es zu sehen ist, entscheidet der Betrachter, der ebenso heilen \
+     muss. Und die Wirkungsprüfung ist dort gegen A4 gemessen, nicht gegen die \
+     Angabe der Datei. Bitte das Ergebnis dort von Hand prüfen.";
+
+/// Ein Satz je **Beanstandung**, mit der Liste der Seiten, für die er gilt.
+///
+/// ## Warum das hier steht
+///
+/// Die Heilung selbst gibt es längst und an genau einer Stelle
+/// ([`redact_pdf::document::sane_box`]); Rasterizer, Oberfläche und [`apply`]
+/// fragen dort. **Gesagt** wurde sie aber nur in der Oberfläche. Ein Lauf über
+/// eine einseitige Datei mit `/MediaBox [0 0 0 0]` endete auf der
+/// Kommandozeile mit „Entfernte Zeichen: 28“, Rückgabewert 0 und keiner
+/// einzigen Warnung — von einer gewöhnlichen Datei nicht zu unterscheiden.
+///
+/// Der erste Halbsatz ist deshalb wörtlich [`SaneBox::warning`], also derselbe
+/// Satz, den der Rasterizer schon an die gezeichnete Seite hängt; hinzu kommen
+/// die Seitenzahlen (1-basiert, wie überall in der Ausgabe) und
+/// [`HEALED_PAGE_CONSEQUENCE`].
+///
+/// ## Warum zusammengefasst wird
+///
+/// Vorher entstand **je Seite** ein vollständiger Satz von rund 410 Zeichen,
+/// von denen 350 Folgetext waren. Gemessen an einer Datei mit 20 000 entarteten
+/// Seiten (5,4 MB): 20 000 Zeilen auf stderr, und das Audit-Log wuchs von
+/// 11,1 MB (dieselbe Datei mit gesunder MediaBox) auf 19,4 MB. Kein Absturz und
+/// kein Hänger — aber die Nachbarn in [`crate::audit::Effects::warnings`] sagen
+/// dasselbe seit jeher in einem Satz mit Seitenliste, und ein Vorbehalt, der
+/// zwanzigtausend Zeilen lang ist, wird nicht gelesen.
+///
+/// Gruppiert wird nach dem Wortlaut aus [`SaneBox::warning`], nicht über alle
+/// geheilten Seiten hinweg: darin steht die **Rohangabe** der Datei („0 x 0“,
+/// „300000 x 300000“), und Seiten mit verschiedenen Angaben in einen Satz zu
+/// ziehen hieße, eine davon falsch wiederzugeben. Eine Datei, die auf jeder
+/// Seite eine *andere* unbrauchbare MediaBox nennt, bekommt deshalb weiterhin
+/// einen Satz je Seite — dort ist die Auskunft je Seite wirklich eine andere.
+///
+/// ## Warum es eine Deckungslücke ist (Rückgabewert 3)
+///
+/// Weil der zweite Teil von [`crate::coverage`]s Definition zutrifft: gelesen
+/// wurde die Seite vollständig — **nachgemessen** wurde das Ergebnis aber gegen
+/// ein Blatt, das in der Datei nicht steht. Die Wirkungsprüfung
+/// ([`crate::audit::EntryEffect::of`]) fragt „liegt das Rechteck auf dem
+/// Blatt?“ und bekommt hier eine Antwort über A4. Gemessen an
+/// `/MediaBox [0 0 300000 300000]` mit Text bei (250000, 250000): der Lauf
+/// meldet „liegen vollständig neben der Seite“ — gegen die Angabe der Datei
+/// läge dasselbe Rechteck mitten darauf. Beide Antworten sind möglich, und
+/// welche stimmt, hängt an einem Blatt, das dieses Programm sich ausgedacht
+/// hat. Dazu kommt die Ausgabedatei: sie behält die unbrauchbare MediaBox
+/// (nachgesehen in den geschriebenen Bytes), und ob das Deck-Rechteck darin zu
+/// sehen ist, entscheidet der Betrachter, der genauso heilen muss. Für diese
+/// Seite kann der Lauf nicht einstehen — das ist der Unterschied zwischen
+/// Rückgabewert 0 und 3.
+///
+/// **Was diese Begründung ausdrücklich nicht ist.** Hier stand vorher, der
+/// Beweis sei der Widerspruch zwischen „Entfernte Zeichen: 28“ und „der Text
+/// der Seite steht unverändert in der Ausgabe“. Der trägt nicht: gemessen an
+/// `/MediaBox [0 0 -595 -842]` sagt derselbe Lauf **beides** und endet mit
+/// Rückgabewert 0. Dort wird nichts geheilt — `sane_box` normalisiert die
+/// vertauschten Ecken zu einem gewöhnlichen A4-Blatt im negativen Quadranten —,
+/// und das Rechteck liegt wirklich daneben. Der Widerspruch gehört also dem
+/// Wortlaut der Off-Page-Warnung und nicht der Heilung; er kann die 3 hier
+/// nicht begründen.
+///
+/// Lärm wird daraus nicht: [`redact_pdf::document::sane_box`] greift erst
+/// außerhalb von 1 pt … 200 000 pt oder bei nicht endlichen Werten. Jedes
+/// gewöhnliche Blatt — A4, Letter, ein Scan, eine Plakatseite — liegt weit
+/// innerhalb und löst hier nichts aus.
+pub fn healed_page_warnings(boxes: &[SaneBox]) -> Vec<String> {
+    // Nach Wortlaut gruppiert, in der Reihenfolge der ersten Nennung. Die
+    // Karte hält den Platz in `gruppen`, damit das Zusammenlegen ein Durchgang
+    // bleibt und nicht Seitenzahl mal Beanstandungen kostet — bei einer Datei,
+    // die auf jeder Seite eine andere Angabe macht, wären das dieselben
+    // Aufwand-mal-Aufwand-Kosten wie in [`push_warnings`].
+    let mut gruppen: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut platz: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (page, checked) in boxes.iter().enumerate() {
+        let Some(note) = checked.warning() else {
+            continue;
+        };
+        match platz.get(&note) {
+            // Das `+ 1` ist die einzige erlaubte Umrechnung: Fließtext sagt
+            // „Seite 1“, JSON zählt ab 0 — wie bei den Nachbarn in `audit.rs`.
+            Some(&i) => gruppen[i].1.push(page + 1),
+            None => {
+                platz.insert(note.clone(), gruppen.len());
+                gruppen.push((note, vec![page + 1]));
+            }
+        }
+    }
+    let total = boxes.len();
+    gruppen
+        .into_iter()
+        .map(|(note, seiten)| {
+            let liste = seiten
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Seite {liste}: {note}. Betrifft {} von {total} Seite(n). \
+                 {HEALED_PAGE_CONSEQUENCE}",
+                seiten.len()
+            )
+        })
+        .collect()
 }
 
 /// Zeitbremse: die Konfliktauflösung wächst **überproportional** mit der

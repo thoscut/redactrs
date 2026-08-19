@@ -804,6 +804,21 @@ pub struct AppState {
     pub rotations: Vec<i64>,
     pub runs: Vec<TextRun>,
     pub current_page: usize,
+    /// Zoomfaktor der Anzeige.
+    ///
+    /// **Ein öffentliches Feld, und darauf lässt sich nichts stützen.**
+    /// [`AppState::set_zoom`] klemmt auf [`MIN_ZOOM`] … [`MAX_ZOOM`] und lehnt
+    /// nicht endliche Werte ab — es ist damit eine Bitte und kein Wächter:
+    /// `state.zoom = f32::NAN` geht daran vorbei, und danach sind
+    /// [`AppState::can_zoom_in`] und [`AppState::can_zoom_out`] **beide**
+    /// `false` (gemessen), weil jeder Vergleich mit NaN falsch ist;
+    /// `zoom_in`/`zoom_out` holen es nicht zurück, nur `zoom_reset`.
+    ///
+    /// Heute schreibt im ganzen Programm nur `set_zoom` hierher, es ist also
+    /// kein Fehler. Aber wer den Bereich *braucht*, prüft ihn selbst:
+    /// [`crate::viewer::usable_zoom`] tut das an der einen Stelle, an der aus
+    /// dem Zoom Regionskoordinaten werden. Dort steht auch, was ohne diese
+    /// Prüfung gemessen herauskam.
     pub zoom: f32,
     pub regions: Vec<AnnotatedRegion>,
     pub selected_region: Option<usize>,
@@ -1213,7 +1228,35 @@ impl AppState {
         self.current_page + 1 >= self.page_count()
     }
 
+    /// Setzt den Zoomfaktor, geklemmt auf [`MIN_ZOOM`] … [`MAX_ZOOM`].
+    ///
+    /// **`f32::clamp` klemmt NaN nicht weg, es reicht ihn durch** — anders als
+    /// `min`/`max`, die ihn schlucken. Ein einziges `set_zoom(NaN)` machte den
+    /// Zoom deshalb dauerhaft unbrauchbar: gemessen blieb `zoom = NaN` stehen,
+    /// `can_zoom_in()` und `can_zoom_out()` waren **beide** `false` (jeder
+    /// Vergleich mit NaN ist falsch), also waren Vergrößern *und* Verkleinern
+    /// abgeschaltet, und `zoom_in`/`zoom_out` hätten daran auch nichts mehr
+    /// geändert — `NaN * ZOOM_STEP` ist wieder NaN. Zurück führte nur
+    /// „Originalgröße“.
+    ///
+    /// Über die heutige Oberfläche ist das nicht auszulösen (der Regler liefert
+    /// Werte aus seinem Bereich, [`crate::viewer::fit_zoom`] prüft die
+    /// Seitenmaße vorher); die Methode ist aber öffentlich, und der Preis der
+    /// Prüfung ist ein Vergleich je Zoomschritt.
+    ///
+    /// **Diese Prüfung ist kein Tor.** [`AppState::zoom`] ist ein öffentliches
+    /// Feld; wer es unmittelbar beschreibt, kommt hier gar nicht vorbei. Wo der
+    /// Bereich gebraucht wird, wird er deshalb noch einmal geprüft — siehe
+    /// [`crate::viewer::usable_zoom`].
+    ///
+    /// Ein Wert ohne endliche Größe **ändert nichts**. Das ist die einzige
+    /// Antwort, die keinen Zustand hinterlässt, aus dem man nicht mehr
+    /// herauskommt; auf einen Ersatzwert zu klemmen hieße, einen Zoom zu
+    /// zeigen, den niemand eingestellt hat.
     pub fn set_zoom(&mut self, zoom: f32) {
+        if !zoom.is_finite() {
+            return;
+        }
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
@@ -1354,7 +1397,46 @@ impl AppState {
     /// geschwärzt“ mitgezählt — gemessen: Rechteck bei x 700…760 auf einer
     /// 595 pt breiten Seite, Kopfzeile „1 werden geschwärzt“, nach dem Export
     /// `removed_glyphs = 0`. Die Wahrheit kam erst hinterher als Warnung.
+    ///
+    /// # Unbrauchbare Koordinaten sind `None` — und das ist die gefährliche
+    /// Richtung
+    ///
+    /// `f64::max` und `f64::min` **schlucken** einen NaN-Operanden und geben
+    /// den anderen zurück. Aus `NaN.max(sheet.ll.x)` wurde damit die linke
+    /// Blattkante, aus `NaN.min(sheet.ur.x)` die rechte — der Schnitt eines
+    /// NaN-Rechtecks mit dem Blatt war **das ganze Blatt**. Gemessen mit
+    /// `Rect::new(NaN, NaN, 100, 100)` auf der 595 x 842 pt großen Demo-Seite:
+    /// `clamp_to_page` lieferte `Some(Rect(0, 0, 595, 842))`,
+    /// [`AppState::add_manual_region`] legte daraufhin eine manuelle Region
+    /// über das ganze Blatt an, meldete „Manuelle Region auf Seite 1 angelegt“
+    /// und die Bilanz zählte sie als `Redacted`. Der Nutzer sähe ein Rechteck
+    /// über der ganzen Seite, das er nie gezogen hat, und exportierte ein
+    /// vollständig geschwärztes Dokument.
+    ///
+    /// Die Regel dafür steht schon in [`Rect::is_usable`] und wird hier nicht
+    /// ein zweites Mal ausgeschrieben: ein Rechteck ohne endliche Koordinaten
+    /// bezeichnet **keinen Bereich der Ebene**, also auch keinen Bereich
+    /// *dieser Seite*. `None` ist damit dieselbe Antwort wie für ein Rechteck
+    /// neben dem Blatt, und alle vier Aufrufer verhalten sich dann richtig:
+    /// [`AppState::add_manual_region`] legt nichts an und sagt es,
+    /// [`AppState::set_region_rect`] lehnt ab, [`AppState::move_selected`] und
+    /// [`AppState::resize_selected`] lassen das Rechteck stehen, ohne einen
+    /// Schritt „Rückgängig“ zu kosten, und [`AppState::is_off_page`] hält den
+    /// Eintrag aus der Konfliktauflösung heraus, statt „wird geschwärzt“ zu
+    /// versprechen.
+    ///
+    /// Die Prüfung gilt **vor** der Frage nach dem Blatt: ohne geladenes
+    /// Dokument wird zwar nichts beschnitten, ein unbrauchbares Rechteck bleibt
+    /// aber auch dort unbrauchbar.
+    ///
+    /// Das **Blatt** braucht keine solche Prüfung: `self.page_boxes` kommt aus
+    /// [`redact_pdf::document::sane_page_boxes`], das jede nicht endliche oder
+    /// absurd bemessene MediaBox durch A4 ersetzt. Festgehalten ist das in
+    /// [`crate::state::z9_tests::jedes_geladene_blatt_ist_brauchbar`].
     pub fn clamp_to_page(&self, page: usize, rect: Rect) -> Option<Rect> {
+        if !rect.is_usable() {
+            return None;
+        }
         let Some(sheet) = self.page_box(page) else {
             return Some(rect);
         };
@@ -1498,10 +1580,27 @@ impl AppState {
     /// Kleiner als [`MIN_REGION_EXTENT`] wird es nicht — ein Rechteck von null
     /// Fläche wäre eine Zeile in der Liste, die nichts überdeckt.
     ///
+    /// **Genau diese Untergrenze war der Einstieg für NaN.** Sie steht als
+    /// `(rect.ur.x + dx).max(rect.ll.x + MIN_REGION_EXTENT)`, und `f64::max`
+    /// schluckt einen NaN-Operanden: mit `dx = NaN` wurde aus der linken Seite
+    /// NaN, `max` gab die rechte zurück, und ein 100 pt breiter Balken war
+    /// danach 2 pt breit — gemessen an `Rect(100, 100, 200, 140)`, heraus kam
+    /// `Rect(100, 100, 102, 140)`. Kein Fehler, keine Meldung, und unter dem
+    /// geschrumpften Balken stünde die IBAN wieder lesbar da. Das ist derselbe
+    /// Schaden, den [`AppState::slide_onto_page`] für das Schieben abwendet.
+    ///
+    /// Ein Schritt ohne endliche Weite ist deshalb **kein** Schritt: er ändert
+    /// nichts. Über die Tastatur kommt er nicht (`crate::app::key_commands`
+    /// setzt `NUDGE`/`NUDGE_FAST`), aber diese Methode ist öffentlich, und die
+    /// Untergrenze soll nicht davon abhängen, wer sie ruft.
+    ///
     /// Verlauf und Seitenprüfung wie bei [`AppState::move_selected`]; beide
     /// teilen sich die Sitzung, weil beides dieselbe Handbewegung an derselben
     /// Region ist.
     pub fn resize_selected(&mut self, dx: f64, dy: f64) -> bool {
+        if !dx.is_finite() || !dy.is_finite() {
+            return false;
+        }
         let Some(index) = self.selected_region else {
             return false;
         };
@@ -2639,6 +2738,10 @@ fn page_rotation(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
 #[cfg(test)]
 #[path = "rev7_tests.rs"]
 pub mod rev7_tests;
+
+#[cfg(test)]
+#[path = "z9_tests.rs"]
+pub mod z9_tests;
 
 #[cfg(test)]
 mod tests {

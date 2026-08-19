@@ -72,8 +72,144 @@ pub struct Limits {
     /// abgelehnt; der Unterschied war allein, ob sie komprimiert war. Die
     /// Begründung im Langen steht in
     /// `redact-pdf/tests/rumpf_im_parse_budget.rs`.
+    ///
+    /// **Was dieses Budget allein nicht kann.** Es zählt *Dateibytes* und muss
+    /// dafür einen Aufblähfaktor unterstellen. Der ist keine Konstante — er
+    /// hängt an der **Form** der Syntax, nicht an ihrer Länge, und schwankt
+    /// gemessen um den Faktor 274. Deshalb steht neben dieser Buchhaltung eine
+    /// zweite, die den Faktor rechnet, statt ihn zu unterstellen; sie hängt am
+    /// selben Schalter. Siehe [`OBJEKTSPEICHER_JE_BUDGETBYTE`].
     pub max_parsed_bytes: u64,
 }
+
+/// Wie viel **Objektspeicher** je Byte Parse-Budget zugestanden wird.
+///
+/// ## Das ist die Zahl, die vorher stillschweigend unterstellt wurde
+///
+/// [`Limits::max_parsed_bytes`] zählt Dateibytes und unterstellt damit einen
+/// begrenzten Aufblähfaktor — geprüft hat ihn niemand. Genau das war die
+/// Lücke: eine Datei aus reinem Rumpf, 16 761 999 Byte und damit **innerhalb**
+/// des 16-MiB-Budgets, gefüllt mit leeren Arrays `[[][][]…]`, lief mit
+/// Rückgabewert 0 durch und belegte dabei **5 739 MB** — über mehrere Läufe
+/// 11 bis 26 s, die Wanduhr schwankt mit der Fremdlast, der Speicher nicht.
+/// Dieselbe Bauart mit 21,4 MB wurde abgelehnt: die Decke griff, sie hing nur
+/// an der falschen Größe. Jetzt wird dieselbe Datei bei 22 MB abgelehnt, in
+/// unter 0,2 s.
+///
+/// Hier steht der Faktor jetzt ausdrücklich da und wird geprüft. Gemessen mit
+/// zählendem Allokator an 4-MB-Dateien gleicher Größe (`Document` nach
+/// `load_mem`, geteilt durch die Dateigröße):
+///
+/// | Form | `Document` | Byte je Dateibyte |
+/// |---|---:|---:|
+/// | `[[][][]…]` — leere Arrays | 1 204,7 MB | **301,6** |
+/// | `[/a/a/a…]` — Namen | 300,2 MB | 75,2 |
+/// | `[0 0 0…]` — Zahlen | 292,6 MB | 73,3 |
+/// | `<</ab 0 …>>` — Dictionary-Einträge | 176,1 MB | 44,1 |
+/// | `[<<>><<>>…]` — leere Dictionaries | 146,7 MB | 36,7 |
+/// | `[1 0 R …]` — Verweise | 146,0 MB | 36,5 |
+/// | eine 800-Byte-Zeichenkette | 4,6 MB | 1,1 |
+///
+/// 274-facher Unterschied bei identischer Dateigröße. Ein Faktor ist also
+/// nichts, was sich aus der Dateigröße ablesen ließe — er hängt an der
+/// **Form**. Deshalb wird er nicht geschätzt, sondern beim Lauf über die
+/// Rohbytes **gerechnet**: [`OBJEKT_BYTES`] je Objekt, [`ARRAY_BYTES`] je
+/// Array (siehe [`wortanfang`]). Dass diese Rechnung nie unter dem wirklich
+/// belegten Speicher liegt — im engsten Fall 2 % darüber —, hält
+/// `redact-pdf/tests/za_objektspeicher_gerechnet.rs` fest.
+///
+/// ## Warum 60
+///
+/// Die Decke ist `max_parsed_bytes × 60`, bei der Vorgabe also **960 MB**
+/// gerechneter Objektspeicher. Sie liegt zwischen dem Teuersten, was dieser
+/// Baum ausdrücklich durchlassen *will*, und dem Billigsten, was er ablehnen
+/// *muss*. Alles gemessen; die Spitzenwerte sind `ru_maxrss` eines
+/// Release-Laufs `redact-rs DATEI -o … -f -q`, MB heißt hier wie überall
+/// 1024², und „gerechnet“ ist der Wert dieser Buchhaltung:
+///
+/// | Datei (Byte) | gerechnet | Spitze vorher | vorher | nachher |
+/// |---|---:|---:|---|---|
+/// | 13 500 654, ein Seiteninhalt mit 1,5 Mio. Operationen | 915 MB | 2 178 MB | rc 0 | **rc 0** |
+/// | 16 660 959, `[<<>><<>>…]` | Byte-Budget bindet | 1 013 MB | rc 0 | **rc 0** |
+/// | 16 660 891, `<</ab 0 …>>` | 988 MB | 1 383 MB | rc 0 | rc 1 |
+/// | 16 661 481, `[1 0 R …]` | 1 241 MB | 711 MB | rc 0 | rc 1 |
+/// | 16 660 959, `[0 0 0 …]` | 1 241 MB | 1 920 MB | rc 0 | rc 1 |
+/// | 16 660 959, `[/a/a …]` | 1 241 MB | 2 404 MB | rc 0 | rc 1 |
+/// | 16 761 999, `[[][][]…]` | 4 896 MB | **5 739 MB** | rc 0 | rc 1, 22 MB |
+///
+/// **Nach unten** hält der lange, ehrliche Seiteninhalt die Decke fest: der
+/// Test `resource_bombs::a_long_honest_content_stream_is_not_mistaken_for_a_fanout`
+/// verlangt ausdrücklich, dass ein einzelner Strom mit sehr vielen Operationen
+/// durchläuft. Er kostet gerechnet 915 MB — jede kleinere Decke bräche ihn.
+/// **Nach oben** hält ihn die Dictionary-Bombe fest, die mit 988 MB knapp
+/// darüber liegt.
+///
+/// Die Zeile mit 711 MB zeigt den Preis der Vorsicht: `1 0 R` ist ein Objekt
+/// und zählt drei Wörter, deshalb wird diese Datei abgelehnt, obwohl sie
+/// gemessen unter der Decke bliebe. Ein Abzug für das `R` ließe sich mit
+/// `R R R R …` dazu missbrauchen, echte Objekte wegzurechnen; Wörter dürfen
+/// nur addiert werden, und eine Datei aus 2,7 Millionen Verweisen ist kein
+/// Dokument.
+///
+/// Der Faktor gilt gegen das **Budget**, nicht gegen die Dateigröße: eine
+/// Datei unter dem Budget darf einen höheren Eigenfaktor haben — der ehrliche
+/// Seiteninhalt oben hat 68 — und kommt trotzdem durch.
+///
+/// Für gewöhnliche Dokumente ändert sich damit nichts: bei allen sechs
+/// Gegenproben (`--write-demo`, 500 und 2 000 Textseiten, 200 Scanseiten mit
+/// Bildern, Querverweis-Strom, 2 937 Textseiten) bindet weiterhin das
+/// **Byte-Budget** und nicht diese Decke — nachgemessen in
+/// `za_objektdecke::bei_gewoehnlichen_dokumenten_bindet_weiter_das_byte_budget`.
+///
+/// ## Wo es doch enger wird, und was das kostet
+///
+/// Ein **sehr dichter Seiteninhalt** stößt jetzt vor dem Byte-Budget an. Bei
+/// der Dichte von `0 0 0 rg\n` (vier Wörter je neun Byte) liegt die Grenze
+/// rechnerisch bei 14 155 776 Byte Strom; gemessen läuft eine Datei mit
+/// 13,5 MB Strom durch und eine mit 14,0 MB nicht mehr — vorher lief die mit
+/// 14,6 MB bei Rückgabewert 0 auf 2 469 MB. Das ist der Preis dafür, dass die
+/// 16-MB-Datei aus leeren Arrays nicht mehr 5 739 MB belegt: beide sind
+/// Syntax, und eine Decke, die nur die eine Form kennt, wäre wieder eine über
+/// der falschen Menge. Wer solche Dateien wirklich verarbeiten muss, hebt
+/// `--max-parsed-mb` an — mit 24 läuft die 14,6-MB-Datei wieder durch.
+///
+/// ## Woran die Decke damit hängt
+///
+/// An `--max-parsed-mb`, und zwar in beiden Einheiten. Das ist Absicht: der
+/// Schalter ist die eine Stelle, an der jemand sagt „so viel Syntax lasse ich
+/// zu“, und er soll nicht in der einen Einheit wirken und in der anderen nicht.
+/// Eine zweite Schraube wäre eine zweite Stelle, an der die Zahlen
+/// auseinanderlaufen — und für ein wirklich so gebautes Dokument gäbe es sonst
+/// gar keinen Weg mehr.
+///
+/// ## Was die Zahl **nicht** ist
+///
+/// Kein Spitzenbedarf eines Laufs. Gerechnet wird, was aus der Syntax an
+/// `Object`-Werten entsteht, und sonst nichts — die Tabelle oben zeigt den
+/// Abstand: beim Seiteninhalt liegt der gemessene Spitzenwert beim 2,4-fachen
+/// des gerechneten, beim Rumpf beim 1,2- bis 1,6-fachen. Es ist auch keine
+/// Messung: die Summe hängt an der Datei, nicht an Allokator oder Zielsystem.
+///
+/// Die Messreihe steht in `redact-pdf/tests/za_objektdecke.rs`.
+const OBJEKTSPEICHER_JE_BUDGETBYTE: u64 = 60;
+
+/// Was ein `lopdf::Object` im geladenen Dokument kostet — der Betrag, mit dem
+/// [`Prescan::walk`] jedes Wort der Syntax verbucht.
+///
+/// Gemessen mit zählendem Allokator: **153,6** Byte je Zahl, Name, Verweis
+/// oder leerem Dictionary in einem Array; ein Dictionary-Eintrag kostet 231
+/// Byte und besteht aus zwei Wörtern (Schlüssel und Wert), bekommt also
+/// 2 × 160 verbucht. 160 liegt über beidem.
+const OBJEKT_BYTES: u64 = 160;
+
+/// Was ein **Array** zusätzlich kostet.
+///
+/// Ein leeres Array `[]` ist zwei Byte in der Datei und kostet gemessen
+/// **632,4** Byte: sein eigener `Object`-Platz plus die Anforderung des `Vec`,
+/// den `lopdf` dafür anlegt. Deshalb zählt eine öffnende `[` wie vier Objekte.
+/// Genau diese Form war die Bombe, die durch das Byte-Budget lief. Beide
+/// Beträge sind in `za_objektspeicher_gerechnet.rs` an die Messung gebunden.
+const ARRAY_BYTES: u64 = 640;
 
 impl Default for Limits {
     fn default() -> Self {
@@ -247,8 +383,41 @@ pub fn prescan(bytes: &[u8], limits: &Limits) -> Result<()> {
         limits,
         decompressed: 0,
         parsed: 0,
+        objects: 0,
     };
     scan.walk(bytes, true, false)
+}
+
+/// Beginnt an `i` ein **Wort** der PDF-Syntax?
+///
+/// Ein Wort ist alles, woraus `lopdf` einen `Object`-Wert macht und was nicht
+/// schon an seiner öffnenden Klammer erkannt wird: eine Zahl, ein Name, ein
+/// Schlüsselwort (`true`, `false`, `null`, `R`, ein Operator im Seiteninhalt).
+/// Klammern zählt [`Prescan::walk`] selbst, an `[`, `<<`, `(` und `<`.
+///
+/// **Die Zählung darf nach oben abweichen, nie nach unten.** Deshalb hier zwei
+/// bewusste Ungenauigkeiten, beide nach oben: ein Verweis `1 0 R` ist *ein*
+/// Objekt und zählt drei Wörter, und ein Dictionary-Schlüssel ist gar kein
+/// Objekt (`lopdf` legt ihn als `Vec<u8>` ab) und zählt eins. Wer die Zählung
+/// dichter an die Wahrheit bringen will, muss aufpassen: ein Abzug für `R`
+/// ließe sich mit `R R R R …` dazu missbrauchen, echte Objekte
+/// wegzurechnen — Wörter dürfen nur addiert werden.
+fn wortanfang(bytes: &[u8], i: usize) -> bool {
+    let b = bytes[i];
+    if b == b'/' {
+        // Der Name selbst wird beim ersten Byte seines Rumpfes gezählt (dessen
+        // Vorgänger ist dieses `/`, also ein Trennzeichen). Nur der **leere**
+        // Name hat keinen Rumpf — er ist trotzdem ein Objekt und kostet ein
+        // Byte in der Datei.
+        return match bytes.get(i + 1) {
+            Some(&n) => is_whitespace(n) || is_delimiter(n),
+            None => true,
+        };
+    }
+    if is_whitespace(b) || is_delimiter(b) {
+        return false;
+    }
+    i == 0 || is_whitespace(bytes[i - 1]) || is_delimiter(bytes[i - 1])
 }
 
 fn check_depth(depth: usize, limit: usize) -> Result<()> {
@@ -267,6 +436,7 @@ struct Prescan<'a> {
     limits: &'a Limits,
     decompressed: u64,
     parsed: u64,
+    objects: u64,
 }
 
 impl Prescan<'_> {
@@ -277,9 +447,10 @@ impl Prescan<'_> {
     /// steuert, ob `stream … endstream` als Nutzlast behandelt wird; das gilt
     /// nur für die Datei selbst, nicht für bereits ausgepackte Streams.
     ///
-    /// `binary` sagt, ob dieser Bereich wie Nutzlast aussieht; davon hängen die
-    /// zulässige Tiefe und die Frage ab, welche `[` überhaupt zählen — siehe
-    /// [`MAX_BINARY_NESTING_DEPTH`] und [`opens_object`].
+    /// `binary` sagt, ob dieser Bereich wie Nutzlast aussieht. Davon hängen
+    /// drei Dinge ab: die zulässige Tiefe (siehe [`MAX_BINARY_NESTING_DEPTH`]),
+    /// ab wann die Tiefenzählung neu anfängt (siehe [`syntax_byte`]), und ob
+    /// die Objekte dieses Bereichs überhaupt verbucht werden.
     ///
     /// ## Der Rumpf zählt mit
     ///
@@ -301,6 +472,17 @@ impl Prescan<'_> {
     /// Die Lücke war also nicht die Bauart der Bombe, sondern allein die Frage,
     /// ob sie komprimiert war. Diese Unterscheidung sucht sich ein Angreifer
     /// als Erstes aus.
+    ///
+    /// ## Und die **Objekte** zählen mit
+    ///
+    /// Die Bytes allein reichen nicht: ein leeres Array `[]` ist zwei Byte und
+    /// im Speicher 632. Deshalb zählt derselbe Lauf nebenher die Wörter der
+    /// Syntax und rechnet daraus, was das geladene Dokument belegen wird —
+    /// [`OBJEKT_BYTES`] je Wort, [`ARRAY_BYTES`] je öffnender `[`, verbucht
+    /// über [`Prescan::charge_objects`]. Gezählt wird nur außerhalb von
+    /// Nutzlast (`binary == false`): woraus `lopdf` keine `Object`-Werte macht,
+    /// kostet auch keine. Die Begründung samt Messreihe steht bei
+    /// [`OBJEKTSPEICHER_JE_BUDGETBYTE`].
     fn walk(&mut self, bytes: &[u8], streams: bool, binary: bool) -> Result<()> {
         let limit = if binary {
             MAX_BINARY_NESTING_DEPTH
@@ -319,6 +501,13 @@ impl Prescan<'_> {
         // Steht dieses Byte in einem Namen (`/…`)? Dort sind auch Bytes über
         // 126 zulässig — `lopdf` nimmt sie sogar roh an.
         let mut in_name = false;
+        // Der gerechnete Speicher der Objekte in diesem Bereich — die Menge,
+        // an der der Speicher des geladenen Dokuments wirklich hängt. Gezählt
+        // wird nur, wo aus den Bytes auch wirklich Syntax wird: Nutzlast
+        // (`binary`) parst `lopdf` nicht zu `Object`-Werten, und ihre Bytes
+        // zählen deshalb schon heute nicht ins Parse-Budget.
+        let zaehlen = !binary;
+        let mut objektspeicher = 0u64;
 
         while i < bytes.len() {
             if binary {
@@ -338,16 +527,23 @@ impl Prescan<'_> {
                     i += 1;
                 }
                 b'%' => i = skip_to_eol(bytes, i),
-                b'(' => i = skip_literal_string(bytes, i),
+                b'(' => {
+                    objektspeicher += zaehlen as u64 * OBJEKT_BYTES;
+                    i = skip_literal_string(bytes, i);
+                }
                 b'<' if bytes.get(i + 1) == Some(&b'<') => {
                     if depth == 0 {
                         dict_start = i;
                     }
+                    objektspeicher += zaehlen as u64 * OBJEKT_BYTES;
                     depth += 1;
                     check_depth(depth, limit)?;
                     i += 2;
                 }
-                b'<' => i = skip_hex_string(bytes, i),
+                b'<' => {
+                    objektspeicher += zaehlen as u64 * OBJEKT_BYTES;
+                    i = skip_hex_string(bytes, i);
+                }
                 b'>' if bytes.get(i + 1) == Some(&b'>') => {
                     depth = depth.saturating_sub(1);
                     i += 2;
@@ -356,6 +552,7 @@ impl Prescan<'_> {
                     }
                 }
                 b'[' => {
+                    objektspeicher += zaehlen as u64 * ARRAY_BYTES;
                     depth += 1;
                     check_depth(depth, limit)?;
                     i += 1;
@@ -381,7 +578,12 @@ impl Prescan<'_> {
                 b'B' if !streams && keyword_at(bytes, i, b"BI") => {
                     i = skip_inline_image(bytes, i);
                 }
-                _ => i += 1,
+                _ => {
+                    if zaehlen && wortanfang(bytes, i) {
+                        objektspeicher += OBJEKT_BYTES;
+                    }
+                    i += 1;
+                }
             }
         }
         if streams {
@@ -395,6 +597,13 @@ impl Prescan<'_> {
                 "die zu parsenden Teile der Datei (Objektköpfe, Dictionaries, \
                  Querverweistabelle) zusammen mit den geparsten Streams",
             )?;
+        }
+        if zaehlen {
+            // Nach dem Byte-Budget, nicht davor: reißt eine Datei beide, ist
+            // die Größe die einfachere Auskunft. Und wie dort gilt — der Lauf
+            // selbst belegt nichts, gebucht wird am Stück, und die Ablehnung
+            // kommt immer noch vor `Document::load_mem`.
+            self.charge_objects(objektspeicher)?;
         }
         Ok(())
     }
@@ -556,18 +765,60 @@ impl Prescan<'_> {
     ///
     /// `woher` benennt die Klasse — sie steht in der Meldung, damit erkennbar
     /// ist, welcher Teil der Datei das Budget aufgebraucht hat.
+    ///
+    /// **Was die Meldung sagen darf.** Sie nannte früher „200 bis 270 Byte je
+    /// Dictionary-Eintrag“ — auch dann, wenn ein Content-Stream das Budget
+    /// gerissen hatte, und als wäre der Faktor eine Konstante. Er ist keine:
+    /// gemessen an 4-MB-Dateien gleicher Größe reicht er von 1,1 (eine lange
+    /// Zeichenkette) bis 301,6 (leere Arrays) Byte je Dateibyte. Genau deshalb
+    /// gibt es daneben [`OBJEKTSPEICHER_JE_BUDGETBYTE`]; die Meldung verspricht
+    /// hier nur noch, was sie halten kann.
     fn charge_parsed(&mut self, size: u64, woher: &str) -> Result<()> {
         self.parsed = self.parsed.saturating_add(size);
         if self.parsed > self.limits.max_parsed_bytes {
             return Err(RedactError::Pdf(format!(
                 "{woher} überschreiten das Budget von {} MB. Beim Parsen wird \
-                 daraus ein Vielfaches an Arbeitsspeicher: gemessen 200 bis 270 \
-                 Byte je Dictionary-Eintrag, unabhängig davon, wie kurz er \
-                 geschrieben ist. Ob ein Stream hierher zählt, entscheidet sein \
+                 daraus ein Vielfaches an Arbeitsspeicher — wie viel, hängt an \
+                 der Form der Syntax, nicht an ihrer Länge: gemessen 1 Byte je \
+                 Dateibyte bei einer langen Zeichenkette und 302 bei lauter \
+                 leeren Arrays. Ob ein Stream hierher zählt, entscheidet sein \
                  Inhalt: sieht er wie PDF-Syntax aus statt wie Nutzlast, gilt \
                  dieses engere Budget. Ein wirklich so großes Dokument lässt \
                  sich mit --max-parsed-mb durchlassen.",
                 self.limits.max_parsed_bytes / (1024 * 1024)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Verbucht den **gerechneten Speicher der Objekte** — die Menge, an der
+    /// der Speicher des geladenen Dokuments wirklich hängt.
+    ///
+    /// Warum es diese zweite Buchhaltung neben [`Prescan::charge_parsed`]
+    /// gibt, steht bei [`OBJEKTSPEICHER_JE_BUDGETBYTE`].
+    fn charge_objects(&mut self, geschaetzt: u64) -> Result<()> {
+        self.objects = self.objects.saturating_add(geschaetzt);
+        let decke = self
+            .limits
+            .max_parsed_bytes
+            .saturating_mul(OBJEKTSPEICHER_JE_BUDGETBYTE);
+        if self.objects > decke {
+            return Err(RedactError::Pdf(format!(
+                "die Objekte dieser Datei belegen im Speicher gerechnet mehr \
+                 als {} MB — sie wird abgelehnt. Nicht ihre Größe entscheidet \
+                 das, sondern Zahl und Art der Objekte: {} Byte je Objekt, {} \
+                 je Array. Ein leeres Array `[]` sind zwei Byte in der Datei \
+                 und gemessen 632 im Arbeitsspeicher; eine Datei aus lauter \
+                 solchen Arrays bleibt damit unter jedem Größenbudget und \
+                 belegt trotzdem Gigabytes. Zugestanden sind {} Byte \
+                 Objektspeicher je Byte des Budgets von --max-parsed-mb — bei \
+                 einem gewöhnlichen Dokument entscheidet deshalb weiterhin \
+                 dessen Größe und nicht diese Decke. Ein wirklich so gebautes \
+                 Dokument lässt sich mit --max-parsed-mb durchlassen.",
+                decke / (1024 * 1024),
+                OBJEKT_BYTES,
+                ARRAY_BYTES,
+                OBJEKTSPEICHER_JE_BUDGETBYTE
             )));
         }
         Ok(())

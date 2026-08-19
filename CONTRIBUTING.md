@@ -86,6 +86,29 @@ Konfigurationsschema zwischen den Reihen ändert.
 abzuschalten ist eine Entscheidung mit Begründung im Code, kein Weg am Gate
 vorbei.
 
+### Vor dem Commit zusätzlich: die Belege in `docs/`
+
+Wer den **Rasterizer** (`redact-render`) oder die **Schwärzung** angefasst hat,
+erzeugt die Bilder der README neu und prüft sie nach — sonst zeigt die
+Startseite einen Stand, den der Code nicht mehr hat:
+
+```bash
+./scripts/make-preview.sh          # erzeugt docs/*.png, *.gif, *.txt neu
+python3 scripts/check-preview.py docs   # prüft sie (36 Prüfungen, ~0,8 s)
+git status --short docs/           # hat sich etwas bewegt?
+```
+
+**Bitgleichheit gilt nur auf derselben Maschine.** Dort liefert ein zweiter Lauf
+dieselben SHA-256-Summen für alle sechs Dateien (nachgemessen); über
+Maschinengrenzen ist das **nicht** zugesagt — `tiny-skia` rastert mit SIMD
+(SSE bzw. NEON),
+Fließkomma-Codegen darf sich zwischen `rustc`-Fassungen ändern, und die
+PNG-Kompression hängt an flate2/miniz_oxide aus `Cargo.lock`. Ein `git status`,
+der auf einem anderen Rechner Bytes meldet, ist deshalb **kein Befund** und
+gehört nicht in einen Beitrag; maßgeblich ist, was `check-preview.py` sagt. Die
+Begründung im Langen steht in
+[`docs/vorher-nachher.md`](docs/vorher-nachher.md#wie-zuverlässig-ist-nachbauen).
+
 ---
 
 ## Der Prüfmaßstab

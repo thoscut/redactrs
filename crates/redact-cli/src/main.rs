@@ -160,7 +160,11 @@ fn dispatch(cli: &Cli) -> Result<ExitCode> {
         let outcome = redact_pipeline::run(&cli.config_for(&settings, input))?;
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&outcome)?);
-        } else if !cli.quiet {
+        } else if cli.quiet {
+            // `--quiet` nimmt die Zusammenfassung weg, nicht den Vorbehalt.
+            // Siehe [`report_warnings`].
+            report_warnings(&outcome, true);
+        } else {
             report(&outcome);
         }
         // Eine Datei, die nur teilweise durchsucht werden konnte, ist kein
@@ -324,15 +328,55 @@ fn report(outcome: &Outcome) {
             }
         }
     }
-    // Warnungen bleiben Warnungen — aber die, für die der Rückgabewert
-    // anspringt, werden auch als solche ausgewiesen. Sonst stünde die
-    // wichtigste Zeile des Laufs zwischen Mitteilungen über Bildkodierung.
+    report_warnings(outcome, false);
+}
+
+/// Die Warnungen eines Laufs nach stderr.
+///
+/// Warnungen bleiben Warnungen — aber die, für die der Rückgabewert anspringt,
+/// werden auch als solche ausgewiesen. Sonst stünde die wichtigste Zeile des
+/// Laufs zwischen Mitteilungen über Bildkodierung.
+///
+/// # Warum `--quiet` die Deckungslücken trotzdem druckt
+///
+/// `nur_lücken` ist die Fassung für `--quiet`, und sie ist keine neue
+/// Entscheidung, sondern das Nachziehen einer bereits getroffenen. Gemessen an
+/// **derselben** Datei mit `/MediaBox [0 0 0 0]`:
+///
+/// ```text
+/// $ redact-rs e1.pdf -o o1.pdf -f --quiet          # eine Datei
+/// $ echo $?
+/// 3                                                 # sonst nichts
+/// $ redact-rs e1.pdf e2.pdf -f --quiet             # zwei Dateien
+/// NICHT VOLLSTÄNDIG GEPRÜFT e1.pdf: Seite 1: Unbrauchbare MediaBox (0 x 0) …
+/// NICHT VOLLSTÄNDIG GEPRÜFT e2.pdf: Seite 1: Unbrauchbare MediaBox (0 x 0) …
+/// ```
+///
+/// Derselbe Befund, derselbe Schalter, und ob er zu lesen ist, hing daran, wie
+/// viele Dateien auf der Kommandozeile standen: `batch::run` druckt ihn seit
+/// jeher „auch mit `--quiet` und auch mit `--json`“, die Einzeldatei schwieg.
+///
+/// Und die Entscheidung ist auch für sich richtig. Wer `--quiet` setzt, will
+/// die Zusammenfassung nicht — Seitenzahl, Trefferzahl, Metadaten, „Ausgabe:
+/// …“. Für die Stapelnutzerin ist der Rückgabewert 3 dagegen der Grund, weshalb
+/// sie die Datei anfassen muss, und **welche Stelle** gemeint ist, steht
+/// nirgends sonst: eine Schleife `for f in *.pdf; do redact-rs "$f" … --quiet;
+/// done` verwirft die Rückgabewerte der einzelnen Läufe ohnehin. Dasselbe
+/// Argument trägt schon `--check-leaks`, wo ein Fund auch bei `--quiet`
+/// gedruckt wird — er ist die Nachricht, wegen der es den Schalter gibt.
+///
+/// Gewöhnliche Warnungen (neu kodiertes Bild, `--no-patterns`, Koordinaten
+/// neben dem Blatt) bleiben unter `--quiet` still. Sonst wäre `--quiet`
+/// wirkungslos, und ein Vorbehalt, der bei jeder Datei anspringt, wird
+/// weggedrückt — genau die Erwägung, die [`redact_pipeline::coverage`] für den
+/// Rückgabewert anstellt.
+fn report_warnings(outcome: &Outcome, nur_lücken: bool) {
     for warning in &outcome.warnings {
-        let marke = if redact_pipeline::is_coverage_gap(warning) {
-            "NICHT GEPRÜFT"
-        } else {
-            "Warnung"
-        };
+        let lücke = redact_pipeline::is_coverage_gap(warning);
+        if nur_lücken && !lücke {
+            continue;
+        }
+        let marke = if lücke { "NICHT GEPRÜFT" } else { "Warnung" };
         eprintln!("{marke}: {}", safe_text(warning));
     }
     let gaps = outcome.coverage_gaps().len();

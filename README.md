@@ -3,6 +3,38 @@
 Ein schlankes, **lokales** CLI- und GUI-Werkzeug in Rust zum Schwärzen sensibler
 Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
 
+<table>
+<tr>
+<th width="50%">vorher — <code>kontoauszug.pdf</code></th>
+<th width="50%">nachher — <code>kontoauszug_geschwaerzt.pdf</code></th>
+</tr>
+<tr>
+<td><img src="docs/vorher.png" width="100%" alt="Gerenderte Seite eines Kontoauszugs der Musterbank AG: „Kontoinhaber: Max Mustermann“, „IBAN: DE89 3704 0044 0532 0130 00“, „BIC: COBADEFFXXX“, „Kontonummer: 532013000“, darunter vier Buchungen vom Januar 2026 mit Beträgen in Euro."></td>
+<td><img src="docs/nachher.png" width="100%" alt="Dieselbe Seite nach einem Lauf: hinter „IBAN:“, „BIC:“ und „Kontonummer:“ steht je ein schwarzer Balken statt der Angabe. Die Zeile „Kontoinhaber: Max Mustermann“ und die vier Buchungen stehen unverändert da."></td>
+</tr>
+</table>
+
+![Konsolenmitschnitt: der Aufruf „redact-rs kontoauszug.pdf“ meldet 2 Seiten, 15 Textzeilen, 7 Treffer, 7 Schwärzungen, 134 entfernte Zeichen, 7 Deck-Rechtecke und „Metadaten entfernt: /Info-Dictionary“. Der zweite Aufruf, „redact-rs kontoauszug_geschwaerzt.pdf --check-leaks“ mit der IBAN als Suchbegriff, antwortet „nicht gefunden“ und setzt hinzu, das heiße NICHT, dass in der Datei nichts mehr stehe — geprüft sei genau diese Liste. Zuletzt gibt „echo $?“ den Rückgabewert 0 aus.](docs/konsole.gif)
+
+**Der schwarze Balken ist nicht der Punkt.** Ein Rechteck über den Text legen
+kann jedes Textverarbeitungsprogramm — und darunter steht die IBAN weiter.
+Der Punkt ist, was der Konsolenmitschnitt zeigt: nach dem Lauf steht die IBAN
+**nicht mehr in der Datei** — auch nicht in einem komprimierten Objektstrom,
+nicht in einer Altrevision und nicht als UTF-16. Das wird hier nicht behauptet,
+sondern [vom Programm selbst nachgemessen](#pruefen) (`--check-leaks`,
+Rückgabewert 3 bei einem Fund).
+
+**Und „Max Mustermann“ steht rechts noch da.** Absichtlich: für Namen gibt es
+kein Muster und keine Named-Entity-Erkennung, also bleiben Kontoinhaber,
+Empfänger und Arbeitgeber stehen, bis sie von Hand oder über die Buchungsliste
+erfasst werden ([was dieses Werkzeug nicht leistet](#erkennung)). Ein Bild, das
+nur die gelungenen Fälle zeigt, wäre Werbung — und wer sich darauf verließe,
+gäbe den Namen weiter.
+
+Alle Belege — auch die Animation der Schwärzung selbst —, woraus jeder entstanden
+ist und was sie ausdrücklich **nicht** zeigen:
+[`docs/vorher-nachher.md`](docs/vorher-nachher.md).
+
 * **Manuelle Schwärzung** über Regionen (JSON oder per Maus in der GUI)
 * **Automatische Schwärzung** über Regex-Muster (IBAN, BIC, Steuer-ID, …)
 * **Buchungsliste** mit Positiv- und Negativliste (CSV)
@@ -67,6 +99,9 @@ Daneben: [`CHANGELOG.md`](CHANGELOG.md) — was sich zwischen zwei Fassungen
 geändert hat, und was davon sicherheitsrelevant war.
 [`SECURITY.md`](SECURITY.md) — Bedrohungsmodell, Grenzen für Eingabedateien,
 Messungen.
+[`docs/vorher-nachher.md`](docs/vorher-nachher.md) — die Belege oben im Langen:
+woraus jedes Bild entstanden ist, die ungekürzte Ausgabe von `--check-leaks`
+dazu und was die Bilder ausdrücklich **nicht** zeigen.
 
 ---
 
@@ -252,7 +287,9 @@ redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
       --allow-undecodable-images  nicht dekodierbare Bilder durchgehen lassen
                                   (UNSICHER — siehe unten)
       --max-decompressed-mb <MB>  Budget für alle entpackten Streams (1024)
-      --max-parsed-mb <MB>        davon für geparste Streams (16)
+      --max-parsed-mb <MB>        davon für alles, woraus PDF-Syntax wird (16):
+                                  geparste Streams UND der Rumpf der Datei
+                                  (Objektköpfe, Dictionaries, xref)
       --max-image-mb <MB>         gleichzeitig gehaltene dekodierte Bildbytes (256)
       --max-input-mb <MB>         Obergrenze für die Eingabedatei selbst (512)
       --max-candidates <N>        Obergrenze für Trefferkandidaten (100000)
@@ -1627,7 +1664,7 @@ cargo test -p redact-pdf --test marked_content
   |---|---|---|
   | Größe der Eingabedatei | 512 MB | `--max-input-mb` |
   | entpackte Bytes über alle Streams | 1024 MB | `--max-decompressed-mb` |
-  | davon: Streams, die geparst werden | 16 MB | `--max-parsed-mb` |
+  | davon: alles, woraus PDF-Syntax wird — geparste Streams **und** der Rumpf der Datei | 16 MB | `--max-parsed-mb` |
   | gleichzeitig gehaltene dekodierte Bildbytes | 256 MB | `--max-image-mb` |
   | Trefferkandidaten je Datei | 100 000 | `--max-candidates` (Exit 2) |
   | Zeichen, die **eine Seite** setzen darf | 1 000 000 | fest |
@@ -1680,11 +1717,14 @@ cargo test -p redact-pdf --test marked_content
   eine unbrauchbare Seitengröße; gerechnet und gezeichnet wird mit A4. Prüfen
   Sie dort besonders genau, ob die Rechtecke sitzen.“
 
-  Die **Kommandozeile schweigt dazu** — nachgemessen an einer einseitigen
-  Datei mit `/MediaBox [0 0 0 0]`: sie findet die IBAN, schwärzt sie (28
-  Zeichen entfernt), endet mit Rückgabewert 0 und gibt keine Warnung aus. Wer
-  dort mit eigenen Koordinaten arbeitet, rechnet also unbemerkt gegen A4. Das
-  ist eine Divergenz zwischen den beiden Programmen und gehört geschlossen.
+  **Die Kommandozeile sagt es auch** — nachgemessen an einer einseitigen Datei
+  mit `/MediaBox [0 0 0 0]`: sie findet die IBAN, schwärzt sie (28 Zeichen
+  entfernt) und meldet dazu „Seite 1: Unbrauchbare MediaBox (0 x 0), A4
+  angenommen“ samt dem Hinweis, dass die Wirkungsprüfung dieser Seite gegen A4
+  gemessen ist und nicht gegen die Angabe der Datei. Der Lauf endet mit
+  **Rückgabewert 3** — verarbeitet, aber nicht vollständig geprüft. Wer dort
+  mit eigenen Koordinaten arbeitet, rechnet gegen A4, und das steht jetzt in
+  der Ausgabe statt nur in der Oberfläche.
 
   **Auch die Hilfsdateien haben eine Grenze**, und die ist *fest* — es gibt
   keinen Schalter dafür:
@@ -2140,6 +2180,35 @@ cargo test -p redact-pdf -- --ignored                 # die bekannten Lecks
 ./scripts/build-windows.sh                            # Windows-Binary (mingw)
 cargo run --release -p redact-pdf --example gen10 -- gross.pdf 10
 ```
+
+### Die Belege in `docs/` neu erzeugen
+
+Die Bilder ganz oben sind keine Bildschirmfotos, sondern Ausgaben dieses
+Programms. Wer am **Rasterizer** (`redact-render`) oder an der **Schwärzung**
+etwas ändert, lässt danach diese beiden Befehle laufen — sonst zeigt die README
+den Stand von vorgestern:
+
+```bash
+./scripts/make-preview.sh          # erzeugt docs/*.png, *.gif, *.txt neu
+python3 scripts/check-preview.py docs   # prüft sie (36 Prüfungen, ~0,8 s)
+```
+
+`check-preview.py` ist ein zweiter, unabhängiger Leser in Python
+(eigener PNG- und GIF-Dekoder, nur Standardbibliothek), damit ein Fehler im
+eigenen Schreiber sich nicht selbst durchwinkt. Danach sagt `git status docs/`,
+ob sich etwas bewegt hat.
+
+> **Bitgleichheit gilt nur auf derselben Maschine.** Dort liefert ein zweiter
+> Lauf dieselben SHA-256-Summen für alle sechs Dateien (nachgemessen). Über
+> Maschinengrenzen ist das **nicht** zugesagt: `tiny-skia` rastert mit SIMD
+> (SSE bzw. NEON), Fließkomma-Codegen darf sich zwischen `rustc`-Fassungen
+> ändern, und die PNG-Kompression hängt an flate2/miniz_oxide aus `Cargo.lock`.
+> Ein `git status`, der auf einem anderen Rechner Bytes meldet, ist deshalb kein
+> Befund. Darum prüft auch die CI **nicht** auf Bytegleichheit, sondern lässt
+> `check-preview.py` über den eingecheckten **und** einen frisch erzeugten Satz
+> laufen (Job `belege` in `.github/workflows/ci.yml`). Die Begründung im Langen
+> steht in
+> [`docs/vorher-nachher.md`](docs/vorher-nachher.md#wie-zuverlässig-ist-nachbauen).
 
 ## Release bauen
 

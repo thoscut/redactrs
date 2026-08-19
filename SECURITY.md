@@ -245,7 +245,11 @@ läuft und an einer verschlüsselten Datei nur die Hälfte sehen kann:
 
 * **Vor** der Entschlüsselung läuft `prescan` wie immer. Was dort zu sehen ist,
   ist geprüft: eine Datei mit 200 000 offenen `[` in einem gewöhnlichen Objekt
-  fällt schon hier durch, verschlüsselt oder nicht.
+  fällt schon hier durch, verschlüsselt oder nicht. Dasselbe gilt seit der
+  Buchung des Rumpfs für eine Dictionary-Bombe: die Objektstruktur wird nicht
+  verschlüsselt, das Parse-Budget greift also schon im ersten Durchgang.
+  Nachgemessen an einer 44-MB-Dictionary-Bombe mit `/Encrypt` im Trailer — sie
+  wird mit **und** ohne Passwort mit derselben Budgetmeldung abgelehnt.
 * **Nach** der Entschlüsselung läuft dieselbe Prüfung ein zweites Mal, jetzt auf
   dem entschlüsselten Dokument (`redact_pipeline::check_limits_after_decryption`).
   Dazu wird das Dokument serialisiert — die Streams stehen darin als das, was
@@ -301,7 +305,8 @@ anzeigende Software. Wer die Datei öffnen darf, kann sie hier schwärzen.
 | Verschachtelungstiefe (`[`, `<<`) | 100 | fest |
 | dito, in binär aussehender Nutzlast | 256 | fest |
 | entpackte Bytes über **alle** Streams | 1024 MB | `--max-decompressed-mb` |
-| davon: Streams, die geparst werden | 16 MB | `--max-parsed-mb` |
+| davon: alles, woraus PDF-**Syntax** wird — geparste Streams **und** der Rumpf der Datei | 16 MB | `--max-parsed-mb` |
+| dito, in der zweiten Einheit: **gerechneter Objektspeicher** | ein Vielfaches des Byte-Budgets | `--max-parsed-mb` |
 | Trefferkandidaten je Datei | 100 000 | `--max-candidates` |
 | Rohgröße eines LZW-/ASCII85-Streams | 16 MB | fest |
 | Bildpunkte **je Bild** (Dekodieren) | 40 000 000 | fest |
@@ -320,6 +325,181 @@ genauso — siehe „Die Grenzen gelten auch hinter der Entschlüsselung“.
 Die Zeilen „Zeichen, die eine Seite setzen darf“ und „Zeichenoperationen je
 Seiten-Scan“ messen keine Bytes, und das ist ihr Zweck; sie stehen weiter unten
 unter „Wenn Bytes die falsche Größe sind“.
+
+### Was `--max-parsed-mb` zählt — zwei Klassen, nicht eine
+
+Das Parse-Budget verbucht **beides**, was `lopdf` zu `Object`-Werten macht:
+
+1. die **Streams, die geparst werden** — Seiteninhalt und Objekt-Streams. Ob ein
+   Stream hierher zählt, entscheidet sein *ausgepackter Inhalt*, nicht sein
+   Dictionary: sieht er wie PDF-Syntax aus statt wie Nutzlast, gilt das enge
+   Budget.
+2. den **Rumpf der Datei selbst** — Objektköpfe, Dictionaries, Arrays,
+   Querverweistabelle, Trailer; alles, was nicht Stream-Nutzlast ist.
+
+**Auch ein Bild kann unter Klasse 1 fallen.** Hier stand einmal „ein Bild bleibt
+Nutzlast und zählt nur gegen `--max-decompressed-mb`“ — das widerspricht dem
+Satz zwei Zeilen darüber, denn es entscheidet der *ausgepackte Inhalt*, und ein
+Bild bringt seinen selbst mit. Nachgemessen an vier einseitigen PDFs mit
+demselben FlateDecode-Graustufenbild (4472 × 4472 Bildpunkte, 19 998 784 Byte
+entpackt), die sich nur im Wertebereich der Bildpunkte unterscheiden:
+
+| Bildpunkte | Datei | Ergebnis mit den Vorgaben |
+|---|---:|---|
+| **0x30–0x70** (dunkler Scan) | 103 199 Byte | **Exit 1** — am *Parse*-Budget, nicht am Dekompressionsbudget |
+| 0x40–0x90 | 108 586 Byte | Exit 0 |
+| 0xC0–0xFF (heller Scan) | 82 679 Byte | Exit 0 |
+| 0x00–0xFF | 103 604 Byte | Exit 0 |
+
+Dieselbe abgelehnte Datei läuft mit `--max-parsed-mb 64` durch (Exit 0, 32 MiB
+Spitzenspeicher).
+
+Der Unterschied ist kein Zufall: 0x30 bis 0x70 liegt vollständig im druckbaren
+ASCII-Bereich (0x20–0x7E), die anderen drei Bereiche nicht. Ein dunkler
+Graustufen-Scan sieht ausgepackt aus wie PDF-Syntax und wird deshalb wie welche
+verbucht. Das ist Absicht — das Dictionary eines Streams gehört dem, der die
+Datei baut, und `/Subtype /Image` wäre damit kein Beleg, sondern eine Einladung.
+Der Preis dafür steht in der ersten Zeile: ein gewöhnlicher Scan, dessen
+Bildpunkte dort landen, wird abgelehnt und braucht `--max-parsed-mb`.
+
+(Die erste Zeile lässt die beiden Klammer-Bytes `0x5B` und `0x5D` aus. Nimmt man
+sie hinzu, lehnt der Lauf mit den Vorgaben ebenfalls am Parse-Budget ab, mit
+`--max-parsed-mb 64` dann aber an der **Verschachtelungstiefe**: `[` und `]` in
+den Bildpunkten liest die Vorprüfung wie einen Stapel offener Arrays. Beide
+Ablehnungen sind richtig; für die Frage dieses Abschnitts — welches Budget ein
+Bild trifft — ist die Tiefengrenze nur im Weg.)
+
+**Klasse 2 fehlte früher, und das war eine Lücke.** Eine Datei aus lauter
+unkomprimierten Dictionaries hat keine Streams — sie sah vom Budget nichts und
+lief mit Rückgabewert 0 durch. Dieselbe Datei *komprimiert*, also als
+Objekt-Stream, wurde seit jeher abgelehnt. Der Unterschied war allein, ob die
+Bombe gepackt war, und das sucht ein Angreifer sich als Erstes aus.
+
+Nachgemessen an dieser Fassung (Release, `/usr/bin/time -f %M`, `--no-patterns`,
+eine Datei aus Dictionaries mit je 600 Einträgen, **kein** Stream darin):
+
+| Rumpf der Datei | `--max-parsed-mb` | Ergebnis |
+|---|---|---|
+| 44,3 MB | 16 (Vorgabe) | Exit 1, 47 MiB — abgelehnt, und zwar wegen des Rumpfs |
+| 44,3 MB | 64 (von Hand angehoben) | Exit 0, **rund 2 520 MiB** |
+
+Die zweite Zeile sagt, was diese Datei kostet, wenn man sie durchlässt: **2,5 GB
+aus 44 MB.** Vor der Buchung des Rumpfs war das kein Sonderfall mit angehobenem
+Budget, sondern der Normalfall — die Datei hat keine Streams, das Budget sah sie
+nicht, und der Lauf endete mit Rückgabewert 0.
+
+### Eine Byte-Grenze kann diese Klasse nicht allein decken
+
+Hier stand einmal: „ein voll ausgeschöpftes Vorgabebudget kostet rund 1,3 GB,
+der ungünstigste Fall bleibt also der Content-Stream“. Der Satz war falsch, und
+er war es aus dem Grund, der in diesem Projekt immer wieder auftaucht — **die
+Decke zählte die falsche Einheit**. Ein Byte-Budget unterstellt einen
+Aufblähfaktor; den gibt es nicht. Er hängt an der *Form* der Syntax, nicht an
+ihrer Länge. Fünf Dateien **gleicher Größe** (je knapp 16,0 MiB reiner Rumpf,
+kein Stream), die sich nur darin unterscheiden, was zwischen den Klammern steht:
+
+| Was zwischen den Klammern steht | Datei | Ergebnis mit den Vorgaben |
+|---|---:|---|
+| `[]` — 8 212 000 leere Arrays | 16 759 951 Byte | **Exit 1** (Objektdecke) |
+| `0` — 8 212 000 Zahlen | 16 759 951 Byte | **Exit 1** (Objektdecke) |
+| `/a` — 5 511 000 Namen | 16 758 210 Byte | Exit 0, **1 638 MiB** |
+| `<<>>` — 4 147 000 leere Dictionaries | 16 757 286 Byte | Exit 0, 985 MiB |
+| `<< /abc 0 … >>` — je 600 Einträge | 16 771 547 Byte | Exit 0, 960 MiB |
+
+Gleiche Dateigröße, und trotzdem liegen allein die drei angenommenen Zeilen um
+den Faktor 1,7 auseinander — die beiden abgelehnten kämen ohne die zweite Decke
+weit darüber hinaus. **Die Datei aus lauter leeren Arrays war der Fall, der das
+aufdeckte:** `[]` sind zwei Byte in der Datei und gemessen 632 Byte im
+Arbeitsspeicher. Sie blieb damit unter *jedem* Größenbudget und belegte
+trotzdem Gigabytes — vor der Objektdecke gemessen **5 832 MiB bei Rückgabewert
+0**, also rund 365 Byte je Dateibyte statt der 80, die aus „1 330 MB aus 16 MB“
+folgen würden.
+
+Deshalb hängt an `--max-parsed-mb` heute **eine zweite Decke in einer zweiten
+Einheit**: neben den Dateibytes wird der *gerechnete* Speicher der Objekte
+gedeckelt, die daraus entstehen (`OBJEKT_BYTES`, `ARRAY_BYTES` und
+`OBJEKTSPEICHER_JE_BUDGETBYTE` in `crates/redact-pdf/src/document.rs`). Beide
+Decken bewegen sich mit demselben Schalter; eine zweite Schraube wäre eine
+zweite Stelle, an der die Zahlen auseinanderlaufen können. Die gerechnete Zahl
+ist dabei *nicht* der Spitzenspeicher — die Zeile mit den Namen zeigt es: sie
+kommt gerechnet unter der Decke durch und belegt gemessen 1 638 MiB.
+
+**Gewöhnliche Dateien merken davon nichts** — aber nicht so weit weg, wie hier
+einmal stand. Die Tabelle nannte früher nur den *Rumpf* und kam damit auf 0,55 %
+und 2,90 %, obwohl der Abschnitt darüber zwei Klassen desselben Budgets
+eingeführt hatte: die geparsten Streams fehlten in der Rechnung. Gemessen wird
+deshalb, was das Budget wirklich sieht — das **kleinste `--max-parsed-mb`, mit
+dem die Datei noch durchläuft** (Bisektion, `--no-patterns`):
+
+| Datei | Größe | kleinstes `--max-parsed-mb` | Anteil am 16-MB-Budget |
+|---|---:|---:|---:|
+| Beispieldatei aus `--write-demo`, 2 Seiten | 1 862 Byte | 1 | ≤ 6 % |
+| 10 Seiten Text (`--example gen10`) | 59 824 Byte | 1 | ≤ 6 % |
+| 200 Seiten A4-Scan, 300 dpi, JPEG je Seite | 55 106 045 Byte | 1 | ≤ 6 % |
+| 500 Seiten Text, unkomprimiert | 2 998 855 Byte | 3 | 19 % |
+| 500 Seiten Text, geschwärzt (also komprimiert) | 535 588 Byte | 5 | 31 % |
+| 2 000 Seiten Text, unkomprimiert | 12 058 857 Byte | 12 | 75 % |
+| 2 000 Seiten Text, geschwärzt | 1 575 711 Byte | 14 | **88 %** |
+
+Der Schalter nimmt nur ganze Megabyte; „1“ heißt also „1 oder weniger, feiner
+lässt sich mit ihm nicht messen“. **Alle** diese Dateien laufen mit den Vorgaben
+durch (Rückgabewert 0, nachgemessen).
+
+Zwei Zeilen sind lehrreich. Der **Scan**: 55 MB Datei und trotzdem 1 MB Budget —
+seine Bilder sind DCT-Nutzlast und zählen nur gegen `--max-decompressed-mb`. Und
+die **geschwärzten** Textdateien brauchen *mehr* Budget als die unkomprimierten
+Originale, aus denen sie entstanden, obwohl sie ein Fünftel bis ein Achtel deren
+Größe haben: das Budget sieht den ausgepackten Inhalt, und die Schwärzung legt
+Deck-Rechtecke obendrauf. Wer vom Dateigewicht auf das Budget schließt, schließt
+in beide Richtungen falsch.
+
+Ein geschwärztes 2 000-Seiten-Dokument liegt damit bei 88 % des Vorgabebudgets —
+das ist gewöhnlich, aber es ist keine Reserve mehr. Wo dieser Text an die Decke
+stößt, steht im nächsten Abschnitt. Die Gegenprobe im Testlauf hält
+`crates/redact-pdf/tests/rumpf_im_parse_budget.rs` fest
+(`gewoehnliche_dokumente_gehen_mit_der_vorgabe_durch`).
+
+### Wo gewöhnlicher Text an die Decke stößt
+
+Damit gibt es eine Verfügbarkeitsschwelle, die vor der Buchung des Rumpfs keine
+war, und sie gehört genannt: **eine Textdatei, deren Rumpf und Seiteninhalte
+zusammen 16 MiB überschreiten, wird abgelehnt** — auch wenn nichts daran böse
+gemeint ist. Bei unkomprimierten Seiteninhalten ist das praktisch die
+Dateigröße, denn dann zählt jedes Byte in eine der beiden Klassen.
+
+Nachgemessen an Dateien in der Bauart von `--example gen10` (45 Textzeilen je
+Seite, unkomprimierte Inhaltsströme), einmal mit `/MediaBox` und `/Resources` je
+Seite und einmal von `/Pages` geerbt:
+
+| Aufbau | Seiten | Datei | Ergebnis mit den Vorgaben |
+|---|---:|---:|---|
+| `/MediaBox` und `/Resources` je Seite | 2 779 | 16 775 702 Byte | Exit 0 |
+| dito | **2 780** | 16 781 757 Byte | **Exit 1** |
+| beides von `/Pages` geerbt | 2 796 | 16 772 427 Byte | Exit 0 |
+| dito | **2 797** | 16 778 444 Byte | **Exit 1** |
+
+16 MiB sind 16 777 216 Byte — in beiden Zeilenpaaren liegt die Grenze genau
+dazwischen.
+
+**Woran die Zahl wirklich hängt.** Nicht an den Seiten — an den Bytes. Dieselben
+Seiten mit geerbtem `/MediaBox` und `/Resources` sparen 46 Byte je Seitendict,
+und schon passen mehr Seiten in dieselbe Decke. Wer die Schwelle als
+Seitenzahl liest, liest sie falsch; maßgeblich ist, was die Datei an Syntax
+mitbringt.
+
+**Der Ausweg steht auf der Kommandozeile:** `--max-parsed-mb` höher setzen. Er
+hebt beide Decken zugleich, und er wirkt linear — wer ihn verdoppelt, lässt
+doppelt so viel Syntax und doppelt so viel gerechneten Objektspeicher zu.
+
+```console
+$ redact-rs 2780seiten.pdf -o out.pdf --max-parsed-mb 32 --no-patterns
+$ echo $?
+0
+```
+
+Gemessen: Exit 0 bei 583 MiB Spitzenspeicher. Wer den Schalter anhebt, sollte
+wissen, wofür — die Tabellen oben sagen, was eine Datei dieser Größe im
+ungünstigen Fall kosten kann.
 
 ### Die Hilfsdateien sind fest begrenzt, und zwar mit Absicht
 
@@ -360,10 +540,13 @@ liefert endlos), dann muss die Länge unter der Grenze liegen, und gelesen wird
 danach trotzdem über einen begrenzten Leser — zwischen Frage und Antwort kann
 eine Datei wachsen.
 
-Die Vorprüfung (`redact_pdf::document::prescan`) läuft über die **Rohbytes**,
-bevor `lopdf` die Datei zu sehen bekommt, und schließt die ausgepackten Streams
-mit ein. Sie muss davor laufen: der Stapelüberlauf beendet den Prozess, bevor
-irgendein Fehlerwert entstehen könnte.
+Die Vorprüfung (`redact_pdf::document::prescan`) läuft über die **Rohbytes** der
+Datei, bevor `lopdf` sie zu sehen bekommt, und schließt die ausgepackten Streams
+und den Rumpf mit ein — siehe „Was `--max-parsed-mb` zählt“. Sie muss davor
+laufen: der Stapelüberlauf beendet den Prozess, bevor irgendein Fehlerwert
+entstehen könnte. Die Buchung des Rumpfs belegt dabei selbst keinen Speicher —
+sie zählt Bytes, und die Ablehnung kommt vor `Document::load_mem`, also vor der
+einzigen Stelle, an der aus diesen Bytes wirklich Speicher wird.
 
 Die erste Zeile steht **vor** allen anderen, und zwar wörtlich: die
 Eingabedatei wird in einem Stück gelesen — die Prüfsumme im Audit-Log soll die
@@ -383,11 +566,15 @@ entfernt, was die Maschine umwirft. Wer wirklich mehr braucht, sagt es mit
 fremde Datei für den Nutzer trifft.
 
 Die beiden Bildzeilen sind eine **eigene** Klasse und stehen bewusst getrennt:
-`--max-decompressed-mb` und `--max-parsed-mb` verbuchen die *Rohbytes* eines
-Streams. Ein Bild, das geschwärzt wird, muss aber nach RGBA8 ausgepackt werden —
+`--max-decompressed-mb` und `--max-parsed-mb` verbuchen die *entpackten
+Streambytes* — das, was der PDF-Filter ausgibt (dazu bei `--max-parsed-mb` der
+Rumpf der Datei). **Nicht** die Rohbytes: eine 82-kB-Datei mit einem
+`/FlateDecode`-Bild von 20 MB entpackter Nutzlast fällt an
+`--max-decompressed-mb 8` durch, obwohl sie 82 kB groß ist (nachgemessen,
+Exit 1). Ein Bild, das geschwärzt wird, muss aber nach RGBA8 ausgepackt werden —
 4 Byte je Bildpunkt. Bei einem gewöhnlichen Schwarzweiß-Scan (`/DeviceGray`,
 `/BitsPerComponent 1`) liegt zwischen beidem der **Faktor 32**; die
-Rohbyte-Grenzen greifen dort also nicht. Siehe „Speicherbedarf der
+Streambyte-Grenzen greifen dort also nicht. Siehe „Speicherbedarf der
 Bildschwärzung“ unter „Messungen“.
 
 ### Wenn Bytes die falsche Größe sind
@@ -655,6 +842,15 @@ Alle Zahlen aus demselben Release-Build (`x86_64-unknown-linux-gnu`, 16 GB RAM),
 Spitzenspeicher über `getrusage(RUSAGE_CHILDREN).ru_maxrss` des Kindprozesses —
 nicht über eine Abtastschleife, die den Spitzenwert verpassen kann.
 
+**Speicher ja, Zeit nein.** Die Speicherzahlen sind reproduzierbar: eine
+Nachmessung auf derselben Maschine trifft sie aufs Megabyte. Die **Laufzeiten
+sind es nicht** — sie hängen an Last, Übersetzer und Maschine und schwanken
+gemessen um ein Fünftel nach unten (13,3 s wurden bei der Nachprüfung zu 11,0 s,
+2,9 s zu 2,4 s), ohne dass sich am Speicher etwas geändert hätte. Sie stehen
+hier als Größenordnung — „Sekunden, nicht Minuten“ —, nicht als Zusicherung.
+Wer eine dieser Sekundenzahlen nicht reproduziert, hat deshalb noch keinen
+Befund; wer eine Speicherzahl nicht reproduziert, sehr wohl.
+
 ### Tiefe Verschachtelung (RUSTSEC-2026-0187)
 
 400-kB-Datei mit 200 000 offenen `[`:
@@ -706,8 +902,9 @@ Rund **62 Byte Arbeitsspeicher je Byte Content-Stream**. Der Grund ist nicht das
 Auspacken, sondern das Parsen: aus jedem Operator wird eine eigene
 `lopdf::content::Operation` mit eigenem Vektor. Deshalb gibt es zwei Budgets —
 ein großes für alle Streams (Bilder, Schriften, eingebettete Dateien werden nur
-gespeichert) und ein sehr viel engeres für die Streams, die tatsächlich geparst
-werden.
+gespeichert) und ein sehr viel engeres für alles, woraus PDF-Syntax wird: die
+geparsten Streams **und** den Rumpf der Datei (siehe „Was `--max-parsed-mb`
+zählt“).
 
 **Der Faktor hängt von der Form des Stroms ab, nicht nur von seiner Größe.**
 Nachgemessen an derselben Maschine (Release, `ru_maxrss` des Kindprozesses,
@@ -723,11 +920,38 @@ Nachgemessen an derselben Maschine (Release, `ru_maxrss` des Kindprozesses,
 Je mehr *Operanden* auf einen Operator kommen, desto teurer wird das Byte: die
 62 aus der Tabelle darüber sind der günstige Fall, nicht der ungünstige.
 Maßgeblich ist deshalb die letzte Zeile: **rund 100 Byte je Byte Content-Stream
-im ungünstigsten hier gemessenen Fall.** Bei der Vorgabe `--max-parsed-mb 16`
-folgt daraus eine Obergrenze von etwa **1,6 GB**, nicht 1 GB.
+im ungünstigsten hier gemessenen Fall.**
+
+**Was hier einmal falsch stand.** „Bei der Vorgabe folgt daraus eine Obergrenze
+von etwa 1,6 GB, und die zweite Klasse desselben Budgets — der Rumpf — bleibt
+darunter; maßgeblich bleibt also der Content-Stream.“ Beides war falsch. Der
+Rumpf bleibt nicht darunter: eine Datei aus lauter leeren Arrays kam bei
+Rückgabewert 0 auf 5 832 MiB (siehe „Eine Byte-Grenze kann diese Klasse nicht
+allein decken“), also auf mehr als das Dreifache. Und „Obergrenze“ war das
+falsche Wort für eine Zahl, die aus einem unterstellten Faktor folgt — die
+Faktoren in dieser Tabelle stehen für die Formen, die *hier* gemessen wurden,
+und nicht für die ungünstigste, die es gibt. Eine Obergrenze gibt heute die
+zweite Decke in der zweiten Einheit, der gerechnete Objektspeicher; die
+Byte-Zahlen dieses Abschnitts sind Messwerte, keine Zusicherung.
 
 Wer das gegen eine Maschine mit wenig Arbeitsspeicher absichern will, setzt
-`--max-parsed-mb` herunter; der Wert wirkt linear.
+`--max-parsed-mb` herunter; der Wert wirkt linear und bewegt beide Decken.
+
+**Und die Verstärkungstabellen dieses Abschnitts sind älter als die
+Objektdecke.** Die Zeilen ab 16 MB Strom lassen sich mit den Vorgaben heute gar
+nicht mehr erreichen — sie wurden an einer Fassung gemessen, die nur Bytes
+zählte. Nachgemessen an der heutigen, `0 0 0 rg` unkomprimiert und
+`--no-patterns`:
+
+| Strom | Ergebnis mit den Vorgaben |
+|---|---|
+| 8 MB | Exit 0 |
+| 16 MB | **Exit 1** (Objektdecke) |
+| 15,0 MB (15 729 051 Byte Datei) | **Exit 1** (Objektdecke); mit `--max-parsed-mb 64`: Exit 0, 1 123 MiB |
+
+Die Richtung des Fehlers in den alten Tabellen ist damit die harmlose: sie
+versprechen mehr Durchlass, als der Code heute gibt. Die Faktoren selbst
+(Byte je Byte) gelten unverändert für das, was durchkommt.
 
 ### Was die Zahl 62–100 nicht ist
 
@@ -1194,7 +1418,8 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
   Kodierung eines Schwarzweiß-Scans) brachte eine **92-kB-Datei** mit 20 Bildern
   den Prozess auf **5 508 MB**, eine 183-kB-Datei mit 40 Bildern auf SIGABRT
   („memory allocation of 144000000 bytes failed“, Exit 134) — trotz gesetzter
-  `--max-decompressed-mb` und `--max-parsed-mb`, denn die zählen Rohbytes. Und
+  `--max-decompressed-mb` und `--max-parsed-mb`, denn die zählen den Stream, wie
+  der PDF-Filter ihn ausgibt (1 Bit je Bildpunkt), nicht die RGBA8-Fassung. Und
   es traf nicht nur konstruierte Eingaben: ein gewöhnlicher 40-seitiger
   A4-Scan mit je einer Schwärzung brauchte 1 369 MB, ein 200-Seiten-Stapel
   entsprechend rund 7 GB. Die Zahlen vorher und nachher stehen unter
