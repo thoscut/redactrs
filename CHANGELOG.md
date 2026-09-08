@@ -27,6 +27,8 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 ## Unveröffentlicht
 
+Bereich: `git log v0.6.0..HEAD`.
+
 Vierter Durchgang, und diesmal fast nur an der **Doku** — mit demselben
 Maßstab wie am Code: jede Angabe hier stammt aus einem Lauf des gebauten
 Binaries, nicht aus dem Quelltext.
@@ -192,9 +194,7 @@ deshalb diesmal die Trennung zwischen „gemessen“ und „zugesagt“.
 
 ---
 
-## Unveröffentlicht
-
-Bereich: `git log v0.6.0..HEAD`.
+### Und am Code: die Fehlerklasse, die diese Runde beim Namen nennt
 
 Vierter und letzter Durchgang der vereinbarten Schleife. Die Fehlerklasse
 dieser Runde steht schon im Eintrag zu 0.6.0 zwischen den Zeilen, hier wird
@@ -270,6 +270,19 @@ abgelehnt; der Unterschied war allein, ob sie komprimiert war — und das
 sucht sich ein Angreifer als Erstes aus. Gegenprobe an gewöhnlichen Dateien:
 ein 2 000-Seiter mit 100 000 Treffern braucht 11 MB des 16-MB-Budgets, ein
 300-seitiger Scan mit 600 MB Bilddaten 1 MB.
+
+**Und die zweite Decke in der zweiten Einheit.** Die Rumpfbuchung allein
+reichte nicht: eine Datei aus 7 968 000 **leeren Arrays**, 16 761 888 Byte und
+damit knapp *unter* dem Budget, lief durch — mit 5,6 GB Spitzenspeicher.
+Denn der Aufblähfaktor hängt nicht an der Dateigröße, sondern an der
+**Form**: gemessen 274-facher Unterschied bei identischer Größe, je nachdem,
+ob die Bytes Zeichenkette, Dictionary oder leeres Array sind. Ein Faktor lässt
+sich daraus nicht schätzen — deshalb wird der Objektspeicher jetzt beim Lauf
+über die Rohbytes **gerechnet** (je Objekt, je Array) und bei
+`max_parsed_bytes × 60`, in der Vorgabe **960 MB**, abgelehnt. Dass die
+Rechnung nie unter dem wirklich belegten Speicher liegt, hält ein eigener
+Test fest (im engsten Fall 2 % darüber). Dieselbe Datei: **vorher rc 0 und
+5,6 GB, jetzt rc 1 und 21 MB in 0,1 s.**
 
 ### Die Nachprüfung kostet nicht mehr Begriffe × Dateigröße
 
