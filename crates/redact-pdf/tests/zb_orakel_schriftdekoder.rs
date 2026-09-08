@@ -29,7 +29,10 @@ const NAME: &str = "Max Mustermann";
 
 /// Die Zeilen, die auf der Seite stehen — wie in den Exporten der
 /// Gegenprüfer.
-const LINES: [&str; 2] = ["Kontoinhaber Max Mustermann", "IBAN: DE89 3704 0044 0532 0130 00"];
+const LINES: [&str; 2] = [
+    "Kontoinhaber Max Mustermann",
+    "IBAN: DE89 3704 0044 0532 0130 00",
+];
 
 /// Ein `/ToUnicode`-CMap, der jedem Code sein Zeichen zuordnet — als
 /// `bfchar`-Liste, wie LibreOffice und MuPDF sie schreiben. `code_bytes` ist
@@ -75,7 +78,10 @@ fn subset_codes(first_code: u32) -> Vec<(u32, char)> {
 }
 
 fn code_of(map: &[(u32, char)], ch: char) -> u32 {
-    map.iter().find(|(_, c)| *c == ch).map(|(code, _)| *code).unwrap()
+    map.iter()
+        .find(|(_, c)| *c == ch)
+        .map(|(code, _)| *code)
+        .unwrap()
 }
 
 /// Seiteninhalt: je Zeile ein `Tj` mit Hex-String aus Glyphencodes, wie
@@ -258,7 +264,10 @@ fn sicht_7_ersetzt_die_bytesichten_nicht() {
     let hits = leaks(&pdf, IBAN);
     let (decoder, bytes): (Vec<&String>, Vec<&String>) =
         hits.iter().partition(|h| h.contains("Schriftdekoder"));
-    assert!(!decoder.is_empty(), "der Dekoder sieht die Vorlage nicht: {hits:?}");
+    assert!(
+        !decoder.is_empty(),
+        "der Dekoder sieht die Vorlage nicht: {hits:?}"
+    );
     assert!(
         bytes.iter().any(|h| h.contains("Objekt")),
         "die Bytesichten sehen die Vorlage nicht mehr: {hits:?}"
@@ -293,16 +302,12 @@ fn kanarienvogel_luegendes_tounicode_bleibt_blind() {
 fn eine_kaputte_seite_nimmt_die_anderen_nicht_mit() {
     let good = libreoffice_export(false);
     let mut doc = Document::load_mem(&good).expect("parsebar");
-    let pages_id = *doc.get_pages().values().next().and_then(|id| {
-        doc.get_dictionary(*id)
-            .ok()?
-            .get(b"Parent")
-            .ok()?
-            .as_reference()
-            .ok()
-    })
-    .map(|id| Box::new(id))
-    .expect("Seitenbaum");
+    let first_page = *doc.get_pages().values().next().expect("eine Seite");
+    let pages_id = doc
+        .get_dictionary(first_page)
+        .and_then(|page| page.get(b"Parent"))
+        .and_then(Object::as_reference)
+        .expect("Seitenbaum");
     let broken_content = doc.add_object(Stream::new(dictionary! {}, b"BT (offen".to_vec()));
     let broken_page = doc.add_object(dictionary! {
         "Type" => "Page",
@@ -311,7 +316,11 @@ fn eine_kaputte_seite_nimmt_die_anderen_nicht_mit() {
         "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
     });
     let pages = doc.get_dictionary_mut(pages_id).expect("Pages");
-    let mut kids = pages.get(b"Kids").and_then(|k| k.as_array()).cloned().expect("Kids");
+    let mut kids = pages
+        .get(b"Kids")
+        .and_then(|k| k.as_array())
+        .cloned()
+        .expect("Kids");
     kids.insert(0, broken_page.into());
     pages.set("Kids", kids);
     pages.set("Count", 2);
@@ -328,7 +337,8 @@ fn eine_kaputte_seite_nimmt_die_anderen_nicht_mit() {
 
     let hits = leaks(&bytes, IBAN);
     assert!(
-        hits.iter().any(|h| h.contains("Seite 2") && h.contains("Schriftdekoder")),
+        hits.iter()
+            .any(|h| h.contains("Seite 2") && h.contains("Schriftdekoder")),
         "Seite 2 ging mit Seite 1 verloren: {hits:?}"
     );
 }

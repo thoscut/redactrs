@@ -16,15 +16,23 @@
 # Die Namenszusaetze stehen in crates/redact-core/src/naming.rs
 # (DEFAULT_OUTPUT_SUFFIX, REVIEW_SUFFIX, AUDIT_SUFFIX). Ein eigener
 # --output-suffix faellt hier natuerlich nicht darunter.
-*_geschwaerzt.pdf
-*_review.json
-*_audit.json
+#
+# Die Endung wird von der Eingabe uebernommen, und diese Datei vergleicht
+# schreibweisenempfindlich: `redact-rs Kontoauszug.PDF` schreibt
+# `Kontoauszug_geschwaerzt.PDF`, und ein Muster `*.pdf` liesse sie durch
+# (nachgemessen mit `git check-ignore`). Deshalb die Klammern - sie decken
+# jede Gross-/Kleinschreibung der Endung. Review und Audit-Log heissen immer
+# `.json` (naming.rs, `sibling_path`), tragen die Klammern aber fuer den
+# Fall, dass jemand sie von Hand umbenennt.
+*_geschwaerzt.[pP][dD][fF]
+*_review.[jJ][sS][oO][nN]
+*_audit.[jJ][sS][oO][nN]
 
 # PDFs im Wurzelverzeichnis. Die Testdaten des Projekts liegen unter
 # crates/*/src/testdata/ bzw. crates/*/tests/data/ und sind davon nicht
 # betroffen; im Wurzelverzeichnis gehoert keine einzige PDF-Datei ins
 # Repository. Wer doch eine braucht: `git add -f`.
-/*.pdf
+/*.[pP][dD][fF]
 
 # ---------------------------------------------------------------------------
 # Oertliche Werkzeug- und Systemreste

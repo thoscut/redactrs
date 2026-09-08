@@ -20,7 +20,8 @@
 //!
 //! * ein **Kleinbild** ([`THUMB_WIDTH`] Pixel breit) — bleibt liegen, damit beim
 //!   Zurückblättern sofort etwas zu sehen ist und die Wartezeit auf das große
-//!   Bild überbrückt wird;
+//!   Bild überbrückt wird. Alle Kleinbilder zusammen bleiben unter
+//!   [`MAX_THUMB_BYTES`]; darüber fällt das am längsten nicht gezeigte weg;
 //! * das **Vollbild** in der aktuellen Zoomstufe — nur für die gerade
 //!   angezeigte Seite; beim Seitenwechsel werden die anderen freigegeben.
 //!
@@ -45,6 +46,18 @@ pub const THUMB_WIDTH: u32 = 240;
 pub const MAX_RENDER_WIDTH: u32 = 4000;
 /// Raster, auf das die angeforderte Breite gerundet wird.
 pub const WIDTH_STEP: u32 = 64;
+/// Decke für alle Kleinbilder zusammen, in Bytes RGBA8.
+///
+/// Ein Kleinbild einer A4-Seite ist 240 × 340 × 4 = 326 kB. Vorher wurde
+/// keines je verworfen: 500 Seiten waren 163 MB Texturen, 2 000 Seiten
+/// 653 MB — ohne Obergrenze, und die Miniaturspalte forderte nach und nach
+/// **jede** Seite an. Wie bei der Clip-Masken-Decke im Rasterizer zählt hier
+/// der Speicher selbst, nicht die Zahl der Bilder (eine 5 000 pt hohe Seite
+/// ist als Kleinbild viermal so groß wie A4).
+///
+/// 64 MiB sind gut 200 A4-Kleinbilder — jedes Dokument, das ein Mensch von
+/// Hand durchsieht, behält alle; die sichtbare Spalte braucht ein Dutzend.
+pub const MAX_THUMB_BYTES: usize = 64 * 1024 * 1024;
 
 /// Gewünschte Bildbreite für eine Seite bei gegebener Zoomstufe.
 ///
@@ -127,6 +140,10 @@ pub struct PageMeta {
 pub struct CachedPage {
     /// Kleinbild; überbrückt die Wartezeit auf das Vollbild.
     pub thumb: Option<TextureHandle>,
+    /// Größe des Kleinbilds in Bytes; `0` ohne Kleinbild.
+    thumb_bytes: usize,
+    /// Wann das Kleinbild zuletzt gebraucht wurde ([`PageCache::touch_thumb`]).
+    thumb_used: u64,
     /// Vollbild in der zuletzt angeforderten Zoomstufe.
     pub full: Option<TextureHandle>,
     /// Breite des Vollbilds; `0`, wenn keines vorliegt.
@@ -173,6 +190,13 @@ pub struct PageCache {
     has_document: bool,
     entries: HashMap<usize, CachedPage>,
     current: Option<usize>,
+    /// Bytes aller Kleinbilder zusammen — die Größe, an der die Decke hängt.
+    thumb_bytes: usize,
+    /// Decke dafür; im Betrieb [`MAX_THUMB_BYTES`].
+    thumb_budget: usize,
+    /// Läuft bei jedem Gebrauch eines Kleinbilds eins weiter — die Uhr, nach
+    /// der das älteste bestimmt wird.
+    clock: u64,
     /// Laufender Vollbildauftrag (Seite, Breite).
     pending_full: Option<(usize, u32)>,
     /// Laufender Kleinbildauftrag.
@@ -213,8 +237,64 @@ impl PageCache {
             has_document: false,
             entries: HashMap::new(),
             current: None,
+            thumb_bytes: 0,
+            thumb_budget: MAX_THUMB_BYTES,
+            clock: 0,
             pending_full: None,
             pending_thumb: None,
+        }
+    }
+
+    /// Setzt die Kleinbild-Decke — nur für Tests, die sie mit einer Handvoll
+    /// Seiten erreichen wollen.
+    #[cfg(test)]
+    pub fn set_thumb_budget(&mut self, bytes: usize) {
+        self.thumb_budget = bytes;
+        self.evict_thumbs(None);
+    }
+
+    /// Bytes aller gehaltenen Kleinbilder.
+    pub fn thumb_bytes(&self) -> usize {
+        self.thumb_bytes
+    }
+
+    /// Wie viele Kleinbilder gerade vorliegen.
+    pub fn thumb_count(&self) -> usize {
+        self.entries.values().filter(|e| e.thumb.is_some()).count()
+    }
+
+    /// Merkt, dass das Kleinbild dieser Seite gerade gebraucht wird — von der
+    /// Miniaturspalte für jede **sichtbare** Zeile, vom Hauptbereich für die
+    /// angezeigte Seite. Wer nicht berührt wird, fällt als Erster weg.
+    pub fn touch_thumb(&mut self, page: usize) {
+        self.clock += 1;
+        if let Some(entry) = self.entries.get_mut(&page) {
+            entry.thumb_used = self.clock;
+        }
+    }
+
+    /// Wirft die am längsten nicht gebrauchten Kleinbilder weg, bis die Decke
+    /// eingehalten ist. Verschont werden `keep` (das eben angekommene) und
+    /// die angezeigte Seite: ihr Kleinbild überbrückt die Wartezeit auf das
+    /// Vollbild.
+    fn evict_thumbs(&mut self, keep: Option<usize>) {
+        while self.thumb_bytes > self.thumb_budget {
+            let oldest = self
+                .entries
+                .iter()
+                .filter(|(page, entry)| {
+                    entry.thumb.is_some() && Some(**page) != keep && Some(**page) != self.current
+                })
+                .min_by_key(|(_, entry)| entry.thumb_used)
+                .map(|(page, _)| *page);
+            let Some(page) = oldest else {
+                break;
+            };
+            if let Some(entry) = self.entries.get_mut(&page) {
+                entry.thumb = None;
+                self.thumb_bytes -= entry.thumb_bytes;
+                entry.thumb_bytes = 0;
+            }
         }
     }
 
@@ -237,6 +317,7 @@ impl PageCache {
         self.has_document = false;
         self.entries.clear();
         self.current = None;
+        self.thumb_bytes = 0;
         self.pending_full = None;
         self.pending_thumb = None;
     }
@@ -267,20 +348,33 @@ impl PageCache {
             degraded: done.rendered.degraded,
         };
         let name = format!("page-{}-{}", done.page, done.width);
-        let texture = ctx.load_texture(name, to_color_image(&done.rendered), texture_options());
+        let image = to_color_image(&done.rendered);
+        let bytes = image.pixels.len() * std::mem::size_of::<egui::Color32>();
+        let texture = ctx.load_texture(name, image, texture_options());
 
+        self.clock += 1;
+        let clock = self.clock;
         let entry = self.entries.entry(done.page).or_insert_with(|| CachedPage {
             thumb: None,
+            thumb_bytes: 0,
+            thumb_used: 0,
             full: None,
             full_width: 0,
             meta: meta.clone(),
         });
         entry.meta = meta;
         if done.thumb {
+            // Ein Kleinbild wird nur einmal gerechnet (`has_thumb`); käme doch
+            // ein zweites, zählte das erste ab.
+            self.thumb_bytes -= entry.thumb_bytes;
             entry.thumb = Some(texture);
+            entry.thumb_bytes = bytes;
+            entry.thumb_used = clock;
+            self.thumb_bytes += bytes;
             if self.pending_thumb == Some(done.page) {
                 self.pending_thumb = None;
             }
+            self.evict_thumbs(Some(done.page));
         } else {
             entry.full = Some(texture);
             entry.full_width = done.width;
@@ -302,6 +396,7 @@ impl PageCache {
 
         if self.current != Some(page) {
             self.current = Some(page);
+            self.touch_thumb(page);
             // Vollauflösung gibt es nur für die sichtbare Seite; die Kleinbilder
             // der anderen bleiben liegen.
             for (index, entry) in self.entries.iter_mut() {

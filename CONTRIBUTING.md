@@ -68,6 +68,16 @@ Dazu kommt in der CI:
 cargo check --workspace --locked                  # Job "msrv", Toolchain 1.88
 cargo deny check advisories licenses bans sources # Job "supply-chain"
 cargo audit                                       # ebenda
+cargo clippy --workspace --all-targets --locked -- -D warnings  # Job "build-windows", nativ
+```
+
+Der Windows-Clippy ist kein Doppel des Linux-Laufs: `cfg(not(unix))`-Zweige
+sieht nur er. Wer ihn lokal nachstellen will, braucht das Ziel, aber keinen
+Linker (`rustup target add x86_64-pc-windows-gnu`):
+
+```bash
+cargo clippy --workspace --all-targets --locked \
+  --target x86_64-pc-windows-gnu -- -D warnings
 ```
 
 Und im Release-Workflow, nicht in der CI, der Bau ohne Oberfläche:

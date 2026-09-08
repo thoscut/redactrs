@@ -58,24 +58,27 @@
 //! ## Die eine Ausnahme von `unsafe`
 //!
 //! Sieben der acht Crates dieses Projekts stehen unter
-//! `#![forbid(unsafe_code)]`. Genau eine Stelle im ganzen Baum braucht es
-//! nicht: der `prctl`-Aufruf unten. `redact-cli` steht deshalb unter `deny`
-//! statt `forbid`, und die Ausnahme trägt diese eine Funktion — nicht die
-//! Datei und nicht das Crate.
+//! `#![forbid(unsafe_code)]`. Genau eine Datei im ganzen Baum braucht es
+//! nicht: diese, für den Systemaufruf unten. `redact-cli` steht deshalb unter
+//! `deny` statt `forbid`, und die Ausnahme trägt der einzelne Aufruf — nicht
+//! die Datei und nicht das Crate.
 //!
 //! Wer das nachzählen will:
 //!
 //! ```console
 //! $ grep -rl 'forbid(unsafe_code)' crates/*/src/lib.rs crates/*/src/main.rs | wc -l
-//! $ grep -rn 'unsafe {' crates/*/src --include='*.rs'
+//! $ grep -rl '#\[allow(unsafe_code)\]' crates/*/src --include='*.rs'
+//! $ grep -c '#\[allow(unsafe_code)\]' crates/redact-cli/src/dumpable.rs
 //! ```
 //!
 //! Die erste Zahl ist **8**, nicht 7: `redact-gui` hat zwei Wurzeln (`lib.rs`
 //! und `main.rs`), beide unter `forbid`. Gezählt werden dort Dateien, hier im
 //! Text Crates — der Unterschied ist genau diese eine Doppelung.
 //!
-//! Die zweite Liste nennt **nur diese Datei**, mit zwei Zeilen: den Aufruf
-//! unten und die Gegenprobe in ihrem Test.
+//! Die zweite Liste nennt **nur diese Datei**, und die dritte Zahl ist **3**:
+//! `prctl` (Linux), `setrlimit` (übrige Unix) — je Bau entsteht nur einer von
+//! beiden — und die Gegenprobe im Test. Gezählt wird das Attribut, nicht das
+//! Schlüsselwort: ein `grep` nach `unsafe {` träfe auch diesen Kommentar.
 
 /// Was der Versuch ergeben hat, Kernabzüge abzuschalten.
 ///
@@ -85,6 +88,14 @@
 /// ändert. Sie unter `false` zusammenzufassen hieße, auf Windows bei jedem
 /// Lauf eine Warnung zu drucken, die niemand befolgen kann — und unter `true`
 /// hieße es, Schutz zu behaupten, den es dort nicht gibt.
+///
+/// Auf einem System ohne Mittel (Windows) liefert [`deny_core_dumps`] nur
+/// [`CoreDumps::Unavailable`]; `Disabled` und `Failed` werden dort nie gebaut,
+/// und `clippy -D warnings` hielte das für toten Code. Die beiden Zustände
+/// sind aber die Wahrheit über Linux und die übrigen Unix — ein Enum je System
+/// wäre die schlechtere Ehrlichkeit. Deshalb die Ausnahme, gebunden an genau
+/// die Systeme, auf denen sie zutrifft.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreDumps {
     /// Abgeschaltet. Der Klartext des Dokuments landet bei einem Absturz
@@ -134,8 +145,8 @@ fn outcome(rc: libc::c_int) -> CoreDumps {
 pub fn deny_core_dumps() -> CoreDumps {
     #[cfg(target_os = "linux")]
     {
-        // Eine der beiden `unsafe`-Stellen im ganzen Baum (die andere ist die
-        // Gegenprobe im Test darunter).
+        // Eine der drei `unsafe`-Stellen im ganzen Baum (die anderen: der
+        // `setrlimit`-Zweig darunter und die Gegenprobe im Test).
         //
         // `prctl` ist variadisch; die Argumente nach `PR_SET_DUMPABLE` sind
         // für diese Option als 0 vorgeschrieben (`man 2 prctl`). Der Aufruf

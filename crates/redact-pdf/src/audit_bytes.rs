@@ -938,7 +938,10 @@ mod tests {
                 "hay={hay:?} pat={pat:?} limit={limit}"
             );
         }
-        assert_eq!(find_all(b"aaaaaaa", &memmem::Finder::new(b"aaaa"), 4), vec![0]);
+        assert_eq!(
+            find_all(b"aaaaaaa", &memmem::Finder::new(b"aaaa"), 4),
+            vec![0]
+        );
         assert_eq!(
             find_all(b"abcabcabcabc", &memmem::Finder::new(b"abc"), 2),
             vec![0, 3]

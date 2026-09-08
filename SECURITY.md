@@ -87,18 +87,22 @@ laufenden Prozess. Gegen den hilft kein Anwendungsprogramm.
   zweite Frage, die die Ausnahme **beziffert** statt sie zu behaupten:
 
   ```bash
-  $ grep -rn '\bunsafe {' crates/*/src --include='*.rs'
-  crates/redact-cli/src/dumpable.rs:78:        let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
-  crates/redact-cli/src/dumpable.rs:107:            let state = unsafe { libc::prctl(libc::PR_GET_DUMPABLE) };
+  $ grep -rl '#\[allow(unsafe_code)\]' crates/*/src --include='*.rs'
+  crates/redact-cli/src/dumpable.rs
+  $ grep -c '#\[allow(unsafe_code)\]' crates/redact-cli/src/dumpable.rs
+  3
   ```
 
-  **Zwei** Fundstellen, und die Zahl gehört genau so hingeschrieben: die erste
-  ist die Ausnahme im ausgelieferten Programm, die zweite steht in deren
-  `#[cfg(test)]`-Modul und liest zurück, ob der Kernel den Zustand wirklich
-  übernommen hat. Beide tragen ein einzelnes `#[allow(unsafe_code)]` an der
-  Stelle — nicht an der Datei und nicht am Crate. Wächst diese Ausgabe, ist die
-  Zusage verletzt, und das ist dann an einer Zahl abzulesen und nicht an einer
-  Meinung.
+  **Eine** Datei, **drei** Fundstellen, und die Zahl gehört genau so
+  hingeschrieben: der `prctl`-Aufruf für Linux, der `setrlimit`-Aufruf für die
+  übrigen Unix-Systeme (im Bau eines Binaries entsteht immer nur einer von
+  beiden), und die Gegenprobe im `#[cfg(test)]`-Modul, die zurückliest, ob der
+  Kernel den Zustand wirklich übernommen hat. Jede trägt ein einzelnes
+  `#[allow(unsafe_code)]` an der Stelle — nicht an der Datei und nicht am
+  Crate; gezählt wird deshalb genau dieses Attribut. (Ein `grep` nach dem
+  Schlüsselwort `unsafe` zählte auch die Erklärung im Modulkommentar mit und
+  lieferte eine Zahl zu viel.) Wächst diese Ausgabe, ist die Zusage verletzt,
+  und das ist dann an einer Zahl abzulesen und nicht an einer Meinung.
 * **Kontrollierter Abbruch statt Speicherfehler.** Übersteigt eine Eingabe die
   unten genannten Grenzen, endet der Lauf mit einer Meldung und einem
   Rückgabewert — nicht mit SIGABRT und nicht mit einer gescheiterten
@@ -219,10 +223,22 @@ getötet und ist nicht etwa vorher sauber ausgestiegen.
 * **Windows: gar nichts.** Es gibt dort kein Gegenstück; ein Prozess kann sich
   dem Abbild nicht entziehen, weil `MiniDumpWriteDump` beim *Aufrufer* liegt
   und nicht beim Ziel. Das ist ausgerechnet die Plattform der Zielgruppe.
-* **macOS und die übrigen Nicht-Linux-Systeme: ebenfalls nichts.** Die
-  Funktion ist `#[cfg(target_os = "linux")]`; sonst tut sie nichts und liefert
-  `true`. Der Rückgabewert heißt dort also „nichts zu tun“ und nicht
-  „geschützt“.
+* **macOS, BSD und die übrigen Unix-Systeme: das schwächere Mittel.** Dort
+  gibt es kein `prctl`; die Funktion setzt `setrlimit(RLIMIT_CORE, 0)` — eine
+  Grenze, kein Verbot. Wer den Prozess mit angehobener Grenze startet, ändert
+  daran nichts (sie wird hier gesetzt, nicht geerbt), aber ein `core_pattern`,
+  das an ein Programm weiterreicht, kann sie je nach System übergehen.
+
+  | System | Mittel | Wie fest |
+  |---|---|---|
+  | Linux | `prctl(PR_SET_DUMPABLE, 0)` | Der Kernel schreibt gar nichts, `root` eingeschlossen. |
+  | macOS, BSD, übrige Unix | `setrlimit(RLIMIT_CORE, 0)` | Schwächer: eine Grenze, kein Verbot. |
+  | Windows | **keins** | Ein Prozess kann sich dem Abbild nicht entziehen. |
+
+  Die Funktion liefert drei Antworten statt `true`/`false`: „abgeschaltet“,
+  „hier gibt es kein Mittel“ (Windows, oder ein Kern, der die Option ablehnt)
+  und „das Mittel gibt es, der Aufruf schlug fehl“ — nur die letzte ist eine
+  Warnung wert (`crates/redact-cli/src/dumpable.rs`).
 * **Ein Abzug, den ein *anderes* Programm zieht**, etwa ein Debugger mit
   `root`-Rechten.
 
@@ -318,6 +334,7 @@ anzeigende Software. Wer die Datei öffnen darf, kann sie hier schwärzen.
 | **Review-Datei** (`--apply-review`) | **16 MB** | **fest** |
 | **Regionsliste** (`--manual-regions`) | **16 MB** | **fest** |
 | **Musterkonfiguration** (`--patterns-config`) | **1 MB** | **fest** |
+| **Suchbegriffe je `--check-leaks`-Lauf** | **1 000** | **fest** |
 
 Alle Grenzen, die dem **Eingabe-PDF** gelten, gelten für verschlüsselte Dateien
 genauso — siehe „Die Grenzen gelten auch hinter der Entschlüsselung“.
@@ -824,9 +841,9 @@ weiterhin beim Namen genannt, `root:*:20501:0:99999:7::` nicht:
 ```
 Fehler: Konfigurationsfehler: /etc/shadow: Einstellungen nicht lesbar
 (Zeile 1, Spalte 1): unbekannter Schlüssel. Erlaubt sind: output_suffix,
-patterns, min_confidence, padding, theme. (Der Inhalt der Datei wird hier
-nicht wiedergegeben — REDACT_RS_CONFIG und die Vorgabestelle können auf eine
-beliebige fremde Datei zeigen.)
+patterns, disabled_patterns, min_confidence, padding, theme. (Der Inhalt der
+Datei wird hier nicht wiedergegeben — REDACT_RS_CONFIG und die Vorgabestelle
+können auf eine beliebige fremde Datei zeigen.)
 ```
 
 Dieselbe Überlegung gilt für die Größe: die Einstellungsdatei wird nur gelesen,

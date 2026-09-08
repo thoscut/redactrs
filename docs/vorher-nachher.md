@@ -188,7 +188,7 @@ $ cargo run -p redact-render --example console_gif -- konsole.txt konsole.gif
 ### Wie zuverlässig ist „nachbauen“?
 
 **Auf derselben Maschine: bitgleich.** Vier vollständige Läufe haben hier
-dieselben SHA-256-Summen für alle fünf erzeugten Bild- und Textdateien
+dieselben SHA-256-Summen für alle sechs erzeugten Bild- und Textdateien
 geliefert. Weder PNG noch GIF tragen einen Zeitstempel, und die Palette wird
 sortiert aufgebaut, damit die Durchlaufreihenfolge nichts ändert.
 

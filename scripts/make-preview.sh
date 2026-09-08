@@ -41,6 +41,10 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_dir="${1:-$repo_root/docs}"
+# Wohin cargo baut. CARGO_TARGET_DIR gilt fuer `cargo build` von selbst; der
+# Pfad zu den gebauten Programmen unten muss dieselbe Variable lesen, sonst
+# baut das Skript an einen Ort und sucht an einem anderen (Abbruch mit 127).
+build_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 
 # Aufloesung: die Seite wird mit BREITE Pixeln gerendert und danach auf den
 # beschriebenen Teil zugeschnitten; uebrig bleiben rund 770 Pixel Breite.
@@ -87,10 +91,10 @@ cargo build --quiet -p redact-cli --bin redact-rs
 cargo build --quiet -p redact-render --example page_to_png
 cargo build --quiet -p redact-render --example redaction_gif
 cargo build --quiet -p redact-render --example console_gif
-cli="$repo_root/target/debug/redact-rs"
-png="$repo_root/target/debug/examples/page_to_png"
-agif="$repo_root/target/debug/examples/redaction_gif"
-cgif="$repo_root/target/debug/examples/console_gif"
+cli="$build_dir/debug/redact-rs"
+png="$build_dir/debug/examples/page_to_png"
+agif="$build_dir/debug/examples/redaction_gif"
+cgif="$build_dir/debug/examples/console_gif"
 
 echo
 echo "== 2/6  Demo erzeugen und schwaerzen ======================================"

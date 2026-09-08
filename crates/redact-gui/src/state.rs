@@ -362,20 +362,38 @@ impl HitOutcome {
     }
 }
 
-/// Obergrenze für die Nachprüfung nach dem Export: so viele **verschiedene**
-/// Texte werden gesucht.
+/// Prüfbudget der Nachprüfung nach dem Export: **Begriffe × Dateibytes**.
 ///
-/// [`redact_pdf::leaks`] liest die Datei je Begriff einmal ganz durch — auf
-/// allen Ebenen, bis in Objektströme hinein. Das ist der Preis dafür, dass es
-/// das ehrliche Messgerät ist, und er ist linear in der Zahl der Begriffe.
-/// Ohne Decke bezahlte ihn die Oberfläche in einem hängenden Fenster: die
-/// Trefferliste darf bis `--max-candidates` (100 000) lang werden.
+/// [`redact_pdf::leaks_many`] liest die Datei einmal und vergleicht dann
+/// jeden Datenblock mit jedem Begriff. Die Kosten sind also Grundkosten je
+/// Datei plus ein Anteil, der mit Begriffen **und** Dateigröße wächst —
+/// gemessen (Release, 1,1 MB, 305 Seiten): 0,45 s für einen Begriff, 1,69 s
+/// für 1 000, also rund 1,2 ms je Begriff und Megabyte.
 ///
-/// 200 ist derselbe Wert wie [`redact_pdf`]s Obergrenze für gemeldete
-/// Fundstellen und deckt jedes Dokument ab, das ein Mensch von Hand
-/// durchsieht. Was darüber liegt, wird **gesagt** und nicht verschwiegen —
-/// siehe [`ExportCheck::sentence`].
-pub const MAX_EXPORT_CHECK_NEEDLES: usize = 200;
+/// Die Decke davor zählte Begriffe allein (200) und sah die Datei nicht:
+/// dieselben 200 Begriffe kosten an 50 kB fast nichts und an 5 MB Sekunden.
+/// Hier zählt das Produkt. Bei 2 GiB sind das ≈ 2 s Rechenzeit im
+/// Hintergrund für jede Dateigröße — 1 900 Begriffe an 1,1 MB, 430 an 5 MB,
+/// 20 000 an 100 kB. Angewendet wird die Decke dort, wo die Dateigröße
+/// bekannt ist: in [`ExportCheckPlan::run`], nach dem Lesen der Datei.
+///
+/// Die Oberfläche hängt daran nicht mehr (die Prüfung läuft auf einem
+/// eigenen Thread, siehe [`crate::app::RedactApp`]); die Decke begrenzt nur,
+/// wie lange „Nachprüfung läuft …“ dort stehen kann. Was sie überschreitet,
+/// wird **gesagt** und nicht verschwiegen — siehe [`ExportCheck::sentence`].
+pub const MAX_EXPORT_CHECK_NEEDLE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Wie viele Begriffe das Prüfbudget bei dieser Dateigröße zulässt —
+/// mindestens einer, sonst würde bei einer riesigen Datei gar nichts geprüft.
+pub fn export_check_needle_limit(file_bytes: u64) -> usize {
+    needle_limit(MAX_EXPORT_CHECK_NEEDLE_BYTES, file_bytes)
+}
+
+/// [`export_check_needle_limit`] mit beliebigem Budget.
+fn needle_limit(budget: u64, file_bytes: u64) -> usize {
+    let allowed = budget / file_bytes.max(1);
+    usize::try_from(allowed).unwrap_or(usize::MAX).max(1)
+}
 
 /// Ergebnis der Nachprüfung über die geschriebene Datei.
 ///
@@ -390,8 +408,19 @@ pub struct ExportCheck {
     pub leaking: Vec<String>,
     /// Geschwärzte Zeilen ohne bekannten Text — von Hand gezogene Rechtecke.
     pub without_text: usize,
-    /// Texte über [`MAX_EXPORT_CHECK_NEEDLES`] hinaus, die nicht gesucht wurden.
+    /// Texte, die das Prüfbudget ([`MAX_EXPORT_CHECK_NEEDLE_BYTES`]) bei
+    /// dieser Dateigröße nicht mehr zuließ.
     pub skipped: usize,
+    /// Texte, die **auch** in einer bewusst stehen gelassenen Zeile stehen —
+    /// abgewählt, durch die Negativliste geschützt oder selbst ein
+    /// Schutzeintrag. Sie werden nicht gesucht: dass sie in der Ausgabe
+    /// stehen, ist eine Entscheidung und kein Leck.
+    pub kept: usize,
+    /// Größe der zurückgelesenen Datei in Bytes — die zweite Größe, an der
+    /// das Prüfbudget hängt.
+    pub file_bytes: u64,
+    /// Wie viele Begriffe das Budget bei dieser Größe zuließ.
+    pub needle_limit: usize,
 }
 
 impl ExportCheck {
@@ -427,6 +456,10 @@ impl ExportCheck {
                 self.leaking.len(),
                 self.checked
             )
+        } else if self.checked == 0 && self.kept > 0 {
+            // Es gab Texte — sie stehen nur alle auch in einer stehen
+            // gelassenen Zeile. „Keine Zeile mit bekanntem Text“ wäre falsch.
+            "Nachprüfung: es wurde nichts gesucht.".to_string()
         } else if self.checked == 0 {
             "Nachprüfung: keine geschwärzte Zeile mit bekanntem Text — es wurde nichts \
              nachgeprüft."
@@ -439,14 +472,26 @@ impl ExportCheck {
         };
         let skipped = if self.skipped > 0 {
             format!(
-                " {} weitere Text(e) wurden nicht gesucht (Höchstzahl {}).",
-                self.skipped, MAX_EXPORT_CHECK_NEEDLES
+                " {} weitere Text(e) wurden nicht gesucht — das Prüfbudget lässt bei {} kB \
+                 höchstens {} Begriffe zu.",
+                self.skipped,
+                self.file_bytes.div_ceil(1024),
+                self.needle_limit
+            )
+        } else {
+            String::new()
+        };
+        let kept = if self.kept > 0 {
+            format!(
+                " {} Text(e) stehen auch in einer abgewählten oder geschützten Zeile und \
+                 wurden deshalb nicht gesucht.",
+                self.kept
             )
         } else {
             String::new()
         };
         format!(
-            "{head}{skipped} Geprüft ist genau diese Liste, nicht die Datei.{}",
+            "{head}{skipped}{kept} Geprüft ist genau diese Liste, nicht die Datei.{}",
             self.hand_made()
         )
     }
@@ -460,6 +505,86 @@ impl ExportCheck {
             " {} Rechteck(e) ohne bekannten Text — dafür bleibt die Sichtprüfung.",
             self.without_text
         )
+    }
+}
+
+/// Was die Nachprüfung suchen soll — der Teil, der den [`AppState`] braucht.
+///
+/// Getrennt vom Lauf ([`ExportCheckPlan::run`]), weil der Lauf die Datei
+/// liest und durchsucht und dafür **nicht** auf dem Oberflächen-Thread laufen
+/// darf: 305 Seiten mit 200 Begriffen hielten das Fenster sekundenlang an.
+/// Der Plan ist reine Daten und wandert auf den Thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExportCheckPlan {
+    /// Die zu suchenden Texte, jeder einmal, in der Reihenfolge der Liste.
+    pub needles: Vec<String>,
+    /// Siehe [`ExportCheck::without_text`].
+    pub without_text: usize,
+    /// Siehe [`ExportCheck::kept`].
+    pub kept: usize,
+}
+
+impl ExportCheckPlan {
+    /// Liest die geschriebene Datei zurück und sucht die Texte darin —
+    /// mit [`redact_pdf::leaks_many`] über die **geschriebenen Bytes**, in
+    /// einem Durchgang. Nicht mit dem eigenen Extraktor: wovor der blind ist,
+    /// das wird nicht geschwärzt und wäre für eine Nachprüfung mit ihm auch
+    /// unsichtbar.
+    ///
+    /// Hier wird das Prüfbudget angewendet ([`export_check_needle_limit`]),
+    /// denn erst hier ist die Dateigröße bekannt. Was nicht mehr hineinpasst,
+    /// zählt [`ExportCheck::skipped`].
+    ///
+    /// Kein Freibrief (siehe [`ExportCheck::sentence`]) und keine Aussage über
+    /// selbst gezogene Rechtecke: die haben keinen bekannten Text, und dafür
+    /// kann diese Prüfung nichts sagen. Beides steht im Satz, den der Nutzer
+    /// liest — verschwiegen wäre die Anzeige selbst eine falsche Entwarnung.
+    pub fn run(self, out: &Path) -> ExportCheck {
+        self.run_within(out, MAX_EXPORT_CHECK_NEEDLE_BYTES)
+    }
+
+    /// [`ExportCheckPlan::run`] mit beliebigem Prüfbudget (Begriffe ×
+    /// Dateibytes) — damit ein Test die Decke an einer kleinen Datei
+    /// erreicht, statt an einer, die Gigabytes wiegt.
+    pub fn run_within(self, out: &Path, budget: u64) -> ExportCheck {
+        let bytes = match std::fs::read(out) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return ExportCheck {
+                    unreadable: Some(error.to_string()),
+                    checked: 0,
+                    leaking: Vec::new(),
+                    without_text: self.without_text,
+                    skipped: self.needles.len(),
+                    kept: self.kept,
+                    file_bytes: 0,
+                    needle_limit: 0,
+                }
+            }
+        };
+        let file_bytes = bytes.len() as u64;
+        let limit = needle_limit(budget, file_bytes);
+        let checked = self.needles.len().min(limit);
+        let skipped = self.needles.len() - checked;
+        let needles: Vec<&str> = self.needles[..checked].iter().map(String::as_str).collect();
+
+        let leaking = redact_pdf::leaks_many(&bytes, &needles)
+            .into_iter()
+            .zip(needles.iter())
+            .filter(|(hits, _)| !hits.is_empty())
+            .map(|(_, needle)| needle.to_string())
+            .collect();
+
+        ExportCheck {
+            unreadable: None,
+            checked,
+            leaking,
+            without_text: self.without_text,
+            skipped,
+            kept: self.kept,
+            file_bytes,
+            needle_limit: limit,
+        }
     }
 }
 
@@ -2514,8 +2639,7 @@ impl AppState {
 
     // ---------------------------------------------------------- Nachprüfung
 
-    /// Liest die eben geschriebene Datei zurück und sucht darin die Texte, die
-    /// gerade geschwärzt wurden.
+    /// Sammelt, was die Nachprüfung nach dem Export suchen soll.
     ///
     /// ## Warum die Oberfläche das kann und die Kommandozeile nicht
     ///
@@ -2527,72 +2651,86 @@ impl AppState {
     /// zwar für die Zielgruppe, die per Doppelklick arbeitet und gar keine
     /// Konsole öffnet.
     ///
-    /// Gesucht wird mit [`redact_pdf::leaks`] über die **geschriebenen Bytes**
-    /// — nicht mit dem eigenen Extraktor. Wovor der blind ist, das wird nicht
-    /// geschwärzt und wäre für eine Nachprüfung mit ihm auch unsichtbar.
+    /// ## Was nicht gesucht wird
     ///
-    /// ## Was sie nicht ist
+    /// Ein Text, der auch in einer **bewusst stehen gelassenen** Zeile steht
+    /// — abgewählt, durch die Negativliste geschützt, Schutzeintrag —, wird
+    /// nicht gesucht. Vorher galt er als Leck: zwei Treffer „Musterbank“, einer
+    /// abgewählt, und die Nachprüfung meldete „1 … steht NOCH in der Ausgabe —
+    /// darf so nicht weitergegeben werden“ über eine Datei, die genau so
+    /// gewollt war. Gesagt wird es trotzdem ([`ExportCheck::kept`]): dass
+    /// dieser Text nicht geprüft werden konnte, gehört in den Satz.
     ///
-    /// Kein Freibrief (siehe [`ExportCheck::sentence`]) und keine Aussage über
-    /// selbst gezogene Rechtecke: die haben keinen bekannten Text, und dafür
-    /// kann diese Prüfung nichts sagen. Beides steht im Satz, den der Nutzer
-    /// liest — verschwiegen wäre die Anzeige selbst eine falsche Entwarnung.
-    pub fn check_export(&self, out: &Path, summary: &HitSummary) -> ExportCheck {
-        let mut needles: Vec<String> = Vec::new();
-        let mut without_text = 0usize;
-        let mut skipped = 0usize;
-
-        for (index, entry) in self.regions.iter().enumerate() {
-            if !summary.outcome(index).is_redacted() {
-                continue;
-            }
-            match entry
+    /// Das Prüfbudget wird hier **nicht** angewendet — es hängt an der
+    /// Dateigröße, und die ist erst in [`ExportCheckPlan::run`] bekannt.
+    pub fn plan_export_check(&self, summary: &HitSummary) -> ExportCheckPlan {
+        let text_of = |entry: &AnnotatedRegion| {
+            entry
                 .region
                 .text
                 .as_deref()
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
-            {
+                .map(str::to_string)
+        };
+
+        // Erst die stehen gelassenen Texte, dann die zu suchenden — die Frage
+        // „steht er auch in einer stehen gelassenen Zeile?“ braucht die ganze
+        // Liste, nicht nur die Zeilen davor.
+        let mut kept_texts: Vec<String> = Vec::new();
+        for (index, entry) in self.regions.iter().enumerate() {
+            let kept = matches!(
+                summary.outcome(index),
+                HitOutcome::Disabled | HitOutcome::Blocked | HitOutcome::Protecting
+            );
+            if let Some(text) = text_of(entry).filter(|_| kept) {
+                if !kept_texts.contains(&text) {
+                    kept_texts.push(text);
+                }
+            }
+        }
+
+        let mut needles: Vec<String> = Vec::new();
+        let mut kept = 0usize;
+        let mut without_text = 0usize;
+        for (index, entry) in self.regions.iter().enumerate() {
+            if !summary.outcome(index).is_redacted() {
+                continue;
+            }
+            match text_of(entry) {
                 Some(text) => {
-                    if needles.iter().any(|n| n == text) {
+                    if needles.contains(&text) {
                         continue;
                     }
-                    if needles.len() == MAX_EXPORT_CHECK_NEEDLES {
-                        skipped += 1;
-                    } else {
-                        needles.push(text.to_string());
+                    if kept_texts.contains(&text) {
+                        // Einmal je Text zählen, nicht je Zeile.
+                        kept += 1;
+                        // Damit derselbe Text nicht bei der nächsten Zeile
+                        // noch einmal zählt.
+                        kept_texts.retain(|k| k != &text);
+                        continue;
                     }
+                    needles.push(text);
                 }
                 None => without_text += 1,
             }
         }
 
-        let bytes = match std::fs::read(out) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return ExportCheck {
-                    unreadable: Some(error.to_string()),
-                    checked: 0,
-                    leaking: Vec::new(),
-                    without_text,
-                    skipped: skipped + needles.len(),
-                }
-            }
-        };
-
-        let leaking = needles
-            .iter()
-            .filter(|needle| !redact_pdf::leaks(&bytes, needle).is_empty())
-            .cloned()
-            .collect();
-
-        ExportCheck {
-            unreadable: None,
-            checked: needles.len(),
-            leaking,
+        ExportCheckPlan {
+            needles,
             without_text,
-            skipped,
+            kept,
         }
+    }
+
+    /// Nachprüfung in einem Zug: planen und laufen lassen.
+    ///
+    /// Blockiert, solange die Datei durchsucht wird — für Tests und für den
+    /// Notfall ohne Thread. Die Oberfläche geht den zweiteiligen Weg
+    /// ([`AppState::plan_export_check`], dann [`ExportCheckPlan::run`] auf
+    /// einem eigenen Thread), damit sie nicht steht.
+    pub fn check_export(&self, out: &Path, summary: &HitSummary) -> ExportCheck {
+        self.plan_export_check(summary).run(out)
     }
 
     // ---------------------------------------------------------------- Review

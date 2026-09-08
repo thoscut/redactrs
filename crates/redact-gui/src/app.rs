@@ -23,13 +23,16 @@
 //! dieselbe Liste neu und geht deshalb durch dieselbe Frage.
 
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use egui::{Color32, Key, Pos2, RichText, Stroke, Vec2};
 use redact_core::ReviewFile;
 
 use crate::render::PageCache;
 use crate::selector::{hit_handle, hit_test, HandleDrag, PointerFrame, RectangleSelector};
-use crate::state::{AppState, HitSummary, RegionColor, MAX_ZOOM, MIN_ZOOM};
+use crate::state::{
+    AppState, ExportCheck, ExportCheckPlan, HitSummary, RegionColor, MAX_ZOOM, MIN_ZOOM,
+};
 use crate::theme::Theme;
 use crate::toolbar::{self, ToolAction, ToolContext, ToolItem};
 use crate::viewer::{self, PagePreview};
@@ -383,10 +386,28 @@ pub fn key_commands(keys: KeyState, has_selection: bool) -> Vec<KeyCommand> {
         return Vec::new();
     }
 
-    // Tastenkürzel mit Steuerungstaste stehen für sich: Strg+Z ist Rückgängig
-    // und nicht zusätzlich irgendein Buchstabe im Blätterwerk.
+    let mut commands = Vec::new();
+
+    // Esc, Entf, Bild auf/ab, Pos1 und Ende gelten **unabhängig von der
+    // Steuerungstaste** — so, wie es die Tastentabelle ohne Vorbehalt
+    // verspricht und wie Umschalt+Bild ab schon immer geblättert hat. Vorher
+    // kehrte der Strg-Zweig unten vorzeitig zurück, und mit gehaltener Strg
+    // taten diese sechs Tasten nichts.
+    if keys.escape {
+        commands.push(KeyCommand::Deselect);
+    }
+    if keys.delete && has_selection {
+        commands.push(KeyCommand::DeleteSelected);
+    }
+
+    let step = if keys.shift { NUDGE_FAST } else { NUDGE };
+    // Escape hebt die Auswahl auf — danach sind die Pfeiltasten wieder für das
+    // Blättern zuständig.
+    let selected = has_selection && !keys.escape;
+
     if keys.ctrl {
-        let mut commands = Vec::new();
+        // Tastenkürzel mit Steuerungstaste stehen für sich: Strg+Z ist
+        // Rückgängig und nicht zusätzlich irgendein Buchstabe im Blätterwerk.
         if keys.key_o {
             commands.push(KeyCommand::Open);
         }
@@ -406,8 +427,7 @@ pub fn key_commands(keys: KeyState, has_selection: bool) -> Vec<KeyCommand> {
         // beim Schieben, mit Umschalt dieselbe große. Ohne Auswahl gibt es
         // nichts zu ändern; ein Blättern wäre hier die falsche Antwort, denn
         // dafür genügt der Pfeil allein.
-        if has_selection {
-            let step = if keys.shift { NUDGE_FAST } else { NUDGE };
+        if selected {
             if keys.left {
                 commands.push(KeyCommand::Resize { dx: -step, dy: 0.0 });
             }
@@ -421,22 +441,7 @@ pub fn key_commands(keys: KeyState, has_selection: bool) -> Vec<KeyCommand> {
                 commands.push(KeyCommand::Resize { dx: 0.0, dy: -step });
             }
         }
-        return commands;
-    }
-
-    let mut commands = Vec::new();
-    if keys.escape {
-        commands.push(KeyCommand::Deselect);
-    }
-    if keys.delete && has_selection {
-        commands.push(KeyCommand::DeleteSelected);
-    }
-
-    let step = if keys.shift { NUDGE_FAST } else { NUDGE };
-    // Escape hebt die Auswahl auf — danach sind die Pfeiltasten wieder für das
-    // Blättern zuständig.
-    let selected = has_selection && !keys.escape;
-    if selected {
+    } else if selected {
         // Y zeigt im PDF nach oben — „Pfeil hoch“ erhöht also y.
         if keys.left {
             commands.push(KeyCommand::Move { dx: -step, dy: 0.0 });
@@ -458,6 +463,7 @@ pub fn key_commands(keys: KeyState, has_selection: bool) -> Vec<KeyCommand> {
             commands.push(KeyCommand::NextPage);
         }
     }
+
     // Bild auf/ab und Pos1/Ende blättern immer, auch mit ausgewählter Region.
     if keys.page_up {
         commands.push(KeyCommand::PrevPage);
@@ -637,6 +643,20 @@ enum Ask {
     Answer(bool),
 }
 
+/// Eine Nachprüfung, die gerade auf ihrem Thread läuft.
+///
+/// Siehe [`RedactApp::start_export_check`].
+struct PendingCheck {
+    /// Die Exportmeldung, vor die das Ergebnis tritt — sie nennt die Datei,
+    /// damit der Satz auch dann noch stimmt, wenn inzwischen ein anderes
+    /// Dokument offen ist.
+    prefix: String,
+    result: Receiver<ExportCheck>,
+}
+
+/// Was die Statuszeile zeigt, solange die Nachprüfung läuft.
+pub const EXPORT_CHECK_RUNNING: &str = "Nachprüfung läuft …";
+
 /// Zustand der Oberfläche.
 pub struct RedactApp {
     pub state: AppState,
@@ -650,6 +670,16 @@ pub struct RedactApp {
     central_rect: Option<egui::Rect>,
     /// Gerasterte Seitenbilder; rechnet auf einem eigenen Thread.
     pages: PageCache,
+    /// Laufende Nachprüfungen nach dem Export — je eine je Ausgabedatei.
+    ///
+    /// Eine Liste, kein einzelner Platz: wer zweimal kurz nacheinander
+    /// exportiert, bekommt **beide** Urteile. Ein verworfener Empfänger hieße,
+    /// dass ein Leck in der ersten Datei nie gemeldet würde.
+    checks: Vec<PendingCheck>,
+    /// Der egui-Kontext des letzten Bildes — damit ein Thread, der fertig ist,
+    /// ein Neuzeichnen anstoßen kann, auch wenn die Oberfläche gerade ruht.
+    /// `None`, solange noch kein Bild gezeichnet wurde (Tests ohne Bildschirm).
+    ui_ctx: Option<egui::Context>,
     /// Helles oder dunkles Thema.
     pub theme: Theme,
     /// Zuletzt an egui übergebenes Thema — damit `set_visuals` nur bei einer
@@ -695,6 +725,8 @@ impl RedactApp {
             error: None,
             central_rect: None,
             pages: PageCache::new(),
+            checks: Vec::new(),
+            ui_ctx: None,
             theme,
             applied_theme: None,
             shown_page: None,
@@ -978,30 +1010,130 @@ impl RedactApp {
             Ok(outcome) => {
                 self.error = None;
                 self.state.warnings = outcome.warnings.clone();
+                let prefix = export_status(
+                    outcome.drawn_rects,
+                    outcome.removed_glyphs,
+                    &out,
+                    &audit,
+                    blocked,
+                    outcome.warnings.first().map(String::as_str),
+                );
                 // Die Nachprüfung über die geschriebenen Bytes — der Weg, den
                 // die Kommandozeile als `--check-leaks` bekommen hat, hier
                 // ohne Konsole und ohne getippte Geheimnisse. Siehe
-                // [`AppState::check_export`].
-                let check = self.state.check_export(&out, &summary);
-                if check.found_leak() {
-                    // Ganz nach vorn: die Statuszeile zeigt nur die **erste**
-                    // Warnung, und keine andere ist wichtiger als diese.
-                    self.state.warnings.insert(0, check.sentence());
-                }
-                self.state.status = format!(
-                    "{}  ·  {}",
-                    export_status(
-                        outcome.drawn_rects,
-                        outcome.removed_glyphs,
-                        &out,
-                        &audit,
-                        blocked,
-                        outcome.warnings.first().map(String::as_str),
-                    ),
-                    check.sentence()
-                );
+                // [`AppState::plan_export_check`].
+                let plan = self.state.plan_export_check(&summary);
+                self.start_export_check(prefix, plan, out);
             }
             Err(e) => self.report(Err(e)),
+        }
+    }
+
+    /// Lässt die Nachprüfung auf einem eigenen Thread laufen.
+    ///
+    /// Vorher lief sie im Zeichentakt: 305 Seiten mit 200 Begriffen hielten
+    /// das Fenster sekundenlang an, eine 5-MB-Datei minutenlang. Jetzt geht
+    /// nur der Plan (reine Daten) auf den Thread; das Ergebnis kommt über
+    /// einen Kanal zurück und wird in [`RedactApp::poll_export_checks`]
+    /// abgeholt — dasselbe Muster wie beim Rastern ([`crate::render`]).
+    /// Solange steht [`EXPORT_CHECK_RUNNING`] in der Statuszeile.
+    ///
+    /// Lässt sich kein Thread starten, läuft die Prüfung an Ort und Stelle:
+    /// langsam ist besser als gar nicht — ohne sie stünde da eine
+    /// Erfolgsmeldung ohne Nachprüfung.
+    fn start_export_check(&mut self, prefix: String, plan: ExportCheckPlan, out: PathBuf) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let repaint = self.ui_ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("redact-export-check".to_string())
+            .spawn({
+                let plan = plan.clone();
+                let out = out.clone();
+                move || {
+                    let check = plan.run(&out);
+                    // Ein `Err` heißt: niemand wartet mehr — dann gibt es auch
+                    // niemanden, dem man das sagen müsste.
+                    let _ = sender.send(check);
+                    if let Some(ctx) = repaint {
+                        ctx.request_repaint();
+                    }
+                }
+            });
+        match spawned {
+            Ok(_) => {
+                self.state.status = format!("{prefix}  ·  {EXPORT_CHECK_RUNNING}");
+                self.checks.push(PendingCheck {
+                    prefix,
+                    result: receiver,
+                });
+            }
+            Err(_) => self.finish_export_check(&prefix, plan.run(&out)),
+        }
+    }
+
+    /// Holt fertige Nachprüfungen ab — einmal je Bild, vor dem Zeichnen.
+    ///
+    /// Gibt zurück, wie viele Urteile angekommen sind.
+    pub fn poll_export_checks(&mut self) -> usize {
+        let mut done = Vec::new();
+        self.checks
+            .retain(|pending| match pending.result.try_recv() {
+                Ok(check) => {
+                    done.push((pending.prefix.clone(), Some(check)));
+                    false
+                }
+                Err(TryRecvError::Empty) => true,
+                // Der Thread ist ohne Ergebnis verschwunden (Panik). Schweigen
+                // wäre eine Entwarnung, die keine ist.
+                Err(TryRecvError::Disconnected) => {
+                    done.push((pending.prefix.clone(), None));
+                    false
+                }
+            });
+        let count = done.len();
+        for (prefix, check) in done {
+            match check {
+                Some(check) => self.finish_export_check(&prefix, check),
+                None => {
+                    self.state.status = format!(
+                        "{prefix}  ·  Nachprüfung: abgebrochen (interner Fehler) — es wurde \
+                         nichts nachgeprüft."
+                    );
+                }
+            }
+        }
+        count
+    }
+
+    /// Trägt ein Urteil in Statuszeile und Warnungen ein.
+    fn finish_export_check(&mut self, prefix: &str, check: ExportCheck) {
+        if check.found_leak() {
+            // Ganz nach vorn: die Statuszeile zeigt nur die **erste**
+            // Warnung, und keine andere ist wichtiger als diese.
+            self.state.warnings.insert(0, check.sentence());
+        }
+        self.state.status = format!("{prefix}  ·  {}", check.sentence());
+    }
+
+    /// Läuft gerade eine Nachprüfung?
+    pub fn export_check_running(&self) -> bool {
+        !self.checks.is_empty()
+    }
+
+    /// Wartet auf alle laufenden Nachprüfungen und trägt ihre Urteile ein.
+    ///
+    /// Nur für Tests: die Oberfläche wartet nie — sie holt je Bild ab.
+    #[cfg(test)]
+    pub fn wait_for_export_checks(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while self.export_check_running() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "die Nachprüfung kommt nicht zum Ende"
+            );
+            if self.poll_export_checks() == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
         }
     }
 
@@ -1807,6 +1939,20 @@ impl RedactApp {
         self.text_focus.remember(crate::focus::in_text_field(ctx));
     }
 
+    /// Beendet einen laufenden Zug am Eckgriff, bevor eine Taste die Region
+    /// verändert.
+    ///
+    /// Vorher lief der Zug weiter: das nächste Mausbild setzte das Rechteck
+    /// wieder auf Anker und Zeiger und überschrieb damit den Tastenschritt —
+    /// der stand dann nur noch als zweiter Schritt im Verlauf. Beendet wird
+    /// wie beim Blättern mitten im Zug: der bisher gezogene Stand bleibt
+    /// stehen, der Selektor bleibt bis zum Loslassen gesperrt.
+    fn end_handle_drag(&mut self) {
+        if self.resize.take().is_some() {
+            self.selector.cancel();
+        }
+    }
+
     fn apply_key_commands(&mut self, commands: &[KeyCommand]) {
         for command in commands {
             match *command {
@@ -1835,9 +1981,11 @@ impl RedactApp {
                     self.state.delete_selected();
                 }
                 KeyCommand::Move { dx, dy } => {
+                    self.end_handle_drag();
                     self.state.move_selected(dx, dy);
                 }
                 KeyCommand::Resize { dx, dy } => {
+                    self.end_handle_drag();
                     self.state.resize_selected(dx, dy);
                 }
                 KeyCommand::AddRegion => {
@@ -1886,8 +2034,11 @@ impl eframe::App for RedactApp {
             self.applied_theme = Some(self.theme);
         }
 
-        // Fertige Seitenbilder abholen, bevor gezeichnet wird.
+        // Fertige Seitenbilder und Nachprüfungen abholen, bevor gezeichnet
+        // wird.
+        self.ui_ctx = Some(ctx.clone());
         self.pages.poll(ctx);
+        self.poll_export_checks();
         self.handle_dropped_files(ctx);
 
         // Einmal je Bild, nicht je Trefferzeile.
@@ -1982,6 +2133,14 @@ mod z4_tests;
 #[cfg(test)]
 #[path = "rev8_tests.rs"]
 mod rev8_tests;
+
+// Prüfrunde Z-B: die Nachprüfung auf einem eigenen Thread, die Kleinbild-Decke,
+// die Trefferliste nur mit sichtbaren Zeilen und vier Kleinigkeiten an Tastatur
+// und Griff. Kindmodul von `app` wie die Runden davor — `export_to`, `resize`
+// und `apply_pointer` sind privat.
+#[cfg(test)]
+#[path = "zb_tests.rs"]
+mod zb_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2538,10 +2697,14 @@ mod tests {
         // zu ändern, und blättern soll es ausdrücklich nicht: dafür genügt der
         // Pfeil allein. In einem Textfeld kommt es ohnehin nicht an — dort
         // greift `text_focus` schon vor diesem Zweig.
+        //
+        // Bis Z-B stand hier zusätzlich `delete: true` — und der Test hielt
+        // fest, dass Strg+Entf **nichts** tut. Das war der Befund, nicht die
+        // Absicht: die Tastentabelle verspricht Entf ohne Vorbehalt. Seither
+        // gilt Entf mit und ohne Strg (siehe `zb_tests`).
         let ctrl_and_arrow = KeyState {
             ctrl: true,
             left: true,
-            delete: true,
             ..KeyState::default()
         };
         assert_eq!(
@@ -4360,6 +4523,7 @@ mod tests {
         });
         app.open_startup_document();
         app.export_to(out.clone());
+        app.wait_for_export_checks();
 
         assert!(app.error.is_none(), "{:?}", app.error);
         assert!(
@@ -4386,6 +4550,7 @@ mod tests {
         });
         plain.open_startup_document();
         plain.export_to(second.clone());
+        plain.wait_for_export_checks();
         assert!(plain.error.is_none(), "{:?}", plain.error);
         assert!(AppState::audit_path_for(&second).exists());
 

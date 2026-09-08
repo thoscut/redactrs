@@ -138,9 +138,19 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master @ 2026-07-16
         with:
           toolchain: ${{ needs.toolchain.outputs.channel }}
+          components: clippy
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+
+      # Clippy noch einmal, auf dem Ziel, das die Zielgruppe benutzt. Der
+      # Linux-Job sieht nur den `cfg(unix)`-Zweig; was nur unter Windows
+      # gebaut wird (etwa `dumpable.rs`, wo dort ein Enum-Zweig nie entsteht),
+      # fiel bisher durch - das Gate war rot und die CI gruen. Lokal:
+      #   cargo clippy --workspace --all-targets --locked \
+      #     --target x86_64-pc-windows-gnu -- -D warnings
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # Volle Feature-Menge inkl. GUI: unter MSVC bringen eframe/egui/rfd
       # ihre Windows-Abhaengigkeiten selbst mit, es sind keine Systempakete

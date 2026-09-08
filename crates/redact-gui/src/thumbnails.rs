@@ -6,6 +6,12 @@
 //! über [`PageCache::request_thumb`] nach, was noch fehlt — eines je Bild,
 //! damit der Arbeits-Thread nicht Aufträge verwirft.
 //!
+//! Angefordert und festgehalten wird nur, was **sichtbar** ist: der
+//! Zwischenspeicher hält die Kleinbilder unter einer Decke
+//! ([`crate::render::MAX_THUMB_BYTES`]) und wirft das am längsten nicht
+//! berührte weg. Forderte die Spalte weiter jede Seite nach, liefe sie bei
+//! einem langen Dokument im Kreis — anfordern, verwerfen, anfordern.
+//!
 //! Die Seitenzahl steht **neben** jedem Bild. Bei fünfzig Seiten sehen die
 //! Miniaturen einander zum Verwechseln ähnlich; ohne Zahl wäre die Spalte eine
 //! Reihe grauer Rechtecke.
@@ -104,6 +110,10 @@ pub fn show(
                                 .color(number_color(ui, current)),
                         );
                         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                        let visible = ui.is_rect_visible(rect);
+                        if visible {
+                            pages.touch_thumb(page);
+                        }
                         paint_thumb(ui, rect, pages, page, current);
                         if hits > 0 {
                             ui.label(RichText::new(format!("{hits}")).small().weak())
@@ -123,9 +133,10 @@ pub fn show(
                             )
                             .on_hover_text(crate::app::NOTHING_DRAWN_NOTICE);
                         }
-                        response
+                        (response, visible)
                     })
                     .inner;
+                let (response, visible) = response;
 
                 let response = response.on_hover_text(format!("Seite {}", page + 1));
                 if response.clicked() {
@@ -136,9 +147,9 @@ pub fn show(
                 }
                 ui.add_space(4.0);
 
-                // Fehlendes Kleinbild nachfordern; tut nichts, solange schon
-                // eines unterwegs ist.
-                if !pages.has_thumb(page) {
+                // Fehlendes Kleinbild nachfordern — nur für sichtbare Zeilen,
+                // und nur eines je Bild (siehe `request_thumb`).
+                if visible && !pages.has_thumb(page) {
                     pages.request_thumb(page, ui.ctx());
                 }
             }

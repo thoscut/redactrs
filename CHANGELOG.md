@@ -17,11 +17,15 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 > **Diese Datei erzeugt die Release-Notizen.** `.github/workflows/release.yml`
 > schneidet beim Veröffentlichen den Abschnitt der gebauten Version heraus
-> (`## <version>`, bis zur nächsten `## `-Überschrift). Beim Release ist
+> (`## <version>`, bis zur nächsten `## `-Überschrift; führende und
+> abschließende Leerzeilen sowie `---`-Trenner fallen weg). Beim Release ist
 > „Unveröffentlicht“ deshalb in `## <version> — <datum>` umzubenennen; sonst
 > findet der Job nichts und meldet eine Warnung statt der
-> Verhaltensänderungen. Nachgeprüft: für 0.3.0, 0.2.0 und 0.1.0 findet er
-> heute 98, 84 bzw. 33 Zeilen.
+> Verhaltensänderungen. Und es darf nur **einen** Abschnitt
+> „Unveröffentlicht“ geben: zwei Überschriften gleichen Namens hießen zwei
+> Abschnitte, von denen der Job nur den ersten nähme. Nachgeprüft mit dem
+> `awk`/`sed` aus release.yml: für 0.3.0, 0.2.0 und 0.1.0 findet er heute
+> 95, 81 bzw. 32 Zeilen.
 
 ---
 
@@ -32,6 +36,27 @@ Bereich: `git log v0.6.0..HEAD`.
 Vierter Durchgang, und diesmal fast nur an der **Doku** — mit demselben
 Maßstab wie am Code: jede Angabe hier stammt aus einem Lauf des gebauten
 Binaries, nicht aus dem Quelltext.
+
+### Die CI lässt Clippy jetzt auch unter Windows laufen
+
+`cargo clippy --workspace --all-targets -- -D warnings` war für das
+Windows-Ziel rot (`variants Disabled and Failed are never constructed` in
+`dumpable.rs`: dort entsteht ohne `prctl`/`setrlimit` nur `Unavailable`), und
+niemand sah es, weil der Windows-Job nur baute und testete. Das Enum behält
+seine drei Zustände — sie sind die Wahrheit über Linux und die übrigen
+Unix-Systeme —, die Ausnahme ist an `cfg(not(unix))` gebunden, und der
+Windows-Job fährt jetzt denselben Clippy-Schritt wie der Linux-Job. Lokal:
+`cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-gnu -- -D warnings`
+(nur das Target, kein Linker nötig).
+
+Dazu drei Kleinigkeiten mit Verhalten: `.gitignore` deckt jetzt auch
+`Kontoauszug_geschwaerzt.PDF` (die Endung wird von der Eingabe übernommen,
+und `git` vergleicht schreibweisenempfindlich); `scripts/make-preview.sh`
+liest `CARGO_TARGET_DIR` auch für den Pfad zu den gebauten Programmen, statt
+nach dem Bau an anderer Stelle mit 127 abzubrechen; und `--help` rückt die
+Kommentarzeilen „Grafische Oberfläche“ und „Beispieldatei …“ wie alle anderen
+ein und nennt alle sechs Schlüssel der Einstellungsdatei sowie die Decke von
+1 000 Begriffen je `--check-leaks`-Lauf.
 
 ### ⚠ Die README beschrieb ein Audit-Log, das es so nicht mehr gibt
 
@@ -80,14 +105,20 @@ Kontrolle hinterlässt im selben Aufruf eine 454 656 Byte große `core`-Datei,
 Crates.** `redact-cli` steht unter `#![deny(unsafe_code)]` mit **einer**
 benannten Ausnahme an der `prctl`-Funktion. `SECURITY.md` sagte weiter „in
 allen acht“ und gab dazu ein `grep`, das seither eine Datei weniger findet —
-beides ist berichtigt, und die Ausnahme wird dort jetzt **beziffert** (zwei
-`unsafe`-Blöcke: einer im ausgelieferten Programm, einer im Test, der
-zurückliest, ob der Kernel den Zustand übernommen hat) statt behauptet.
+beides ist berichtigt, und die Ausnahme wird dort jetzt **beziffert** (drei
+`unsafe`-Blöcke in einer Datei: `prctl` für Linux, `setrlimit` für die übrigen
+Unix-Systeme — je Bau entsteht nur einer davon — und die Gegenprobe im Test,
+die zurückliest, ob der Kernel den Zustand übernommen hat) statt behauptet.
+Gezählt wird das Attribut `#[allow(unsafe_code)]`, nicht das Schlüsselwort:
+ein `grep` nach `unsafe {` traf auch seine eigene Erklärung im Modulkommentar.
 
 Ausgeschrieben steht dort auch, **was der Schutz nicht leistet**: unter Windows
 gibt es kein Gegenstück (`MiniDumpWriteDump` liegt beim Aufrufer, nicht beim
-Ziel) — ausgerechnet die Plattform der Zielgruppe —, und unter macOS und jedem
-anderen Nicht-Linux-System tut die Funktion nichts und liefert trotzdem `true`.
+Ziel) — ausgerechnet die Plattform der Zielgruppe —, und unter macOS, BSD und
+den übrigen Unix-Systemen gibt es nur das schwächere Mittel
+`setrlimit(RLIMIT_CORE, 0)`: eine Grenze, kein Verbot. Die Funktion liefert
+drei Antworten statt `true`/`false`; „hier gibt es kein Mittel“ ist keine
+Warnung, „der Aufruf schlug fehl“ schon.
 Dazu der Nebeneffekt: der Prozess ist danach für `ptrace` durch denselben
 Benutzer unerreichbar, `gdb` und `strace` brauchen `root`.
 
@@ -284,10 +315,13 @@ Rechnung nie unter dem wirklich belegten Speicher liegt, hält ein eigener
 Test fest (im engsten Fall 2 % darüber). Dieselbe Datei: **vorher rc 0 und
 5,6 GB, jetzt rc 1 und 21 MB in 0,1 s.**
 
-### Die Nachprüfung kostet nicht mehr Begriffe × Dateigröße
+### Die Nachprüfung entpackt und parst die Datei nur noch einmal
 
 `--check-leaks` packte je Suchbegriff **die ganze Datei neu aus** und parste
-den Objektgraphen neu. Diese Arbeit hängt an der Datei, nicht am Begriff.
+den Objektgraphen neu. Diese Arbeit hängt an der Datei, nicht am Begriff, und
+fällt jetzt einmal an. Der Vergleich selbst läuft weiter je Begriff über die
+ganze Datei; oberhalb der Tabelle wächst die Laufzeit damit weiter mit der
+Zahl der Begriffe.
 
 | 792-kB-Datei | 0.6.0 | 0.7.0 |
 |---|---|---|

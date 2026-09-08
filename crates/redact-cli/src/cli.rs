@@ -366,6 +366,12 @@ pub struct Cli {
     ///
     /// **Nichts gefunden ist kein Freibrief:** geprüft ist damit genau diese
     /// Liste und sonst nichts.
+    ///
+    /// Höchstens 1 000 Begriffe je Aufruf; mehr endet mit Rückgabewert `2`,
+    /// bevor die Datei gelesen wird. Jeder Begriff kostet einen Vergleich
+    /// über die ganze Datei, und eine Liste in Millionenhöhe sähe von außen
+    /// aus wie ein Hänger. Wer mehr hat, teilt die Liste und ruft mehrmals
+    /// auf — jeder Lauf meldet für sich.
     #[arg(
         long = "check-leaks",
         value_name = "TEXT",
@@ -531,15 +537,19 @@ impl ActionArg {
 ///
 /// Aufgabe #61: der musl-Build entsteht mit `--no-default-features`; dort darf
 /// die Oberfläche weder im Beispielteil noch bei den Schaltern auftauchen.
+///
+/// Kein `\` hinter dem öffnenden Anführungszeichen: die Fortsetzung frisst
+/// nicht nur den Zeilenumbruch, sondern auch den führenden Leerraum der
+/// nächsten Zeile — und die Kommentarzeile stand dann in der Hilfe ohne die
+/// zwei Leerzeichen, die jedes andere Beispiel hat. Der Test
+/// `every_example_comment_is_indented` hält das fest.
 #[cfg(feature = "gui")]
-const GUI_EXAMPLE: &str = "\
-  # Grafische Oberfläche
+const GUI_EXAMPLE: &str = "  # Grafische Oberfläche
   redact-rs --gui kontoauszug.pdf
 
 ";
 #[cfg(not(feature = "gui"))]
-const GUI_EXAMPLE: &str = "\
-  # (Diese Fassung wurde ohne grafische Oberfläche gebaut.)
+const GUI_EXAMPLE: &str = "  # (Diese Fassung wurde ohne grafische Oberfläche gebaut.)
 
 ";
 
@@ -569,8 +579,7 @@ Beispiele:
   redact-rs kontoauszug.pdf -o geschwaerzt.pdf --apply-review review.json \\
       --audit-log audit.json
 
-{GUI_EXAMPLE}\
-  # Beispieldatei zum Ausprobieren erzeugen
+{GUI_EXAMPLE}  # Beispieldatei zum Ausprobieren erzeugen
   redact-rs --write-demo beispiel.pdf
 
   # Nachprüfen: steht das Geheimnis noch in der fertigen Datei?
@@ -580,7 +589,8 @@ Beispiele:
   # Dasselbe, ohne die Begriffe in Prozessliste und Shell-Historie zu schreiben
   redact-rs geschwaerzt.pdf --check-leaks - < begriffe.txt
 
-Einstellungsdatei — Namenszusatz, Muster, Mindestvertrauen, Polsterung, Thema:
+Einstellungsdatei — Namenszusatz, Muster, abgeschaltete Muster, Mindestvertrauen,
+Polsterung, Thema:
   ~/.config/redact-rs/settings.yaml   bzw.   %APPDATA%\\redact-rs\\settings.yaml
   {} zeigt auf eine andere Datei.
   Rangfolge: Kommandozeile schlägt Datei schlägt Vorgabe.
@@ -625,6 +635,24 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// Jede Kommentarzeile im Beispielblock steht zwei Zeichen eingerückt —
+    /// auch die beiden, die an eine `\`-Fortsetzung des Stringliterals
+    /// grenzten und deshalb bündig links standen (`# Grafische Oberfläche`,
+    /// `# Beispieldatei …`).
+    #[test]
+    fn every_example_comment_is_indented() {
+        let text = examples();
+        let buendig: Vec<&str> = text.lines().filter(|l| l.starts_with('#')).collect();
+        assert!(
+            buendig.is_empty(),
+            "Kommentarzeilen ohne Einrückung im Hilfetext: {buendig:?}"
+        );
+        assert!(
+            text.lines().any(|l| l.starts_with("  # ")),
+            "kein eingerücktes Beispiel gefunden — Prüfung greift ins Leere"
+        );
     }
 
     #[test]

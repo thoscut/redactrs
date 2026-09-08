@@ -50,6 +50,36 @@
 //! Dieselben Messwerte je **Objekt** statt je Datei (802-Byte-Körper mit je
 //! 401 Objekten): ein leeres Array 632,4 Byte, jedes andere Objekt 153,6.
 //! Daher `ARRAY_BYTES = 640` und `OBJEKT_BYTES = 160`.
+//!
+//! ## Objekt-Streams (Debug, 200 000 Objekte je Datei, Querverweis-Strom)
+//!
+//! Die Rohkörper oben legen ihre Objekte in ein Array. In einem `/ObjStm`
+//! wird jedes Objekt dagegen **eigenständig** in `Document::objects`
+//! eingetragen — eigener Platz im Baum, bei `<</a 0>>` ein eigenes
+//! Dictionary — und der Querverweis-Strom hält je Objekt einen Eintrag. Das
+//! ist eine andere Speicherform, und die Zusicherung „`OBJEKT_BYTES` liegt
+//! über dem, was ein Objekt kostet“ muss auch dort gelten.
+//!
+//! | Form je Objekt | gerechnet | gemessen brutto | gemessen ohne Nutzlast | Verh. |
+//! |---|---:|---:|---:|---:|
+//! | `<</a 0>>` | 800 | 809,8 | **777,9** | 1,028 |
+//! | `[]` | 960 | 771,2 | 745,9 | 1,29 |
+//! | `0` | 480 | 290,1 | 265,9 | 1,81 |
+//! | `/a` | 480 | 295,2 | 269,9 | 1,78 |
+//! | `<<>>` | 480 | 293,3 | 265,9 | 1,81 |
+//! | `1 0 R` | 800 | 294,5 | 265,9 | 3,01 |
+//! | `(a)` | 480 | 300,2 | 273,9 | 1,75 |
+//!
+//! „Gerechnet“ ist hier nicht am Verhalten ablesbar (siehe den Kommentar im
+//! Test), sondern nach der Regel von `walk` gebildet: zwei Kopfzahlen und der
+//! Körper, `[` als 640, jedes andere Wort als 160. „Brutto“ ist alles, was
+//! `lopdf` nach `load_mem` hält; „ohne Nutzlast“ zieht die Dateibytes ab, die
+//! `lopdf` als Inhalt des Objekt- und des Querverweis-Stroms behält. Die
+//! decken Byte-Budget und Dekompressionsbudget, nicht die Objektdecke — und
+//! brutto hinge die Zahl an der Stellenzahl der Kopfzahlen, nicht an den
+//! Objekten. Verglichen wird deshalb ohne Nutzlast. Brutto läge `<</a 0>>`
+//! 1,2 % **über** der Rechnung; wer die Decke auch brutto halten will, braucht
+//! `OBJEKT_BYTES = 162` (809,8 / 5 Wörter, aufgerundet).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -177,6 +207,84 @@ fn rumpf(name: &str, ziel: usize) -> Vec<u8> {
     datei(&alle)
 }
 
+/// Dieselbe Art Objekt, `anzahl`-mal in **einem Objekt-Stream** (`/ObjStm`),
+/// mit Querverweis-Strom — so, wie jede echte Datei mit Objekt-Streams
+/// gebaut ist.
+///
+/// Unkomprimiert, damit die Datei zeigt, was `lopdf` sieht: der Strom wird
+/// beim Laden ausgepackt, und jedes Objekt darin steht danach einzeln in
+/// `Document::objects` — ein Objekt je Kopfpaar, nicht eines je Stream. Die
+/// Vorprüfung sieht den Inhalt als Syntax und zählt je Objekt auch die beiden
+/// Kopfzahlen (Nummer und Versatz) als Wörter mit.
+///
+/// Der Querverweis-Strom ist kein Beiwerk: je Objekt trägt er einen Eintrag
+/// vom Typ 2, und den hält `lopdf` als `XrefEntry` im Dokument — ein Preis je
+/// Objekt, der nicht aus der Syntax des Objekts kommt. Eine klassische
+/// `xref`-Tabelle kennt keine Typ-2-Einträge; mit ihr fehlte diese Menge in
+/// der Messung. Objektnummern beginnen hinter dem Gerüst und dem Container.
+fn objstm(koerper: &[u8], anzahl: usize) -> Vec<u8> {
+    let container = geruest().len() + 1;
+    let erste = container + 1;
+    let mut kopf = String::new();
+    let mut inhalt = Vec::new();
+    for k in 0..anzahl {
+        kopf.push_str(&format!("{} {} ", erste + k, inhalt.len()));
+        inhalt.extend_from_slice(koerper);
+        inhalt.push(b'\n');
+    }
+    let mut strom = format!(
+        "<< /Type /ObjStm /N {anzahl} /First {} /Length {} >>\nstream\n",
+        kopf.len(),
+        kopf.len() + inhalt.len()
+    )
+    .into_bytes();
+    strom.extend_from_slice(kopf.as_bytes());
+    strom.extend_from_slice(&inhalt);
+    strom.extend_from_slice(b"\nendstream");
+    let mut alle = geruest();
+    alle.push(strom);
+
+    let mut out: Vec<u8> = b"%PDF-1.5\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in alle.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        out.extend_from_slice(o);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    // Querverweis-Strom, `/W [1 4 4]`: Typ, Versatz bzw. Container, Generation
+    // bzw. Index. Vier Byte für den Index, weil 200 000 nicht in zwei passen.
+    let xref_id = erste + anzahl;
+    let xref_offset = out.len();
+    let mut eintraege: Vec<u8> = Vec::with_capacity((xref_id + 1) * 9);
+    let eintrag = |e: &mut Vec<u8>, typ: u8, a: u32, b: u32| {
+        e.push(typ);
+        e.extend_from_slice(&a.to_be_bytes());
+        e.extend_from_slice(&b.to_be_bytes());
+    };
+    eintrag(&mut eintraege, 0, 0, 0);
+    for off in &offsets {
+        eintrag(&mut eintraege, 1, *off as u32, 0);
+    }
+    for k in 0..anzahl {
+        eintrag(&mut eintraege, 2, container as u32, k as u32);
+    }
+    eintrag(&mut eintraege, 1, xref_offset as u32, 0);
+    out.extend_from_slice(
+        format!(
+            "{xref_id} 0 obj\n<< /Type /XRef /Size {} /W [1 4 4] /Root 1 0 R /Length {} >>\nstream\n",
+            xref_id + 1,
+            eintraege.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(&eintraege);
+    out.extend_from_slice(
+        format!("\nendstream\nendobj\nstartxref\n{xref_offset}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
 /// Was die Vorprüfung für diese Datei **rechnet**, in Byte — oder `None`,
 /// wenn sich die Zahl von außen nicht ablesen lässt.
 ///
@@ -298,6 +406,79 @@ fn die_rechnung_liegt_nie_unter_dem_gemessenen_speicher() {
         engste < 1.5,
         "keine Form liegt mehr dicht an der Rechnung (engste {engste:.2}) — \
          die Decke misst dann nicht mehr, was sie begrenzen soll"
+    );
+
+    // ---------------------------------------------------------- Objekt-Streams
+    //
+    // Dieselben Objekte, nur in einem `/ObjStm` verpackt. Hier ist die
+    // Rechnung von außen **nicht** ablesbar: je Objekt kostet der Kopf
+    // (Nummer und Versatz) rund 15 Dateibyte, und damit bleibt der
+    // Eigenfaktor jeder Form unter `FAKTOR` — die Objektdecke bindet bei
+    // diesen Dateien nie, das Byte-Budget entscheidet. Was trotzdem gelten
+    // muss, ist die Zusicherung **je Wort**: `OBJEKT_BYTES` „liegt über“ dem,
+    // was ein Objekt kostet. Ein Objekt-Stream ist die eine Bauart, bei der
+    // ein einzelnes `<</a 0>>` als eigenständiges Objekt in `Document::objects`
+    // landet — mit eigenem Platz im Baum und eigenem Dictionary —, und genau
+    // das prüfen die Rohkörper oben nicht: dort stehen die Objekte in einem
+    // Array.
+    //
+    // Gerechnet wird je Objekt wie in `walk`: die zwei Kopfzahlen zählen
+    // 2 × 160, dazu der Körper — `[` als 640, jedes andere Wort als 160.
+    // Gemessen wird der Speicher des Dokuments **ohne** die Nutzlast des
+    // Containers: `lopdf` behält den Stream-Inhalt (Dateibytes), und die
+    // deckt das Byte-Budget, nicht die Objektdecke.
+    let anzahl = 200_000usize;
+    let objstm_formen: [(&str, &[u8], u64); 7] = [
+        ("<</a 0>>", b"<</a 0>>", 2 * 160 + 3 * 160),
+        ("[]", b"[]", 2 * 160 + 640),
+        ("0", b"0", 2 * 160 + 160),
+        ("/a", b"/a", 2 * 160 + 160),
+        ("<<>>", b"<<>>", 2 * 160 + 160),
+        ("1 0 R", b"1 0 R", 2 * 160 + 3 * 160),
+        ("(a)", b"(a)", 2 * 160 + 160),
+    ];
+    println!();
+    println!(
+        "{:<12} {:>9} {:>12} {:>12} {:>10} {:>10} {:>6}",
+        "ObjStm-Form", "Datei", "gemessen", "o. Nutzl.", "je Objekt", "gerechnet", "Verh."
+    );
+    let mut engste_objstm = f64::MAX;
+    for (name, koerper, gerechnet_je_objekt) in objstm_formen {
+        let bytes = objstm(koerper, anzahl);
+        let nutzlast = bytes.len() - geruest().iter().map(Vec::len).sum::<usize>();
+
+        let vorher = LIVE.load(Ordering::Relaxed);
+        let doc = lopdf::Document::load_mem(&bytes).expect("ladbar");
+        let gemessen = LIVE.load(Ordering::Relaxed).saturating_sub(vorher);
+        // Sonst misst der Test einen Strom, dessen Objekte nie angekommen sind.
+        assert_eq!(
+            doc.objects.len(),
+            anzahl + geruest().len() + 2,
+            "{name}: `lopdf` hat die Objekte des Streams nicht ausgepackt"
+        );
+        drop(doc);
+
+        let ohne_nutzlast = gemessen.saturating_sub(nutzlast);
+        let je_objekt = ohne_nutzlast as f64 / anzahl as f64;
+        let verhaeltnis = gerechnet_je_objekt as f64 / je_objekt;
+        println!(
+            "{name:<12} {:>9} {gemessen:>12} {ohne_nutzlast:>12} {je_objekt:>10.1} \
+             {gerechnet_je_objekt:>10} {verhaeltnis:>6.3}",
+            bytes.len()
+        );
+        assert!(
+            verhaeltnis >= 1.0,
+            "{name} im Objekt-Stream: die Vorprüfung rechnet {gerechnet_je_objekt} Byte je \
+             Objekt, `lopdf` belegt {je_objekt:.1} — OBJEKT_BYTES liegt hier unter dem \
+             gemessenen Preis"
+        );
+        engste_objstm = engste_objstm.min(verhaeltnis);
+    }
+    println!("engste ObjStm-Form: {engste_objstm:.3}");
+    // Wie bei den Rohkörpern: dicht genug, dass die Rechnung noch misst.
+    assert!(
+        engste_objstm < 1.5,
+        "keine ObjStm-Form liegt mehr dicht an der Rechnung (engste {engste_objstm:.2})"
     );
 
     // **Woher die beiden Beträge kommen.** Ein leeres Array kostet gemessen

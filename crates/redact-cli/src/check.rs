@@ -90,11 +90,13 @@ const MAX_NEEDLE_INPUT: u64 = redact_core::MAX_AUX_FILE_BYTES;
 /// Obergrenze für die **Zahl** der Suchbegriffe.
 ///
 /// Die Byte-Grenze darüber allein reicht nicht: 16 MB fassen rund eine
-/// Million kurze Zeilen. Gemessen an einer 792-kB-Datei kostet ein Begriff
-/// etwa 16 ms (100 Begriffe 1,65 s, 1 000 Begriffe 15,9 s, 5 000 Begriffe
-/// 80,9 s — linear, der Speicher bleibt bei 20 MB). Eine Million Begriffe
-/// liefen also über vier Stunden, ohne dass irgendetwas kaputt wäre; das
-/// sieht von außen aus wie ein Hänger.
+/// Million kurze Zeilen. Gemessen an einer 898-kB-Datei mit 420 Seiten:
+/// 1 Begriff 1,7 s, 100 Begriffe 2,1 s, 1 000 Begriffe 5,9 s — ein Sockel
+/// (Datei lesen, Ströme auspacken, jede Seite durch den Schriftdekoder) und
+/// darüber rund 4 ms je Begriff, linear. Eine Million Begriffe liefen also
+/// über eine Stunde, ohne dass irgendetwas kaputt wäre; das sieht von außen
+/// aus wie ein Hänger. (Bis 0.7.0 kostete der Vergleich 65 ms je Begriff,
+/// Byte für Byte; seit `memmem` in `audit_bytes::find_all` nicht mehr.)
 ///
 /// 1 000 ist großzügig für das, wofür der Schalter da ist: die Geheimnisse
 /// **eines** Dokuments, von Hand aufgeschrieben. Wer mehr hat, ruft zweimal

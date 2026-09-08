@@ -1336,6 +1336,15 @@ abgelehnt statt durchsucht: darin stehen die Zeichenketten verschlüsselt, eine
 Bytesuche fände auch dann nichts, wenn das Geheimnis noch darin steht — und
 „nichts gefunden“ wäre hier die falscheste aller Antworten.
 
+**Höchstens 1 000 Begriffe je Aufruf.** Jeder Begriff kostet einen Vergleich
+über die ganze Datei; eine Liste in Millionenhöhe liefe Stunden und sähe von
+außen aus wie ein Hänger. Der 1 001. Begriff endet deshalb mit Rückgabewert
+`2`, bevor die Datei gelesen wird (nachgemessen: `seq 1 1001 | sed 's/^/x/' |
+redact-rs beispiel.pdf --check-leaks -` meldet „mit 1001 Suchbegriffen; mehr
+als 1000 nimmt der Lauf nicht an“; mit 1 000 Zeilen läuft derselbe Aufruf
+durch). Wer mehr hat, teilt die Liste und ruft mehrmals auf — jeder Lauf
+meldet für sich.
+
 ### Die Gegenprobe
 
 **Erst sie gibt dem Ergebnis seinen Wert.** Dieselbe Demo, diesmal ohne
@@ -1870,6 +1879,11 @@ anhalten; lässt sich eine Seite nicht rasterisieren, springt eine schematische
 Vorschau ein und zeigt wenigstens die Lage des Textes.
 
 ### Tastaturbedienung
+
+Die Tabelle nennt die Tasten so, wie sie gedrückt werden: steht kein Strg
+davor, gilt der Eintrag für die Taste **allein**. Was dieselbe Taste mit
+gehaltener Strg tut (Strg+Bild ab, Strg+Entf, Strg+Esc …), ist hier nicht
+zugesagt.
 
 | Taste | Wirkung |
 |---|---|

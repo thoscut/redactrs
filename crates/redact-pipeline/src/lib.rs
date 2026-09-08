@@ -1539,9 +1539,16 @@ pub fn review_identity(review_sha: &str, document_sha: &str) -> ReviewIdentity {
     }
 }
 
-/// Die ersten Stellen einer Prüfsumme — mehr braucht eine Meldung nicht.
+/// Die ersten zwölf **Zeichen** einer Prüfsumme — mehr braucht eine Meldung
+/// nicht.
+///
+/// Zeichen, nicht Bytes: die Prüfsumme aus der Review-Datei ist Fremdmaterial
+/// (`--apply-review`, `--manual-regions`), und `"sha256": "aaaaaaaaaaaä"`
+/// ließ den Byte-Schnitt `&sha[..12]` mitten im `ä` landen — Panik, Rückgabe
+/// 101, statt der Meldung „gehört zu einem anderen Dokument“.
 fn short_sha(sha: &str) -> &str {
-    &sha[..sha.len().min(12)]
+    let ende = sha.char_indices().nth(12).map_or(sha.len(), |(i, _)| i);
+    &sha[..ende]
 }
 
 /// Stellt sicher, dass eine Review-Datei zum Dokument gehört.
