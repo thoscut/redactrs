@@ -637,15 +637,12 @@ impl Budget {
         stream: &Stream,
     ) -> PlacedStream {
         self.effort.decoded_streams += 1;
-        let (content, has_tokens) = match stream
-            .decompressed_content()
-            .or_else(|_| stream.get_plain_content())
-        {
-            Ok(data) => (
+        let (content, has_tokens) = match crate::filters::decoded_content(stream) {
+            Some(data) => (
                 Some(crate::ops::decode_content_checked(&data)),
                 has_tokens(&data),
             ),
-            Err(_) => (None, false),
+            None => (None, false),
         };
         // `/Resources` wird mitsamt seiner Objekt-Id aufgelöst: teilen sich
         // mehrere Ströme dasselbe Verzeichnis, teilen sie sich auch dessen
@@ -1577,9 +1574,9 @@ pub(crate) fn cmyk_to_rgb(c: f64, m: f64, y: f64, k: f64) -> Rgb {
 /// Erfolg durchgehen: „0 Schwärzungen, Rückgabewert 0“ liest sich wie
 /// „nichts gefunden, also sauber“, und genau das wäre es dann nicht.
 pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
-    let content_data = doc
-        .get_page_content(page_id)
-        .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
+    // Über [`crate::filters`], nicht `Document::get_page_content`: der eigene
+    // Dekoder kennt `ASCIIHexDecode` und `RunLengthDecode`, `lopdf` nicht.
+    let content_data = crate::filters::page_content(doc, page_id);
     // Nicht `lopdf::content::Content::decode`: dessen Parser kennt kein
     // `BI … ID … EI`. Die Binärdaten hinter dem `ID` bringen ihn aus dem Tritt,
     // der Rest des Streams geht verloren — Text hinter einem Inline-Bild wäre
@@ -1658,12 +1655,56 @@ fn has_tokens(data: &[u8]) -> bool {
 struct FontDecodeStats {
     /// (Ressourcenname, `/BaseFont`) → (Zeichen gesamt, davon unlesbar)
     per_font: BTreeMap<(Vec<u8>, String), (usize, usize)>,
+    /// Fonts **mit** `/ToUnicode`: was ihre Codes ergeben — siehe
+    /// [`UniformMapping`].
+    mapped: BTreeMap<(Vec<u8>, String), UniformMapping>,
 }
 
+/// Ob ein `/ToUnicode` alle benutzten Codes auf denselben Text abbildet.
+///
+/// Ein `/ToUnicode` ist eine Behauptung des Erzeugers, keine Eigenschaft der
+/// Glyphen: der Betrachter zeichnet, was im Font steht, und kopiert, was die
+/// CMap sagt. Gemessen an einer Datei, deren CMap jeden Code auf „x“ legt:
+/// der Betrachter zeigte die IBAN, die Analyse las „xxxxxxxx“, fand nichts
+/// und endete mit Rückgabewert 0. Eine CMap, die viele verschiedene Codes auf
+/// **ein** Zeichen legt, ist sichtbar unplausibel — ein Font hat für ein
+/// Zeichen ein, zwei, vielleicht drei Glyphvarianten, nicht acht.
+///
+/// Nur diese eine Form wird erkannt. Eine CMap, die die Zeichen *vertauscht*,
+/// ist von einer richtigen nicht zu unterscheiden, ohne die Glyphen selbst zu
+/// lesen.
+#[derive(Debug, Default)]
+struct UniformMapping {
+    codes: HashSet<u32>,
+    text: String,
+    uniform: bool,
+}
+
+/// Ab so vielen verschiedenen Codes auf denselben Text gilt ein `/ToUnicode`
+/// als unplausibel. Die Zahl zählt **Codes** (verschiedene Glyphen), nicht
+/// Zeichen im Strom: ein Wort mit hundert „x“ ist ein Code.
+const UNIFORM_MAPPING_MIN_CODES: usize = 8;
+
 impl FontDecodeStats {
-    fn record(&mut self, font_name: &[u8], font: &FontInfo, text: &str) {
-        // Fonts mit /ToUnicode sagen selbst, was ihre Codes bedeuten.
+    fn record(&mut self, font_name: &[u8], font: &FontInfo, code: u32, text: &str) {
+        // Fonts mit /ToUnicode sagen selbst, was ihre Codes bedeuten — ob
+        // glaubhaft, hält [`UniformMapping`] fest. Leerraum zählt nicht mit:
+        // dass mehrere Codes ein Leerzeichen ergeben, ist gewöhnlich.
         if font.charmap.has_to_unicode() {
+            if text.trim().is_empty() || text.contains(crate::encoding::REPLACEMENT) {
+                return;
+            }
+            let entry = self
+                .mapped
+                .entry((font_name.to_vec(), font.base_font.clone()))
+                .or_insert_with(|| UniformMapping {
+                    codes: HashSet::new(),
+                    text: text.to_string(),
+                    uniform: true,
+                });
+            if entry.codes.insert(code) && entry.text != text {
+                entry.uniform = false;
+            }
             return;
         }
         let entry = self
@@ -1696,6 +1737,25 @@ impl FontDecodeStats {
                 "Font „{name}“ hat kein /ToUnicode; sein Text lässt sich nicht \
                  dekodieren. Muster können darin nicht erkannt werden — diese \
                  Seite wurde möglicherweise nicht vollständig geschwärzt."
+            ));
+        }
+        for ((resource, base_font), mapping) in &self.mapped {
+            if !mapping.uniform || mapping.codes.len() < UNIFORM_MAPPING_MIN_CODES {
+                continue;
+            }
+            let name = if base_font.is_empty() {
+                String::from_utf8_lossy(resource).into_owned()
+            } else {
+                base_font.clone()
+            };
+            out.push(format!(
+                "Font „{name}“ hat ein /ToUnicode, das {} verschiedene Zeichencodes auf \
+                 denselben Text „{}“ abbildet. Das ist nicht glaubhaft: der Betrachter \
+                 zeichnet die Glyphen des Fonts, die Analyse liest nur, was das \
+                 /ToUnicode behauptet. Muster können darin nicht erkannt werden — diese \
+                 Seite wurde möglicherweise nicht vollständig geschwärzt.",
+                mapping.codes.len(),
+                mapping.text
             ));
         }
         out
@@ -3513,7 +3573,7 @@ fn show_text(
                     if !budget.glyph() {
                         break;
                     }
-                    stats.record(&ts.font_name, font, &text);
+                    stats.record(&ts.font_name, font, code, &text);
                     let w0 = font.width(code, &text);
                     let is_space = nbytes == 1 && code == 32;
                     let displacement = (w0 * ts.font_size

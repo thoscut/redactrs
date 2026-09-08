@@ -30,6 +30,7 @@ pub mod content;
 pub mod document;
 pub mod encoding;
 pub mod extract;
+pub mod filters;
 pub mod font;
 pub mod glyphnames;
 pub mod image;

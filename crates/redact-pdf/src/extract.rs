@@ -25,12 +25,14 @@
 //! deshalb in [`split_layers`] in Druckschichten zerlegt, und jede Schicht
 //! ergibt ihre eigene Zeile.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use lopdf::{Document, ObjectId};
-use redact_core::{Glyph, Rect, Result, TextRun};
+use lopdf::{Document, Object, ObjectId};
+use redact_core::{bounding_box, Glyph, Rect, Result, TextRun};
 
-use crate::content::{scan_page, GlyphItem, ScanResult};
+use crate::content::{
+    scan_page, GlyphItem, MarkedTextRecord, ScanResult, ShowRecord, StreamKey, MIRROR_KEYS,
+};
 
 /// Auflösung der Richtungs-Einteilung in Grad. Glyphen mit gleicher gerundeter
 /// Grundlinienrichtung kommen in dieselbe Zeile; ein 90°-Block bleibt also von
@@ -101,7 +103,9 @@ impl PdfExtractor {
             return Ok(Vec::new());
         };
         let scan = scan_page(doc, *page_id)?;
-        Ok(Self::build_lines(page_index, glyph_items(&scan)))
+        let mut runs = Self::build_lines(page_index, glyph_items(&scan));
+        runs.extend(mirror_runs(doc, page_index, &scan).0);
+        Ok(runs)
     }
 
     /// Wie [`PdfExtractor::extract`], liefert aber zusätzlich die Warnungen des
@@ -131,6 +135,13 @@ impl PdfExtractor {
             }
             placed.extend(scan.form_placements.keys().copied());
             runs.extend(Self::build_lines(index, glyph_items(&scan)));
+            let (mirrors, mirror_warnings) = mirror_runs(doc, index, &scan);
+            runs.extend(mirrors);
+            for warning in mirror_warnings {
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
+                }
+            }
         }
         for warning in unplaced_form_warnings(doc, &declared, &placed) {
             if !warnings.contains(&warning) {
@@ -339,6 +350,145 @@ fn glyph_items(scan: &ScanResult) -> Vec<(usize, GlyphItem)> {
         .enumerate()
         .flat_map(|(index, show)| show.glyphs().cloned().map(move |g| (index, g)))
         .collect()
+}
+
+/// Textspiegel, die etwas **anderes** sagen als die Glyphen darunter — als
+/// eigene Zeilen, samt Warnung je Abschnitt.
+///
+/// Ein `/ActualText` (oder `/Alt`, `/E`) ist Text, den ein Betrachter ausgibt:
+/// `pdftotext` bevorzugt ihn in der Voreinstellung, Kopieren im Betrachter
+/// liefert ihn. Bis 0.6.0 wurde er nur **geleert**, wenn die Schwärzung die
+/// Glyphen darunter traf, und nie **gelesen**. Gemessen an zwei Dateien:
+///
+/// * `/Span <</ActualText (IBAN: DE89 …)>> BDC (Kontodaten folgen unten) Tj EMC`
+///   — 0 Treffer, Rückgabewert 0, und Kopieren im Betrachter lieferte die
+///   IBAN aus der „geschwärzten“ Datei.
+/// * Dasselbe mit `/Alt` — gleiches Ergebnis.
+///
+/// **Deckungsgleich** heißt: nach [`fold`] gleich. Word, InDesign und jeder
+/// PDF/UA-Erzeuger schreiben Spiegel routinemäßig — für Ligaturen, weiche
+/// Trennstriche, Tabulatoren, Sonderzeichen. Die dürfen keine Warnung geben,
+/// sonst warnt jede getaggte Datei. Ein Spiegel aus **einem** Zeichen sagt für
+/// sich nichts und wird ebenfalls nicht gemeldet. Mehr Ausnahmen gibt es
+/// nicht: ein `½` mit `/ActualText (1/2)` wird gemeldet, denn ohne eine
+/// Tabelle aller Sonderzeichen ist es von einem `½` mit `/ActualText (IBAN …)`
+/// nicht zu unterscheiden — und die Warnung sagt genau das.
+///
+/// **Widerspricht** der Spiegel, kann das Werkzeug nicht wissen, welche der
+/// beiden Fassungen ein Betrachter zeigt. Deshalb beides: der Spiegel wird als
+/// eigene Zeile durchsucht (auf dem Kasten der Glyphen darunter — trifft dort
+/// ein Muster, verschwinden die Glyphen und mit ihnen der Spiegel, siehe
+/// `crate::redact::mirrors_to_clear`), **und** der Lauf meldet eine
+/// Deckungslücke. Ein Spiegel ohne Glyphen darunter hat keinen Kasten und
+/// bleibt bei der Warnung.
+///
+/// Die Warnung nennt keinen Text: sie steht später im Audit-Log, und dort
+/// hätte der Spiegel nichts verloren.
+fn mirror_runs(doc: &Document, page: usize, scan: &ScanResult) -> (Vec<TextRun>, Vec<String>) {
+    let mut runs = Vec::new();
+    let mut warnings = Vec::new();
+    // (Strom, Operation) → Textoperation. Ein mehrfach platziertes Formular
+    // liefert dieselbe Operation mehrfach; die erste Platzierung genügt, der
+    // Strom wird ohnehin nur einmal neu geschrieben.
+    let mut shows: HashMap<(StreamKey, usize), &ShowRecord> = HashMap::new();
+    for show in &scan.shows {
+        shows.entry((show.stream, show.op_index)).or_insert(show);
+    }
+    for record in &scan.marked {
+        let glyphs: Vec<&GlyphItem> = record
+            .shows
+            .iter()
+            .filter_map(|index| shows.get(&(record.stream, *index)))
+            .flat_map(|show| show.glyphs())
+            .collect();
+        let beneath = fold(glyphs.iter().map(|g| g.text.as_str()));
+        let rect = bounding_box(glyphs.iter().map(|g| &g.rect));
+        for key in MIRROR_KEYS {
+            let Some(text) = mirror_text(doc, record, key) else {
+                continue;
+            };
+            let folded = fold([text.as_str()]);
+            if folded.is_empty() || folded == beneath || folded.chars().count() == 1 {
+                continue;
+            }
+            warnings.push(format!(
+                "Der Textspiegel (/{}) eines Marked-Content-Abschnitts auf Seite {} sagt \
+                 etwas anderes als die Glyphen darunter ({} Zeichen im Spiegel, {} in den \
+                 Glyphen). Welche der beiden Fassungen ein Betrachter zeigt oder kopiert, \
+                 kann das Werkzeug nicht wissen. Der Spiegel wurde zusätzlich als eigener \
+                 Text durchsucht; bitte das Ergebnis dort von Hand prüfen.",
+                String::from_utf8_lossy(key),
+                page + 1,
+                folded.chars().count(),
+                beneath.chars().count()
+            ));
+            if let Some(rect) = rect {
+                runs.push(spread(page, &text, rect));
+            }
+        }
+    }
+    (runs, warnings)
+}
+
+/// Der Spiegeltext unter `key` — auch, wenn er als Verweis in der Liste steht.
+fn mirror_text(doc: &Document, record: &MarkedTextRecord, key: &[u8]) -> Option<String> {
+    let value = record.properties.get(key).ok()?;
+    match doc.dereference(value).ok()?.1 {
+        Object::String(bytes, _) => Some(crate::audit_bytes::decode_pdf_string(bytes)),
+        _ => None,
+    }
+}
+
+/// Die Vergleichsform eines Textes: ohne Leerraum, ohne unsichtbare Zeichen,
+/// Ligaturen aufgelöst.
+///
+/// Genau die Unterschiede, die ein ehrlicher Spiegel hat: `/ActualText (fi)`
+/// über einer `ﬁ`-Ligatur, `<FEFF00AD>` (weicher Trennstrich) über einem
+/// Bindestrich am Zeilenende, `<FEFF0009>` (Tabulator) über einem Leerraum.
+fn fold<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    for part in parts {
+        for c in part.chars() {
+            match c {
+                c if c.is_whitespace() => {}
+                '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
+                '\u{FB00}' => out.push_str("ff"),
+                '\u{FB01}' => out.push_str("fi"),
+                '\u{FB02}' => out.push_str("fl"),
+                '\u{FB03}' => out.push_str("ffi"),
+                '\u{FB04}' => out.push_str("ffl"),
+                '\u{FB05}' | '\u{FB06}' => out.push_str("st"),
+                c => out.push(c),
+            }
+        }
+    }
+    out
+}
+
+/// Verteilt einen Text gleichmäßig über einen Kasten — Zeichen für Zeichen,
+/// in Schreibrichtung von links nach rechts.
+///
+/// Die Kästen sind erfunden; sie liegen aber alle **im** Kasten der Glyphen,
+/// die der Spiegel ersetzt. Ein Treffer darin berührt deshalb immer echte
+/// Glyphen, und die Schwärzung nimmt den Spiegel mit.
+fn spread(page: usize, text: &str, rect: Rect) -> TextRun {
+    let chars: Vec<char> = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let step = rect.width() / chars.len().max(1) as f64;
+    let glyphs = chars
+        .into_iter()
+        .enumerate()
+        .map(|(i, ch)| {
+            let x0 = rect.ll.x + step * i as f64;
+            Glyph {
+                ch,
+                rect: Rect::new(x0, rect.ll.y, x0 + step, rect.ur.y),
+            }
+        })
+        .collect();
+    TextRun::new(page, glyphs)
 }
 
 /// Meldet Form-XObjects, die in einem Ressourcenverzeichnis **stehen**, aber

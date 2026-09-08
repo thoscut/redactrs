@@ -558,9 +558,9 @@ impl PdfRedactor {
         report: &mut RedactionReport,
         content_users: &mut ContentUsers,
     ) -> Result<()> {
-        let data = doc
-            .get_page_content(page_id)
-            .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
+        // Derselbe Leser wie in der Analyse ([`crate::filters`]): was dort
+        // dekodiert wurde, wird hier dekodiert neu geschrieben.
+        let data = crate::filters::page_content(doc, page_id);
         let decoded = decode_or_fail(&data, "Der Content-Stream dieser Seite")?;
 
         let mut operations = rewrite_operations(&decoded, plans, inline_images, mirrors);
@@ -1384,10 +1384,12 @@ fn rewrite_form(
             .get_object(form_id)
             .and_then(|o| o.as_stream())
             .map_err(|e| RedactError::Pdf(e.to_string()))?;
-        stream
-            .decompressed_content()
-            .or_else(|_| stream.get_plain_content())
-            .map_err(|e| RedactError::Pdf(e.to_string()))?
+        crate::filters::decoded_content(stream).ok_or_else(|| {
+            RedactError::Pdf(format!(
+                "Form-XObject {} {} ließ sich nicht dekodieren",
+                form_id.0, form_id.1
+            ))
+        })?
     };
     let decoded = decode_or_fail(&data, "Der Inhalt eines Form-XObjects")?;
     let operations = rewrite_operations(&decoded, plans, inline_images, mirrors);

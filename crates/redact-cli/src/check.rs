@@ -74,9 +74,10 @@ use crate::cli::Cli;
 const NO_CLEAN_BILL: &str = "\
 Das heißt NICHT, dass in der Datei nichts mehr steht. Geprüft wurde genau diese
 Liste. Was nicht darin steht — ein zweiter Name, eine weitere Kontonummer, eine
-Schreibweise mit anderen Leerzeichen, Text in einem Rasterbild —, ist damit
-nicht geprüft. Die Liste zu schreiben bleibt Handarbeit, und die Sichtprüfung
-des Ergebnisses ersetzt sie nicht.";
+Schreibweise mit anderen Leerzeichen, Text in einem Rasterbild, Text in einer
+Schrift ohne brauchbare Zeichenzuordnung —, ist damit nicht geprüft. Die Liste
+zu schreiben bleibt Handarbeit, und die Sichtprüfung des Ergebnisses ersetzt
+sie nicht.";
 
 /// Obergrenze für die Begriffsliste auf der Standardeingabe.
 ///

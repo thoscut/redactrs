@@ -306,9 +306,7 @@ pub fn page_ops(doc: &Document, page_index: usize) -> Result<PageOps> {
     let media_box = crate::document::page_box(doc, page_id);
     let rotate = page_rotation(doc, page_id);
 
-    let data = doc
-        .get_page_content(page_id)
-        .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
+    let data = crate::filters::page_content(doc, page_id);
     let operations = decode_content(&data);
     let resources = crate::content::page_resources(doc, page_id);
 

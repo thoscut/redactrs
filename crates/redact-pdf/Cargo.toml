@@ -13,4 +13,7 @@ redact-core.workspace = true
 lopdf.workspace = true
 # Bilddaten in PDFs: FlateDecode (roh, ohne lopdf-Umweg) und JPEG.
 flate2 = "1"
+# Teilstring-Suche im Leck-Detektor (audit_bytes): liegt ohnehin im Graphen,
+# siehe Cargo.lock.
+memchr = "2"
 zune-jpeg = "0.5"

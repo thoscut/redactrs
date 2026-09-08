@@ -32,11 +32,48 @@
 //!    `/T`, `/Info`-Werte, `/Names` …), inklusive Trailer,
 //! 6. innerhalb von Streams zusätzlich die **Verkettung aller
 //!    Zeichenketten-Literale** — damit wird Text auch dann gefunden, wenn er
-//!    per `TJ` in Bruchstücke zerlegt ist.
+//!    per `TJ` in Bruchstücke zerlegt ist,
+//! 7. **jede Seite, wie der eigene Schriftdekoder sie liest**: Glyphencodes
+//!    über `/ToUnicode`, `/Differences` und Standardkodierungen in Zeichen
+//!    übersetzt, zu Zeilen gesetzt ([`scan_decoded_text`]).
 //!
 //! Beide PDF-String-Kodierungen werden berücksichtigt: PDFDocEncoding/Latin-1
 //! **und** UTF-16BE (mit und ohne BOM). Ebenso beide Syntaxen: literal
 //! `(DE89…)` und hexadezimal `<44453839…>`.
+//!
+//! ## Warum Sichtweise 7 kein Zirkelschluss ist
+//!
+//! Die Sichten 1–6 vergleichen **Bytes**. Bei einer eingebetteten
+//! Teilmengen-Schrift stehen im Strom aber Glyphnummern oder umgelenkte Codes
+//! (`<01020304>Tj`), keine Zeichen — und das ist die Datei aus Word,
+//! LibreOffice und Chrome, also der Regelfall. Gemessen an einem
+//! LibreOffice-Writer-24.2-Export (TrueType-Teilmenge `BAAAAA+LiberationSerif`,
+//! Codes ab `01`) und an einem PyMuPDF-Export (Type0/Identity-H, DejaVuSans)
+//! meldete `--check-leaks` an der **ungeschwärzten** Datei „keiner der 4
+//! Suchbegriffe steht noch in der Datei“, Rückgabewert 0.
+//!
+//! Sicht 7 wäre **allein** genau der Zirkelschluss von oben. Sie steht
+//! deshalb **neben** den Bytesichten, nicht an ihrer Stelle: die Bytesichten
+//! finden, was der Dekoder nicht liest (Metadaten, verwaiste Objekte, Text in
+//! einem Strom, den kein `Do` erreicht, Rohbytes einer alten Revision); der
+//! Dekoder findet, was die Bytesichten nicht lesen (Glyphencodes).
+//!
+//! ## Benannte blinde Flecken
+//!
+//! Was **keine** der sieben Sichten sieht — und was deshalb auch ein sauberer
+//! Lauf nicht ausschließt:
+//!
+//! * **Ein lügendes `/ToUnicode`.** Die Zuordnung ist eine Behauptung der
+//!   Datei; der Dekoder glaubt ihr. Bildet sie jeden Code auf „x“ ab, liest
+//!   Sicht 7 „xxxx“, die Bytesichten sehen Glyphnummern, und der Text auf
+//!   dem Papier bleibt unsichtbar (Kanarienvogel in
+//!   `tests/zb_orakel_schriftdekoder.rs`).
+//! * **Eine Schrift ohne brauchbare Zuordnung** — kein `/ToUnicode`, keine
+//!   `cmap` im Fontprogramm. Der Interpreter warnt beim Schwärzen darüber;
+//!   `leaks` gibt nur Fundstellen zurück und kann die Warnung nicht
+//!   weiterreichen.
+//! * **Text in einem Rasterbild** und **Glyphen als Pfade** (Umrisse statt
+//!   Schrift): dort gibt es keine Codes, die man übersetzen könnte.
 //!
 //! ## Fehlerrichtung
 //!
@@ -49,6 +86,9 @@ use std::collections::BTreeSet;
 use std::io::Read;
 
 use lopdf::{Dictionary, Document, Object, ObjectStream, Stream, StringFormat};
+use memchr::memmem;
+
+use crate::extract::PdfExtractor;
 
 /// Obergrenze für gemeldete Fundstellen — eine Fehlermeldung mit 5000 Zeilen
 /// hilft niemandem.
@@ -92,7 +132,12 @@ pub fn leaks_many(pdf_bytes: &[u8], needles: &[&str]) -> Vec<Vec<String>> {
 
     scan_raw_file(pdf_bytes, &mut probe);
     scan_raw_streams(pdf_bytes, &mut probe);
-    scan_object_graph(pdf_bytes, &mut probe);
+
+    // Lässt sich die Datei nicht parsen, bleiben die Rohsuchen die Messung.
+    if let Ok(doc) = Document::load_mem(pdf_bytes) {
+        scan_object_graph(&doc, &mut probe);
+        scan_decoded_text(&doc, &mut probe);
+    }
 
     probe.into_hits()
 }
@@ -112,8 +157,10 @@ struct Needle {
     /// bringt der Vergleich nichts und würde nur Fehlalarme über
     /// Fragmentgrenzen hinweg erzeugen („MODE“ + „89 EUR“ → „DE89“).
     squeezed: Option<String>,
-    /// Bytefolgen: (Beschreibung, Muster).
-    variants: Vec<(&'static str, Vec<u8>)>,
+    /// Bytefolgen: (Beschreibung, Muster) — das Muster als vorbereiteter
+    /// Sucher, weil derselbe Begriff Tausende Datenblöcke durchsucht: jeder
+    /// Zeichenketten-Wert, jeder Strom, roh und dekodiert.
+    variants: Vec<(&'static str, memmem::Finder<'static>)>,
 }
 
 impl Needle {
@@ -147,7 +194,10 @@ impl Needle {
         Self {
             text: text.to_string(),
             squeezed: (squeezed != text).then_some(squeezed),
-            variants,
+            variants: variants
+                .into_iter()
+                .map(|(how, pat)| (how, memmem::Finder::new(&pat).into_owned()))
+                .collect(),
         }
     }
 }
@@ -275,25 +325,19 @@ fn printable_context(hay: &[u8], pos: usize, len: usize) -> String {
 }
 
 /// Alle Fundstellen von `pat` in `hay` (überlappungsfrei), höchstens `limit`.
-fn find_all(hay: &[u8], pat: &[u8], limit: usize) -> Vec<usize> {
-    if pat.is_empty() || hay.len() < pat.len() {
+///
+/// Bis 0.7.0 stand hier `windows(pat.len()).position(|w| w == pat)` — ein
+/// Vergleich je Byte und Begriff, in jeder Kodierung, auf jeder Sichtweise.
+/// Das kostete **Begriffe × Dateigröße**, obwohl der Durchgang selbst längst
+/// nur noch einmal lief: gemessen an einer 898-kB-Datei 65 ms je Begriff
+/// (200 Begriffe 13,0 s). `memmem` findet dasselbe — überlappungsfrei, in
+/// derselben Reihenfolge — mit SIMD-Vorfilter; die Fundstellen bleiben
+/// Stelle für Stelle gleich (`find_all_agrees_with_the_naive_search`).
+fn find_all(hay: &[u8], pat: &memmem::Finder<'_>, limit: usize) -> Vec<usize> {
+    if pat.needle().is_empty() {
         return Vec::new();
     }
-    let mut out = Vec::new();
-    let mut from = 0usize;
-    while from + pat.len() <= hay.len() {
-        match hay[from..].windows(pat.len()).position(|w| w == pat) {
-            Some(rel) => {
-                out.push(from + rel);
-                if out.len() >= limit {
-                    break;
-                }
-                from += rel + pat.len();
-            }
-            None => break,
-        }
-    }
-    out
+    pat.find_iter(hay).take(limit).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +348,8 @@ fn scan_raw_file(bytes: &[u8], probe: &mut Probe) {
     probe.each(|needle, report| {
         for (how, pat) in &needle.variants {
             for pos in find_all(bytes, pat, 8) {
-                report.hit_bytes(&format!("Rohdatei @0x{pos:x}"), how, bytes, pos, pat.len());
+                let len = pat.needle().len();
+                report.hit_bytes(&format!("Rohdatei @0x{pos:x}"), how, bytes, pos, len);
             }
         }
     });
@@ -324,9 +369,11 @@ fn scan_raw_streams(bytes: &[u8], probe: &mut Probe) {
 }
 
 fn raw_stream_blocks(bytes: &[u8]) -> Vec<(usize, &[u8])> {
+    let stream = memmem::Finder::new(b"stream");
+    let endstream = memmem::Finder::new(b"endstream");
     let mut out = Vec::new();
     let mut i = 0usize;
-    while let Some(rel) = bytes[i..].windows(6).position(|w| w == b"stream") {
+    while let Some(rel) = stream.find(&bytes[i..]) {
         let start = i + rel;
         i = start + 6;
         // „endstream“ endet ebenfalls auf „stream“ — solche Treffer überspringen.
@@ -340,7 +387,7 @@ fn raw_stream_blocks(bytes: &[u8]) -> Vec<(usize, &[u8])> {
         if bytes.get(data) == Some(&b'\n') {
             data += 1;
         }
-        let Some(rel_end) = bytes[data..].windows(9).position(|w| w == b"endstream") else {
+        let Some(rel_end) = endstream.find(&bytes[data..]) else {
             break;
         };
         out.push((data, &bytes[data..data + rel_end]));
@@ -353,11 +400,7 @@ fn raw_stream_blocks(bytes: &[u8]) -> Vec<(usize, &[u8])> {
 // Ebene 3–6: Objektgraph
 // ---------------------------------------------------------------------------
 
-fn scan_object_graph(bytes: &[u8], probe: &mut Probe) {
-    // Lässt sich die Datei nicht parsen, bleiben die Rohsuchen die Messung.
-    let Ok(doc) = Document::load_mem(bytes) else {
-        return;
-    };
+fn scan_object_graph(doc: &Document, probe: &mut Probe) {
     walk_dict(&doc.trailer, "Trailer", probe, 0);
     for (id, object) in &doc.objects {
         let path = format!("Objekt {} {}", id.0, id.1);
@@ -577,7 +620,8 @@ fn scan_raw_bytes(hay: &[u8], location: &str, how: &str, probe: &mut Probe) {
     probe.each(|needle, report| {
         for (variant, pat) in &needle.variants {
             for pos in find_all(hay, pat, 4) {
-                report.hit_bytes(location, &format!("{how}, {variant}"), hay, pos, pat.len());
+                let len = pat.needle().len();
+                report.hit_bytes(location, &format!("{how}, {variant}"), hay, pos, len);
             }
         }
     });
@@ -587,11 +631,17 @@ fn scan_raw_bytes(hay: &[u8], location: &str, how: &str, probe: &mut Probe) {
 /// als auch roh vergleichen.
 fn scan_string(raw: &[u8], location: &str, how: &str, probe: &mut Probe) {
     // Dekodieren hängt allein an der Zeichenkette, nicht am Suchbegriff.
-    let decoded = decode_pdf_string(raw);
-    let squeezed = probe.any_squeezed.then(|| squeeze(&decoded));
+    scan_text(&decode_pdf_string(raw), location, how, probe);
+    scan_raw_bytes(raw, location, how, probe);
+}
+
+/// Bereits dekodierter Text: als Ganzes und, wo der Begriff Leerraum hat,
+/// ohne jeden Leerraum.
+fn scan_text(text: &str, location: &str, how: &str, probe: &mut Probe) {
+    let squeezed = probe.any_squeezed.then(|| squeeze(text));
     probe.each(|needle, report| {
-        if let Some(pos) = decoded.find(&needle.text) {
-            report.hit_text(location, how, &decoded, pos, needle.text.len());
+        if let Some(pos) = text.find(&needle.text) {
+            report.hit_text(location, how, text, pos, needle.text.len());
         } else if let (Some(needle_squeezed), Some(squeezed)) = (&needle.squeezed, &squeezed) {
             if let Some(pos) = squeezed.find(needle_squeezed) {
                 report.hit_text(
@@ -604,7 +654,61 @@ fn scan_string(raw: &[u8], location: &str, how: &str, probe: &mut Probe) {
             }
         }
     });
-    scan_raw_bytes(raw, location, how, probe);
+}
+
+// ---------------------------------------------------------------------------
+// Ebene 7: der Text, wie der eigene Schriftdekoder ihn liest
+// ---------------------------------------------------------------------------
+
+/// Durchsucht jede Seite so, wie die Analyse sie liest: Glyphencodes über
+/// `/ToUnicode`, `/Differences` und die Standardkodierungen in Zeichen
+/// übersetzt, zu Zeilen zusammengesetzt (siehe [`PdfExtractor`]).
+///
+/// Die Sichtweisen 1–6 vergleichen Bytes. In einer eingebetteten
+/// Teilmengen-Schrift — dem Regelfall aus Word, LibreOffice, Chrome — stehen
+/// im Strom aber keine Zeichen, sondern Glyphnummern oder umgelenkte Codes:
+/// `<01020304>Tj` für „Kont“. Keine der sechs Bytesichten kann darin eine
+/// IBAN finden; gemessen an einem LibreOffice-Writer-24.2-Export meldete der
+/// Detektor an der **ungeschwärzten** Datei „nicht gefunden“ für alle vier
+/// Begriffe.
+///
+/// Diese Sicht kommt **dazu**, nicht an die Stelle der anderen. Allein wäre
+/// sie der Zirkelschluss aus dem Modulkommentar: wovor der Dekoder blind ist,
+/// wäre auch hier unsichtbar. Beide zusammen decken sich gegenseitig: die
+/// Bytesichten finden, was der Dekoder nicht liest (Metadaten, verwaiste
+/// Objekte, Rohtext in einem Strom, den kein `Do` erreicht); der Dekoder
+/// findet, was die Bytesichten nicht lesen (Glyphencodes).
+///
+/// Eine Seite, die der Interpreter ablehnt (Aufwandskonto gerissen, Strom
+/// nicht zerlegbar), fehlt in dieser Sicht — die Bytesichten haben sie
+/// trotzdem durchsucht. Damit sie nicht die anderen Seiten mitnimmt, wird
+/// nach einem Fehler Seite für Seite gelesen. Das ist der Rückfall, nicht
+/// der Regelweg: [`PdfExtractor::extract_page`] baut je Aufruf den
+/// Seitenbaum neu, und das ist bei 4 000 Seiten quadratisch — gemessen
+/// 8,7 s je Seite gegenüber 1,3 s für [`PdfExtractor::extract`].
+fn scan_decoded_text(doc: &Document, probe: &mut Probe) {
+    let extractor = PdfExtractor::new();
+    let runs = match extractor.extract(doc) {
+        Ok(runs) => runs,
+        Err(_) => (0..doc.get_pages().len())
+            .filter_map(|index| extractor.extract_page(doc, index).ok())
+            .flatten()
+            .collect(),
+    };
+    // Die Zeilen kommen seitenweise sortiert; je Seite ein Text.
+    for page_runs in runs.chunk_by(|a, b| a.page == b.page) {
+        let text: String = page_runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        scan_text(
+            &text,
+            &format!("Seite {}", page_runs[0].page + 1),
+            "Schriftdekoder",
+            probe,
+        );
+    }
 }
 
 /// Dekodiert eine PDF-Zeichenkette.
@@ -787,6 +891,60 @@ mod tests {
         );
     }
 
+    /// Die alte Suche, Byte für Byte — als Maßstab für die neue.
+    fn find_all_naive(hay: &[u8], pat: &[u8], limit: usize) -> Vec<usize> {
+        if pat.is_empty() || hay.len() < pat.len() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut from = 0usize;
+        while from + pat.len() <= hay.len() {
+            match hay[from..].windows(pat.len()).position(|w| w == pat) {
+                Some(rel) => {
+                    out.push(from + rel);
+                    if out.len() >= limit {
+                        break;
+                    }
+                    from += rel + pat.len();
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// `memmem` muss Fundstelle für Fundstelle dasselbe liefern wie die
+    /// naive Suche: überlappungsfrei, in Reihenfolge, an der Grenze
+    /// abgeschnitten. Die Fälle: Muster länger als der Heuhaufen, Muster am
+    /// Ende, überlappende Vorkommen (`aaaa` in `aaaaaaa` sind zwei, nicht
+    /// vier), Grenze kleiner als die Zahl der Vorkommen, leeres Muster.
+    #[test]
+    fn find_all_agrees_with_the_naive_search() {
+        let cases: &[(&[u8], &[u8], usize)] = &[
+            (b"", b"a", 4),
+            (b"ab", b"abc", 4),
+            (b"xxabc", b"abc", 4),
+            (b"aaaaaaa", b"aaaa", 4),
+            (b"abcabcabcabc", b"abc", 2),
+            (b"abcabcabcabc", b"abc", 8),
+            (b"abc", b"", 4),
+            (b"a.b.c.d.e.f", b".", 3),
+            (b"DE89 3704 0044 DE89 3704", b"DE89 3704", 8),
+        ];
+        for (hay, pat, limit) in cases {
+            assert_eq!(
+                find_all(hay, &memmem::Finder::new(pat), *limit),
+                find_all_naive(hay, pat, *limit),
+                "hay={hay:?} pat={pat:?} limit={limit}"
+            );
+        }
+        assert_eq!(find_all(b"aaaaaaa", &memmem::Finder::new(b"aaaa"), 4), vec![0]);
+        assert_eq!(
+            find_all(b"abcabcabcabc", &memmem::Finder::new(b"abc"), 2),
+            vec![0, 3]
+        );
+    }
+
     #[test]
     fn run_length_roundtrip() {
         // 3 Literalbytes, dann 4× 'A'.
@@ -922,10 +1080,12 @@ mod tests {
             "der leere Begriff darf nicht gesucht werden"
         );
 
-        // `scan_object_graph` parst genau einmal — nachweisbar daran, dass es
-        // ein `&mut Probe` mit allen Begriffen nimmt und nicht je Begriff
-        // aufgerufen wird. Der Aufruf hier ist derselbe wie in `leaks_many`.
-        scan_object_graph(&pdf, &mut probe);
+        // Der Objektgraph wird genau einmal abgelaufen — nachweisbar daran,
+        // dass `scan_object_graph` ein `&mut Probe` mit allen Begriffen nimmt
+        // und nicht je Begriff aufgerufen wird. Der Aufruf hier ist derselbe
+        // wie in `leaks_many`.
+        let doc = Document::load_mem(&pdf).expect("Vorlage parsebar");
+        scan_object_graph(&doc, &mut probe);
         let hits = probe.into_hits();
         assert_eq!(hits.len(), NEEDLES.len());
         assert!(

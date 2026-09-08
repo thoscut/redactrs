@@ -41,11 +41,38 @@
 //!   `/OCG` über `/Resources /Properties` am Leben, und der Ebenenname ist
 //!   frei wählbarer Text.
 //!
+//! * `/Outlines` — die Lesezeichen. Jeder Eintrag trägt einen `/Title`, und
+//!   der ist frei wählbarer Text: „Kontoauszug DE89 …“ ist ein Lesezeichen,
+//!   wie es jeder Erzeuger schreibt. Gemessen (vor dieser Änderung): eine Datei mit der
+//!   IBAN allein im Lesezeichen endete mit 0 Treffern, Rückgabewert 0, und
+//!   `--check-leaks` fand sie. Preis: die Gliederung im Betrachter ist weg.
+//!
 //! Aus **jeder Seite**:
 //!
 //! * `/Metadata` (seitenweites XMP), `/PieceInfo`, `/StructParents`, `/AA`,
 //! * Annotationen vom Typ `/FileAttachment` — ein Dateianhang hängt nicht nur
 //!   im `/Names`-Baum, er kann auch direkt an einer Seite kleben.
+//!
+//! Aus **jeder verbliebenen Annotation**:
+//!
+//! * die Aktionen `/A` und `/AA` und ein benanntes `/Dest`. Ein Link fern des
+//!   Textes trägt seinen Klartext in `/URI` (`mailto:…?subject=DE89 …`), in
+//!   `/F` (`/GoToR`, `/Launch`: `Kontoauszug_DE89….pdf`) oder in `/JS`; ein
+//!   benanntes Ziel ist eine Zeichenkette. Gemessen: alle drei Formen
+//!   überlebten die Schwärzung mit Rückgabewert 0. Ein `/Dest` als Feld
+//!   (`[Seite /XYZ x y z]`) bleibt — es trägt Zahlen und Verweise, keinen
+//!   Text. Preis: Verweise ins Netz und in andere Dateien funktionieren
+//!   danach nicht mehr,
+//! * die Kommentartexte `/Contents`, `/RC`, `/T` (Verfasser) und `/Subj`.
+//!   Gemessen: eine Notiz mit Symbol-Erscheinungsstrom trug die IBAN in
+//!   `/Contents`, ein `/T` und ein `/RC` neben einem Erscheinungsstrom
+//!   ebenso — alle mit Rückgabewert 0. Was eine Annotation **zeichnet**
+//!   (`/AP`), geht wie Seitentext durch die Schwärzung und bleibt; was sie
+//!   daneben als Klartext mitführt, hat keine Glyphengeometrie und kann
+//!   nicht anteilig geschwärzt werden. Das ist dieselbe Entscheidung wie bei
+//!   den Feldwerten — und dieselbe, die Acrobats „Dokument bereinigen“
+//!   trifft. Ein `/Popup` und eine `/IRT`-Antwortkette tragen danach nichts
+//!   mehr.
 //!
 //! ## Was hier bewusst *nicht* passiert
 //!
@@ -103,6 +130,12 @@ pub struct MetadataReport {
     /// denselben Klartext tragen kann, der gerade aus dem Strom entfernt
     /// wurde.
     pub optional_content_names_cleared: usize,
+    /// Lesezeichen (`/Outlines`-Einträge), mit dem Baum entfernt.
+    pub outlines_removed: usize,
+    /// `/A`, `/AA` und benannte `/Dest` an Annotationen.
+    pub annotation_actions_removed: usize,
+    /// `/Contents`, `/RC`, `/T` und `/Subj` an Annotationen.
+    pub annotation_texts_cleared: usize,
 }
 
 impl MetadataReport {
@@ -165,6 +198,21 @@ impl MetadataReport {
             "Ebenenname (/OCG /Name)",
             "Ebenennamen (/OCG /Name)",
         );
+        count(
+            self.outlines_removed,
+            "Lesezeichen (/Outlines)",
+            "Lesezeichen (/Outlines)",
+        );
+        count(
+            self.annotation_actions_removed,
+            "Aktion oder benanntes Ziel an einer Annotation (/A, /AA, /Dest)",
+            "Aktionen oder benannte Ziele an Annotationen (/A, /AA, /Dest)",
+        );
+        count(
+            self.annotation_texts_cleared,
+            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj)",
+            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj)",
+        );
         out
     }
 }
@@ -218,6 +266,15 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
         collect_widget_fields(doc, *page_id, &mut field_ids);
     }
     report.field_values_cleared = clear_field_values(doc, &field_ids);
+    // Lesezeichen: zählen und ihre Objekte vormerken, solange der Baum steht.
+    // Ein Eintrag ist nur über `/Outlines` erreichbar; er fiele auch bei
+    // `prune_unreachable`, aber die Zahl gehört in den Bericht.
+    if let Some(outlines) = catalog_id
+        .and_then(|id| doc.get_dictionary(id).ok())
+        .and_then(|catalog| catalog.get(b"Outlines").ok())
+    {
+        report.outlines_removed = collect_outline_items(doc, outlines, &mut to_delete);
+    }
 
     // --- Katalog --------------------------------------------------------
     if let Some(catalog_id) = catalog_id {
@@ -255,6 +312,7 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
             if take(catalog, b"OCProperties", &mut to_delete) {
                 report.optional_content_removed = true;
             }
+            take(catalog, b"Outlines", &mut to_delete);
         }
     }
 
@@ -275,6 +333,9 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
                 report.additional_actions_removed += 1;
             }
         }
+        let (actions, texts) = clean_annotations(doc, *page_id, &mut to_delete);
+        report.annotation_actions_removed += actions;
+        report.annotation_texts_cleared += texts;
     }
 
     for id in to_delete {
@@ -358,6 +419,155 @@ fn clear_ocg_names_in_dict(dict: &mut Dictionary, depth: usize) -> usize {
 
 /// Entfernt `key` und merkt sich das Objekt, das dadurch seine Referenz
 /// verliert. Rückgabe: war der Schlüssel überhaupt vorhanden?
+/// Zählt die Einträge eines Lesezeichenbaums und merkt ihre Objekte zum
+/// Löschen vor.
+///
+/// Gelaufen wird `/First` → `/Next` je Ebene und `/First` in die Tiefe, mit
+/// Besuchsmenge: ein Baum, der auf sich selbst zeigt, wäre sonst endlos. Die
+/// Tiefe ist mit [`MAX_TREE_DEPTH`] gedeckelt, die Breite mit der Zahl der
+/// Objekte in der Datei — mehr verschiedene Einträge kann es nicht geben.
+fn collect_outline_items(
+    doc: &Document,
+    root: &Object,
+    to_delete: &mut BTreeSet<ObjectId>,
+) -> usize {
+    let mut seen: BTreeSet<ObjectId> = BTreeSet::new();
+    if let Object::Reference(id) = root {
+        to_delete.insert(*id);
+        seen.insert(*id);
+    }
+    let Some(first) = resolve(doc, root)
+        .and_then(|o| o.as_dict().ok())
+        .and_then(|d| d.get(b"First").ok())
+    else {
+        return 0;
+    };
+    let limit = doc.objects.len();
+    let mut count = 0usize;
+    let mut stack: Vec<(Object, usize)> = vec![(first.clone(), 0)];
+    while let Some((item, depth)) = stack.pop() {
+        if depth > MAX_TREE_DEPTH || count > limit {
+            break;
+        }
+        let Object::Reference(id) = item else {
+            continue;
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        to_delete.insert(id);
+        let Ok(dict) = doc.get_dictionary(id) else {
+            continue;
+        };
+        count += 1;
+        if let Ok(next) = dict.get(b"Next") {
+            stack.push((next.clone(), depth));
+        }
+        if let Ok(child) = dict.get(b"First") {
+            stack.push((child.clone(), depth + 1));
+        }
+    }
+    count
+}
+
+/// Nimmt jeder Annotation der Seite ihre Aktionen und Kommentartexte.
+///
+/// Liefert (entfernte Aktionen und benannte Ziele, entfernte Texte). Eine
+/// Annotation steht gewöhnlich als eigenes Objekt in `/Annots`; ein direkt
+/// eingebettetes Dictionary wird im Feld selbst bereinigt.
+fn clean_annotations(
+    doc: &mut Document,
+    page_id: ObjectId,
+    to_delete: &mut BTreeSet<ObjectId>,
+) -> (usize, usize) {
+    let Some(annots) = doc
+        .get_dictionary(page_id)
+        .ok()
+        .and_then(|page| page.get(b"Annots").ok())
+        .and_then(|o| resolve(doc, o))
+        .and_then(|o| o.as_array().ok())
+        .cloned()
+    else {
+        return (0, 0);
+    };
+    let mut actions = 0usize;
+    let mut texts = 0usize;
+    let mut inline: Vec<Object> = Vec::new();
+    let mut inline_changed = false;
+    for annot in annots {
+        match annot {
+            Object::Reference(id) => {
+                if let Ok(dict) = doc.get_dictionary_mut(id) {
+                    let (a, t) = clean_annotation(dict, to_delete);
+                    actions += a;
+                    texts += t;
+                }
+                inline.push(Object::Reference(id));
+            }
+            Object::Dictionary(mut dict) => {
+                let (a, t) = clean_annotation(&mut dict, to_delete);
+                inline_changed |= a + t > 0;
+                actions += a;
+                texts += t;
+                inline.push(Object::Dictionary(dict));
+            }
+            other => inline.push(other),
+        }
+    }
+    if inline_changed {
+        if let Ok(page) = doc.get_dictionary_mut(page_id) {
+            page.set("Annots", Object::Array(inline));
+        }
+    }
+    (actions, texts)
+}
+
+/// Die Schlüssel, unter denen eine Annotation Klartext neben ihrem
+/// Erscheinungsbild führt.
+const ANNOTATION_TEXT_KEYS: [&[u8]; 4] = [b"Contents", b"RC", b"T", b"Subj"];
+
+fn clean_annotation(dict: &mut Dictionary, to_delete: &mut BTreeSet<ObjectId>) -> (usize, usize) {
+    let mut actions = 0usize;
+    for key in [b"A".as_slice(), b"AA".as_slice()] {
+        if take(dict, key, to_delete) {
+            actions += 1;
+        }
+    }
+    if dict
+        .get(b"Dest")
+        .is_ok_and(|dest| !is_explicit_destination(dest))
+        && take(dict, b"Dest", to_delete)
+    {
+        actions += 1;
+    }
+    let mut texts = 0usize;
+    for key in ANNOTATION_TEXT_KEYS {
+        if take(dict, key, to_delete) {
+            texts += 1;
+        }
+    }
+    (actions, texts)
+}
+
+/// Ein `/Dest` ohne Text: ein Feld aus Verweis, Zahlen und einem der
+/// Anzeigenamen aus PDF 32000-1, Tabelle 151 (`[Seite /XYZ x y z]`).
+///
+/// Alles andere — eine Zeichenkette (benanntes Ziel), ein Name als Ziel,
+/// ein Feld mit einem fremden Namen darin — kann Text tragen und fällt.
+fn is_explicit_destination(dest: &Object) -> bool {
+    const FIT: [&[u8]; 8] = [
+        b"XYZ", b"Fit", b"FitH", b"FitV", b"FitR", b"FitB", b"FitBH", b"FitBV",
+    ];
+    let Object::Array(items) = dest else {
+        return false;
+    };
+    items.iter().all(|item| match item {
+        Object::Reference(_) | Object::Integer(_) | Object::Real(_) | Object::Null => true,
+        Object::Name(name) => FIT.contains(&name.as_slice()),
+        _ => false,
+    })
+}
+
 fn take(dict: &mut Dictionary, key: &[u8], to_delete: &mut BTreeSet<ObjectId>) -> bool {
     let referenced = match dict.get(key) {
         Ok(Object::Reference(id)) => Some(*id),
