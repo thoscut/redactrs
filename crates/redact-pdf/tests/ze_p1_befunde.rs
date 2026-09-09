@@ -1,12 +1,14 @@
 //! Gegenprüfung P1: die beiden Befunde, die der Umbau aus Commit `f982c12`
 //! hinterlassen hat — als lauffähige Belege.
 //!
-//! Diese Tests sind **absichtlich `#[ignore]`**: sie schlagen fehl, solange
-//! die Befunde offen sind, und sollen das Tor nicht rot machen. Lauf:
-//! `cargo test -p redact-pdf --test ze_p1_befunde -- --ignored --nocapture`
+//! Beide Befunde sind in Fix-Runde 5 geschlossen; `#[ignore]` ist deshalb
+//! weg, und diese Tests halten die Korrektur fest:
 //!
-//! Sind die Befunde behoben, gehört `#[ignore]` weg — dann sind es die Tests,
-//! die die Korrektur festhalten.
+//! * **P1-1** — [`crate::filters::decoded_prefix_within`] (der Orakelweg)
+//!   behält, was es entziffern konnte, und sagt, wo es stehen blieb;
+//!   `decoded_content_within` (der Interpreterweg) bleibt streng.
+//! * **P1-2** — `ascii85_decode_within` bucht, was eine Gruppe wirklich
+//!   liefert (die angebrochene Schlussgruppe eins bis drei Byte, nicht vier).
 
 mod common;
 
@@ -46,21 +48,24 @@ fn pdf_with(filter: Object, content: Vec<u8>) -> Vec<u8> {
 // Befund P1-1
 // ---------------------------------------------------------------------------
 
-/// Der **entzifferbare Anfang** einer Filterkette wird weggeworfen, sobald ein
-/// späteres Glied unbekannt ist.
+/// Der **entzifferbare Anfang** einer Filterkette darf nicht weggeworfen
+/// werden, nur weil ein späteres Glied unbekannt ist.
 ///
-/// `filters::decoded_content_within` gibt für die ganze Kette `Ok(None)`
-/// zurück, sobald ein Filter unbekannt ist (`decode_one` → `Ok(None)` →
-/// `return Ok(None)`). `audit_bytes::decode_stream` reicht das durch: der
-/// Strom bekommt **gar keine** dekodierte Sicht. Bis `f982c12` hatte
-/// `audit_bytes` einen eigenen Dekoder (`manual_decode`), der bei einem
-/// unbekannten Filter **abbrach und das bis dahin Entpackte zurückgab** —
-/// und genau darin fand das Orakel das Geheimnis.
+/// Der Befund: `filters::decoded_content_within` gab für die ganze Kette
+/// `Ok(None)` zurück, sobald ein Filter unbekannt war (`decode_one` →
+/// `Ok(None)` → `return Ok(None)`), und `audit_bytes::decode_stream` reichte
+/// das durch — der Strom bekam **gar keine** dekodierte Sicht. Bis `f982c12`
+/// hatte `audit_bytes` einen eigenen Dekoder (`manual_decode`), der bei einem
+/// unbekannten Filter **abbrach und das bis dahin Entpackte zurückgab**, und
+/// genau darin fand das Orakel das Geheimnis.
+///
+/// Die Korrektur trennt die beiden Ansprüche:
+/// `filters::decoded_prefix_within` ist der Orakelweg und behält den Anfang,
+/// `decoded_content_within` bleibt für den Interpreter streng.
 ///
 /// Die Rohsicht deckt den Fall nicht ab: sie versucht nur zlib an den
 /// Rohbytes, und die sind hier ASCII-Hex.
 #[test]
-#[ignore = "Befund P1-1 — offen"]
 fn p1_1_kette_mit_unbekanntem_filter_verliert_die_dekodierten_sichten() {
     let content = common::ascii_hex_encode(&deflate(&payload()));
     let pdf = pdf_with(
@@ -137,15 +142,16 @@ fn alter_manual_decode(content: &[u8], filters: &[&str]) -> Option<Vec<u8>> {
 // Befund P1-2
 // ---------------------------------------------------------------------------
 
-/// `ascii85_decode_within` lehnt einen Strom ab, der **genau** so groß ist
-/// wie die Grenze — sofern seine Länge kein Vielfaches von vier ist.
+/// `ascii85_decode_within` darf einen Strom nicht ablehnen, der **genau** so
+/// groß ist wie die Grenze — auch dann nicht, wenn seine Länge kein
+/// Vielfaches von vier ist.
 ///
-/// Die Prüfung `if out.len() + 4 > limit` steht vor jeder Fünfergruppe und
-/// unterstellt, dass jede Gruppe vier Byte liefert. Die letzte,
-/// angebrochene Gruppe liefert aber ein bis drei. Jeder andere Filter
-/// (Flate, LZW, ASCIIHex, RunLength) nimmt exakt `limit` Byte an.
+/// Der Befund: die Prüfung `if out.len() + 4 > limit` stand vor jeder
+/// Fünfergruppe und unterstellte, dass jede Gruppe vier Byte liefert. Die
+/// letzte, angebrochene Gruppe liefert aber ein bis drei. Jeder andere Filter
+/// (Flate, LZW, ASCIIHex, RunLength) nimmt exakt `limit` Byte an — heute
+/// dieser auch (`filters::tests::jeder_filter_nimmt_genau_seine_grenze_an`).
 #[test]
-#[ignore = "Befund P1-2 — offen"]
 fn p1_2_ascii85_wird_beim_eigenen_umfang_abgelehnt() {
     let doc = Document::with_version("1.5");
     for n in 1..=12usize {
@@ -163,9 +169,9 @@ fn p1_2_ascii85_wird_beim_eigenen_umfang_abgelehnt() {
     }
 }
 
-/// Dieselbe Rechnung im Orakel: ein gewöhnlicher ASCII85-Strom landet in
-/// `unchecked`, obwohl das Budget für ihn reicht — die Kommandozeile
-/// antwortet darauf mit Rückgabewert 3 („nicht geprüft“) an harmlosem
+/// Dieselbe Rechnung im Orakel: ein gewöhnlicher ASCII85-Strom landete in
+/// `unchecked`, obwohl das Budget für ihn reichte — die Kommandozeile
+/// antwortete darauf mit Rückgabewert 3 („nicht geprüft“) an harmlosem
 /// Material.
 ///
 /// Aufbau: ein erster Strom verbraucht das Budget bis auf genau `n` Byte,
@@ -173,7 +179,6 @@ fn p1_2_ascii85_wird_beim_eigenen_umfang_abgelehnt() {
 /// Der erste hängt hinter `RunLengthDecode`, damit die Vorprüfung des
 /// Laders ihn nicht selbst auspackt und das Budget vorwegnimmt.
 #[test]
-#[ignore = "Befund P1-2 — offen"]
 fn p1_2_ascii85_strom_wird_grundlos_uebersprungen() {
     const BUDGET: usize = 64 * 1024;
     const N: usize = 1023; // 1023 % 4 == 3

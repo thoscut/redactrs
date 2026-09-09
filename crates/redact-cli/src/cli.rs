@@ -347,7 +347,8 @@ pub struct Cli {
     /// **Nachprüfen statt schwärzen:** steht dieser Text noch in der Datei?
     ///
     /// Mehrfach angebbar — je Angabe ein Suchbegriff. Gesucht wird mit
-    /// `redact_pdf::leaks` auf allen Ebenen, auf denen ein Geheimnis
+    /// `redact_pdf::leaks_many_within` — alle Begriffe in einem Durchgang,
+    /// mit Budget — auf allen Ebenen, auf denen ein Geheimnis
     /// überleben kann: rohe Dateibytes, jeder `stream … endstream`-Block (auch
     /// Flate-dekomprimiert, also inklusive Altrevisionen), jedes Stream-Objekt
     /// dekodiert, die Objekte in `/ObjStm`-Containern und jedes
@@ -381,9 +382,13 @@ pub struct Cli {
     /// Liste und sonst nichts.
     ///
     /// Höchstens 1 000 Begriffe je Aufruf; mehr endet mit Rückgabewert `2`,
-    /// bevor die Datei gelesen wird. Jeder Begriff kostet einen Vergleich
-    /// über die ganze Datei, und eine Liste in Millionenhöhe sähe von außen
-    /// aus wie ein Hänger. Wer mehr hat, teilt die Liste und ruft mehrmals
+    /// bevor die Datei gelesen wird. Nicht der Zeit wegen: seit Fix-Runde 4
+    /// laufen alle Begriffe in **einem** Durchgang, 1 000 kosten kaum mehr
+    /// als einer (gemessen an 64 MiB: 5,20 s gegen 6,27 s). Die Decke gilt
+    /// dem Speicher des Automaten, der alle Begriffe in allen Kodierungen
+    /// trägt — gemessen 1,0 MB für 1 000 Begriffe, 675 MB und 25 s allein
+    /// für den Bau bei einer Million —, und der Trefferliste, die je Begriff
+    /// eine Zeile bekommt. Wer mehr hat, teilt die Liste und ruft mehrmals
     /// auf — jeder Lauf meldet für sich.
     #[arg(
         long = "check-leaks",
@@ -617,7 +622,7 @@ Rückgabewerte:
   {EXIT_USAGE}  Bedienfehler: ein Schalter, die Einstellungsdatei oder eine mitgegebene
      Datei passt nicht (z.B. eine Review-Datei zu einem anderen Dokument).
   {EXIT_INCOMPLETE}  Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.
-     Zwei Fälle:
+     Drei Fälle:
      • Verarbeitet, aber nicht vollständig geprüft. Die Ausgabe ist
        geschrieben und was gefunden wurde, ist geschwärzt — für einen Teil des
        Dokuments konnte die Analyse aber nicht einstehen: ein Font ohne
@@ -631,6 +636,13 @@ Rückgabewerte:
        Ein Fund ist kein Verarbeitungsfehler (das wäre 1) und kein
        Bedienfehler (das wäre 2): die Suche lief vollständig, die Antwort
        lautet „ja, es steht noch drin“.
+     • --check-leaks konnte eine Stelle NICHT PRÜFEN — und das auch ohne
+       einen einzigen Fund. Ein Strom, der das Restbudget von
+       --max-decompressed-mb sprengte, wurde nicht entpackt; über ihn sagt
+       „nicht gefunden“ nichts. Solche Stellen stehen als
+       „NICHT GEPRÜFT: …“ in der Ausgabe. Dasselbe gilt, wo die Objektsicht
+       an ihrer Verschachtelungstiefe abbricht. Hier liegt der Unterschied
+       zu 0: die Antwort ist nicht „sauber“, sondern unvollständig.
 ",
         redact_pipeline::settings::SETTINGS_ENV,
         EXIT_OK = crate::EXIT_OK,
@@ -665,6 +677,84 @@ mod tests {
         assert!(
             text.lines().any(|l| l.starts_with("  # ")),
             "kein eingerücktes Beispiel gefunden — Prüfung greift ins Leere"
+        );
+    }
+
+    /// Der Rückgabewert 3 hat **drei** Bedeutungen — und alle drei stehen im
+    /// Hilfetext, in `README.md` und in `SECURITY.md`.
+    ///
+    /// Gegenprüfung E1 der Fix-Runde 5: der dritte Fall („nicht geprüft“, auch
+    /// ohne Fund) war seit der Runde 4 im Code (`main.rs`, `check::report`),
+    /// aber der Hilfetext sagte weiter „Zwei Fälle“, `SECURITY.md` „hat **zwei**
+    /// Bedeutungen“ und die README-Tabelle nannte nur den Fund. Wer danach ein
+    /// Skript baute, hielt `3` ohne Fund für unmöglich.
+    ///
+    /// Der Block, den `SECURITY.md` aus `--help` zitiert, wird **Zeile für
+    /// Zeile** gegen den echten Hilfetext gehalten — ein Zitat, das das
+    /// Programm nie ausgibt, ist schlimmer als keines. Zeilen, die im Zitat
+    /// mit „…“ abgekürzt sind, werden dabei ausgelassen.
+    ///
+    /// Mutation (nachgewiesen): „Drei Fälle:“ im Hilfetext zurück auf „Zwei
+    /// Fälle:“ — dieser Test ist rot.
+    #[test]
+    fn der_dritte_fall_des_rueckgabewerts_drei_steht_ueberall() {
+        use clap::CommandFactory;
+
+        let wurzel = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lies = |name: &str| {
+            std::fs::read_to_string(wurzel.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+        };
+        let glatt = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("     Drei Fälle:"), "--help zählt nicht drei");
+        assert!(
+            help.contains("--check-leaks konnte eine Stelle NICHT PRÜFEN"),
+            "--help nennt den dritten Fall nicht"
+        );
+
+        let security = lies("SECURITY.md");
+        assert!(
+            security.contains("#### Rückgabewert 3 hat **drei** Bedeutungen"),
+            "SECURITY.md zählt nicht drei"
+        );
+
+        // Der zitierte Block: alles zwischen dem `sed`-Aufruf und dem Ende
+        // des Konsolenkastens.
+        let marke = "$ redact-rs --help | sed -n '/^  3  /,$p'\n";
+        let start = security
+            .find(marke)
+            .expect("SECURITY.md ohne das --help-Zitat")
+            + marke.len();
+        let zitat = &security[start..];
+        let zitat = &zitat[..zitat.find("\n```").expect("Kasten ohne Ende")];
+        let mut geprueft = 0;
+        for zeile in zitat.lines() {
+            if zeile.trim().is_empty() || zeile.trim_end().ends_with('…') {
+                continue;
+            }
+            assert!(
+                help.contains(zeile.trim_end()),
+                "SECURITY.md zitiert eine Zeile, die --help nicht ausgibt: {zeile:?}"
+            );
+            geprueft += 1;
+        }
+        assert!(
+            geprueft >= 5,
+            "das Zitat besteht fast nur aus „…“ — geprüft wurden {geprueft} Zeilen"
+        );
+
+        let readme = glatt(&lies("README.md"));
+        assert!(
+            readme.contains("endet **auch ohne Fund** mit `3`, wenn es eine Stelle nicht lesen"),
+            "README nennt den dritten Fall nicht im Fließtext"
+        );
+        assert!(
+            readme.contains(
+                "**oder** eine Stelle konnte nicht geprüft werden \
+                 (Entpackgrenze, Verschachtelungstiefe), auch ohne einen einzigen Fund."
+            ),
+            "die README-Tabelle nennt den dritten Fall nicht"
         );
     }
 

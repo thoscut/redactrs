@@ -742,8 +742,8 @@ fn zb5_ein_abgewaehlter_text_ist_eine_entscheidung_kein_leck() {
     );
     assert!(
         status.contains(
-            "1 Text(e) stehen auch in einer abgewählten oder geschützten Zeile und wurden \
-             deshalb nicht gesucht."
+            "1 Text(e) decken sich mit einer abgewählten oder geschützten Zeile und zählen \
+             deshalb nicht als Leck."
         ),
         "{status}"
     );
@@ -802,7 +802,7 @@ fn zb5_zweimal_geschwaerzt_einmal_abgewaehlt_ist_kein_leck() {
         "{status}"
     );
     assert!(
-        status.contains("1 Text(e) stehen auch in einer abgewählten"),
+        status.contains("1 Text(e) decken sich mit einer abgewählten"),
         "{status}"
     );
 
@@ -826,7 +826,7 @@ fn zb5_nur_stehen_gelassene_texte_heisst_nichts_gesucht_und_sagt_warum() {
         "{sentence}"
     );
     assert!(
-        sentence.contains("2 Text(e) stehen auch in einer abgewählten"),
+        sentence.contains("2 Text(e) decken sich mit einer abgewählten"),
         "{sentence}"
     );
     assert!(!sentence.contains("keine geschwärzte Zeile"), "{sentence}");
@@ -1183,6 +1183,223 @@ fn zb_g5a4_die_warnung_nennt_die_datei() {
     // Der Satz selbst ist unverändert der der Statuszeile.
     assert!(
         app.state.status.contains("steht NOCH in der Ausgabe"),
+        "{}",
+        app.state.status
+    );
+}
+
+// ===========================================================================
+// P5-D3 — die Warnung des vorigen Exports bleibt stehen
+// ===========================================================================
+
+/// Ein Dokument mit einem Leck, das jeder Export stehen lässt: das Rechteck
+/// liegt neben dem Text.
+fn leaking_app() -> RedactApp {
+    let mut app = demo_app();
+    app.state.regions.push(text_region(
+        0,
+        Rect::new(40.0, 40.0, 120.0, 60.0),
+        "Musterbank",
+    ));
+    let index = app.state.regions.len() - 1;
+    assert_eq!(app.state.hit_summary().outcome(index), HitOutcome::Redacted);
+    app
+}
+
+fn leak_warnings(app: &RedactApp) -> Vec<String> {
+    app.state
+        .warnings
+        .iter()
+        .filter(|w| w.contains("steht NOCH in der Ausgabe"))
+        .cloned()
+        .collect()
+}
+
+/// **Befund P5-D3.** `export_to` setzte `self.state.warnings =
+/// outcome.warnings` bei **jedem** geglückten Export — die Warnung des
+/// vorigen war damit weg. Genau der Fall, für den Fix-Runde 4 den Dateinamen
+/// eingeführt hat: zwei Ausgabedateien, zwei Urteile, und man muss sehen
+/// können, welches zu welcher gehört. `zb_g5a4_die_warnung_nennt_die_datei`
+/// überlebte nur, weil dort **beide** Prüfungen noch liefen, als der zweite
+/// Export begann. Hier ist das erste Urteil schon da — vorher: rot.
+/// Mutation (`note_export_warnings` → `self.state.warnings = …`): rot.
+#[test]
+fn zb_p5d3_die_warnung_des_ersten_exports_ueberlebt_den_zweiten() {
+    let dir = tmp("p5d3-zwei");
+    let mut app = leaking_app();
+
+    app.export_to(dir.join("erste.pdf"));
+    app.wait_for_export_checks();
+    assert_eq!(leak_warnings(&app).len(), 1, "{:?}", app.state.warnings);
+
+    // Erst wenn das erste Urteil steht, der zweite Export.
+    app.export_to(dir.join("zweite.pdf"));
+    app.wait_for_export_checks();
+
+    let leaks = leak_warnings(&app);
+    assert_eq!(leaks.len(), 2, "{:?}", app.state.warnings);
+    assert!(
+        leaks.iter().any(|w| w.starts_with("erste.pdf: ")),
+        "die erste Warnung ist weg: {:?}",
+        app.state.warnings
+    );
+    assert!(
+        leaks.iter().any(|w| w.starts_with("zweite.pdf: ")),
+        "{:?}",
+        app.state.warnings
+    );
+}
+
+/// Die Gegenrichtung, drei Hälften: derselbe Dateiname sammelt sich nicht
+/// (dreimal exportiert, eine Warnung), ein Export, der das Leck **schließt**,
+/// nimmt die alte Warnung mit (sonst stünde eine Warnung über eine Datei, die
+/// es nicht mehr gibt), und mehr als [`MAX_WARNED_FILES`] Dateien werden
+/// nicht gehalten — die älteste fällt heraus.
+/// Mutation (`forget_warnings_of` in `note_export_warnings` weg): die alte
+/// Warnung bleibt über der geschwärzten Datei stehen, rot. Mutation (die
+/// `while`-Schleife in `remember_warnings_of` weg): 11 statt 10, rot.
+#[test]
+fn zb_p5d3_dieselbe_datei_sammelt_sich_nicht_und_die_decke_haelt() {
+    let dir = tmp("p5d3-decke");
+    let mut app = leaking_app();
+
+    for _ in 0..3 {
+        app.export_to(dir.join("gleich.pdf"));
+        app.wait_for_export_checks();
+    }
+    assert_eq!(leak_warnings(&app).len(), 1, "{:?}", app.state.warnings);
+
+    // Und zwei Exporte derselben Datei, beide unterwegs, bevor das erste
+    // Urteil kommt: beide tragen denselben Satz, und der steht einmal da.
+    // Mutation (`contains`-Prüfung in `note_check_warning` weg): zwei, rot.
+    app.export_to(dir.join("gleich.pdf"));
+    app.export_to(dir.join("gleich.pdf"));
+    app.wait_for_export_checks();
+    assert_eq!(leak_warnings(&app).len(), 1, "{:?}", app.state.warnings);
+
+    // Dieselbe Datei noch einmal, diesmal ohne das Leck: die alte Warnung
+    // gehört weg — sie spricht über eine Datei, die es nicht mehr gibt.
+    let leaking = app.state.regions.pop().expect("das leckende Rechteck");
+    app.export_to(dir.join("gleich.pdf"));
+    app.wait_for_export_checks();
+    assert!(
+        leak_warnings(&app).is_empty(),
+        "die alte Warnung steht über der neuen Datei: {:?}",
+        app.state.warnings
+    );
+    app.state.regions.push(leaking);
+
+    for i in 0..MAX_WARNED_FILES + 1 {
+        app.export_to(dir.join(format!("datei{i}.pdf")));
+        app.wait_for_export_checks();
+    }
+    let leaks = leak_warnings(&app);
+    assert_eq!(leaks.len(), MAX_WARNED_FILES, "{:?}", app.state.warnings);
+    assert!(
+        !leaks.iter().any(|w| w.starts_with("datei0.pdf: ")),
+        "die älteste Datei muss herausfallen: {:?}",
+        app.state.warnings
+    );
+    assert!(
+        leaks
+            .iter()
+            .any(|w| w.starts_with(&format!("datei{}.pdf: ", MAX_WARNED_FILES))),
+        "{:?}",
+        app.state.warnings
+    );
+}
+
+/// Und die Zusage des Doc-Kommentars von `finish_export_check`: die
+/// Warnungen bleiben, **bis das nächste Dokument kommt**. Danach nicht mehr —
+/// und die Decke zählt im neuen Dokument wieder zehn Dateien voll aus.
+/// Mutation (`note_export_warnings` → `self.state.warnings = …`): rot.
+#[test]
+fn zb_p5d3_der_dokumentwechsel_raeumt_die_warnungen_weg() {
+    let dir = tmp("p5d3-wechsel");
+    let mut app = leaking_app();
+    app.export_to(dir.join("erste.pdf"));
+    app.wait_for_export_checks();
+    assert_eq!(leak_warnings(&app).len(), 1, "{:?}", app.state.warnings);
+
+    app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "zweites.pdf");
+    assert!(
+        app.state.warnings.is_empty(),
+        "das nächste Dokument räumt sie weg: {:?}",
+        app.state.warnings
+    );
+
+    // Und die Namensliste ist mit weg: die Decke zählt wieder bei null.
+    for i in 0..MAX_WARNED_FILES {
+        app.state.regions.push(text_region(
+            0,
+            Rect::new(40.0, 40.0, 120.0, 60.0),
+            "Musterbank",
+        ));
+        app.export_to(dir.join(format!("neu{i}.pdf")));
+        app.wait_for_export_checks();
+        app.state.regions.pop();
+    }
+    assert_eq!(
+        leak_warnings(&app).len(),
+        MAX_WARNED_FILES,
+        "{:?}",
+        app.state.warnings
+    );
+}
+
+// ===========================================================================
+// P5-D5 — das Neuzeichnen hängt am Ende des Threads, nicht an seinem Erfolg
+// ===========================================================================
+
+/// **Befund P5-D5.** `request_repaint` stand als **letzte** Anweisung im
+/// Prüf-Thread. Starb er davor (Panik), ruhte die Oberfläche weiter: ohne
+/// Bild kein `poll_export_checks`, ohne Abholen kein `Disconnected` — und
+/// die Statuszeile blieb auf „Nachprüfung läuft …“, obwohl der Satz
+/// „abgebrochen (interner Fehler)“ längst bereitlag. Jetzt fordert ein
+/// Wächter das Neuzeichnen beim Fallenlassen an, also auch beim Abwickeln
+/// der Panik — der Wächter wird in den Thread **hineingezogen**
+/// (`let _repaint = repaint;`) und dort beim Abwickeln fallen gelassen.
+/// Mutation (der Wächter zurück zu `Option<egui::Context>` mit
+/// `ctx.request_repaint()` als letzter Anweisung): rot.
+#[test]
+fn zb_p5d5_eine_panik_im_pruefthread_fordert_trotzdem_ein_neuzeichnen() {
+    let out = tmp("p5d5-panik").join("geschwaerzt.pdf");
+    let ctx = egui::Context::default();
+    assert!(!ctx.has_requested_repaint(), "frischer Kontext, nichts an");
+
+    let mut app = demo_app();
+    app.ui_ctx = Some(ctx.clone());
+    app.force_panic_in_check = true;
+    app.export_to(out);
+    app.wait_for_export_checks();
+
+    assert!(
+        ctx.has_requested_repaint(),
+        "ohne Neuzeichnen holt niemand das Urteil ab — die Statuszeile bliebe auf „läuft“"
+    );
+    assert!(
+        app.state.status.contains("abgebrochen (interner Fehler)"),
+        "{}",
+        app.state.status
+    );
+}
+
+/// Die Gegenrichtung: der geglückte Lauf fordert es genauso an — der
+/// Wächter ersetzt den Aufruf am Ende, er kommt nicht zu ihm hinzu.
+#[test]
+fn zb_p5d5_auch_der_geglueckte_lauf_fordert_ein_neuzeichnen() {
+    let out = tmp("p5d5-gut").join("geschwaerzt.pdf");
+    let ctx = egui::Context::default();
+    assert!(!ctx.has_requested_repaint());
+
+    let mut app = demo_app();
+    app.ui_ctx = Some(ctx.clone());
+    app.export_to(out);
+    app.wait_for_export_checks();
+
+    assert!(ctx.has_requested_repaint());
+    assert!(
+        app.state.status.contains("Nachprüfung:"),
         "{}",
         app.state.status
     );

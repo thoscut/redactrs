@@ -8,10 +8,10 @@
 //!   ist, ein ausdrückliches Sprungziel, ein Erscheinungsstrom, und dass
 //!   Zyklen und große Bäume in vertretbarer Zeit enden;
 //! * die **Befunde** P3-1 bis P3-6: Material, an dem das Geheimnis nach
-//!   `strip_metadata` + `save_to_bytes` noch in der Datei steht, oder an dem
-//!   eine Zahl des Berichts etwas meldet, das nicht geschah. Sie sind
-//!   `#[ignore]` und rot, bis die Lücke geschlossen ist
-//!   (`cargo test -p redact-pdf --test ze_p3_metadatenlauf -- --ignored`).
+//!   `strip_metadata` + `save_to_bytes` noch in der Datei stand, oder an dem
+//!   eine Zahl des Berichts etwas meldete, das nicht geschah. Sie waren
+//!   `#[ignore]` und rot; seit Fix-Runde 5 laufen sie mit und sind grün.
+//!   Ein Messtest (`mess_…`) bleibt ignoriert — er misst, er prüft nicht.
 //!
 //! Orakel ist [`redact_pdf::leaks`] an den geschriebenen Bytes — dieselbe
 //! Prüfung, die `redact-rs --check-leaks` fährt.
@@ -359,7 +359,6 @@ fn lange_ketten_und_breite_faecher_enden_in_sekunden() {
 /// Modul-Dokumentation verspricht „ein direkt eingebettetes Dictionary wird
 /// im Feld selbst bereinigt“; das gilt nur für `/Annots` selbst.
 #[test]
-#[ignore = "Befund P3-1: eingebettetes /Popup behält seinen Klartext"]
 fn befund_p3_1_eingebettetes_popup() {
     let mut d = page(&["Rechnung Nr. 4711"]);
     let annot = d.add(Object::Dictionary(dictionary! {
@@ -379,7 +378,6 @@ fn befund_p3_1_eingebettetes_popup() {
 /// eingebettete Dictionary bleibt mit seinem `/TU` stehen und wird von
 /// `prune_unreachable` gehalten, weil das Array erreichbar ist.
 #[test]
-#[ignore = "Befund P3-2: eingebettetes Dictionary in einem /Kids-Array bleibt unberührt"]
 fn befund_p3_2_eingebettetes_dictionary_in_einem_kids_array() {
     let mut d = page(&["Rechnung Nr. 4711"]);
     let field = d.doc.new_object_id();
@@ -418,7 +416,6 @@ fn befund_p3_2_eingebettetes_dictionary_in_einem_kids_array() {
 /// Die Kontrolle in derselben Prüfung: dieselbe Datei mit einer Kette der
 /// Länge 10 verliert ihr `/V`.
 #[test]
-#[ignore = "Befund P3-3: /V jenseits der 32 Ebenen bleibt stehen"]
 fn befund_p3_3_feldwert_jenseits_der_32_ebenen() {
     fn kette(len: usize, wert_bei: usize) -> Doc {
         let mut d = page(&["Rechnung Nr. 4711"]);
@@ -468,7 +465,6 @@ fn befund_p3_3_feldwert_jenseits_der_32_ebenen() {
 /// Lesezeichen entfernt“, und `MetadataReport` verspricht: „Jeder Eintrag
 /// ist ein *gemessenes* Ergebnis, kein Vorsatz“.
 #[test]
-#[ignore = "Befund P3-4: gezähltes Lesezeichen bleibt samt /Title in der Datei"]
 fn befund_p3_4_gezaehltes_lesezeichen_bleibt() {
     let mut d = page(&["Rechnung Nr. 4711"]);
     let item = d.doc.new_object_id();
@@ -505,7 +501,6 @@ fn befund_p3_4_gezaehltes_lesezeichen_bleibt() {
 /// Lauf; der Trailer selbst wird nirgends auf die zulässigen Schlüssel
 /// (`/Root`, `/Info`, `/Encrypt`, `/ID`, `/Size`) beschnitten.
 #[test]
-#[ignore = "Befund P3-5: Objekt unter einem fremden Trailerschlüssel überlebt"]
 fn befund_p3_5_objekt_unter_fremdem_trailerschluessel() {
     let mut d = page(&["Rechnung Nr. 4711"]);
     let id = d.add(Object::Dictionary(
@@ -520,7 +515,6 @@ fn befund_p3_5_objekt_unter_fremdem_trailerschluessel() {
 /// referenzierte Objekt dann weg — eine Erreichbarkeitsprüfung, die abbricht,
 /// muss im Zweifel „erreichbar“ sagen, nicht „weg damit“.
 #[test]
-#[ignore = "Befund P3-6: Verweis hinter 65 Ebenen direkter Verschachtelung wird weggeräumt"]
 fn befund_p3_6_verweis_hinter_tiefer_verschachtelung() {
     let mut d = page(&["Rechnung Nr. 4711"]);
     let gebraucht = d.add(Object::Stream(lopdf::Stream::new(
@@ -542,5 +536,128 @@ fn befund_p3_6_verweis_hinter_tiefer_verschachtelung() {
         doc.objects.contains_key(&gebraucht),
         "ein referenziertes Objekt wurde weggeräumt, weil die Erreichbarkeitsprüfung \
          bei Tiefe 64 abbricht"
+    );
+}
+
+/// Ein Schlüssel mit dem Wert `null` ist nach PDF 32000-1, 7.3.9 gleich
+/// einem fehlenden Schlüssel. Er darf keinen Zähler bewegen — sonst meldet
+/// der Bericht Entfernungen, bei denen nie etwas zu entfernen war.
+///
+/// Mutationsnachweis: `take` auf `dict.remove(key).is_some()` zurückgedreht —
+/// dann meldet der Bericht 2 Texte, 1 Feldwert, 1 Aktion und je einen
+/// Anhang/JavaScript-Eintrag, und der Test ist rot.
+#[test]
+fn ein_null_wert_bewegt_keinen_zaehler() {
+    let mut d = page(&["Rechnung Nr. 4711"]);
+    let annot = d.add(Object::Dictionary(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(),
+        "Contents" => Object::Null, "T" => Object::Null,
+        "A" => Object::Null, "V" => Object::Null,
+    }));
+    d.page_dict_set("Annots", Object::Array(vec![Object::Reference(annot)]));
+    let names = d.add(Object::Dictionary(dictionary! {
+        "EmbeddedFiles" => Object::Null, "JavaScript" => Object::Null,
+    }));
+    d.catalog_set("Names", Object::Reference(names));
+
+    let (report, _) = strip(&d.finish());
+    assert_eq!(
+        report.annotation_texts_cleared, 0,
+        "/Contents null, /T null"
+    );
+    assert_eq!(report.annotation_actions_removed, 0, "/A null");
+    assert_eq!(report.field_values_cleared, 0, "/V null");
+    assert_eq!(report.embedded_files_removed, 0);
+    assert_eq!(report.javascript_removed, 0);
+    // Der `/Names`-Baum selbst stand da und ist weg — das zählt.
+    assert_eq!(report.names_removed, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Messung zu P3-3: was der besuchsgeführte Lauf an großen Formularen kostet
+// ---------------------------------------------------------------------------
+
+/// Zeit und Spitzenspeicher (`VmHWM`) für 100 000 Felder nebeneinander und
+/// für eine `/Parent`-Kette von 1 000 000 Feldern — die Größen, bei denen
+/// eine Tiefengrenze früher abgebrochen hätte.
+///
+/// Kein Prüftest: er misst und druckt (`--ignored --nocapture`).
+#[test]
+#[ignore = "Messung, keine Prüfung"]
+fn mess_p3_3_grosse_formularbaeume() {
+    fn vm_hwm_kib() -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("VmHWM:"))
+                    .and_then(|line| line.split_whitespace().nth(1)?.parse().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    // 100 000 Felder nebeneinander, jedes mit Wert.
+    let mut d = page(&["Rechnung Nr. 4711"]);
+    let n = 100_000usize;
+    let ids: Vec<ObjectId> = (0..n)
+        .map(|k| {
+            d.add(Object::Dictionary(dictionary! {
+                "Type" => "Annot", "Subtype" => "Widget", "Rect" => rect(),
+                "FT" => "Tx", "T" => Object::string_literal(format!("f{k}")),
+                "V" => secret_string(),
+            }))
+        })
+        .collect();
+    d.page_dict_set(
+        "Annots",
+        Object::Array(ids.iter().map(|id| Object::Reference(*id)).collect()),
+    );
+    let vorher = vm_hwm_kib();
+    let start = Instant::now();
+    let report = strip_metadata(&mut d.doc);
+    let breit = start.elapsed();
+    assert_eq!(report.field_values_cleared, n);
+    println!(
+        "100 000 Felder: {breit:?}, VmHWM {} MiB (vorher {} MiB)",
+        vm_hwm_kib() / 1024,
+        vorher / 1024
+    );
+
+    // Eine `/Parent`-Kette von 1 000 000 Feldern, der Wert in der Mitte.
+    let mut d = page(&["Rechnung Nr. 4711"]);
+    let n = 1_000_000usize;
+    let ids: Vec<ObjectId> = (0..n).map(|_| d.doc.new_object_id()).collect();
+    for (i, id) in ids.iter().enumerate() {
+        let mut dict = dictionary! { "FT" => "Tx" };
+        if i > 0 {
+            dict.set("Parent", Object::Reference(ids[i - 1]));
+        }
+        if i == n / 2 {
+            dict.set("V", secret_string());
+        }
+        if i + 1 == n {
+            dict.set("Type", Object::Name(b"Annot".to_vec()));
+            dict.set("Subtype", Object::Name(b"Widget".to_vec()));
+            dict.set("Rect", rect());
+        }
+        d.doc.objects.insert(*id, Object::Dictionary(dict));
+    }
+    d.page_dict_set(
+        "Annots",
+        Object::Array(vec![Object::Reference(*ids.last().expect("Kette"))]),
+    );
+    let vorher = vm_hwm_kib();
+    let start = Instant::now();
+    let report = strip_metadata(&mut d.doc);
+    let kette = start.elapsed();
+    assert_eq!(
+        report.field_values_cleared, 1,
+        "der Wert in der Mitte fällt"
+    );
+    println!(
+        "1 000 000er-Kette: {kette:?}, VmHWM {} MiB (vorher {} MiB)",
+        vm_hwm_kib() / 1024,
+        vorher / 1024
     );
 }

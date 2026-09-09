@@ -333,16 +333,23 @@ Rückgabewerte:
 | `0` | Erfolg — und nichts blieb ungeprüft |
 | `1` | Verarbeitungsfehler. Im Stapelbetrieb: mindestens eine Datei ist gescheitert |
 | `2` | Bedienfehler (Argumente, Einstellungsdatei, Prüfsummen, `--max-candidates`) |
-| `3` | **Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.** Beim Schwärzen: es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. Bei [`--check-leaks`](#pruefen): mindestens einer der Suchbegriffe steht noch in der Datei. |
+| `3` | **Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.** Beim Schwärzen: es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. Bei [`--check-leaks`](#pruefen): mindestens einer der Suchbegriffe steht noch in der Datei — **oder** eine Stelle konnte nicht geprüft werden (Entpackgrenze, Verschachtelungstiefe), auch ohne einen einzigen Fund. |
 
 `3` ist kein Fehler und kein „alles gut“ — es ist die Aufforderung, genau diese
 Stellen anzusehen. In einem Skript gehört er behandelt wie ein Fehler, solange
 niemand hingeschaut hat.
 
-Beide Fälle senden dieselbe Nachricht, und das ist der Grund für dieselbe Zahl:
-*die Datei ist nicht abgenommen.* Ein Fund unter `--check-leaks` ist ausdrücklich
-**kein** `1` — die Datei wurde gelesen, die Suche lief vollständig durch, die
-Antwort steht fest. Sie lautet nur „ja, es steht noch drin“.
+Alle drei Fälle senden dieselbe Nachricht, und das ist der Grund für dieselbe
+Zahl: *die Datei ist nicht abgenommen.* Ein Fund unter `--check-leaks` ist
+ausdrücklich **kein** `1` — die Datei wurde gelesen, die Suche lief vollständig
+durch, die Antwort steht fest. Sie lautet nur „ja, es steht noch drin“.
+
+Der dritte Fall ist der stillste und deshalb der wichtigste: `--check-leaks`
+endet **auch ohne Fund** mit `3`, wenn es eine Stelle nicht lesen konnte — ein
+Strom über dem Restbudget von `--max-decompressed-mb`, oder eine
+Verschachtelung unterhalb der Tiefe, bis zu der die Objektsicht liest. Über
+eine solche Stelle sagt „nicht gefunden“ nichts, und genau deshalb darf sie
+nicht als `0` durchgehen. Sie steht als `NICHT GEPRÜFT: …` in der Ausgabe.
 
 Ein gewöhnliches `Warnung:` setzt den Rückgabewert **nicht**. Ein Rasterbild
 auf der Seite ist eine bekannte Grenze des Verfahrens und der Normalfall bei
@@ -1351,9 +1358,15 @@ Schalter. (Eine Datei, deren als Flate ausgewiesene Ströme *in Summe* über dem
 Budget liegen, kommt gar nicht so weit: die Vorprüfung lehnt sie wie beim
 Schwärzen mit Rückgabewert `1` ab, bevor irgendetwas ausgepackt wird.)
 
-**Höchstens 1 000 Begriffe je Aufruf.** Jeder Begriff kostet einen Vergleich
-über die ganze Datei; eine Liste in Millionenhöhe liefe Stunden und sähe von
-außen aus wie ein Hänger. Der 1 001. Begriff endet deshalb mit Rückgabewert
+**Höchstens 1 000 Begriffe je Aufruf.** Nicht der Zeit wegen: seit Fix-Runde 4
+trägt ein Automat alle Begriffe in allen Kodierungen und läuft **einmal** je
+Datenblock — 1 000 Begriffe kosten kaum mehr als einer (nachgemessen an einer
+64-MiB-Datei: 5,20 s für einen, 6,27 s für 1 000, Verhältnis 1,21). Die Decke
+gilt dem Speicher: der Automat wächst linear mit der Liste, nachgemessen
+1,0 MB für 1 000 Begriffe (12 000 Muster), 7,1 MB für 10 000, 68 MB für
+100 000 und **675 MB** für eine Million — dazu 25 s allein für seinen Bau,
+bevor ein Byte der Datei gelesen ist. Und jeder Begriff bekommt eine eigene
+Zeile im Bericht. Der 1 001. Begriff endet deshalb mit Rückgabewert
 `2`, bevor die Datei gelesen wird (nachgemessen: `seq 1 1001 | sed 's/^/x/' |
 redact-rs beispiel.pdf --check-leaks -` meldet „mit 1001 Suchbegriffen; mehr
 als 1000 nimmt der Lauf nicht an“; mit 1 000 Zeilen läuft derselbe Aufruf
@@ -1953,13 +1966,21 @@ Ergebnis steht in der Statuszeile, ein Fund zusätzlich ganz vorn in den
 Warnungen.
 
 Gesucht werden höchstens 1 000 Begriffe je Nachprüfung — dieselbe Decke wie
-bei `--check-leaks` (`redact_core::MAX_CHECK_NEEDLES`). Was darüber liegt,
-wird gesagt und nicht verschwiegen: die Zeile nennt die Zahl der nicht
-gesuchten Texte. Geprüft ist *diese Liste*, nicht die Datei — ein selbst
-gezogenes Rechteck hat keinen bekannten Text, und die Zeile nennt die Zahl
-solcher Rechtecke. Je Text fällt **eine** Entscheidung: steht er in einer
-abgewählten Zeile, ist sein Verbleib gewollt und kein Leck, gleich wie viele
-geschwärzte Zeilen ihn sonst tragen.
+bei `--check-leaks` (`redact_core::MAX_CHECK_NEEDLES`), und gezählt wird
+**jede Schreibweise**, die in einer geschwärzten Zeile steht. Was darüber
+liegt, wird gesagt und nicht verschwiegen: die Zeile nennt die Zahl der nicht
+gesuchten Texte. Geprüft ist
+*diese Liste*, nicht die Datei — ein selbst gezogenes Rechteck hat keinen
+bekannten Text, und die Zeile nennt die Zahl solcher Rechtecke.
+
+Ein Text, den Sie bewusst stehen lassen, deckt nur sich selbst: steht dieselbe
+Zeichenfolge aus einer geschwärzten Zeile noch **wörtlich** in der Ausgabe,
+wird sie gemeldet. Nur wenn allein die Fassung ohne Leerraum trifft und eine
+stehen gelassene Zeile dieselbe Zeichenfolge trägt, zählt der Fund nicht als
+Leck — die Zeile sagt, wie viele Texte das betrifft.
+
+Bleiben Stellen der Datei ungeprüft, sagt die Statuszeile, wie viele es sind,
+und nennt sie beim Namen samt Grund — „nicht gefunden“ ist dann keine Aussage.
 
 ### Trefferliste
 
@@ -2257,13 +2278,19 @@ den Stand von vorgestern:
 
 ```bash
 ./scripts/make-preview.sh          # erzeugt docs/*.png, *.gif, *.txt neu
-python3 scripts/check-preview.py docs   # prüft sie (36 Prüfungen, ~0,8 s)
+python3 scripts/check-preview.py docs   # prüft sie (54 Prüfungen, ~0,3 s)
 ```
 
 `check-preview.py` ist ein zweiter, unabhängiger Leser in Python
 (eigener PNG- und GIF-Dekoder, nur Standardbibliothek), damit ein Fehler im
 eigenen Schreiber sich nicht selbst durchwinkt. Danach sagt `git status docs/`,
 ob sich etwas bewegt hat.
+
+Die Zahl der Prüfungen ist keine Zierde: das Skript druckt sie als letzte
+Zeile (`Alle N Pruefungen bestanden.`), und
+`crates/redact-cli/tests/belege.rs::die_zahl_der_pruefungen_steht_im_readme`
+vergleicht sie mit der Zahl in diesem Satz. Hier stand „36 Prüfungen“, während
+das Skript längst 54 meldete — abgeschrieben veraltet so eine Zahl still.
 
 > **Bitgleichheit gilt nur auf derselben Maschine.** Dort liefert ein zweiter
 > Lauf dieselben SHA-256-Summen für alle sechs Dateien (nachgemessen). Über

@@ -24,8 +24,12 @@
 //!    werden, die im Objektgraph der neuesten Revision gar nicht auftauchen,
 //! 3. **jedes Stream-Objekt** des Objektgraphen, dekodiert über
 //!    [`crate::filters`] (Flate, LZW, ASCII85, ASCIIHex, RunLength, mit
-//!    Prädiktor; bei einem nicht unterstützten Filter bleiben die Rohbytes
-//!    die Rückfallebene) — derselbe Dekoder, den der Schwärzer benutzt,
+//!    Prädiktor) — derselbe Dekoder, den der Schwärzer benutzt, nur
+//!    nachsichtiger: bricht die Filterkette an einem unbekannten Glied ab,
+//!    wird durchsucht, was **bis dahin** entpackt war
+//!    ([`crate::filters::decoded_prefix_within`]), und die Fundstelle sagt,
+//!    wo es stehen blieb; bleibt gar nichts übrig, sind die Rohbytes die
+//!    Rückfallebene,
 //! 4. **Objekte in Objekt-Streams** (`/ObjStm`) — komprimierte Container, die
 //!    eine reine Rohbyte-Suche nicht sehen kann,
 //! 5. **alle Zeichenketten-Objekte** im gesamten Objektgraph, egal unter
@@ -39,8 +43,8 @@
 //!    übersetzt, zu Zeilen gesetzt ([`scan_decoded_text`]).
 //!
 //! Beide PDF-String-Kodierungen werden berücksichtigt: PDFDocEncoding/Latin-1
-//! **und** UTF-16BE (mit und ohne BOM). Ebenso beide Syntaxen: literal
-//! `(DE89…)` und hexadezimal `<44453839…>`.
+//! **und** UTF-16 (BE wie LE, mit und ohne BOM). Ebenso beide Syntaxen:
+//! literal `(DE89…)` und hexadezimal `<44453839…>`.
 //!
 //! ## Warum Sichtweise 7 kein Zirkelschluss ist
 //!
@@ -74,7 +78,20 @@
 //!   `leaks` gibt nur Fundstellen zurück und kann die Warnung nicht
 //!   weiterreichen.
 //! * **Text in einem Rasterbild** und **Glyphen als Pfade** (Umrisse statt
-//!   Schrift): dort gibt es keine Codes, die man übersetzen könnte.
+//!   Schrift): dort gibt es keine Codes, die man übersetzen könnte. Ein
+//!   Strom hinter `/DCTDecode`, `/JPXDecode`, `/CCITTFaxDecode` oder
+//!   `/JBIG2Decode` fällt darunter — allein wie am Ende einer Kette. Er
+//!   erzeugt deshalb **keinen** Eintrag in [`LeakCheck::unchecked`]: sonst
+//!   käme jede Datei mit einem Foto als „unvollständig geprüft“ zurück, und
+//!   eine Grenze, die gewöhnliche Dateien abweist, ist genauso ein Fehler wie
+//!   eine Lücke. Ein Filtername, den niemand kennt, ist etwas anderes und
+//!   steht sehr wohl in `unchecked`.
+//! * **Was tiefer liegt als [`MAX_DEPTH`]** Ebenen im Objektgraphen. Der
+//!   Lader lässt 100 zu, diese Sicht läuft 32 — der Abbruch steht seit
+//!   Fix-Runde 5 in [`LeakCheck::unchecked`] mit dem Objektpfad. Vorher war
+//!   er still: ein oktal maskierter Text in 33 verschachtelten Arrays kam an
+//!   der Kommandozeile als „nicht gefunden“ mit Rückgabewert 0 zurück
+//!   (Befund P4-2).
 //!
 //! ## Kosten und Budget
 //!
@@ -166,6 +183,20 @@ pub fn leaks_many(pdf_bytes: &[u8], needles: &[&str]) -> Vec<Vec<String>> {
 pub struct LeakCheck {
     /// Je Suchbegriff die Fundstellen, in der Reihenfolge der Eingabe.
     pub findings: Vec<Vec<String>>,
+    /// Je Suchbegriff: hat er **wörtlich** getroffen — Zeichen für Zeichen,
+    /// in irgendeiner Kodierung —, oder nur seine Fassung **ohne Leerraum**?
+    ///
+    /// Gleiche Länge und Reihenfolge wie `findings`. `false` bei einem
+    /// Begriff ohne Fund; `false` bei einem Fund heißt: gefunden wurde nur
+    /// die gequetschte Normalform (`DE893704…` für `DE89 3704 …`).
+    ///
+    /// Die Unterscheidung steht im Text jeder Fundstelle schon in eckigen
+    /// Klammern („…, ohne Leerraum“). Hier steht sie **maschinenlesbar**,
+    /// damit die Oberfläche sie nicht aus einer Meldung herauslesen muss:
+    /// Sie entscheidet daran, ob ein Rest ein Leck ist oder eine bewusst
+    /// stehen gelassene Schreibweise derselben Normalform (Befund P5-2).
+    /// Sie kostet nichts: gezählt wird beim Melden, nicht beim Suchen.
+    pub literal: Vec<bool>,
     /// Was nicht durchsucht wurde, je Stelle ein Satz (Objekt, Grund).
     pub unchecked: Vec<String>,
 }
@@ -205,8 +236,10 @@ pub fn leaks_many_within(
 ) -> LeakCheck {
     let mut probe = Probe::new(needles);
     if probe.needles.is_empty() {
+        let (findings, literal) = probe.into_hits();
         return LeakCheck {
-            findings: probe.into_hits(),
+            findings,
+            literal,
             unchecked: Vec::new(),
         };
     }
@@ -250,8 +283,10 @@ pub fn leaks_many_within(
         )),
     }
 
+    let (findings, literal) = probe.into_hits();
     LeakCheck {
-        findings: probe.into_hits(),
+        findings,
+        literal,
         unchecked,
     }
 }
@@ -265,6 +300,10 @@ struct Budget {
     remaining: u64,
     total: u64,
     skipped: usize,
+    /// Stellen, die aus einem **anderen** Grund als dem Budget offen blieben
+    /// (unbekanntes Glied einer Filterkette, Tiefengrenze) — gezählt, damit
+    /// eine Datei, die davon tausende hat, nicht tausend Zeilen erzeugt.
+    noted: usize,
     unchecked: Vec<String>,
 }
 
@@ -274,6 +313,7 @@ impl Budget {
             remaining: total,
             total,
             skipped: 0,
+            noted: 0,
             unchecked: Vec::new(),
         }
     }
@@ -303,11 +343,26 @@ impl Budget {
         }
     }
 
+    /// Merkt eine Stelle, die aus einem anderen Grund als dem Budget offen
+    /// blieb — mit derselben Decke wie [`Self::skip`].
+    fn note(&mut self, message: String) {
+        self.noted += 1;
+        if self.noted <= MAX_UNCHECKED {
+            self.unchecked.push(message);
+        }
+    }
+
     fn into_unchecked(mut self) -> Vec<String> {
         if self.skipped > MAX_UNCHECKED {
             self.unchecked.push(format!(
                 "… und {} weitere Ströme nicht entpackt",
                 self.skipped - MAX_UNCHECKED
+            ));
+        }
+        if self.noted > MAX_UNCHECKED {
+            self.unchecked.push(format!(
+                "… und {} weitere Stellen nicht geprüft",
+                self.noted - MAX_UNCHECKED
             ));
         }
         self.unchecked
@@ -359,6 +414,22 @@ impl Needle {
         variants.push(("UTF-16BE", utf16.clone()));
         variants.push(("Hex-String (UTF-16BE, gross)", hex_ascii(&utf16, true)));
         variants.push(("Hex-String (UTF-16BE, klein)", hex_ascii(&utf16, false)));
+
+        // UTF-16**LE** ist im PDF nicht vorgesehen, kommt aber vor —
+        // [`decode_pdf_string`] liest den BOM `FF FE` ausdrücklich. Ein
+        // Zeichenketten-**Objekt** ist damit abgedeckt; LE-Bytes **in einem
+        // Strom** (oder in der Rohdatei, wo niemand parst) waren es nicht.
+        // Der Preis ist drei Muster mehr je Begriff, und der Automat läuft
+        // einmal je Datenblock, egal wie viele Muster er kennt: gemessen an
+        // einer Datei mit 8 MiB entpacktem Strom 28,7 ms mit einem Begriff
+        // und 29,6 ms mit 200 (`ze_p1_mess_kosten_je_kodierung`).
+        let utf16le: Vec<u8> = text
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>();
+        variants.push(("UTF-16LE", utf16le.clone()));
+        variants.push(("Hex-String (UTF-16LE, gross)", hex_ascii(&utf16le, true)));
+        variants.push(("Hex-String (UTF-16LE, klein)", hex_ascii(&utf16le, false)));
 
         variants.dedup_by(|a, b| a.1 == b.1);
 
@@ -540,7 +611,7 @@ impl Probe {
                 let Some(&pos) = positions.first() else {
                     return false;
                 };
-                self.reports[n].hit_text(location, how, text, pos, self.text.lens[n]);
+                self.reports[n].hit_text(location, how, text, pos, self.text.lens[n], true);
                 true
             })
             .collect()
@@ -562,18 +633,29 @@ impl Probe {
                 continue;
             }
             if let Some(&pos) = positions.first() {
-                self.reports[n].hit_text(location, how, squeezed, pos, self.squeezed.lens[id]);
+                self.reports[n].hit_text(
+                    location,
+                    how,
+                    squeezed,
+                    pos,
+                    self.squeezed.lens[id],
+                    false,
+                );
             }
         }
     }
 
-    /// Die Fundstellen in der Reihenfolge der Eingabe.
-    fn into_hits(self) -> Vec<Vec<String>> {
-        let mut out = vec![Vec::new(); self.total];
+    /// Die Fundstellen und die Wörtlich-Marken, je in der Reihenfolge der
+    /// Eingabe (leere Begriffe behalten ihren Platz: keine Funde, nicht
+    /// wörtlich).
+    fn into_hits(self) -> (Vec<Vec<String>>, Vec<bool>) {
+        let mut hits = vec![Vec::new(); self.total];
+        let mut literal = vec![false; self.total];
         for (slot, report) in self.slots.into_iter().zip(self.reports) {
-            out[slot] = report.hits;
+            hits[slot] = report.hits;
+            literal[slot] = report.literal;
         }
-        out
+        (hits, literal)
     }
 }
 
@@ -608,25 +690,41 @@ fn hex_ascii(bytes: &[u8], upper: bool) -> Vec<u8> {
 struct Report {
     hits: Vec<String>,
     seen: BTreeSet<String>,
+    /// Hat der Begriff **wörtlich** getroffen? Siehe [`LeakCheck::literal`].
+    /// Wird auch gesetzt, wenn die Meldung selbst wegfällt (Doppelung oder
+    /// [`MAX_HITS`]) — getroffen hat er trotzdem.
+    literal: bool,
 }
 
 impl Report {
-    fn push(&mut self, message: String) {
+    fn push(&mut self, message: String, literal: bool) {
+        self.literal |= literal;
         if self.hits.len() < MAX_HITS && self.seen.insert(message.clone()) {
             self.hits.push(message);
         }
     }
 
-    /// Fund in einer Bytefolge.
+    /// Fund in einer Bytefolge — immer wörtlich: die Kodierungen eines
+    /// Begriffs werden aus seinem Text gebildet, nicht aus der gequetschten
+    /// Fassung.
     fn hit_bytes(&mut self, location: &str, how: &str, hay: &[u8], pos: usize, len: usize) {
         let ctx = printable_context(hay, pos, len);
-        self.push(format!("{location} [{how}]: …{ctx}…"));
+        self.push(format!("{location} [{how}]: …{ctx}…"), true);
     }
 
-    /// Fund in bereits dekodiertem Text.
-    fn hit_text(&mut self, location: &str, how: &str, hay: &str, pos: usize, len: usize) {
+    /// Fund in bereits dekodiertem Text; `literal` sagt, ob der Text selbst
+    /// getroffen hat oder nur seine Fassung ohne Leerraum.
+    fn hit_text(
+        &mut self,
+        location: &str,
+        how: &str,
+        hay: &str,
+        pos: usize,
+        len: usize,
+        literal: bool,
+    ) {
         let ctx = printable_context(hay.as_bytes(), pos, len);
-        self.push(format!("{location} [{how}]: …{ctx}…"));
+        self.push(format!("{location} [{how}]: …{ctx}…"), literal);
     }
 }
 
@@ -774,6 +872,38 @@ fn scan_object_graph(doc: &Document, probe: &mut Probe, budget: &mut Budget) {
     }
 }
 
+/// Die Tiefengrenze ist erreicht — und das wird **gesagt**.
+///
+/// Der Lader lässt 100 Ebenen zu ([`Limits::max_nesting_depth`]), diese Sicht
+/// läuft 32 ([`MAX_DEPTH`]). Zwischen beiden Zahlen liegt ein Streifen, in dem
+/// ein Text in der Datei steht und keine Sicht ihn liest: ein oktal
+/// maskiertes `\104\105…` in 33 verschachtelten Arrays fand keine Bytesuche
+/// (die Maskierung), und die Objektsicht brach ab — **stillschweigend**, mit
+/// Rückgabewert 0 an der Kommandozeile (Befund P4-2). Der Abbruch bleibt; nur
+/// still ist er nicht mehr.
+///
+/// Gemeldet wird nur, was überhaupt etwas verbergen kann: ein Blatt ohne
+/// Inhalt (Zahl, `null`, Verweis) hat nichts zu verbergen, und eine Meldung
+/// darüber wäre bloß Lärm.
+fn too_deep(path: &str, object: &Object, budget: &mut Budget) {
+    let hides_something = match object {
+        Object::String(..) | Object::Name(_) | Object::Stream(_) => true,
+        Object::Array(items) => !items.is_empty(),
+        Object::Dictionary(dict) => !dict.is_empty(),
+        _ => false,
+    };
+    if hides_something {
+        budget.note(deep_message(path));
+    }
+}
+
+fn deep_message(path: &str) -> String {
+    format!(
+        "{path}: nicht durchsucht — Verschachtelungstiefe {MAX_DEPTH} erreicht; \
+         was tiefer liegt, hat keine Sicht gelesen"
+    )
+}
+
 fn walk(
     doc: &Document,
     object: &Object,
@@ -783,7 +913,7 @@ fn walk(
     depth: usize,
 ) {
     if depth > MAX_DEPTH {
-        return;
+        return too_deep(path, object, budget);
     }
     match object {
         Object::String(raw, format) => {
@@ -816,6 +946,8 @@ fn walk_dict(
     budget: &mut Budget,
     depth: usize,
 ) {
+    // `walk` hat die Tiefe schon geprüft und gemeldet, bevor es hierher
+    // verzweigt; diese Schranke ist die Absicherung, kein zweiter Melder.
     if depth > MAX_DEPTH {
         return;
     }
@@ -845,10 +977,22 @@ fn scan_stream(
     scan_blob(&stream.content, &format!("{path} <Stream, roh>"), probe);
 
     let decoded = match decode_stream(doc, stream, budget.room()) {
-        Ok(Some((label, data))) => {
-            budget.charge(data.len());
-            scan_blob(&data, &format!("{path} <Stream, {label}>"), probe);
-            Some(data)
+        Ok(Some(view)) => {
+            budget.charge(view.data.len());
+            scan_blob(
+                &view.data,
+                &format!("{path} <Stream, {}>", view.label),
+                probe,
+            );
+            if let Some(rest) = view.unknown_rest {
+                budget.note(format!(
+                    "{path} <Stream>: nur bis Filter {} von {} dekodiert — /{rest} \
+                     ist hier kein bekannter Filter; was dahinter steht, hat keine \
+                     Sicht gelesen",
+                    view.applied, view.total
+                ));
+            }
+            Some(view.data)
         }
         Ok(None) => None,
         Err(Oversize) => {
@@ -878,30 +1022,73 @@ fn scan_stream(
     }
 }
 
-/// Die dekodierte Sicht auf einen gefilterten Stream: (Beschriftung, Daten).
+/// Die dekodierte Sicht auf einen gefilterten Stream.
+struct Decoded {
+    /// Beschriftung für die Fundstelle.
+    label: String,
+    data: Vec<u8>,
+    /// Wie viele Glieder der Kette wirklich liefen, und wie lang sie ist.
+    applied: usize,
+    total: usize,
+    /// Der Filtername, an dem die Kette abbrach — nur gesetzt, wenn er
+    /// nicht zu den bewusst nicht dekodierten Bildfiltern gehört
+    /// ([`filters::is_image_filter`]).
+    unknown_rest: Option<String>,
+}
+
+/// Die dekodierte Sicht auf einen gefilterten Stream — so weit, wie sie
+/// reicht.
 ///
-/// `None` ohne `/Filter` (die Rohbytes sind schon durchsucht) und bei einem
-/// Filter, den [`crate::filters`] nicht kennt (Bildfilter) — dann bleiben
-/// die Rohbytes die Rückfallebene, und die Rohsicht hat zusätzlich Flate an
-/// ihnen versucht.
+/// `None` ohne `/Filter` (die Rohbytes sind schon durchsucht) und wenn schon
+/// das **erste** Glied unbekannt ist (Bildfilter): dann sind die Rohbytes das
+/// Einzige, was es gibt, und die Rohsicht hat zusätzlich Flate an ihnen
+/// versucht — eine zweite, gleichlautende Meldung brächte nichts.
+///
+/// Bricht die Kette **später** ab, kommt zurück, was bis dahin entpackt war:
+/// `[/ASCIIHexDecode /FlateDecode /DCTDecode]` mit Klartext im Flate-Teil
+/// wird so wieder gefunden. Bis Commit `f982c12` konnte das Orakel das (ein
+/// eigener Dekoder, der abbrach und behielt), danach nicht mehr — siehe
+/// [`filters::decoded_prefix_within`].
 fn decode_stream(
     doc: &Document,
     stream: &Stream,
     room: usize,
-) -> Result<Option<(String, Vec<u8>)>, Oversize> {
+) -> Result<Option<Decoded>, Oversize> {
     let names = filters::filter_names(doc, &stream.dict).unwrap_or_default();
     if names.is_empty() {
         return Ok(None);
     }
-    let label = format!(
-        "dekodiert: {}",
+    let (data, applied) = filters::decoded_prefix_within(doc, stream, room)?;
+    if applied == 0 {
+        return Ok(None);
+    }
+    let chain = |names: &[Vec<u8>]| {
         names
             .iter()
             .map(|f| String::from_utf8_lossy(f))
             .collect::<Vec<_>>()
             .join("+")
-    );
-    Ok(filters::decoded_content_within(doc, stream, room)?.map(|data| (label, data)))
+    };
+    let total = names.len();
+    let (label, unknown_rest) = if applied == total {
+        (format!("dekodiert: {}", chain(&names)), None)
+    } else {
+        let rest = String::from_utf8_lossy(&names[applied]).into_owned();
+        (
+            format!(
+                "dekodiert: {} — bis Filter {applied} von {total}, danach /{rest} unbekannt",
+                chain(&names[..applied])
+            ),
+            (!filters::is_image_filter(&names[applied])).then_some(rest),
+        )
+    };
+    Ok(Some(Decoded {
+        label,
+        data,
+        applied,
+        total,
+        unknown_rest,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1347,6 +1534,41 @@ mod tests {
         );
     }
 
+    /// `LeakCheck::literal` trennt den wörtlichen Fund vom Fund, den nur die
+    /// Fassung ohne Leerraum gebracht hat.
+    ///
+    /// Die Oberfläche entscheidet daran, ob ein Rest ein Leck ist oder eine
+    /// bewusst stehen gelassene Schreibweise derselben Normalform (Vertrag V1
+    /// aus Fix-Runde 5): „DE89 3704“ und „DE893704“ sind ein Text, aber nur
+    /// einer von beiden steht wörtlich in der Datei.
+    #[test]
+    fn literal_says_whether_the_needle_matched_verbatim() {
+        // Wörtlich: die Ziffern stehen mit Leerzeichen im Strom.
+        let woertlich = b"%PDF-1.5\n1 0 obj\n<< >>\nstream\n(DE89 3704 0044) Tj\nendstream\n";
+        // Nur zerlegt: erst die Verkettung ohne Leerraum trifft.
+        let zerlegt = b"%PDF-1.5\n1 0 obj\n<< >>\nstream\n[(DE89)-2(3704)-2(0044)] TJ\nendstream\n";
+        let needles = ["DE89 3704 0044", "kommtnichtvor", ""];
+
+        let a = leaks_many_within(woertlich, &needles, u64::MAX);
+        assert!(!a.findings[0].is_empty());
+        assert_eq!(a.literal, vec![true, false, false], "{:?}", a.findings[0]);
+
+        let b = leaks_many_within(zerlegt, &needles, u64::MAX);
+        assert!(
+            !b.findings[0].is_empty(),
+            "die gequetschte Fassung muss treffen: {:?}",
+            b.findings[0]
+        );
+        assert_eq!(
+            b.literal,
+            vec![false, false, false],
+            "wörtlich steht der Text dort nicht: {:?}",
+            b.findings[0]
+        );
+        // Und die Marke sagt dasselbe wie der Meldungstext.
+        assert!(b.findings[0].iter().all(|h| h.contains("ohne Leerraum")));
+    }
+
     /// Der Durchgang darf die Begriffe nicht vermischen: jeder Bericht gehört
     /// zu genau seinem Begriff, auch wenn ein leerer dazwischensteht.
     #[test]
@@ -1413,7 +1635,7 @@ mod tests {
         // wie in `leaks_many`.
         let doc = Document::load_mem(&pdf).expect("Vorlage parsebar");
         scan_object_graph(&doc, &mut probe, &mut Budget::new(u64::MAX));
-        let hits = probe.into_hits();
+        let (hits, _) = probe.into_hits();
         assert_eq!(hits.len(), NEEDLES.len());
         assert!(
             hits.iter().any(|h| !h.is_empty()),

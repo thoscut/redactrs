@@ -29,6 +29,18 @@
 //! [`decoded_content`] ist dieselbe Kette ohne Grenze — der Schwärzer
 //! bekommt seine Datei bereits durch [`crate::document::prescan`] gedeckelt.
 //!
+//! # Zwei Leser, zwei Ansprüche
+//!
+//! [`decoded_content_within`] ist **streng**: bleibt ein Glied der Kette
+//! unbekannt, gibt es die ganze Kette auf (`Ok(None)`). Das ist die Sicht des
+//! Interpreters — ein halb dekodierter Strom ist keine PDF-Syntax, und eine
+//! Seite daraus wäre erfunden.
+//!
+//! [`decoded_prefix_within`] ist **nachsichtig**: es dekodiert so weit, wie es
+//! kommt, und sagt, wo es stehen blieb. Das ist die Sicht des Orakels — es
+//! will sehen, was sichtbar ist. Ein Klartext im Flate-Teil von
+//! `[/ASCIIHexDecode /FlateDecode /DCTDecode]` ist genau so zu finden.
+//!
 //! # Was hier bewusst nicht steht
 //!
 //! * **Der LZW-Dekoder** selbst ist `weezl`, dieselbe Bibliothek mit
@@ -82,21 +94,82 @@ pub fn decoded_content_within(
     stream: &Stream,
     limit: usize,
 ) -> Result<Option<Vec<u8>>, Oversize> {
+    let (data, applied, total) = decode_chain(doc, stream, limit)?;
+    Ok((applied == total).then_some(data))
+}
+
+/// Der **Orakelweg**: dekodiert die Filterkette so weit, wie sie sich
+/// dekodieren lässt, und sagt, wo sie stehen blieb.
+///
+/// Rückgabe: die Bytes nach dem letzten angewandten Filter und die **Anzahl
+/// angewandter Filter**. Ist sie so groß wie die Kette, lief sie ganz durch;
+/// ist sie kleiner, war das nächste Glied unbekannt (`names[applied]` nennt
+/// es). `0` heißt „gar nichts entpackt“ — die Bytes sind dann die Rohbytes
+/// des Stroms.
+///
+/// # Warum nicht über [`decoded_content_within`]
+///
+/// Die beiden Leser haben verschiedene Ansprüche. Der **Interpreter**
+/// ([`crate::content`], [`crate::redact`]) darf einen halb dekodierten Strom
+/// nicht als Seiteninhalt lesen: was hinter dem unbekannten Glied steht, ist
+/// keine PDF-Syntax, und eine Seite, die daraus gelesen würde, wäre erfunden.
+/// Dort ist „unbekannter Filter“ zu Recht ein Abbruch mit Warnung, und
+/// [`decoded_content_within`] bleibt streng.
+///
+/// Das **Orakel** ([`crate::audit_bytes`]) will dagegen sehen, was sichtbar
+/// ist. Bis Commit `f982c12` hatte es einen eigenen Dekoder, der am
+/// unbekannten Filter abbrach und das bis dahin Entpackte **behielt**; der
+/// Umbau auf dieses Modul warf es weg, und ein Klartext im Flate-Teil von
+/// `[/ASCIIHexDecode /FlateDecode /DCTDecode]` war nicht mehr zu finden.
+/// Diese Funktion stellt genau das wieder her — ohne die Strenge des
+/// Interpreters anzurühren.
+pub fn decoded_prefix_within(
+    doc: &Document,
+    stream: &Stream,
+    limit: usize,
+) -> Result<(Vec<u8>, usize), Oversize> {
+    let (data, applied, _) = decode_chain(doc, stream, limit)?;
+    Ok((data, applied))
+}
+
+/// Die Filterkette, so weit sie läuft: (Bytes, angewandte Filter, Kettenlänge).
+fn decode_chain(
+    doc: &Document,
+    stream: &Stream,
+    limit: usize,
+) -> Result<(Vec<u8>, usize, usize), Oversize> {
     // Ohne `/Filter` oder mit einem unbrauchbaren Wert liest `lopdf` den
     // Strom als „nicht gefiltert“, und die Rohbytes sind dann das Einzige,
     // was es zu lesen gibt.
     let Some(filters) = filter_names(doc, &stream.dict) else {
-        return Ok(Some(stream.content.clone()));
+        return Ok((stream.content.clone(), 0, 0));
     };
+    let total = filters.len();
     let mut data = stream.content.clone();
     for (index, filter) in filters.iter().enumerate() {
         let parms = decode_parms(doc, &stream.dict, index);
         let Some(next) = decode_one(filter, &data, parms.as_ref(), limit)? else {
-            return Ok(None);
+            return Ok((data, index, total));
         };
         data = next;
     }
-    Ok(Some(data))
+    Ok((data, total, total))
+}
+
+/// Ein Filter, den dieses Modul **bewusst** nicht dekodiert: Bilddaten.
+///
+/// Text in einem Rasterbild ist ein im Modulkopf von [`crate::audit_bytes`]
+/// benannter blinder Fleck — er ist es bei `/DCTDecode` allein genauso wie am
+/// Ende einer Kette. Das Orakel meldet ihn deshalb **nicht** als „nicht
+/// geprüft“: `[/ASCII85Decode /DCTDecode]` ist die gewöhnliche Ausgabe eines
+/// Distillers, und eine Antwort, die daran „unvollständig“ sagt, säße an
+/// jeder zweiten Datei mit einem Foto. Ein Filtername, den niemand kennt, ist
+/// etwas anderes: dahinter kann alles stehen.
+pub(crate) fn is_image_filter(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"DCTDecode" | b"DCT" | b"JPXDecode" | b"CCITTFaxDecode" | b"CCF" | b"JBIG2Decode"
+    )
 }
 
 /// Die Filterkette aus `/Filter` — aufgelöst, in Dekodierreihenfolge.
@@ -355,10 +428,11 @@ fn ascii85_decode_within(data: &[u8], limit: usize) -> Result<Vec<u8>, Oversize>
         if b == b'~' {
             break;
         }
-        if out.len() + 4 > limit {
-            return Err(Oversize);
-        }
         if b == b'z' && count == 0 {
+            // Gebucht wird, was diese Gruppe wirklich liefert — vier Byte.
+            if out.len() + 4 > limit {
+                return Err(Oversize);
+            }
             out.extend_from_slice(&[0, 0, 0, 0]);
             continue;
         }
@@ -368,18 +442,22 @@ fn ascii85_decode_within(data: &[u8], limit: usize) -> Result<Vec<u8>, Oversize>
         group[count] = b - b'!';
         count += 1;
         if count == 5 {
+            if out.len() + 4 > limit {
+                return Err(Oversize);
+            }
             out.extend_from_slice(&ascii85_group(&group));
             count = 0;
         }
     }
     if count > 1 {
+        // Die angebrochene Schlussgruppe liefert `count - 1` Byte, nicht vier.
+        if out.len() + count - 1 > limit {
+            return Err(Oversize);
+        }
         for slot in group.iter_mut().skip(count) {
             *slot = 84;
         }
         out.extend_from_slice(&ascii85_group(&group)[..count - 1]);
-    }
-    if out.len() > limit {
-        return Err(Oversize);
     }
     Ok(out)
 }
@@ -822,5 +900,188 @@ mod tests {
         let lzw = [0x80, 0x10, 0x60, 0x20];
         assert_eq!(lzw_within(&lzw, None, 0), Err(Oversize));
         assert_eq!(lzw_within(&lzw, None, 1).as_deref(), Ok(&b"A"[..]));
+    }
+
+    // -----------------------------------------------------------------
+    // Fix-Runde 5
+    // -----------------------------------------------------------------
+
+    /// Kodiert `plain` mit dem jeweiligen Filter — nur für die Tests.
+    fn encode(filter: &str, plain: &[u8]) -> Vec<u8> {
+        match filter {
+            "FlateDecode" => {
+                use std::io::Write;
+                let mut e =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                e.write_all(plain).expect("deflate");
+                e.finish().expect("deflate")
+            }
+            "LZWDecode" => weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+                .encode(plain)
+                .expect("LZW"),
+            "ASCIIHexDecode" => {
+                let mut out = hex_ascii_upper(plain);
+                out.push(b'>');
+                out
+            }
+            "ASCII85Decode" => ascii85(plain),
+            "RunLengthDecode" => {
+                // Wörtliche Läufe zu höchstens 128 Byte, dann das Endebyte.
+                let mut out = Vec::new();
+                for chunk in plain.chunks(128) {
+                    out.push(chunk.len() as u8 - 1);
+                    out.extend_from_slice(chunk);
+                }
+                out.push(128);
+                out
+            }
+            other => panic!("unbekannter Filter {other}"),
+        }
+    }
+
+    fn hex_ascii_upper(bytes: &[u8]) -> Vec<u8> {
+        bytes
+            .iter()
+            .flat_map(|b| {
+                let d = b"0123456789ABCDEF";
+                [d[(b >> 4) as usize], d[(b & 15) as usize]]
+            })
+            .collect()
+    }
+
+    fn ascii85(plain: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for chunk in plain.chunks(4) {
+            let mut group = [0u8; 4];
+            group[..chunk.len()].copy_from_slice(chunk);
+            let mut value = u32::from_be_bytes(group);
+            let mut digits = [0u8; 5];
+            for slot in digits.iter_mut().rev() {
+                *slot = b'!' + (value % 85) as u8;
+                value /= 85;
+            }
+            out.extend_from_slice(&digits[..chunk.len() + 1]);
+        }
+        out.extend_from_slice(b"~>");
+        out
+    }
+
+    /// **Jeder** Filter nimmt genau `limit` Byte an und lehnt bei `limit - 1`
+    /// ab — kein Filter darf gewöhnliches Material an seiner eigenen Größe
+    /// scheitern lassen (Befund P1-2).
+    ///
+    /// `ASCII85Decode` prüfte vor jeder Fünfergruppe `out.len() + 4 > limit`
+    /// und unterstellte damit, dass auch die letzte, angebrochene Gruppe vier
+    /// Byte liefert; sie liefert eins bis drei. Ein Strom, dessen entpackte
+    /// Länge exakt ins Restbudget passte, kam als [`Oversize`] zurück — an
+    /// der Kommandozeile Rückgabewert 3 an harmlosem Material.
+    ///
+    /// `ASCIIHexDecode` braucht in der Schleife keine Grenze: es **halbiert**
+    /// (zwei Ziffern je Byte), das Ergebnis passt also immer in die Hälfte
+    /// der ohnehin schon geladenen Rohbytes, und `decode_one` misst am
+    /// Ergebnis mit `>` — exakt an der Grenze. Flate (`read_within`, liest
+    /// `limit + 1` und misst) und LZW (`Bounded`, bucht vor dem Schreiben)
+    /// sind ebenso exakt.
+    #[test]
+    fn jeder_filter_nimmt_genau_seine_grenze_an() {
+        let doc = doc();
+        for filter in [
+            "FlateDecode",
+            "LZWDecode",
+            "ASCIIHexDecode",
+            "ASCII85Decode",
+            "RunLengthDecode",
+        ] {
+            // Auch Längen, die kein Vielfaches von vier sind — dort lag der Fehler.
+            for n in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 63, 64, 65] {
+                let plain: Vec<u8> = (0..n).map(|i| b'A' + (i % 26) as u8).collect();
+                let stream = with_filter(filter.into(), encode(filter, &plain));
+                assert_eq!(
+                    decoded_content_within(&doc, &stream, n),
+                    Ok(Some(plain.clone())),
+                    "{filter}: {n} Byte passen nicht in eine Grenze von {n} Byte"
+                );
+                if n > 0 {
+                    assert_eq!(
+                        decoded_content_within(&doc, &stream, n - 1),
+                        Err(Oversize),
+                        "{filter}: {n} Byte gehen in eine Grenze von {} Byte",
+                        n - 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// Der Orakelweg behält, was er entziffert hat; der Interpreterweg bleibt
+    /// streng (Befund P1-1).
+    #[test]
+    fn der_orakelweg_behaelt_den_entzifferten_anfang() {
+        let doc = doc();
+        let plain = b"BT (Konto DE89) Tj ET";
+        let content = encode("ASCIIHexDecode", &encode("FlateDecode", plain));
+        let stream = with_filter(
+            Object::Array(vec![
+                "ASCIIHexDecode".into(),
+                "FlateDecode".into(),
+                "DCTDecode".into(),
+            ]),
+            content,
+        );
+
+        // Streng: die Kette lief nicht durch, also gibt es keinen Inhalt.
+        assert_eq!(decoded_content_within(&doc, &stream, usize::MAX), Ok(None));
+
+        // Nachsichtig: zwei Filter liefen, und ihr Ergebnis ist der Klartext.
+        let (data, applied) =
+            decoded_prefix_within(&doc, &stream, usize::MAX).expect("kein Oversize");
+        assert_eq!(applied, 2);
+        assert_eq!(data, plain);
+    }
+
+    /// Schon das erste Glied unbekannt: nichts entpackt, die Rohbytes stehen.
+    #[test]
+    fn der_orakelweg_meldet_wenn_er_gar_nicht_erst_anfangen_konnte() {
+        let doc = doc();
+        let stream = with_filter("DCTDecode".into(), b"\xff\xd8roh".to_vec());
+        let (data, applied) =
+            decoded_prefix_within(&doc, &stream, usize::MAX).expect("kein Oversize");
+        assert_eq!(applied, 0);
+        assert_eq!(data, stream.content);
+    }
+
+    /// Ohne `/Filter` gibt es nichts zu entpacken — beide Wege liefern die
+    /// Rohbytes, und der Orakelweg zählt null angewandte Filter.
+    #[test]
+    fn ohne_filter_liefern_beide_wege_die_rohbytes() {
+        let doc = doc();
+        let stream = Stream::new(dictionary! {}, b"roh".to_vec()).with_compression(false);
+        assert_eq!(
+            decoded_content_within(&doc, &stream, usize::MAX),
+            Ok(Some(b"roh".to_vec()))
+        );
+        assert_eq!(
+            decoded_prefix_within(&doc, &stream, usize::MAX),
+            Ok((b"roh".to_vec(), 0))
+        );
+    }
+
+    /// Die Liste der bewusst nicht dekodierten Bildfilter — dahinter steht
+    /// Bildinhalt, kein ungelesener Text (siehe [`is_image_filter`]).
+    #[test]
+    fn bildfilter_sind_benannt_und_nichts_sonst() {
+        for name in [
+            &b"DCTDecode"[..],
+            b"DCT",
+            b"JPXDecode",
+            b"CCITTFaxDecode",
+            b"CCF",
+            b"JBIG2Decode",
+        ] {
+            assert!(is_image_filter(name), "{}", String::from_utf8_lossy(name));
+        }
+        for name in [&b"Crypt"[..], b"PrivatFilter", b"FlateDecode", b""] {
+            assert!(!is_image_filter(name), "{}", String::from_utf8_lossy(name));
+        }
     }
 }

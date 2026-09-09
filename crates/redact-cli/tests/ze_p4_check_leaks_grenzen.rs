@@ -16,10 +16,10 @@
 //!    oktal maskierter Text auf Ebene 33 wird von keiner Sicht gelesen und
 //!    trotzdem als „nicht gefunden“ mit Rückgabewert 0 gemeldet — die stille
 //!    Entwarnung, die diese Runde abstellen wollte. Der Nachweis steht in
-//!    [`tiefe_33_ist_eine_stille_entwarnung`] und ist **`#[ignore]`**: er
-//!    beschreibt einen Befund, nicht den Zustand des Baums, und darf das Gate
-//!    nicht rot machen. Lauf:
-//!    `cargo test -p redact-cli --test ze_p4_check_leaks_grenzen -- --ignored`
+//!    [`tiefe_33_ist_eine_stille_entwarnung`]. Seit der Fix-Runde 5 meldet die
+//!    Objektsicht ihren Abbruch (`NICHT GEPRÜFT: … Verschachtelungstiefe 32
+//!    erreicht`, Rückgabewert 3); der Test ist deshalb **scharf** und läuft im
+//!    Gate mit: `cargo test -p redact-cli --test ze_p4_check_leaks_grenzen`
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -244,19 +244,27 @@ fn pdf_mit_tiefem_text(depth: usize, geheim: &str) -> Vec<u8> {
     ])
 }
 
-/// **Befund P4-2 (`#[ignore]`, dieser Test ist heute rot).**
+/// **Befund P4-2 — geschlossen in der Fix-Runde 5, dieser Test ist scharf.**
 ///
-/// Auf Ebene 32 findet die Nachprüfung den Text (Rückgabewert 3), auf Ebene
-/// 33 meldet sie „nicht gefunden“ mit Rückgabewert **0** und ohne eine
-/// einzige `NICHT GEPRÜFT`-Zeile — obwohl der Text in der Datei steht und
-/// keine Sicht ihn gelesen hat. Die Vorprüfung des Laders lässt 100 Ebenen zu
+/// Der Befund: auf Ebene 32 fand die Nachprüfung den Text (Rückgabewert 3),
+/// auf Ebene 33 meldete sie „nicht gefunden“ mit Rückgabewert **0** und ohne
+/// eine einzige `NICHT GEPRÜFT`-Zeile — obwohl der Text in der Datei steht und
+/// keine Sicht ihn gelesen hatte. Die Vorprüfung des Laders lässt 100 Ebenen zu
 /// (`Limits::max_nesting_depth`), die Objektsicht des Orakels bricht bei 32 ab
-/// (`audit_bytes::MAX_DEPTH`) — und meldet das Abbrechen nicht.
+/// (`audit_bytes::MAX_DEPTH`) — und meldete das Abbrechen nicht.
 ///
-/// Erwartet wird hier, was die Runde 4 zugesagt hat: entweder finden oder
-/// benennen, aber nie stillschweigend 0.
+/// Verlangt wird, was die Runde 4 zugesagt hat: entweder finden oder benennen,
+/// aber nie stillschweigend 0. Der Lauf sagt jetzt beides:
+///
+/// ```text
+/// Tiefe 32:  GEFUNDEN (2 Fundstelle(n)): DE89 3704 0044 0532 0130 00
+///            Objekt 5 0[0]…[0] [Zeichenkette, literal]: …      → 3
+/// Tiefe 33:  nicht gefunden: DE89 3704 0044 0532 0130 00
+///            NICHT GEPRÜFT: Objekt 5 0[0]…[0]: nicht durchsucht —
+///            Verschachtelungstiefe 32 erreicht; was tiefer liegt, hat
+///            keine Sicht gelesen                                 → 3
+/// ```
 #[test]
-#[ignore = "Befund P4-2: die Tiefengrenze der Objektsicht meldet sich nicht"]
 fn tiefe_33_ist_eine_stille_entwarnung() {
     let dir = workdir("tiefe");
     let geheim = "DE89 3704 0044 0532 0130 00";
@@ -271,12 +279,36 @@ fn tiefe_33_ist_eine_stille_entwarnung() {
             gefunden,
             "Tiefe {tiefe}: {text}"
         );
-        assert_ne!(
+        assert_eq!(
             out.status.code(),
-            Some(0),
+            Some(3),
             "Tiefe {tiefe}: stille Entwarnung — der Text steht in der Datei, \
              keine Sicht hat ihn gelesen, und der Lauf sagt es nicht:\n{text}"
         );
+        // Ebene 33 wird nicht gefunden — dann muss sie benannt sein, mit
+        // Grund. „nicht gefunden“ allein wäre genau die Entwarnung, die
+        // dieser Test verhindert.
+        if !gefunden {
+            assert!(
+                text.contains("  NICHT GEPRÜFT: "),
+                "Tiefe {tiefe}: kein Fund und keine benannte Stelle:\n{text}"
+            );
+            assert!(
+                text.contains("Verschachtelungstiefe 32 erreicht"),
+                "Tiefe {tiefe}: die Stelle nennt ihren Grund nicht:\n{text}"
+            );
+            assert!(
+                text.contains("nicht geprüft — die Antwort ist unvollständig"),
+                "Tiefe {tiefe}: das Ergebnis liest sich wie eine Entwarnung:\n{text}"
+            );
+            // Und der Rat am Ende schickt niemanden an den falschen Schalter:
+            // ein höheres Entpackbudget hilft gegen die Tiefengrenze nicht.
+            assert!(
+                text.contains("was an der Verschachtelungstiefe hängt, nicht"),
+                "Tiefe {tiefe}: der Satz verspricht --max-decompressed-mb als \
+                 Heilmittel für jede Ursache:\n{text}"
+            );
+        }
     }
 
     std::fs::remove_dir_all(&dir).ok();

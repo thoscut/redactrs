@@ -6,7 +6,10 @@
 //! gefunden“ darf nie stillschweigend „nicht gesucht“ heißen.
 //!
 //! Die Speichermessung (`VmHWM`) läuft im Kindprozess, weil der Spitzenwert
-//! am Prozess hängt und die anderen Tests dieser Datei ihn sonst prägen.
+//! am Prozess hängt und die anderen Tests dieser Datei ihn sonst prägen. Sie
+//! ist der einzige linuxspezifische Teil: `/proc/self/status` gibt es unter
+//! Windows nicht. Dort prüft derselbe Test Frist, Fund und `unchecked` —
+//! siehe [`peak_rss_bytes`].
 
 mod common;
 
@@ -327,15 +330,44 @@ fn gewoehnliche_stroeme_werden_bei_passendem_budget_nicht_abgelehnt() {
 
 const CHILD: &str = "ZE_P1_BOMBE_KIND";
 
-fn peak_rss_bytes() -> u64 {
+/// Der Spitzenwert des Prozesses in Byte — `VmHWM` aus `/proc/self/status`.
+///
+/// `None` auf Zielen ohne `/proc` (Windows, macOS). Die Zusicherung „die
+/// Bombe wurde nicht entpackt“ steht dort auf den Beinen, die überall
+/// tragen: der Lauf bleibt in seiner Frist, findet nichts, und der Strom
+/// steht mit seiner Objekt-Id in `unchecked`. Wer 512 MiB wirklich
+/// auspackt, reißt die Frist auch ohne Speichermesser.
+///
+/// Unter Linux bleibt die Messung **scharf** — dort gibt es `/proc` immer.
+/// Vorher las diese Funktion auf jedem Ziel `/proc` und brach mit `expect`
+/// ab; der Windows-Job der CI war seit `f982c12` rot, obwohl der geprüfte
+/// Code dort in Ordnung war.
+#[cfg(target_os = "linux")]
+fn peak_rss_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
-    status
-        .lines()
-        .find_map(|l| l.strip_prefix("VmHWM:"))
-        .and_then(|v| v.trim().strip_suffix("kB"))
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(|kb| kb * 1024)
-        .expect("VmHWM")
+    Some(
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmHWM:"))
+            .and_then(|v| v.trim().strip_suffix("kB"))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+            .expect("VmHWM"),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
+/// Was der Kindprozess über seine Speichermessung sagt — der Elternprozess
+/// liest daran ab, dass wirklich gemessen wurde.
+fn peak_note(peak: Option<u64>) -> String {
+    match peak {
+        Some(bytes) => format!("VmHWM {} MB", bytes / 1_000_000),
+        None => "ohne Speichermessung (kein /proc auf diesem Ziel)".to_string(),
+    }
 }
 
 /// LZW-, ASCII85-, RunLength- und Kettenbombe: jede bleibt im Budget, in
@@ -364,7 +396,15 @@ fn die_neuen_filter_als_bombe_bleiben_im_budget() {
         output.status,
         String::from_utf8_lossy(&output.stdout)
     );
-    assert!(stderr.contains("VmHWM"), "nicht gemessen: {stderr}");
+    let marke = if cfg!(target_os = "linux") {
+        "VmHWM"
+    } else {
+        "ohne Speichermessung"
+    };
+    assert!(
+        stderr.contains(marke),
+        "der Kindprozess hat nicht gemessen (erwartet „{marke}“): {stderr}"
+    );
 }
 
 fn bomben_im_kindprozess() {
@@ -438,11 +478,11 @@ fn bomben_im_kindprozess() {
         let peak = peak_rss_bytes();
         eprintln!(
             "Bombe {name}: bis {} MiB entpackt, {packed} Byte gepackt, Budget {} MiB: \
-             {elapsed:?}, VmHWM {} MB (vorher {} MB)",
+             {elapsed:?}, {} (vorher {})",
             out_bytes / MIB,
             budget / MIB as u64,
-            peak / 1_000_000,
-            before / 1_000_000
+            peak_note(peak),
+            peak_note(before)
         );
         assert!(
             elapsed < deadline,
@@ -467,10 +507,222 @@ fn bomben_im_kindprozess() {
             result.unchecked
         );
     }
-    let peak = peak_rss_bytes();
+    // Die Speicherschranke gilt, wo sie messbar ist; die Prüfungen in der
+    // Schleife oben (Frist, kein Fund, `unchecked` nennt den Strom) tragen
+    // auf jedem Ziel.
+    if let Some(peak) = peak_rss_bytes() {
+        assert!(
+            peak < 400_000_000,
+            "VmHWM {} MB — eine der Bomben wurde entpackt",
+            peak / 1_000_000
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Messung: was eine zusätzliche Kodierung je Begriff kostet
+// ---------------------------------------------------------------------------
+
+/// Wie teuer ist eine weitere Bytevariante in `Needle::new`?
+///
+/// Der Automat läuft **einmal** je Datenblock, gleich wie viele Muster er
+/// kennt; teurer wird nur sein Bau. Gemessen wird beides zusammen: ein Lauf
+/// über eine 8-MiB-Datei mit 1 und mit 200 Begriffen. Bleibt `#[ignore]` —
+/// eine Zeitmessung auf einer geteilten Maschine gehört nicht ins Tor. Lauf:
+/// `cargo test --release -p redact-pdf --test ze_p1_budget_und_filter -- --ignored --nocapture`
+#[test]
+#[ignore = "Messung"]
+fn ze_p1_mess_kosten_je_kodierung() {
+    let gross = fuellung(8 * MIB);
+    let (pdf, _) = pdf_with_streams(vec![stream_with("FlateDecode".into(), deflate(&gross))]);
+    eprintln!("Datei {} Byte", pdf.len());
+    let viele: Vec<String> = (0..200)
+        .map(|i| format!("Suchbegriff Nummer {i}"))
+        .collect();
+    let viele: Vec<&str> = viele.iter().map(String::as_str).collect();
+    for (name, needles) in [("1 Begriff", &[SECRET][..]), ("200 Begriffe", &viele)] {
+        let mut best = Duration::from_secs(999);
+        for _ in 0..5 {
+            let started = Instant::now();
+            let r = leaks_many_within(&pdf, needles, u64::MAX);
+            assert!(r.unchecked.is_empty());
+            best = best.min(started.elapsed());
+        }
+        eprintln!("  {name}: {best:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fix-Runde 5: unbekanntes Kettenglied und Tiefengrenze
+// ---------------------------------------------------------------------------
+
+/// Bricht eine Filterkette an einem unbekannten Glied ab, bleibt **das
+/// Entzifferte** durchsucht — und der Abbruch wird gesagt, wenn der Filter
+/// wirklich unbekannt ist.
+///
+/// Bis Fix-Runde 4 warf `filters::decoded_content_within` die ganze Kette weg
+/// (`Ok(None)`), und das Orakel bekam gar keine dekodierte Sicht; der
+/// Klartext im Flate-Teil war weg (Befund P1-1).
+///
+/// Die Gegenrichtung steht daneben: `[/ASCII85Decode /DCTDecode]` ist die
+/// gewöhnliche Ausgabe eines Distillers. Text in einem Rasterbild ist ein
+/// benannter blinder Fleck — bei `/DCTDecode` allein genauso wie am Ende
+/// einer Kette. Eine Datei mit einem Foto darf deshalb **nicht** als
+/// „unvollständig geprüft“ zurückkommen.
+#[test]
+fn ein_unbekanntes_kettenglied_verliert_den_entzifferten_anfang_nicht() {
+    let mut plain = text_ops(&[SECRET]);
+    plain.extend_from_slice(&fuellung(4096));
+    let content = common::ascii_hex_encode(&deflate(&plain));
+
+    for (rest, gemeldet) in [("DCTDecode", false), ("PrivatFilter", true)] {
+        let (pdf, ids) = pdf_with_streams(vec![stream_with(
+            Object::Array(vec![
+                "ASCIIHexDecode".into(),
+                "FlateDecode".into(),
+                rest.into(),
+            ]),
+            content.clone(),
+        )]);
+        let named = object(ids[0]);
+        let result = leaks_many_within(&pdf, &[SECRET], u64::MAX);
+        assert!(
+            result.findings[0]
+                .iter()
+                .any(|h| h.contains(&named) && h.contains("danach /")),
+            "{rest}: der entzifferte Anfang wurde nicht durchsucht: {:?}",
+            result.findings[0]
+        );
+        let genannt = result
+            .unchecked
+            .iter()
+            .any(|u| u.contains(&named) && u.contains(rest));
+        assert_eq!(
+            genannt, gemeldet,
+            "{rest}: unchecked = {:?}",
+            result.unchecked
+        );
+    }
+}
+
+/// Ein Strom, dessen **erstes** Glied schon unbekannt ist, bekommt keine
+/// zweite, gleichlautende Meldung: die Rohbytes sind die Rohbytes, und die
+/// Rohsicht hat sie schon durchsucht.
+#[test]
+fn ein_reines_bild_erzeugt_keine_doppelte_sicht() {
+    let (pdf, ids) = pdf_with_streams(vec![stream_with("DCTDecode".into(), text_ops(&[SECRET]))]);
+    let named = object(ids[0]);
+    let result = leaks_many_within(&pdf, &[SECRET], u64::MAX);
+    assert!(result.unchecked.is_empty(), "{:?}", result.unchecked);
     assert!(
-        peak < 400_000_000,
-        "VmHWM {} MB — eine der Bomben wurde entpackt",
-        peak / 1_000_000
+        !result.findings[0].iter().any(|h| h.contains("dekodiert")),
+        "ein nicht dekodierter Strom bekommt eine „dekodiert“-Sicht: {:?}",
+        result.findings[0]
     );
+    assert!(
+        result.findings[0]
+            .iter()
+            .any(|h| h.contains(&named) && h.contains("Stream, roh")),
+        "die Rohsicht fehlt: {:?}",
+        result.findings[0]
+    );
+}
+
+/// Ein Objekt tiefer als `audit_bytes::MAX_DEPTH` (32): die Objektsicht
+/// bricht ab — und **sagt** es. Bis Fix-Runde 4 tat sie es stillschweigend,
+/// und `--check-leaks` antwortete mit Rückgabewert 0 auf einen Text, den
+/// keine Sicht gelesen hatte (Befund P4-2/B1).
+///
+/// Gemessen wird an der **Objektsicht**: nur ihre Fundstellen tragen den
+/// Objektpfad. Dass die Rohsicht denselben Text findet, ändert nichts daran,
+/// dass die Objektsicht abbricht — und genau dieser Abbruch muss in
+/// `unchecked` stehen. (An der Kommandozeile ist der Fall schärfer: dort
+/// steht der Text oktal maskiert in der Datei und keine Bytesuche sieht ihn,
+/// `redact-cli/tests/ze_p4_check_leaks_grenzen.rs`.)
+#[test]
+fn die_tiefengrenze_der_objektsicht_meldet_sich() {
+    for (tiefe, gefunden) in [(32usize, true), (33, false)] {
+        let mut d = page(&[]);
+        // Verschachtelt ist das **Objekt**, nicht ein Strominhalt: nur die
+        // Objektsicht läuft hier in die Tiefe.
+        let mut objekt = Object::String(SECRET.as_bytes().to_vec(), lopdf::StringFormat::Literal);
+        for _ in 0..tiefe {
+            objekt = Object::Array(vec![objekt]);
+        }
+        let tief_id = d.add(objekt);
+        d.catalog_set("Tief", Object::Reference(tief_id));
+        let pdf = d.finish();
+
+        let result = leaks_many_within(&pdf, &[SECRET], u64::MAX);
+        let objektsicht = result.findings[0]
+            .iter()
+            .any(|h| h.starts_with(&object(tief_id)));
+        assert_eq!(
+            objektsicht, gefunden,
+            "Tiefe {tiefe}: {:?}",
+            result.findings[0]
+        );
+        let gesagt = result
+            .unchecked
+            .iter()
+            .any(|u| u.contains("Verschachtelungstiefe"));
+        assert_eq!(
+            gesagt, !gefunden,
+            "Tiefe {tiefe}: unchecked = {:?}",
+            result.unchecked
+        );
+    }
+}
+
+/// Was kostet die Tiefengrenze der Objektsicht?
+///
+/// Der Lader lässt 100 Ebenen zu, die Objektsicht läuft 32. Bevor man die
+/// eine Zahl an die andere angleicht, muss man wissen, was tiefer Laufen
+/// kostet: die Sicht baut je Knoten einen Pfad (`{path}[{i}]`), und der
+/// wächst mit der Tiefe — die Arbeit ist Knoten × Tiefe, nicht Knoten.
+///
+/// Gemessen wird an einem bösartigen Objekt: `breite` Blätter auf **jeder**
+/// Ebene bis `tiefe`. Bleibt `#[ignore]` (Zeitmessung). Lauf:
+/// `cargo test --release -p redact-pdf --test ze_p1_budget_und_filter -- --ignored --nocapture mess_tiefe`
+#[test]
+#[ignore = "Messung"]
+fn ze_p1_mess_tiefe_kostet() {
+    // Höchstens 99 Wrapper: `lopdf` parst bis Tiefe 100 und lässt ein
+    // tieferes Objekt ganz fallen — dann liefe die Sicht gar nicht.
+    for (tiefe, breite) in [(31usize, 200usize), (99, 200), (99, 1000)] {
+        let mut d = page(&[]);
+        let blatt = || {
+            Object::String(
+                b"harmloser Text ohne Geheimnis".to_vec(),
+                lopdf::StringFormat::Literal,
+            )
+        };
+        let mut objekt = Object::Array((0..breite).map(|_| blatt()).collect());
+        for _ in 0..tiefe {
+            let mut ebene: Vec<Object> = (0..breite).map(|_| blatt()).collect();
+            ebene.push(objekt);
+            objekt = Object::Array(ebene);
+        }
+        let id = d.add(objekt);
+        d.catalog_set("Tief", Object::Reference(id));
+        let pdf = d.finish();
+        // Gegenprobe: das Objekt hat den Lader überlebt.
+        let doc = redact_pdf::load_from_bytes(&pdf).expect("ladbar");
+        assert!(
+            matches!(doc.get_object(id), Ok(Object::Array(_))),
+            "Tiefe {tiefe}: `lopdf` hat das Objekt fallen lassen — die Messung misst nichts"
+        );
+
+        let mut best = Duration::from_secs(999);
+        for _ in 0..3 {
+            let started = Instant::now();
+            let r = leaks_many_within(&pdf, &["kommtnichtvor"], u64::MAX);
+            assert!(r.findings[0].is_empty());
+            best = best.min(started.elapsed());
+        }
+        eprintln!(
+            "Tiefe {tiefe}, Breite {breite}: Datei {} kB, {best:?}",
+            pdf.len() / 1024
+        );
+    }
 }

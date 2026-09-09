@@ -11,7 +11,7 @@ use redact_core::{Rect, Region, Source};
 use redact_pdf::testing::{build_pdf, TextItem};
 use redact_pipeline::Config;
 
-use crate::state::{AnnotatedRegion, HitOutcome};
+use crate::state::{AnnotatedRegion, ExportCheckPlan, HitOutcome};
 use crate::RedactApp;
 
 // --------------------------------------------------------------- Hilfsmittel
@@ -75,16 +75,18 @@ fn over_spaced() -> Rect {
 // 1 — Die Normalform: `squeeze` deckt mehr ab, als die Suche einlöst
 // ===========================================================================
 
-/// **Befund P5-1.** Zwei geschwärzte Zeilen, deren Texte sich nur im
-/// Leerraum unterscheiden, sind seit Fix-Runde 4 **ein** Text; gesucht wird
-/// der Originaltext der **ersten** Zeile. Steht dort die Schreibweise
-/// **ohne** Leerraum, sucht `leaks_many` nur diese wörtlich —
+/// **Befund P5-1, behoben.** Zwei geschwärzte Zeilen, deren Texte sich nur
+/// im Leerraum unterscheiden, waren seit Fix-Runde 4 **ein** Begriff;
+/// gesucht wurde der Originaltext der **ersten** Zeile. Stand dort die
+/// Schreibweise **ohne** Leerraum, suchte `leaks_many` nur diese wörtlich —
 /// `Needle::squeezed` ist `None`, wenn der Begriff selbst keinen Leerraum
-/// enthält. Die zweite Schreibweise bleibt in der Ausgabe stehen (das
-/// Rechteck trifft sie nicht) und wird nicht mehr gemeldet: vor Runde 4
-/// waren es zwei Begriffe, und der zweite hätte angeschlagen.
+/// enthält —, und die zweite Schreibweise blieb ungesucht in der Ausgabe
+/// stehen (das Rechteck trifft sie nicht): sieben Fundstellen, gemeldet
+/// wurde „1 gesuchte(r) Text steht nicht mehr in der Ausgabe“.
+/// Jetzt steht **jede** Schreibweise in `needles`.
+/// Mutation (`seen` auf `squeeze(&text)` statt auf `text`): rot.
 #[test]
-fn ze_p5_1_die_normalform_verliert_die_zweite_schreibweise() {
+fn ze_p5_1_jede_schreibweise_wird_gesucht() {
     let out = tmp("1-normalform").join("out.pdf");
     let mut app = RedactApp::new(no_patterns());
     app.open_bytes_and_analyze(&two_spellings(), "zwei.pdf");
@@ -110,22 +112,24 @@ fn ze_p5_1_die_normalform_verliert_die_zweite_schreibweise() {
 
     let plan = app.state.plan_export_check(&summary);
     println!("needles: {:?}", plan.needles);
-    // Ein Begriff — und zwar der ohne Leerraum.
-    assert_eq!(plan.needles, vec![PLAIN.to_string()], "{plan:?}");
+    // Beide Schreibweisen — die Decke zählt Schreibweisen, nicht Normalformen.
+    assert_eq!(
+        plan.needles,
+        vec![PLAIN.to_string(), SPACED.to_string()],
+        "{plan:?}"
+    );
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
 
-    // Der Befund: die Oberfläche schweigt über ein echtes Leck.
-    assert!(
-        !check.found_leak(),
-        "hier wäre der Befund behoben: {}",
-        check.sentence()
-    );
-    assert!(check.warning().is_none(), "{:?}", check.warning());
+    // Und das echte Leck wird gemeldet — mit der Schreibweise, die leckt.
+    assert!(check.found_leak(), "{}", check.sentence());
+    assert_eq!(check.leaking, vec![SPACED.to_string()]);
+    assert_eq!(check.checked, 2);
+    assert!(check.warning().is_some(), "{:?}", check.warning());
     assert!(
         check
             .sentence()
-            .contains("stehen nicht mehr in der Ausgabe"),
+            .contains("1 von 2 gesuchten Text(en) steht NOCH in der Ausgabe"),
         "{}",
         check.sentence()
     );
@@ -133,7 +137,6 @@ fn ze_p5_1_die_normalform_verliert_die_zweite_schreibweise() {
 
 /// Dieselbe Vorlage, richtige Erwartung: ein Leck muss gemeldet werden.
 #[test]
-#[ignore = "Befund P5-1: die zweite Schreibweise wird nicht gesucht"]
 fn ze_p5_1_die_zweite_schreibweise_muesste_ein_leck_sein() {
     let out = tmp("1-soll").join("out.pdf");
     let mut app = RedactApp::new(no_patterns());
@@ -148,10 +151,10 @@ fn ze_p5_1_die_zweite_schreibweise_muesste_ein_leck_sein() {
     assert!(check.found_leak(), "{}", check.sentence());
 }
 
-/// Die Gegenprobe zur Reihenfolge: steht die Schreibweise **mit** Leerraum
-/// vorn, trägt der Begriff seine Fassung ohne Leerraum mit — dann findet
-/// dieselbe Suche dasselbe Leck. Der Befund hängt allein an der
-/// Listenreihenfolge, und die ist die des Dokuments.
+/// Die Gegenprobe zur Reihenfolge: dieselbe Vorlage andersherum. Vorher
+/// hing das Urteil an der Listenreihenfolge (mit Leerraum vorn → gefunden,
+/// ohne Leerraum vorn → stilles Leck); jetzt stehen beide Schreibweisen in
+/// `needles`, und das Urteil ist in beiden Reihenfolgen dasselbe.
 #[test]
 fn ze_p5_1_umgekehrte_reihenfolge_findet_dasselbe_leck() {
     let out = tmp("1-umgekehrt").join("out.pdf");
@@ -168,27 +171,44 @@ fn ze_p5_1_umgekehrte_reihenfolge_findet_dasselbe_leck() {
     let summary = app.state.hit_summary();
     app.state.export(&out, None).expect("Export");
     let plan = app.state.plan_export_check(&summary);
-    assert_eq!(plan.needles, vec![SPACED.to_string()], "{plan:?}");
+    assert_eq!(
+        plan.needles,
+        vec![SPACED.to_string(), PLAIN.to_string()],
+        "{plan:?}"
+    );
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
     assert!(check.found_leak(), "{}", check.sentence());
+    // Ohne eine bewusst stehen gelassene Zeile deckt nichts irgendetwas ab:
+    // jeder Fund zählt, auch der, den nur die Fassung ohne Leerraum bringt.
+    // Mutation (`kept_forms` im Lauf nicht beachtet, jeder gequetschte Fund
+    // gilt als gedeckt): `kept` 1 statt 0, rot.
+    assert_eq!(check.kept, 0, "{check:?}");
+    assert_eq!(check.leaking.len(), 2, "{:?}", check.leaking);
 }
 
 // ===========================================================================
-// 2 — Die Entscheidung „kept“ deckt seit Runde 4 mehr ab als die Suche
+// 2 — „kept“ deckte seit Runde 4 mehr ab als die Suche
 // ===========================================================================
 
-/// **Befund P5-2.** Ein **abgewählter** Text deckt jetzt jede Schreibweise
-/// derselben Normalform. Eine geschwärzte Zeile, deren Rechteck danebengeht
-/// und deren Text sich vom abgewählten nur im Leerraum unterscheidet, wird
-/// deshalb gar nicht mehr gesucht — `kept` statt `needle`. Vor Runde 4 stand
-/// sie in `needles`, und die Suche fand sie. Der Fehlalarm, den Runde 4
-/// abstellen wollte (G5-B1), lag in der **anderen** Richtung: dort trug der
-/// Begriff selbst Leerraum, und nur deshalb sucht `leaks_many` ihn auch
-/// gequetscht.
+/// **Befund P5-2, behoben.** Ein **abgewählter** Text deckte seit Fix-Runde 4
+/// jede Schreibweise derselben Normalform. Eine geschwärzte Zeile, deren
+/// Rechteck danebengeht und deren Text sich vom abgewählten nur im Leerraum
+/// unterscheidet, wurde deshalb gar nicht mehr gesucht — `kept` statt
+/// `needle`; vor Runde 4 stand sie in `needles`, und die Suche fand sie.
+///
+/// Jetzt wird sie gesucht, und entschieden wird am **Fund**: getroffen hat
+/// die Schreibweise hier Zeichen für Zeichen ([`redact_pdf::LeakCheck`]s
+/// `literal`), also ist es ein Leck — gleich, was daneben abgewählt ist.
+/// Der Fehlalarm, den Runde 4 abstellen wollte (G5-B1), liegt in der
+/// anderen Hälfte desselben Urteils: dort trifft **nur** die Fassung ohne
+/// Leerraum, und die kann die abgewählte Zeile sein
+/// (`ze_p5_2_ein_fund_nur_ohne_leerraum_ist_kein_leck`).
+/// Mutation (die `literal`-Prüfung im Lauf weg, Entscheidung zurück in den
+/// Plan): rot.
 #[test]
-fn ze_p5_2_ein_abgewaehlter_text_deckt_die_andere_schreibweise() {
-    let out = tmp("2-kept").join("out.pdf");
+fn ze_p5_2_die_andere_schreibweise_muesste_ein_leck_sein() {
+    let out = tmp("2-soll").join("out.pdf");
     let mut app = RedactApp::new(no_patterns());
     app.open_bytes_and_analyze(&two_spellings(), "zwei.pdf");
     // Geschwärzt, Rechteck geht daneben: echtes Leck.
@@ -203,6 +223,7 @@ fn ze_p5_2_ein_abgewaehlter_text_deckt_die_andere_schreibweise() {
     assert_eq!(summary.outcome(1), HitOutcome::Disabled);
     app.state.export(&out, None).expect("Export");
 
+    // Das Orakel: die geschwärzte Schreibweise steht wörtlich noch da.
     let bytes = std::fs::read(&out).unwrap();
     assert!(
         !redact_pdf::leaks(&bytes, SPACED).is_empty(),
@@ -210,54 +231,120 @@ fn ze_p5_2_ein_abgewaehlter_text_deckt_die_andere_schreibweise() {
     );
 
     let plan = app.state.plan_export_check(&summary);
-    println!("needles: {:?}, kept: {}", plan.needles, plan.kept);
-    assert!(plan.needles.is_empty(), "{plan:?}");
-    assert_eq!(plan.kept, 1, "{plan:?}");
+    println!(
+        "needles: {:?}, kept_forms: {:?}",
+        plan.needles, plan.kept_forms
+    );
+    assert_eq!(plan.needles, vec![SPACED.to_string()], "{plan:?}");
+    assert_eq!(plan.kept_forms, vec![true], "{plan:?}");
+    assert_eq!(plan.kept, 0, "{plan:?}");
+    let check = plan.run(&out);
+    println!("Statuszeile: {}", check.sentence());
+    assert!(check.found_leak(), "{}", check.sentence());
+    assert_eq!(check.leaking, vec![SPACED.to_string()]);
+    assert_eq!(check.kept, 0, "{check:?}");
+    assert!(check.warning().is_some(), "{:?}", check.warning());
+}
+
+/// Die Gegenrichtung, und der Fehlalarm aus Runde 4 darf nicht zurückkommen:
+/// die geschwärzte Schreibweise ist wirklich weg, die abgewählte steht da.
+/// Getroffen hat dann **nur** die Fassung ohne Leerraum — das kann die
+/// abgewählte Zeile sein, also kein Leck, sondern `kept`. Dieselbe Vorlage
+/// wie oben, nur trifft das Rechteck. Schwester von
+/// `zc_g5_tests::g5b_dieselbe_iban_ohne_leerraum_abgewaehlt_ist_kein_leck`.
+#[test]
+fn ze_p5_2_ein_fund_nur_ohne_leerraum_ist_kein_leck() {
+    let out = tmp("2-kept").join("out.pdf");
+    let mut app = RedactApp::new(no_patterns());
+    app.open_bytes_and_analyze(&two_spellings(), "zwei.pdf");
+    // Geschwärzt, und das Rechteck trifft: die Schreibweise ist weg.
+    app.state
+        .regions
+        .push(text_region(0, over_spaced(), SPACED));
+    // Bewusst stehen gelassen.
+    app.state.regions.push(text_region(0, over_plain(), PLAIN));
+    assert!(app.state.set_enabled(1, false));
+    let summary = app.state.hit_summary();
+    app.state.export(&out, None).expect("Export");
+
+    // Das Orakel, und zugleich der ganze Mechanismus: die geschwärzte
+    // Schreibweise ist **wörtlich** weg, getroffen wird sie nur noch über
+    // ihre Fassung ohne Leerraum — nämlich an der abgewählten Zeile, die
+    // bewusst dasteht.
+    let bytes = std::fs::read(&out).unwrap();
+    let probe = redact_pdf::leaks_many_within(&bytes, &[SPACED], u64::MAX);
+    println!("Orakel: {:?}", probe.findings[0]);
+    assert!(!probe.findings[0].is_empty(), "gequetscht trifft es");
+    assert!(!probe.literal[0], "wörtlich weg: {:?}", probe.findings[0]);
+    assert!(!redact_pdf::leaks(&bytes, PLAIN).is_empty(), "bewusst da");
+
+    let plan = app.state.plan_export_check(&summary);
+    assert_eq!(plan.needles, vec![SPACED.to_string()], "{plan:?}");
+    assert_eq!(plan.kept_forms, vec![true], "{plan:?}");
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
     assert!(
         !check.found_leak(),
-        "hier wäre der Befund behoben: {}",
+        "der Fehlalarm aus Runde 4 wäre zurück: {}",
         check.sentence()
     );
+    assert_eq!(check.kept, 1, "{check:?}");
     assert!(check.warning().is_none(), "{:?}", check.warning());
     assert!(
         check
             .sentence()
-            .contains("1 Text(e) stehen auch in einer abgewählten"),
+            .contains("1 Text(e) decken sich mit einer abgewählten"),
         "{}",
         check.sentence()
     );
 }
 
-/// Dieselbe Vorlage, richtige Erwartung.
+/// Und dieselbe Vorlage andersherum: geschwärzt die Schreibweise **ohne**
+/// Leerraum (Rechteck daneben — echtes Leck), stehen gelassen die **mit**.
+/// Hier konnte es nie einen Fehlalarm geben (ein Begriff ohne Leerraum wird
+/// nur wörtlich gesucht) — Fix-Runde 4 deckte trotzdem auch diese Richtung.
 #[test]
-#[ignore = "Befund P5-2: der abgewählte Text deckt die andere Schreibweise"]
-fn ze_p5_2_die_andere_schreibweise_muesste_ein_leck_sein() {
-    let out = tmp("2-soll").join("out.pdf");
+fn ze_p5_2_auch_andersherum_ist_es_ein_leck() {
+    let out = tmp("2-andersherum").join("out.pdf");
     let mut app = RedactApp::new(no_patterns());
     app.open_bytes_and_analyze(&two_spellings(), "zwei.pdf");
     app.state
         .regions
-        .push(text_region(0, empty_corner(2), SPACED));
-    app.state.regions.push(text_region(0, over_plain(), PLAIN));
+        .push(text_region(0, empty_corner(3), PLAIN));
+    app.state
+        .regions
+        .push(text_region(0, over_spaced(), SPACED));
     assert!(app.state.set_enabled(1, false));
     let summary = app.state.hit_summary();
+    assert_eq!(summary.outcome(0), HitOutcome::Redacted);
+    assert_eq!(summary.outcome(1), HitOutcome::Disabled);
     app.state.export(&out, None).expect("Export");
-    let check = app.state.plan_export_check(&summary).run(&out);
+
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(
+        !redact_pdf::leaks(&bytes, PLAIN).is_empty(),
+        "die Vorlage muss lecken"
+    );
+
+    let plan = app.state.plan_export_check(&summary);
+    assert_eq!(plan.needles, vec![PLAIN.to_string()], "{plan:?}");
+    let check = plan.run(&out);
+    println!("Statuszeile: {}", check.sentence());
     assert!(check.found_leak(), "{}", check.sentence());
+    assert_eq!(check.leaking, vec![PLAIN.to_string()]);
+    assert_eq!(check.kept, 0, "{check:?}");
 }
 
 // ===========================================================================
 // 3 — Die Ränder der Normalform (kein Befund)
 // ===========================================================================
 
-/// Was `squeeze` zusammenfasst und was nicht: geschütztes Leerzeichen,
-/// Tabulator und Zeilenumbruch sind Leerraum und fallen zusammen; Text, der
-/// nur aus Leerraum besteht, zählt als „ohne Text“; Groß-/Kleinschreibung,
-/// Unicode-Normalisierung (é als ein oder zwei Codepunkte) und Bindestriche
-/// bleiben eigene Texte — die Normalform macht die Suche dort **nicht**
-/// gröber, also entsteht dort auch kein blinder Fleck.
+/// Jede Schreibweise steht in `needles` — auch die vier, die dieselbe
+/// Normalform tragen (geschütztes Leerzeichen, Tabulator, Zeilenumbruch,
+/// ganz ohne Leerraum). Text, der nur aus Leerraum besteht, zählt als „ohne
+/// Text“; Groß-/Kleinschreibung, Unicode-Normalisierung (é als ein oder
+/// zwei Codepunkte) und Bindestriche waren schon vorher eigene Texte.
+/// Mutation (`seen` auf der Normalform): fünf statt neun Begriffe, rot.
 #[test]
 fn ze_p5_3_die_raender_der_normalform() {
     let mut app = RedactApp::new(no_patterns());
@@ -290,6 +377,10 @@ fn ze_p5_3_die_raender_der_normalform() {
         plan.needles,
         vec![
             "AB\tCD".to_string(),
+            "AB CD".to_string(),
+            "AB\u{a0}CD".to_string(),
+            "AB\nCD".to_string(),
+            "ABCD".to_string(),
             "ab cd".to_string(),
             "AB-CD".to_string(),
             "\u{e9}".to_string(),
@@ -378,24 +469,105 @@ fn ze_p5_5_ein_zu_kleines_budget_kommt_bis_in_den_satz() {
     let sentence = check.sentence();
     println!("Statuszeile: {sentence}");
     assert!(
-        sentence.contains("wurden nicht geprüft (Entpackgrenze) — die Antwort ist unvollständig."),
+        sentence.contains("wurden nicht geprüft — die Antwort ist unvollständig:"),
+        "{sentence}"
+    );
+    // Der Grund steht bei der Stelle, nicht im Satzbau: hier ist er wirklich
+    // die Entpackgrenze, und der Satz gibt ihn wieder, statt ihn anzunehmen.
+    assert!(
+        check
+            .unchecked
+            .iter()
+            .any(|u| u.contains("Entpackgrenze") || u.contains("Vorprüfung")),
+        "{:#?}",
+        check.unchecked
+    );
+    assert!(
+        sentence.contains(check.unchecked.first().expect("eine Stelle").as_str()),
         "{sentence}"
     );
     assert!(
         sentence.contains("Geprüft ist genau diese Liste, nicht die Datei."),
         "{sentence}"
     );
+    // Kein doppelter Punkt, wo die Stelle schon einen mitbringt.
+    assert!(!sentence.contains(".. Geprüft"), "{sentence}");
     let warning = check.warning().expect("unvollständig ist eine Warnung");
+    assert!(warning.contains("nicht geprüft"), "{warning}");
     assert!(
-        warning.contains("nicht geprüft (Entpackgrenze)"),
+        warning.contains(check.unchecked.first().expect("eine Stelle").as_str()),
         "{warning}"
+    );
+}
+
+/// **Die zweite Ursache, an einem echten Lauf (Fix-Runde 5).** Seit der
+/// Korrektur in `redact-pdf` ist die Entpackgrenze nicht mehr der einzige
+/// Weg zu „nicht geprüft“: die Objektsicht meldet auch, wo der Objektgraph
+/// tiefer ist, als sie geht (`MAX_DEPTH` = 32; der Lader lässt bis 100 zu).
+/// Hier ist das Budget **voll** — der alte Satz „nicht geprüft
+/// (Entpackgrenze)“ hätte eine Ursache behauptet, die es nicht gibt, und in
+/// die falsche Richtung geschickt. Jetzt zählt der Satz die Stellen und gibt
+/// ihren Grund wieder; er muss bis in die Statuszeile und in die Warnung
+/// kommen. Die Gegenrichtung (Budget als Ursache) steht in
+/// `ze_p5_5_ein_zu_kleines_budget_kommt_bis_in_den_satz`, beide Ursachen
+/// nebeneinander in `zc_g5_tests::g5a2_nicht_geprueft_steht_im_satz_…`.
+#[test]
+fn ze_p5_5_die_tiefengrenze_kommt_auch_bis_in_den_satz() {
+    let dir = tmp("5-zwei-gruende");
+    let out = dir.join("tief.pdf");
+
+    // Dieselbe Vorlage, dazu ein 40 Ebenen tiefes Objekt mit Klartext ganz
+    // unten — genau die Stelle, die keine Sicht mehr liest.
+    let mut doc = lopdf::Document::load_mem(&two_spellings()).expect("ladbar");
+    let mut inner = lopdf::Dictionary::new();
+    inner.set("Leck", lopdf::Object::string_literal(SPACED));
+    let mut deep = lopdf::Object::Dictionary(inner);
+    for _ in 0..40 {
+        deep = lopdf::Object::Array(vec![deep]);
+    }
+    doc.add_object(deep);
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).expect("schreibbar");
+    std::fs::write(&out, &bytes).expect("Datei");
+
+    // Das volle Budget des Ladens: an der Entpackgrenze liegt es diesmal
+    // **nicht**, und trotzdem ist die Antwort unvollständig.
+    let plan = ExportCheckPlan {
+        needles: vec![PLAIN.to_string()],
+        ..ExportCheckPlan::default()
+    };
+    let check = plan.run(&out);
+    println!("unchecked: {:#?}", check.unchecked);
+    assert!(check.incomplete(), "{check:?}");
+
+    let tiefe = check
+        .unchecked
+        .iter()
+        .find(|u| u.contains("Verschachtelungstiefe"))
+        .cloned()
+        .unwrap_or_else(|| panic!("keine Tiefengrenze: {:#?}", check.unchecked));
+    assert!(
+        !check.unchecked.iter().any(|u| u.contains("Entpackgrenze")),
+        "{:#?}",
+        check.unchecked
+    );
+
+    let sentence = check.sentence();
+    println!("Statuszeile: {sentence}");
+    let warning = check.warning().expect("unvollständig ist eine Warnung");
+    assert!(sentence.contains(tiefe.as_str()), "{sentence}");
+    assert!(warning.contains(tiefe.as_str()), "{warning}");
+    // Der alte Satz hätte hier die falsche Ursache genannt und in die falsche
+    // Richtung geschickt: „(Entpackgrenze)“ an einem Lauf mit vollem Budget.
+    assert!(
+        !sentence.contains("nicht geprüft (Entpackgrenze)"),
+        "{sentence}"
     );
 }
 
 /// Dass P5-1 kein Kunstgriff ist: die **Analyse** selbst liefert die beiden
 /// Schreibweisen — Seite 1 ohne, Seite 2 mit Leerraum, beide echte
-/// Mustertreffer, beide geschwärzt. Der Plan trägt trotzdem nur einen
-/// Begriff, und der ist der ohne Leerraum. Vor Fix-Runde 4 waren es zwei.
+/// Mustertreffer, beide geschwärzt. Der Plan trägt jetzt wieder beide.
 #[test]
 fn ze_p5_1_auch_die_analyse_liefert_beide_schreibweisen() {
     let iban_only = Config {
@@ -416,7 +588,12 @@ fn ze_p5_1_auch_die_analyse_liefert_beide_schreibweisen() {
     assert_eq!(summary.outcome(1), HitOutcome::Redacted);
     let plan = app.state.plan_export_check(&summary);
     println!("needles: {:?}", plan.needles);
-    assert_eq!(plan.needles, vec![PLAIN.to_string()], "{plan:?}");
-    // Und der eine Begriff trägt keine Fassung ohne Leerraum: er hat keinen.
+    assert_eq!(
+        plan.needles,
+        vec![PLAIN.to_string(), SPACED.to_string()],
+        "{plan:?}"
+    );
+    // Und warum die eine Schreibweise die andere nicht mitsucht: sie trägt
+    // keinen Leerraum, also gibt es zu ihr keine gequetschte Fassung.
     assert_eq!(redact_pdf::squeeze(PLAIN), PLAIN);
 }

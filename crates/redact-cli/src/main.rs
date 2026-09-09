@@ -71,12 +71,16 @@ pub const EXIT_USAGE: u8 = 2;
 ///
 /// ## Der dritte Fall: `--check-leaks` konnte eine Stelle nicht prüfen
 ///
-/// Die Suche entpackt in Summe höchstens `--max-decompressed-mb`. Ein Strom,
-/// der das Restbudget sprengte, wurde nicht entpackt, und „nicht gefunden“
-/// sagt über ihn nichts.
-/// Das ist dieselbe Nachricht wie eine Deckungslücke beim Schwärzen —
+/// Zwei Grenzen können die Suche an einer Stelle aussteigen lassen. Die
+/// **Entpackgrenze**: die Suche entpackt in Summe höchstens
+/// `--max-decompressed-mb`; ein Strom, der das Restbudget sprengte, wurde
+/// nicht entpackt, und „nicht gefunden“ sagt über ihn nichts. Und die
+/// **Verschachtelungstiefe** der Objektsicht: unterhalb davon liest sie nicht
+/// weiter.
+/// Beides ist dieselbe Nachricht wie eine Deckungslücke beim Schwärzen —
 /// „verarbeitet, aber nicht vollständig geprüft“ — und bekommt dieselbe Zahl,
-/// auch ohne Fund. Siehe `check::report`.
+/// auch ohne Fund. Die Stellen stehen als `NICHT GEPRÜFT: …` in der Ausgabe;
+/// siehe `check::report`.
 pub const EXIT_INCOMPLETE: u8 = 3;
 
 fn main() -> ExitCode {

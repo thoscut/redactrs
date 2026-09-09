@@ -335,7 +335,7 @@ Einheit gemeint, nur ausdrücklich; die Schalter (`--max-input-mb` und die
 | davon: alles, woraus PDF-**Syntax** wird — geparste Streams **und** der Rumpf der Datei | 16 MB | `--max-parsed-mb` |
 | dito, in der zweiten Einheit: **gerechneter Objektspeicher** | ein Vielfaches des Byte-Budgets | `--max-parsed-mb` |
 | Trefferkandidaten je Datei | 100 000 | `--max-candidates` |
-| Rohgröße eines LZW-/ASCII85-Streams | 16 MB | fest |
+| Rohgröße eines Streams, den die **Vorprüfung** auspacken muss (LZW, ASCII85 — jede Kette, die nicht reines Flate ist) | 16 MB | fest |
 | Bildpunkte **je Bild** (Dekodieren) | 40 000 000 | fest |
 | gleichzeitig gehaltene **dekodierte** Bildbytes | 256 MB | `--max-image-mb` |
 | **Zeichen, die eine Seite setzen darf** | **1 000 000** | fest |
@@ -354,6 +354,39 @@ genauso — siehe „Die Grenzen gelten auch hinter der Entschlüsselung“.
 Die Zeilen „Zeichen, die eine Seite setzen darf“ und „Zeichenoperationen je
 Seiten-Scan“ messen keine Bytes, und das ist ihr Zweck; sie stehen weiter unten
 unter „Wenn Bytes die falsche Größe sind“.
+
+**Die 16-MB-Zeile gilt der Vorprüfung, nicht jedem Altlast-Filter.** Auspacken
+muss die Vorprüfung nur, was zu PDF-Syntax werden kann; das sind `FlateDecode`,
+`LZWDecode` und `ASCII85Decode`. Ist die Kette nicht reines Flate, gilt die
+16-MB-Grenze der **Rohgröße** — nachgemessen an einem 17-MB-`ASCII85Decode`-
+Strom: `Stream mit Altlast-Filter (ASCII85Decode) ist mit 17 825 795 Bytes zu
+groß (Grenze 16 777 216 Bytes)`, Rückgabewert 1. `ASCIIHexDecode`,
+`RunLengthDecode` und die Bildfilter packt die Vorprüfung **gar nicht** aus, sie
+zählt ihre Rohbytes; dieselben 17 MB laufen dort durch (Rückgabewert 0,
+nachgemessen). Ausgepackt werden sie erst beim Schwärzen und in der
+Nachprüfung — und dort gegen `--max-decompressed-mb`, nicht gegen 16 MB
+(nachgemessen: ein `RunLengthDecode`- und ein `ASCIIHexDecode`-Seiteninhalt mit
+demselben Geheimnis werden von `--check-leaks` gefunden, letzterer ausdrücklich
+als `<Stream, dekodiert: ASCIIHexDecode>`).
+
+**Der Spitzenspeicher hängt am größten Einzelstrom, nicht am Budget.** „1024 MB“
+ist die *Summe* der entpackten Bytes über alle Ströme, nicht der Bedarf. Wer
+den Bedarf schätzen will, sieht auf den **größten einzelnen Strom**: gemessen
+liegt die Spitze bei rund dem **Doppelten** seiner entpackten Größe (die
+entpackten Bytes liegen mehr als einmal gleichzeitig im Speicher).
+Nachgemessen an einer 1 020 KiB großen Datei mit einem einzigen
+Flate-Strom über 1 GiB Nullen, **mit den Vorgabewerten** (`--max-decompressed-mb
+1024`): `redact-rs bomb.pdf --check-leaks XX` endet mit Rückgabewert **0** — der
+Strom passt ja ins Budget — und mit einem `VmHWM` von 2 172 628 kB ≈ 2,1 GiB
+(18 s; gemessen über `getrusage(RUSAGE_CHILDREN).ru_maxrss`, dieselbe Zahl, die
+`/proc/<pid>/status` als `VmHWM` führt). Das Schwärzen derselben Datei erreicht
+dieselbe Spitze (2 172 312 kB) — die Nachprüfung ist hier nicht sparsamer als
+der Hauptweg. Derselbe Strom als `/ObjStm` verpackt kommt mit den Vorgabewerten
+gar nicht durch (Rückgabewert 1, `VmHWM` 1 056 688 kB); wer ihm mit
+`--max-decompressed-mb 4096` Luft gibt, misst 3 220 164 kB ≈ 3,1 GiB — also rund
+das **Dreifache**, weil ein Objektstrom zusätzlich geparst wird. Wer den Bedarf drücken will, senkt
+`--max-decompressed-mb`: mit 16 MB bleibt derselbe Lauf bei 24 MB (Rückgabewert
+1, die Vorprüfung lehnt die Datei ab).
 
 ### Was `--max-parsed-mb` zählt — zwei Klassen, nicht eine
 
@@ -790,26 +823,32 @@ Datei gescheitert, endet der Lauf mit Rückgabewert 3 statt 0
 (`crates/redact-cli/src/batch.rs`, `exit_code`); eine gescheiterte Datei
 schlägt das mit 1.
 
-#### Rückgabewert 3 hat **zwei** Bedeutungen
+#### Rückgabewert 3 hat **drei** Bedeutungen
 
 Das ist die Stelle, an der ein Skript falsch gebaut wird. Wer den Absatz
 darüber allein liest, hält 3 für „verarbeitet, aber nicht vollständig geprüft“
 — und deutet dann einen **Leckfund** als eine bloß unvollständige Prüfung. Der
-`--help`-Text des Binaries nennt seit 0.4.0 beide Fälle; hier standen sie
-bisher nicht.
+`--help`-Text des Binaries nennt alle drei Fälle; hier standen bis zur
+Fix-Runde 5 nur zwei, und der dritte fehlte auch dort, wo er am meisten wehtut:
+`--check-leaks` endet **auch ohne Fund** mit 3, wenn eine Stelle ungeprüft
+blieb.
 
 ```console
 $ redact-rs --help | sed -n '/^  3  /,$p'
   3  Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.
-     Zwei Fälle:
+     Drei Fälle:
      • Verarbeitet, aber nicht vollständig geprüft. …
      • --check-leaks hat mindestens einen Begriff in der Datei gefunden.
        Ein Fund ist kein Verarbeitungsfehler (das wäre 1) und kein
        Bedienfehler (das wäre 2): die Suche lief vollständig, die Antwort
        lautet „ja, es steht noch drin“.
+     • --check-leaks konnte eine Stelle NICHT PRÜFEN — und das auch ohne
+       einen einzigen Fund. Ein Strom, der das Restbudget von
+       --max-decompressed-mb sprengte, wurde nicht entpackt; über ihn sagt
+       „nicht gefunden“ nichts. …
 ```
 
-Beide Fälle heißen „sieh hin“, und beide dürfen nicht als Erfolg durchgehen.
+Alle drei Fälle heißen „sieh hin“, und keiner darf als Erfolg durchgehen.
 Wer sie im Skript **unterscheiden** muss, unterscheidet sie am Aufruf und nicht
 am Rückgabewert: `--check-leaks` schwärzt nicht und schließt jeden
 Schwärzungsschalter aus, ein schwärzender Lauf prüft keine Begriffe. Ein
@@ -1001,12 +1040,24 @@ sie fanden; die Grenze `--max-decompressed-mb` galt nur dem Schwärzen. Seit
 dieser Fassung gilt sie beiden, und zwar **beim Entpacken** (der Leser bekommt
 das Restbudget, es wird nicht hinterher gemessen), samt einer Vorprüfung mit
 derselben Zahl, damit `lopdf` keinen Objektstrom unbegrenzt auspackt.
-Nachgemessen an 1 GiB Nullen (1 042 919 Byte in der Datei), Budget 16 MiB:
+Nachgemessen an 1 GiB Nullen (1 044 089 Byte in der Datei als Seiteninhalt,
+1 044 192 Byte als `/ObjStm`), je einmal mit `--max-decompressed-mb 16` und
+einmal mit `--max-decompressed-mb 4096` — letzteres steht für „ohne die
+Grenze“, denn 4096 MB deckt das ganze GiB. Aufruf jeweils
+`redact-rs <bombe> --check-leaks XX`; der Spitzenspeicher ist
+`getrusage(RUSAGE_CHILDREN).ru_maxrss` des Kindprozesses, dieselbe Zahl, die
+`/proc/<pid>/status` als `VmHWM` führt:
 
-| Form der Bombe | Zeit | Spitzenspeicher | ohne die Grenze beim Entpacken |
-|---|---|---|---|
-| als Seiteninhalt | 28 ms | 27 MB | 345 MB |
-| als Objektstrom (`/ObjStm`) | 26 ms | 27 MB | 882 MB |
+| Form der Bombe | mit 16 MB Budget | ohne die Grenze (4096 MB) |
+|---|---|---|
+| als Seiteninhalt | 24 MB, 0,02 s, **Exit 1** | 2 173 MB, 18 s, Exit 0 |
+| als Objektstrom (`/ObjStm`) | 24 MB, 0,02 s, **Exit 1** | 3 220 MB, 18 s, Exit 0 |
+
+Hier standen bis zur Fix-Runde 5 „345 MB“ und „882 MB“ für die rechte Spalte. Das konnte
+nicht stimmen: ein GiB, das wirklich entpackt wird, liegt danach im Speicher,
+und weniger als 1 074 MB kann eine Spitze dann nicht sein. Die Zahlen oben sind
+über je drei Läufe stabil auf drei Stellen (2 172–2 173 MB bzw. 3 220 MB); die
+Zeiten hängen an der Maschine und sind nur zur Größenordnung genannt.
 
 Ein Strom über dem Restbudget wird übersprungen und **benannt** — die Antwort
 lautet dann „nicht geprüft“, nicht „nicht gefunden“ (Rückgabewert 3, siehe
@@ -1795,6 +1846,37 @@ Verbindlich ist `redact_pdf::leaks` — und **genau die** Funktion steckt hinter
 Nachprüfung der Oberfläche. Wer keine
 Rust-Toolchain hat, nimmt den Schalter; der Bibliotheksaufruf ist derselbe
 Maßstab, nur für den, der das Repository ohnehin gebaut hat.
+
+### Was die Nachprüfung der Oberfläche zusichert — und was nicht
+
+Sie entscheidet **am Fund**: ein wörtlicher Rest ist ein Leck. Trifft nur die
+Fassung ohne Leerraum und trägt eine bewusst stehen gelassene Zeile dieselbe
+Zeichenfolge, zählt der Fund nicht — die Statuszeile sagt, wie viele Texte das
+betrifft. Ein Text, der wörtlich auch in einer stehen gelassenen Zeile steht,
+wird gar nicht gesucht; für ihn bleibt die Sichtprüfung.
+
+Sie nennt außerdem jede ungeprüfte Stelle mit **ihrem eigenen** Grund und nimmt
+keine Ursache an. Gründe sind heute: entpackte Ströme über
+`--max-decompressed-mb`, eine vom Lader abgelehnte Vorprüfung, und Objekte
+tiefer als 32 Ebenen im Objektgraphen.
+
+### Interpreter und Orakel lesen verschieden
+
+Der Interpreter nimmt einen halb dekodierten Strom **nie** als Seiteninhalt:
+eine Filterkette mit unbekanntem Glied bricht mit Warnung ab. Das Orakel
+durchsucht den entzifferbaren Anfang trotzdem — es soll finden, was sichtbar
+ist, nicht schwärzen. Festgehalten in
+`ze_p2_seitenschleife::halb_dekodierter_strom_wird_nie_seiteninhalt`.
+
+**Was ein sauberer Lauf nicht ausschließt.** Text hinter einem Bildfilter
+(`/DCTDecode`, `/JPXDecode`, `/CCITTFaxDecode`, `/JBIG2Decode`), allein oder am
+Ende einer Filterkette: ein benannter blinder Fleck und **keine**
+`NICHT GEPRÜFT`-Zeile — sonst käme jede Datei mit einem Foto als unvollständig
+geprüft zurück. Ein Filtername, den das Programm gar nicht kennt, steht sehr
+wohl darin. Ebenso benannt: ein Textspiegel in einer direkt in
+`/Resources /Properties` stehenden Eigenschaftsliste bleibt im
+Ressourcenverzeichnis stehen (Beleg:
+`ze_p2_spiegel::befund_direkte_eigenschaftsliste_behaelt_ihren_spiegel`).
 
 Es gibt keine Prämie und keine zugesicherte Frist — dies ist ein kleines
 Projekt. Eingehende Meldungen werden aber beantwortet.

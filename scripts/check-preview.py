@@ -50,7 +50,16 @@ Liegt neben pruefung.txt keine vorher-nachher.md (die CI erzeugt die Belege
 in ein Wegwerfverzeichnis), wird die aus docs/ neben diesem Skript genommen -
 dann prueft der Lauf, dass die eingecheckte Doku zu dem passt, was das
 gebaute Programm heute ausgibt. Dass pruefung.txt selbst zum Programm passt,
-haelt crates/redact-cli/tests/belege.rs fest.
+haelt crates/redact-cli/tests/belege.rs fest - seit der Fix-Runde 5 mit dem
+ganzen Berichtsblock: Dateigroesse, Belegzeilen und jede Fundstellenzeile.
+Vorher verglich er nur die GEFUNDEN-/nicht-gefunden-Zeilen; die Mutationen
+"1862"->"1863" und "(Objekt 4 0)"->"(Objekt 9 0)" blieben gruen, obwohl dieser
+Kopf schon damals das Gegenteil zusagte.
+
+Die letzte Zeile dieses Skripts ("Alle N Pruefungen bestanden.") nennt die
+Zahl der Pruefungen. Sie steht auch in der README, und
+belege.rs::die_zahl_der_pruefungen_steht_im_readme haelt beide zusammen -
+abgeschrieben stand dort 36, waehrend hier 54 herauskamen.
 """
 
 import struct

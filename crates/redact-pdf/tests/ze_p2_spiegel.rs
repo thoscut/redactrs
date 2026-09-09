@@ -223,19 +223,19 @@ fn dasselbe_formular_zweimal_im_spiegel_warnt_nicht() {
     assert_no_mirror_warning(&same_form_twice(false), "zweimal, ohne Verschachtelung");
 }
 
-/// **Befund P2-3 (offen, älter als Fix-Runde 4).** Sobald irgendwo im
+/// **Befund P2-3 (Fix-Runde 5 geschlossen, älter als Fix-Runde 4).** Sobald irgendwo im
 /// Dokument ein Formular ein Formular zeichnet, läuft
 /// `ScanResult::close_forms` — und dessen `seen`-Menge (eine Menge über
 /// Objekt-Ids, geteilt über alle Platzierungen eines Abschnitts) wirft die
 /// **zweite** Platzierung desselben Formulars weg. Derselbe ehrliche Spiegel
 /// gilt dann als Widerspruch: „10 Zeichen im Spiegel, 5 in den Glyphen“.
 /// Diese Warnung steht nicht in `redact_pipeline::coverage::NOT_A_COVERAGE_GAP`
-/// und wird deshalb zum Rückgabewert 3 an einer harmlosen Datei.
+/// und wurde deshalb zum Rückgabewert 3 an einer harmlosen Datei.
 ///
-/// Ignoriert, weil die Korrektur aussteht: `cargo test -p redact-pdf --test
-/// ze_p2_spiegel -- --ignored` führt den Befund vor.
+/// `close_forms` zählt seit Fix-Runde 5 **Platzierungen**: der Zyklusschutz
+/// ist die Kette der Vorfahren des Pfades, nicht eine Menge über den ganzen
+/// Datensatz.
 #[test]
-#[ignore = "Befund P2-3: offen — close_forms entdoppelt eine zweite Platzierung"]
 fn befund_dasselbe_formular_zweimal_im_spiegel_warnt_falsch() {
     assert_no_mirror_warning(&same_form_twice(true), "zweimal, mit Verschachtelung");
 }
@@ -537,4 +537,362 @@ fn ehrliche_getaggte_datei_gibt_keine_warnung() {
         mirror_warnings(&report_warnings).is_empty(),
         "{report_warnings:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Dasselbe Formular zweimal **im** Formular unter dem Spiegel
+// ---------------------------------------------------------------------------
+
+/// Derselbe Befund eine Ebene tiefer: der Spiegel steht über **einem** `Do`,
+/// und das Formular dahinter zeichnet das innere zweimal. Ein Betrachter
+/// sieht „Alpha“ zweimal, der Spiegel schreibt „AlphaAlpha“ — kein
+/// Widerspruch. Eine Entdopplung über Objekt-Ids (gleich ob je Datensatz oder
+/// je Platzierung) zählte hier fünf statt zehn Zeichen.
+#[test]
+fn inneres_formular_zweimal_gezeichnet_warnt_nicht() {
+    let mut d = page(&[]);
+    let resources = d.resources_id;
+    let (inner, _) = add_form(&mut d, resources, "Fm1", &text_at(600, "Alpha"));
+    let (_, outer_res) = add_form(
+        &mut d,
+        resources,
+        "Fm0",
+        "q /Fm1 Do Q\nq 1 0 0 1 0 -20 cm /Fm1 Do Q\n",
+    );
+    d.doc
+        .get_dictionary_mut(outer_res)
+        .expect("Ressourcen")
+        .set("XObject", dictionary! { "Fm1" => inner });
+
+    let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+    raw.extend_from_slice(b"/Span <</ActualText (AlphaAlpha)>> BDC\nq /Fm0 Do Q\nEMC\n");
+    d.set_content(&raw);
+    let bytes = d.finish();
+    assert_no_mirror_warning(&bytes, "inneres Formular zweimal gezeichnet");
+}
+
+/// Und dieselbe Datei mit einem **lügenden** Spiegel darüber: die Schließung
+/// darf die Glyphen nicht nur richtig zählen, sie muss sie auch weiterhin
+/// finden — der Spiegel fällt.
+#[test]
+fn inneres_formular_zweimal_gezeichnet_luegender_spiegel_faellt() {
+    let mut d = page(&[]);
+    let resources = d.resources_id;
+    let (inner, _) = add_form(&mut d, resources, "Fm1", &text_at(600, SECRET));
+    let (_, outer_res) = add_form(
+        &mut d,
+        resources,
+        "Fm0",
+        "q /Fm1 Do Q\nq 1 0 0 1 0 -20 cm /Fm1 Do Q\n",
+    );
+    d.doc
+        .get_dictionary_mut(outer_res)
+        .expect("Ressourcen")
+        .set("XObject", dictionary! { "Fm1" => inner });
+
+    let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+    raw.extend_from_slice(
+        format!(
+            "/Span <</ActualText ({})>> BDC\nq /Fm0 Do Q\nEMC\n",
+            escape(&format!("Zahlung an {SECRET}"))
+        )
+        .as_bytes(),
+    );
+    d.set_content(&raw);
+    let bytes = d.finish();
+    assert_lie_is_gone(&bytes, "inneres Formular zweimal, lügender Spiegel");
+}
+
+/// Beides zusammen: der Spiegel überdeckt **zwei** Platzierungen desselben
+/// Formulars, und dieses zeichnet seinerseits ein inneres. Zwei Platzierungen
+/// × „Alpha“ = „AlphaAlpha“.
+///
+/// Der Fall hält die Kanten in `ScanResult::nested_forms` fest: das äußere
+/// Formular wird zweimal durchlaufen und meldet sein `Do` dabei zweimal.
+/// Stünde die Kante deshalb zweimal in der Liste, zählten die Glyphen des
+/// inneren Formulars doppelt — zwanzig statt zehn Zeichen.
+#[test]
+fn zwei_platzierungen_mit_innerem_formular_warnen_nicht() {
+    let mut d = page(&[]);
+    let resources = d.resources_id;
+    let (inner, _) = add_form(&mut d, resources, "Fm1", &text_at(600, "Alpha"));
+    let (_, outer_res) = add_form(&mut d, resources, "Fm0", "q /Fm1 Do Q\n");
+    d.doc
+        .get_dictionary_mut(outer_res)
+        .expect("Ressourcen")
+        .set("XObject", dictionary! { "Fm1" => inner });
+
+    let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+    raw.extend_from_slice(
+        b"/Span <</ActualText (AlphaAlpha)>> BDC\nq /Fm0 Do Q\nq 1 0 0 1 0 -20 cm /Fm0 Do Q\nEMC\n",
+    );
+    d.set_content(&raw);
+    let bytes = d.finish();
+    assert_no_mirror_warning(&bytes, "zwei Platzierungen mit innerem Formular");
+}
+
+// ---------------------------------------------------------------------------
+// Gegenrichtung: der Zyklus
+// ---------------------------------------------------------------------------
+
+/// Ein Formular, das **sich selbst** zeichnet, unter einem Spiegel: die
+/// Schließung muss anhalten. Der Interpreter betritt den Zyklus über
+/// `visiting` gar nicht erst, die Glyphen stehen also einmal da, und der
+/// deckungsgleiche Spiegel warnt nicht.
+///
+/// Ohne den Zyklusschutz in `close_forms` läuft dieser Test nicht rot,
+/// sondern gar nicht mehr zu Ende.
+#[test]
+fn formular_das_sich_selbst_zeichnet_haelt_an() {
+    let mut d = page(&[]);
+    let resources = d.resources_id;
+    let (inner, _) = add_form(&mut d, resources, "Fm1", &text_at(600, "Alpha"));
+    // Ein zweites Formular macht die Schließung überhaupt erst nötig.
+    let (_, outer_res) = add_form(&mut d, resources, "Fm0", "q /Fm1 Do Q\n");
+    d.doc
+        .get_dictionary_mut(outer_res)
+        .expect("Ressourcen")
+        .set("XObject", dictionary! { "Fm1" => inner });
+    // Und jetzt zeichnet das innere Formular sich selbst.
+    let mut body = text_at(600, "Alpha").into_bytes();
+    body.extend_from_slice(b"q /Fm1 Do Q\n");
+    let inner_res = d
+        .doc
+        .get_object(inner)
+        .and_then(|o| o.as_stream())
+        .expect("Formular")
+        .dict
+        .get(b"Resources")
+        .and_then(|o| o.as_reference())
+        .expect("Ressourcen");
+    d.doc
+        .get_dictionary_mut(inner_res)
+        .expect("Ressourcen")
+        .set("XObject", dictionary! { "Fm1" => inner });
+    let stream = d
+        .doc
+        .get_object_mut(inner)
+        .and_then(|o| o.as_stream_mut())
+        .expect("Formular");
+    stream.set_content(body);
+
+    let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+    raw.extend_from_slice(b"/Span <</ActualText (Alpha)>> BDC\nq /Fm0 Do Q\nEMC\n");
+    d.set_content(&raw);
+    let bytes = d.finish();
+    assert_no_mirror_warning(&bytes, "Formular zeichnet sich selbst");
+}
+
+// ---------------------------------------------------------------------------
+// Die Decke über den Platzierungen
+// ---------------------------------------------------------------------------
+
+/// Eine Seite mit `outer` Platzierungen eines Formulars unter **einem**
+/// Spiegel; jedes davon zeichnet ein inneres Formular `inner_placements`-mal.
+/// Die Schließung zählt daraus `outer * (1 + inner_placements)` Platzierungen.
+fn many_placements(outer: usize, inner_placements: usize) -> Vec<u8> {
+    many_placements_maybe_mirrored(outer, inner_placements, true)
+}
+
+/// Dieselbe Seite, wahlweise **ohne** den Spiegel darüber — dann läuft die
+/// Schließung leer, und übrig bleibt der Aufwand des Interpreters selbst.
+fn many_placements_maybe_mirrored(
+    outer: usize,
+    inner_placements: usize,
+    mirrored: bool,
+) -> Vec<u8> {
+    let mut d = page(&[]);
+    let resources = d.resources_id;
+    let (inner, _) = add_form(&mut d, resources, "Fm1", &text_at(600, "A"));
+    let body = "q /Fm1 Do Q\n".repeat(inner_placements);
+    let (_, outer_res) = add_form(&mut d, resources, "Fm0", &body);
+    d.doc
+        .get_dictionary_mut(outer_res)
+        .expect("Ressourcen")
+        .set("XObject", dictionary! { "Fm1" => inner });
+
+    let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+    if mirrored {
+        raw.extend_from_slice(b"/Span <</ActualText (Alpha)>> BDC\n");
+    }
+    raw.extend_from_slice("q /Fm0 Do Q\n".repeat(outer).as_bytes());
+    if mirrored {
+        raw.extend_from_slice(b"EMC\n");
+    }
+    d.set_content(&raw);
+    d.finish()
+}
+
+/// Über der Decke (100 000 Platzierungen) sagt der Scan, dass er nicht mehr
+/// zugeordnet hat — statt still einen falschen Vergleich zu ziehen.
+///
+/// 10 000 × (1 + 10) = 110 000 Platzierungen aus einer Datei von wenigen
+/// Kilobyte. Ohne Decke hinge der Umfang der Schließung an nichts mehr.
+#[test]
+fn ueber_der_decke_sagt_der_scan_es_an() {
+    let (_, warnings) = analyse(&many_placements(10_000, 10));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("Formularplatzierungen") && w.contains("unvollständig")),
+        "keine Warnung über die Decke: {warnings:?}"
+    );
+}
+
+/// Und darunter (10 000 × (1 + 1) = 20 000) läuft dieselbe Seite ohne ein
+/// Wort durch — die Decke darf gewöhnliches Material nicht anfassen.
+#[test]
+fn unter_der_decke_bleibt_es_still() {
+    let (_, warnings) = analyse(&many_placements(10_000, 1));
+    assert!(
+        !warnings.iter().any(|w| w.contains("Formularplatzierungen")),
+        "Warnung unter der Decke: {warnings:?}"
+    );
+}
+
+/// Messung (ignoriert): was 10 000 Platzierungen desselben Formulars unter
+/// einem Spiegel kosten. Lauf:
+/// `cargo test -p redact-pdf --test ze_p2_spiegel -- --ignored --nocapture`
+#[test]
+#[ignore = "Messung"]
+fn mess_zehntausend_platzierungen() {
+    for (outer, inner, mirrored) in [
+        (10_000usize, 0usize, false),
+        (10_000, 0, true),
+        (10_000, 1, false),
+        (10_000, 1, true),
+        (10_000, 10, false),
+        (10_000, 10, true),
+    ] {
+        let bytes = many_placements_maybe_mirrored(outer, inner, mirrored);
+        let start = std::time::Instant::now();
+        let (_, warnings) = analyse(&bytes);
+        println!(
+            "{outer} × (1 + {inner}) Platzierungen, Spiegel {mirrored}: {:?}, \
+             {} Warnung(en), Spitzenspeicher {}",
+            start.elapsed(),
+            warnings.len(),
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap_or_default()
+                .lines()
+                .find(|l| l.starts_with("VmHWM"))
+                .unwrap_or("VmHWM: ?")
+                .trim()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Die Warnung über indirekte Verweise steht einmal
+// ---------------------------------------------------------------------------
+
+/// Eine Eigenschaftsliste, die über `/Resources /Properties` erreichbar ist,
+/// **ohne** ein eigenes Objekt zu sein, darf neben dem Spiegel indirekte
+/// Verweise führen; beim Neuschreiben inline in den Strom müssen sie
+/// entfallen, und das wird gemeldet.
+///
+/// Seit `f982c12` kann diese Meldung an derselben Datei **zweimal** entstehen:
+/// einmal in der Seitenschleife, einmal in der Formularschleife (und ein
+/// drittes Mal für die nach der Formularschleife nachgereichten Abschnitte).
+/// Hier steht dieselbe Liste im Seitenstrom **und** im Formular darunter, und
+/// beide verlieren ihren Spiegel durch dieselbe Schwärzung. Der Bericht darf
+/// den Satz trotzdem nur einmal führen.
+///
+/// `z8_warnungen_entdoppelt.rs` deckt diesen Weg nicht ab: dort geht es um
+/// `ScanResult::warn` und `ops::note`, nicht um `redact::push_warning`.
+fn shared_property_list(d: &mut Doc, holder: ObjectId, mirror: &str) {
+    let target = d.add(Object::string_literal("Beiwerk"));
+    let list = dictionary! {
+        "ActualText" => Object::string_literal(mirror.to_string()),
+        "Foo" => Object::Reference(target),
+    };
+    let holder_dict = d.doc.get_dictionary_mut(holder).expect("Ressourcen");
+    holder_dict.set("Properties", dictionary! { "MC0" => list });
+}
+
+#[test]
+fn warnung_ueber_indirekte_verweise_steht_genau_einmal() {
+    let lie = format!("Zahlung an {SECRET}");
+    let mut d = page(&[]);
+    let resources = d.resources_id;
+    let (_, form_resources) = add_form(
+        &mut d,
+        resources,
+        "Fm0",
+        &format!("/Span /MC0 BDC\n{}EMC\n", text_at(600, SECRET)),
+    );
+    shared_property_list(&mut d, form_resources, &lie);
+    shared_property_list(&mut d, resources, &lie);
+
+    let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+    raw.extend_from_slice(b"/Span /MC0 BDC\nq /Fm0 Do Q\nEMC\n");
+    d.set_content(&raw);
+    let bytes = d.finish();
+
+    let (runs, _) = analyse(&bytes);
+    let redactions = redactions_for(&runs, SECRET);
+    assert!(!redactions.is_empty(), "nichts zu schwärzen");
+    // **Nicht** auf `leaks` geprüft: der Spiegel bleibt in dieser Bauart im
+    // Ressourcenverzeichnis stehen — siehe
+    // `befund_direkte_eigenschaftsliste_behaelt_ihren_spiegel` weiter unten.
+    // Hier geht es allein um die Zahl der Warnungen.
+    let (_, warnings) = pipeline(&bytes, &redactions);
+
+    let hits: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("indirekte Verweise"))
+        .collect();
+    assert_eq!(hits.len(), 1, "{warnings:?}");
+    assert!(hits[0].contains("/Foo"), "{}", hits[0]);
+}
+
+/// **Neuer Befund (offen, Fix-Runde 5).** Eine Eigenschaftsliste, die als
+/// **direktes** Dictionary in `/Resources /Properties` steht, verliert ihren
+/// Spiegel nur im Strom — im Ressourcenverzeichnis bleibt er stehen.
+///
+/// `mirror_property_list` liefert für sie `property_id == None` (sie ist kein
+/// eigenes Objekt), und `mirrors_to_clear` schickt sie deshalb denselben Weg
+/// wie eine inline im Strom stehende Liste: `rebuild_marked` schreibt die
+/// bereinigte Fassung inline an die Stelle des `/MC0`. Der Eintrag in den
+/// Ressourcen wird dabei ausdrücklich nicht angefasst („den andere Abschnitte
+/// vielleicht noch brauchen“) — und dort steht der Klartext weiter in der
+/// Datei. Ein Betrachter zeigt ihn nicht mehr; `leaks` findet ihn:
+///
+/// ```text
+/// Objekt 2 0/Properties/MC0/ActualText [Zeichenkette, literal]: …Zahlung an DE89 …
+/// ```
+///
+/// Ohne Warnung, mit Rückgabewert 0. Die Korrektur braucht die **Objekt-Id
+/// des Verzeichnisses**, in dem die Liste steht; die kennt heute weder
+/// `content::mirror_property_list` (es sieht nur `&Dictionary`) noch
+/// `content::page_resources` (es mischt die geerbten Verzeichnisse zu einem
+/// neuen zusammen). Das ist mehr als eine kleinste Änderung und deshalb
+/// hier als Beleg hinterlegt statt beiläufig behoben.
+///
+/// Lauf: `cargo test -p redact-pdf --test ze_p2_spiegel -- --ignored`.
+#[test]
+#[ignore = "Befund: direkte Eigenschaftsliste in /Properties behält ihren Spiegel"]
+fn befund_direkte_eigenschaftsliste_behaelt_ihren_spiegel() {
+    let lie = format!("Zahlung an {SECRET}");
+    let mut d = page(&[]);
+    let resources = d.resources_id;
+    let list = dictionary! { "ActualText" => Object::string_literal(lie.clone()) };
+    d.doc
+        .get_dictionary_mut(resources)
+        .expect("Ressourcen")
+        .set("Properties", dictionary! { "MC0" => list });
+
+    let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+    raw.extend_from_slice(b"/Span /MC0 BDC\n");
+    raw.extend_from_slice(text_at(600, SECRET).as_bytes());
+    raw.extend_from_slice(b"EMC\n");
+    d.set_content(&raw);
+    let bytes = d.finish();
+
+    let (runs, _) = analyse(&bytes);
+    let redactions = redactions_for(&runs, SECRET);
+    assert!(!redactions.is_empty(), "nichts zu schwärzen");
+    let (out, warnings) = pipeline(&bytes, &redactions);
+    let found = leaks(&out, SECRET);
+    assert!(found.is_empty(), "Warnungen {warnings:?}, Lecks {found:?}");
 }

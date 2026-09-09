@@ -372,6 +372,16 @@ impl HitOutcome {
     }
 }
 
+/// So viele ungeprüfte Stellen nennt der Satz beim Namen; der Rest wird
+/// gezählt.
+///
+/// [`redact_pdf::LeakCheck::unchecked`] darf bis zu 51 Zeilen tragen (50
+/// einzelne Ströme plus eine Summenzeile). Alle in die Statuszeile zu
+/// schreiben hieße, sie unlesbar zu machen; gar keine zu nennen hieße, die
+/// Ursache raten zu lassen. Drei zeigen, **worum** es geht — die Zahl davor
+/// sagt, wie viele es sind.
+const MAX_NAMED_PLACES: usize = 3;
+
 /// Ergebnis der Nachprüfung über die geschriebene Datei.
 ///
 /// Siehe [`AppState::check_export`].
@@ -379,7 +389,7 @@ impl HitOutcome {
 pub struct ExportCheck {
     /// Die Ausgabe ließ sich nicht zurücklesen — dann gibt es keine Aussage.
     pub unreadable: Option<String>,
-    /// Zahl der wirklich gesuchten (verschiedenen) Texte.
+    /// Zahl der wirklich gesuchten (verschiedenen) Schreibweisen.
     pub checked: usize,
     /// Texte, die **noch** in der Ausgabe stehen.
     pub leaking: Vec<String>,
@@ -388,21 +398,33 @@ pub struct ExportCheck {
     /// Texte jenseits der Decke ([`redact_core::MAX_CHECK_NEEDLES`]) — sie
     /// wurden nicht gesucht, und der Satz sagt das.
     pub skipped: usize,
-    /// Texte, die **auch** in einer bewusst stehen gelassenen Zeile stehen —
-    /// abgewählt, durch die Negativliste geschützt oder selbst ein
-    /// Schutzeintrag. Sie werden nicht gesucht: dass sie in der Ausgabe
-    /// stehen, ist eine Entscheidung und kein Leck.
+    /// Schreibweisen, die sich mit einer bewusst stehen gelassenen Zeile
+    /// decken — abgewählt, durch die Negativliste geschützt oder selbst ein
+    /// Schutzeintrag. Dass sie in der Ausgabe stehen, ist eine Entscheidung
+    /// und kein Leck.
+    ///
+    /// Zwei Wege führen hierher, und beide sind dasselbe Urteil:
+    ///
+    /// 1. **wörtlich derselbe Text** steht in einer stehen gelassenen Zeile —
+    ///    dann wird gar nicht erst gesucht ([`AppState::plan_export_check`]);
+    /// 2. gesucht wurde, und getroffen hat **nur die Fassung ohne Leerraum**
+    ///    ([`redact_pdf::LeakCheck::literal`]) einer stehen gelassenen Zeile
+    ///    derselben Normalform ([`ExportCheckPlan::kept_forms`]).
     pub kept: usize,
     /// Die Decke, die für diesen Lauf galt — im Regelfall
     /// [`redact_core::MAX_CHECK_NEEDLES`]; ein Test darf sie tiefer legen
     /// ([`ExportCheckPlan::run_within`]). Der Satz nennt sie, damit der
     /// Nutzer weiß, wo die Grenze liegt, und nicht nur, dass es eine gibt.
     pub limit: usize,
-    /// Stellen der Datei, die die Suche **nicht** durchsucht hat, weil das
-    /// Entpackbudget nicht reichte ([`redact_pdf::LeakCheck::unchecked`]) —
-    /// je Stelle ein Satz. Nicht leer heißt: „nicht gefunden“ ist keine
-    /// Aussage, und der Satz sagt das. Zählt für die Warnungen wie ein Fund,
-    /// nicht als „steht NOCH“ — gesehen wurde ja nichts.
+    /// Stellen der Datei, die die Suche **nicht** durchsucht hat
+    /// ([`redact_pdf::LeakCheck::unchecked`]) — je Stelle ein Satz, und
+    /// jeder nennt **seinen eigenen** Grund: das Entpackbudget reichte
+    /// nicht, der Lader lehnte die Vorprüfung ab, oder der Objektgraph war
+    /// tiefer, als die Suche geht. Nicht leer heißt: „nicht gefunden“ ist
+    /// keine Aussage, und der Satz sagt das — mit den Stellen, nicht mit
+    /// einer angenommenen Ursache ([`ExportCheck::sentence`]). Zählt für die
+    /// Warnungen wie ein Fund, nicht als „steht NOCH“ — gesehen wurde ja
+    /// nichts.
     pub unchecked: Vec<String>,
 }
 
@@ -413,7 +435,7 @@ impl ExportCheck {
     }
 
     /// Ist die Antwort unvollständig, weil Stellen der Datei ungeprüft
-    /// blieben (Entpackgrenze)?
+    /// blieben? Warum, sagt jede Stelle selbst ([`ExportCheck::unchecked`]).
     pub fn incomplete(&self) -> bool {
         !self.unchecked.is_empty()
     }
@@ -482,9 +504,17 @@ impl ExportCheck {
             )
         };
         let unchecked = if self.incomplete() {
+            let places = self.unchecked_places();
+            // Die Stellen kommen aus `redact-pdf` und bringen ihre eigene
+            // Zeichensetzung mit; ein zweiter Punkt dahinter sähe aus wie ein
+            // Tippfehler.
+            let dot = if places.ends_with(['.', '!', '?']) {
+                ""
+            } else {
+                "."
+            };
             format!(
-                " {} Stelle(n) wurden nicht geprüft (Entpackgrenze) — die Antwort ist \
-                 unvollständig.",
+                " {} Stelle(n) wurden nicht geprüft — die Antwort ist unvollständig: {places}{dot}",
                 self.unchecked.len()
             )
         } else {
@@ -502,8 +532,8 @@ impl ExportCheck {
         };
         let kept = if self.kept > 0 {
             format!(
-                " {} Text(e) stehen auch in einer abgewählten oder geschützten Zeile und \
-                 wurden deshalb nicht gesucht.",
+                " {} Text(e) decken sich mit einer abgewählten oder geschützten Zeile und \
+                 zählen deshalb nicht als Leck.",
                 self.kept
             )
         } else {
@@ -513,6 +543,25 @@ impl ExportCheck {
             "{head}{unchecked}{skipped}{kept} Geprüft ist genau diese Liste, nicht die Datei.{}",
             self.hand_made()
         )
+    }
+
+    /// Die ungeprüften Stellen, wie [`redact_pdf::LeakCheck::unchecked`] sie
+    /// liefert — jede mit **ihrem** Grund, höchstens
+    /// [`MAX_NAMED_PLACES`] genannt.
+    ///
+    /// Der Satz sagte bis Fix-Runde 5 „nicht geprüft (Entpackgrenze)“ und
+    /// behauptete damit eine Ursache, die längst nicht die einzige ist: die
+    /// Objektsicht meldet auch „Verschachtelungstiefe 32 erreicht“, und die
+    /// Vorprüfung des Laders meldet ihre eigene Ablehnung. Eine Ursache zu
+    /// nennen, die nicht feststeht, führt an der falschen Stelle nachsehen
+    /// — die Stellen selbst wissen es besser.
+    fn unchecked_places(&self) -> String {
+        let named = self.unchecked.len().min(MAX_NAMED_PLACES);
+        let mut text = self.unchecked[..named].join("; ");
+        if let Some(rest) = self.unchecked.len().checked_sub(named).filter(|r| *r > 0) {
+            text.push_str(&format!("; … und {rest} weitere"));
+        }
+        text
     }
 
     /// Der Satz über die Rechtecke, zu denen es nichts zu suchen gibt.
@@ -535,8 +584,20 @@ impl ExportCheck {
 /// Der Plan ist reine Daten und wandert auf den Thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportCheckPlan {
-    /// Die zu suchenden Texte, jeder einmal, in der Reihenfolge der Liste.
+    /// Die zu suchenden Texte, jede **Schreibweise** einmal, in der
+    /// Reihenfolge der Liste — siehe [`AppState::plan_export_check`].
     pub needles: Vec<String>,
+    /// Je Begriff: trägt eine bewusst stehen gelassene Zeile **dieselbe
+    /// Normalform** ([`redact_pdf::squeeze`])?
+    ///
+    /// Gleiche Länge und Reihenfolge wie [`ExportCheckPlan::needles`]. `true`
+    /// heißt: ein Fund, den **nur** die Fassung ohne Leerraum gebracht hat
+    /// ([`redact_pdf::LeakCheck::literal`] ist dort `false`), kann diese
+    /// Zeile sein und zählt nicht als Leck — ein **wörtlicher** Fund zählt
+    /// sehr wohl. Fehlt der Eintrag (ein Plan, den ein Test von Hand baut),
+    /// gilt `false`: dann ist jeder Fund ein Leck, und das ist die sichere
+    /// Seite.
+    pub kept_forms: Vec<bool>,
     /// Siehe [`ExportCheck::without_text`].
     pub without_text: usize,
     /// Siehe [`ExportCheck::kept`].
@@ -556,6 +617,7 @@ impl Default for ExportCheckPlan {
     fn default() -> Self {
         Self {
             needles: Vec::new(),
+            kept_forms: Vec::new(),
             without_text: 0,
             kept: 0,
             max_decompressed_bytes: redact_pdf::document::Limits::default().max_decompressed_bytes,
@@ -572,7 +634,9 @@ impl ExportCheckPlan {
     ///
     /// ## Die Decke: Begriffe, dieselbe Zahl wie `--check-leaks`
     ///
-    /// Gesucht werden höchstens [`redact_core::MAX_CHECK_NEEDLES`] Begriffe;
+    /// Gesucht werden höchstens [`redact_core::MAX_CHECK_NEEDLES`] Begriffe
+    /// — gezählt werden **Schreibweisen**, denn jede ist ein eigenes Muster
+    /// im Automaten und kostet eigene Arbeit;
     /// was darüber liegt, zählt [`ExportCheck::skipped`] und steht im Satz.
     /// Die Kosten der Suche sind Begriffe × **entpackte** Streambytes — und
     /// beide Faktoren sind gedeckelt: die Begriffe hier, die Bytes durch
@@ -635,13 +699,38 @@ impl ExportCheckPlan {
         // Mit dem Entpackbudget des Ladens: was die Suche deshalb nicht
         // durchsucht, kommt als `unchecked` zurück und steht im Satz.
         let found = redact_pdf::leaks_many_within(&bytes, &needles, self.max_decompressed_bytes);
-        let leaking = found
-            .findings
-            .into_iter()
-            .zip(needles.iter())
-            .filter(|(hits, _)| !hits.is_empty())
-            .map(|(_, needle)| needle.to_string())
-            .collect();
+
+        // Die zweite Hälfte der Entscheidung „Leck oder bewusst stehen
+        // gelassen“ — die erste fiel im Plan, wörtlich.
+        //
+        // Ein **wörtlicher** Fund ist immer ein Leck: die Schreibweise steht
+        // Zeichen für Zeichen in der Ausgabe, gleich was daneben abgewählt
+        // ist. Hat dagegen nur die Fassung **ohne Leerraum** getroffen und
+        // trägt eine stehen gelassene Zeile dieselbe Normalform, kann der
+        // Fund genau diese Zeile sein — dann ist er keine Aussage über ein
+        // Leck (Befund G5-B1).
+        //
+        // Bis Fix-Runde 5 fiel diese Entscheidung im Plan, also **vor** der
+        // Suche und ohne zu wissen, was getroffen hat: eine geschwärzte
+        // Zeile, deren Rechteck danebenging, galt als stehen gelassen und
+        // wurde nie gesucht — ein echtes Leck ohne ein Wort (Befund P5-2).
+        // Getrennt werden kann beides erst am Fund selbst
+        // ([`redact_pdf::LeakCheck::literal`]).
+        let mut kept = self.kept;
+        let mut leaking = Vec::new();
+        for (index, (hits, needle)) in found.findings.iter().zip(needles.iter()).enumerate() {
+            if hits.is_empty() {
+                continue;
+            }
+            // Fehlt die Marke, gilt der Fund als wörtlich — ein Leck zu
+            // verschweigen wäre der teurere Irrtum.
+            let literal = found.literal.get(index).copied().unwrap_or(true);
+            if !literal && self.kept_forms.get(index).copied().unwrap_or(false) {
+                kept += 1;
+                continue;
+            }
+            leaking.push((*needle).to_string());
+        }
 
         ExportCheck {
             unreadable: None,
@@ -649,7 +738,7 @@ impl ExportCheckPlan {
             leaking,
             without_text: self.without_text,
             skipped,
-            kept: self.kept,
+            kept,
             limit,
             unchecked: found.unchecked,
         }
@@ -2750,19 +2839,57 @@ impl AppState {
     /// trägt alle Texte, damit der Lauf sagen kann, wie viele er nicht
     /// gesucht hat.
     ///
-    /// ## Dieselbe Normalform wie die Suche
+    /// ## Gesucht wird jede Schreibweise, entschieden wird je Schreibweise
     ///
-    /// Die Entscheidung „gesucht oder stehen gelassen“ fällt auf dem Text
-    /// **ohne Leerraum** ([`redact_pdf::squeeze`]) — derselben Normalform,
-    /// auf der [`redact_pdf::leaks_many`] sucht. Vorher verglich sie
-    /// wörtlich: dieselbe IBAN einmal als „DE89 3704 …“ (geschwärzt) und
-    /// einmal als „DE893704…“ (abgewählt) waren zwei Texte, die Suche fand
-    /// die stehen gelassene Schreibweise auch gequetscht, und die
-    /// Nachprüfung meldete „steht NOCH in der Ausgabe“ über eine Datei, die
-    /// genau so gewollt war (Befund G5-B1). Gesucht wird der Originaltext
-    /// der ersten Zeile seiner Normalform. Ein Teilstring bleibt ein
-    /// eigener Text: „DE89“ geschwärzt und die ganze IBAN abgewählt ist
-    /// weiter ein Fund — wörtlich richtig.
+    /// Gesucht wird **jede** Schreibweise, die in einer geschwärzten Zeile
+    /// steht — nicht eine je Normalform. Fix-Runde 4 fasste Schreibweisen
+    /// derselben Normalform ([`redact_pdf::squeeze`]) zu **einem** Begriff
+    /// zusammen und suchte den Originaltext der **ersten** Zeile. Trug der
+    /// keinen Leerraum, war [`redact_pdf::leaks_many`]s gequetschte Fassung
+    /// `None` (ein Begriff ohne Leerraum wird nur wörtlich gesucht) — und
+    /// die zweite Schreibweise stand ungesucht in der Ausgabe: gemessen
+    /// siebenmal, gemeldet wurde „1 gesuchte(r) Text steht nicht mehr in
+    /// der Ausgabe“ (Befund P5-1). Ob es auffiel, hing an der Reihenfolge
+    /// der Trefferliste.
+    ///
+    /// Die Decke ([`redact_core::MAX_CHECK_NEEDLES`]) zählt damit
+    /// **Schreibweisen**, nicht Normalformen — sie deckelt, was die Suche
+    /// kostet, und das sind die Muster, die der Automat trägt (Begriffe ×
+    /// entpackte Bytes, siehe [`ExportCheckPlan::run`]). Eine Decke auf
+    /// Normalformen zählte die falsche Einheit: hundert Schreibweisen einer
+    /// Normalform wären ein Begriff und kosteten doch hundert.
+    ///
+    /// ## Wann eine stehen gelassene Zeile eine Schreibweise deckt
+    ///
+    /// **Wörtlich** — und dann wird gar nicht erst gesucht: derselbe Text in
+    /// zwei Zeilen, eine geschwärzt, eine abgewählt, ist eine Entscheidung
+    /// und kein Leck (Befund 5 aus Fix-Runde 4). Gesagt wird es trotzdem
+    /// ([`ExportCheck::kept`]).
+    ///
+    /// **Auf der Normalform** fällt die Entscheidung **nicht** hier, sondern
+    /// am Fund ([`ExportCheckPlan::run_within`]): der Plan merkt sich nur, ob
+    /// eine stehen gelassene Zeile dieselbe Normalform trägt
+    /// ([`ExportCheckPlan::kept_forms`]), gesucht wird die Schreibweise so
+    /// oder so. Denn ob ein Rest die stehen gelassene Zeile ist, weiß man
+    /// erst, wenn man weiß, **was** getroffen hat: nur die Fassung ohne
+    /// Leerraum (dann kann es diese Zeile sein) oder der Text Zeichen für
+    /// Zeichen (dann ist es ein Leck).
+    ///
+    /// Die beiden Irrtümer davor, beide an derselben IBAN:
+    ///
+    /// * Vor Fix-Runde 4 verglich die Entscheidung nur wörtlich. „DE89 3704
+    ///   …“ geschwärzt, „DE893704…“ abgewählt: gesucht wurde die Schreibweise
+    ///   mit Leerraum, [`redact_pdf::leaks_many`] sucht sie **auch**
+    ///   gequetscht, traf die abgewählte Zeile — und die Nachprüfung meldete
+    ///   „steht NOCH in der Ausgabe“ über eine Datei, die genau so gewollt
+    ///   war (Befund G5-B1).
+    /// * Fix-Runde 4 deckte daraufhin die ganze Normalform, und zwar in
+    ///   **beiden** Richtungen und **vor** der Suche. Eine geschwärzte Zeile,
+    ///   deren Rechteck danebenging, galt damit als bewusst stehen gelassen
+    ///   und wurde nie gesucht — ein echtes Leck ohne ein Wort (Befund P5-2).
+    ///
+    /// Ein Teilstring bleibt ein eigener Text: „DE89“ geschwärzt und die
+    /// ganze IBAN abgewählt ist weiter ein Fund — wörtlich richtig.
     pub fn plan_export_check(&self, summary: &HitSummary) -> ExportCheckPlan {
         let text_of = |entry: &AnnotatedRegion| {
             entry
@@ -2776,25 +2903,29 @@ impl AppState {
 
         // Erst die stehen gelassenen Texte, dann die zu suchenden — die Frage
         // „steht er auch in einer stehen gelassenen Zeile?“ braucht die ganze
-        // Liste, nicht nur die Zeilen davor.
+        // Liste, nicht nur die Zeilen davor. Beides wird gebraucht: die
+        // Schreibweise wörtlich und ihre Normalform.
         let mut kept_texts: BTreeSet<String> = BTreeSet::new();
+        let mut kept_squeezed: BTreeSet<String> = BTreeSet::new();
         for (index, entry) in self.regions.iter().enumerate() {
             let kept = matches!(
                 summary.outcome(index),
                 HitOutcome::Disabled | HitOutcome::Blocked | HitOutcome::Protecting
             );
             if let Some(text) = text_of(entry).filter(|_| kept) {
-                kept_texts.insert(redact_pdf::squeeze(&text));
+                kept_squeezed.insert(redact_pdf::squeeze(&text));
+                kept_texts.insert(text);
             }
         }
 
         let mut needles: Vec<String> = Vec::new();
+        let mut kept_forms: Vec<bool> = Vec::new();
         let mut kept = 0usize;
         let mut without_text = 0usize;
-        // Je Text eine Entscheidung — `seen` merkt sich, welche schon
-        // gefallen ist. Ein `retain` an `kept_texts` täte das nicht: nach der
-        // ersten geschwärzten Zeile wäre der Text dort weg, und die zweite
-        // landete in `needles`.
+        // Je **Schreibweise** eine Entscheidung — `seen` merkt sich, welche
+        // schon gefallen ist. Ein `retain` an `kept_texts` täte das nicht:
+        // nach der ersten geschwärzten Zeile wäre der Text dort weg, und die
+        // zweite landete in `needles`.
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for (index, entry) in self.regions.iter().enumerate() {
             if !summary.outcome(index).is_redacted() {
@@ -2802,13 +2933,16 @@ impl AppState {
             }
             match text_of(entry) {
                 Some(text) => {
-                    let key = redact_pdf::squeeze(&text);
-                    if !seen.insert(key.clone()) {
+                    if !seen.insert(text.clone()) {
                         continue;
                     }
-                    if kept_texts.contains(&key) {
+                    // Wörtlich deckt eine stehen gelassene Zeile sofort —
+                    // dann gibt es nichts zu suchen. Trägt sie nur dieselbe
+                    // Normalform, wird gesucht und erst am Fund entschieden.
+                    if kept_texts.contains(&text) {
                         kept += 1;
                     } else {
+                        kept_forms.push(kept_squeezed.contains(&redact_pdf::squeeze(&text)));
                         needles.push(text);
                     }
                 }
@@ -2818,6 +2952,7 @@ impl AppState {
 
         ExportCheckPlan {
             needles,
+            kept_forms,
             without_text,
             kept,
             max_decompressed_bytes: self.config.limits.max_decompressed_bytes,

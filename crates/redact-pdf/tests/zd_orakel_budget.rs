@@ -320,16 +320,46 @@ fn bomb() -> Vec<u8> {
     e.finish().expect("deflate")
 }
 
-/// `VmHWM` aus `/proc/self/status`, in Byte — der Spitzenwert des Prozesses.
-fn peak_rss_bytes() -> u64 {
+/// Der Spitzenwert des Prozesses in Byte — `VmHWM` aus `/proc/self/status`.
+///
+/// `None` auf Zielen ohne `/proc` (Windows, macOS). Die Zusicherung „die
+/// Bombe wurde nicht entpackt“ steht dort auf den beiden anderen Beinen, die
+/// überall tragen: der Lauf bleibt in seiner Frist, und das Ergebnis stimmt
+/// (nichts gefunden, der Strom in `unchecked`). Ein Entpacken von 1 GiB
+/// reißt die Frist auch ohne Speichermesser.
+///
+/// Unter Linux bleibt die Messung **scharf**: `/proc/self/status` gibt es
+/// dort immer, ein Fehlen ist ein Fehler und kein Grund, die Prüfung
+/// wegzulassen. Vorher las diese Funktion auf **jedem** Ziel `/proc` und
+/// brach mit `expect` ab — der Windows-Job der CI war seit `f982c12` rot
+/// („The system cannot find the path specified“, Rückgabewert 101), obwohl
+/// der geprüfte Code dort in Ordnung war.
+#[cfg(target_os = "linux")]
+fn peak_rss_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
-    status
-        .lines()
-        .find_map(|l| l.strip_prefix("VmHWM:"))
-        .and_then(|v| v.trim().strip_suffix("kB"))
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(|kb| kb * 1024)
-        .expect("VmHWM")
+    Some(
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmHWM:"))
+            .and_then(|v| v.trim().strip_suffix("kB"))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+            .expect("VmHWM"),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
+/// Was der Kindprozess über seine Speichermessung sagt — der Elternprozess
+/// liest daran ab, dass wirklich gemessen wurde.
+fn peak_note(peak: Option<u64>) -> String {
+    match peak {
+        Some(bytes) => format!("VmHWM {} MB", bytes / 1_000_000),
+        None => "ohne Speichermessung (kein /proc auf diesem Ziel)".to_string(),
+    }
 }
 
 /// Umgebungsvariable, mit der sich der Bombentest als Kindprozess erkennt.
@@ -367,9 +397,17 @@ fn eine_flate_bombe_bleibt_im_budget() {
         output.status,
         String::from_utf8_lossy(&output.stdout)
     );
+    // Der Kindprozess muss wirklich gelaufen sein und seine Zeile gedruckt
+    // haben — unter Linux mit Speicherwert, sonst mit dem Vermerk, dass es
+    // ihn hier nicht gibt.
+    let marke = if cfg!(target_os = "linux") {
+        "VmHWM"
+    } else {
+        "ohne Speichermessung"
+    };
     assert!(
-        stderr.contains("VmHWM"),
-        "der Kindprozess hat nicht gemessen: {stderr}"
+        stderr.contains(marke),
+        "der Kindprozess hat nicht gemessen (erwartet „{marke}“): {stderr}"
     );
 }
 
@@ -469,18 +507,20 @@ fn bombe_im_kindprozess() {
         let peak = peak_rss_bytes();
         eprintln!(
             "Bombe (objstm={objstm}): {} MiB entpackt, {} Byte gepackt, Budget {} MiB: {elapsed:?}, \
-             VmHWM {} MB (vorher {} MB)",
+             {} (vorher {})",
             BOMB_BYTES / MIB,
             packed.len(),
             budget / MIB,
-            peak / 1_000_000,
-            before / 1_000_000
+            peak_note(peak),
+            peak_note(before)
         );
-        assert!(
-            peak < 100_000_000,
-            "objstm={objstm}: VmHWM {} MB — die Bombe wurde entpackt",
-            peak / 1_000_000
-        );
+        if let Some(peak) = peak {
+            assert!(
+                peak < 100_000_000,
+                "objstm={objstm}: VmHWM {} MB — die Bombe wurde entpackt",
+                peak / 1_000_000
+            );
+        }
         assert!(
             elapsed < deadline,
             "objstm={objstm}: {elapsed:?} — die Bombe wurde entpackt"

@@ -33,11 +33,163 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 Bereich: `git log v0.6.0..HEAD`.
 
-Vier Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
+Fünf Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
 und Doku mit demselben Maßstab: jede Angabe hier stammt aus einem Lauf des
-gebauten Binaries, nicht aus dem Quelltext. Zuletzt (Runde 4) bekommt die
-Nachprüfung ein Budget, und die Befunde der Gegenprüfung der Runde 3 —
-am Code wie an der Doku — werden geschlossen.
+gebauten Binaries, nicht aus dem Quelltext. Zuletzt (Runde 5) hört das Orakel
+auf, an einer unbekannten Filterstufe und an seiner Verschachtelungstiefe still
+aufzugeben, und die Doku sagt wieder, was das Programm tut.
+
+### Fix-Runde 5: was die Gegenprüfung der Runde 4 noch fand
+
+Fünf Gegenprüfer lasen die Korrekturen der Runde 4 mit eigenem Material gegen.
+**Vier stille Lecks** blieben: ein unbekanntes Filterglied nahm dem Orakel die
+ganze Kette; die Objektsicht brach ab Verschachtelungstiefe 33 stumm ab;
+eingebettete Annotationsteile und tiefe Feldwerte behielten ihren Klartext; und
+die Oberfläche suchte nur die erste Schreibweise. Dazu zwei falsche Alarme und
+neun Stellen, an denen die Doku mehr oder anderes sagte als der Code.
+
+* **Der Rückgabewert 3 hat drei Bedeutungen, nicht zwei.** Seit der Runde 4
+  endet `--check-leaks` **auch ohne Fund** mit 3, wenn eine Stelle ungeprüft
+  blieb — das stand in `main.rs`, aber `--help` sagte weiter „Zwei Fälle“,
+  `SECURITY.md` „hat **zwei** Bedeutungen“ und die README-Tabelle nannte nur
+  den Fund. Wer danach ein Skript baute, hielt `3` ohne Fund für unmöglich.
+  Alle drei Texte nennen jetzt den dritten Fall samt seinen beiden Ursachen
+  (Entpackgrenze, Verschachtelungstiefe), und
+  `der_dritte_fall_des_rueckgabewerts_drei_steht_ueberall` hält sie zusammen —
+  einschließlich des `--help`-Zitats in `SECURITY.md`, das jetzt Zeile für Zeile
+  gegen den echten Hilfetext geprüft wird.
+* **Die Bombentabelle war nicht reproduzierbar** (siehe oben, Runde 4): 345 MB
+  und 882 MB für ein entpacktes GiB. Neu gemessen und mit dem Verfahren
+  beschrieben.
+* **Der Spitzenspeicher hängt am größten Einzelstrom, nicht am Budget.**
+  `SECURITY.md` nannte „1024 MB“ und ließ offen, was das für den Bedarf heißt.
+  Gemessen an einer 1 020 KiB großen Datei mit einem 1-GiB-Strom, mit den
+  **Vorgabewerten**: `--check-leaks` endet mit Rückgabewert 0 und einem `VmHWM`
+  von 2 172 628 kB ≈ 2,1 GiB — dieselbe Spitze wie beim Schwärzen
+  (2 172 312 kB), also rund das Doppelte des größten Einzelstroms. Steht in der
+  Grenzentabelle.
+* **Ein Kostensatz, der den abgeschafften Zustand beschrieb.** `--help`, README
+  und die Fehlermeldung in `check.rs` sagten „Jeder Begriff kostet einen
+  Vergleich über die ganze Datei“ — seit Runde 4 kostet 1 000 Begriffe kaum mehr
+  als einer. Die Decke von 1 000 bleibt, aber mit ihrem heutigen Grund und
+  dessen Messung: der Automat wächst linear mit der Liste (1,0 MB bei 1 000
+  Begriffen, 7,1 MB bei 10 000, 68 MB bei 100 000, **675 MB** bei einer Million,
+  dazu 25 s allein für seinen Bau), und jeder Begriff bekommt eine eigene Zeile
+  im Bericht.
+* **`docs/pruefung.txt` war nur zur Hälfte gebunden.** `tests/belege.rs` verglich
+  die `GEFUNDEN`/`nicht gefunden`-Zeilen, den Rückgabewert und die Fassung — die
+  Dateigrößen und die Fundstellenzeilen nicht. Die Mutationen „1862“→„1863“ und
+  „(Objekt 4 0)“→„(Objekt 9 0)“ blieben grün, obwohl `check-preview.py` in
+  seinem Kopf zusagte, `belege.rs` halte das fest. Jetzt wird der **ganze
+  Berichtsblock** verglichen; beide Mutationen sind rot.
+* **Die Zahl der Prüfungen in `check-preview.py` ist gebunden.** Die README
+  nannte „36 Prüfungen“, das Skript meldete 54.
+  `die_zahl_der_pruefungen_steht_im_readme` liest die letzte Zeile des
+  Skriptlaufs und verlangt genau dieses `N` in der README.
+* **Zwei ungebundene „1 000“ in diesem Verlauf** — eine davon ausgerechnet in dem
+  Satz, der die Bindung ankündigt — liest jetzt
+  `the_needle_ceiling_is_one_number_in_code_help_and_docs` mit.
+* **Reste.** `crates/redact-cli/Cargo.toml` sagte noch „Windows hat kein
+  Gegenstück“ (es gibt eines, `WerAddExcludedApplication`, nur ist es nicht
+  umgesetzt und steht nicht in libc). `--help` nannte `redact_pdf::leaks` statt
+  `leaks_many_within`. Die 16-MB-Zeile in `SECURITY.md` liest sich jetzt als
+  das, was sie ist — eine Grenze der **Vorprüfung** für Ketten, die nicht reines
+  Flate sind (nachgemessen: 17 MB `ASCII85Decode` → Rückgabewert 1; dieselben
+  17 MB als `ASCIIHexDecode` oder `RunLengthDecode` laufen durch, weil die
+  Vorprüfung sie gar nicht auspackt). Und der Satz zu `ptrace` sagt jetzt
+  „unter Linux“.
+* **Der Rat am Ende einer unvollständigen Prüfung war falsch geworden.**
+  „mehr davon packt `--max-decompressed-mb` aus“ half gegen die
+  Verschachtelungstiefe nichts. Der Satz nennt jetzt beide Ursachen und sagt,
+  welche der Schalter erreicht (`ze_p4_check_leaks_grenzen::tiefe_33_…`, jetzt
+  scharf statt `#[ignore]`).
+
+* **Das Leck-Orakel verlor den entzifferbaren Anfang einer Filterkette.** War
+  ein späteres Glied unbekannt, warf es die ganze Kette weg: Klartext im
+  Flate-Teil von `[/ASCIIHexDecode /FlateDecode /DCTDecode]` wurde nicht mehr
+  gefunden — das Orakel fand damit **weniger** als vor der letzten Runde, und
+  an ihm messen alle anderen Tests. Es dekodiert jetzt so weit, wie es kommt,
+  und nennt in der Fundstelle den Filter, an dem es stehen blieb. Der Schwärzer
+  bleibt streng: einen halb dekodierten Strom liest er nie als Seiteninhalt
+  (`ze_p2_seitenschleife::halb_dekodierter_strom_wird_nie_seiteninhalt`).
+* **Die Objektsicht bricht bei Verschachtelungstiefe 32 ab — und sagt es
+  jetzt.** Ein oktal maskierter Text in 33 verschachtelten Arrays bekam
+  „nicht gefunden“ und Rückgabewert 0, obwohl keine Sicht ihn gelesen hatte;
+  bei 32 Ebenen wurde derselbe Text gefunden. Der Abbruch steht jetzt mit
+  Objektpfad in der `NICHT GEPRÜFT`-Liste (Rückgabewert 3). Die Grenze bleibt
+  bei 32, gemessen: Tiefe 99 bei Breite 1 000 kostet 35,4 ms gegen 57,9 ms
+  bei einer Grenze von 100 — bezahlbar, aber ohne Nutzen.
+* **`ASCII85Decode` lehnte einen Strom ab, der exakt ins Restbudget passte.**
+  Die Prüfung unterstellte jeder Fünfergruppe vier Ausgabebytes; die letzte
+  liefert eins bis drei. Ergebnis: Rückgabewert 3 („nicht geprüft“) an
+  harmlosem Material, und die Datei verlor zusätzlich die Schriftdekoder-Sicht.
+  Alle fünf Filter nehmen jetzt nachweislich genau die Grenze an.
+* **`--check-leaks` findet UTF-16LE-Bytes auch innerhalb eines Stroms**, nicht
+  nur in einem Zeichenketten-Objekt. Kosten unter der Messstreuung (8 MiB
+  entpackt, 200 Begriffe: 31,2–32,2 ms vorher, 29,3–34,4 ms nachher).
+* **Drei Klartexte an Annotationen, die der Graphlauf der letzten Runde nicht
+  erreichte.** Ein direkt eingebettetes `/Popup <</Contents (…)>>`, ein inline
+  stehendes Widget in einem `/Kids`-Array und jeder Feldwert jenseits von 32
+  Ebenen blieben in der Ausgabe stehen — `--check-leaks` fand sie, der Lauf
+  meldete 0. Der Grund war jedes Mal derselbe: verfolgt wurden nur *Verweise*,
+  und die Feldwerte liefen in zwei eigenen, tiefenbegrenzten Vorläufen. Jetzt
+  bereinigt **ein** besuchsgeführter Lauf ohne Tiefengrenze alles, was eine
+  Annotation erreichbar hält, eingebettete Dictionaries eingeschlossen; `/V`,
+  `/DV` und `/RV` fallen darin mit. Gemessen (Release): 100 000 Felder 0,40 s,
+  eine `/Parent`-Kette aus 1 000 000 Feldern 1,65 s.
+* **Die Zahlen im Audit-Log melden nur noch Entferntes.** `outlines_removed`
+  zählte vor dem Aufräumen: ein Lesezeichen, das noch an zweiter Stelle hing,
+  überlebte samt `/Title`, gemeldet wurde trotzdem 1. Anhänge, JavaScript,
+  `/XFA` und Lesezeichen werden jetzt **nach** `prune_unreachable` gezählt
+  (Träger *und* Teilbaum müssen weg sein), jedes Lesezeichen verliert
+  zusätzlich seinen `/Title` an Ort und Stelle, und ein Schlüssel mit Wert
+  `null` bewegt keinen Zähler mehr (PDF 32000-1, 7.3.9).
+* **Die Erreichbarkeitsprüfung riet nicht mehr.** Sie brach bei 64 Ebenen ab
+  und wertete alles darunter als unerreichbar — ein XObject hinter 70
+  verschachtelten Arrays wurde gelöscht. Sie läuft jetzt ohne Tiefengrenze;
+  eine Prüfung, die abbricht, muss im Zweifel „erreichbar“ sagen.
+* **Der Trailer der Ausgabe trägt nur noch `/Root`, `/Info`, `/Encrypt`, `/ID`
+  und `/Size`.** Ein Objekt unter einem selbstgebauten Trailerschlüssel
+  (`<< /Zusatz 7 0 R >>`) überlebte bisher jedes Aufräumen, weil der ganze
+  Trailer Wurzel der Erreichbarkeitsprüfung ist.
+* **Ein Textspiegel über einem mehrfach platzierten Formular galt als
+  Widerspruch.** `/Span <</ActualText (AlphaAlpha)>> BDC /Fm0 Do /Fm0 Do EMC`:
+  die Schließung entdoppelte über Objekt-Ids und zählte die Glyphen halb —
+  „10 Zeichen im Spiegel, 5 in den Glyphen“, Rückgabewert 3 an gewöhnlichem
+  getaggtem Material, und zwar nur dann, wenn *irgendwo* im Dokument ein
+  Formular ein Formular zeichnete. Gezählt werden jetzt Platzierungen; Zyklen
+  beendet die Kette der Vorfahren. Neue Decke: höchstens 100 000
+  Formularplatzierungen unter den Spiegeln einer Seite (Mehrkosten gemessen:
+  8,5 MB, unter 0,3 s); wird sie erreicht, sagt eine Warnung, dass der
+  Vergleich für die letzten Abschnitte unvollständig ist.
+* **Die Oberfläche suchte nur eine von zwei Schreibweisen.** Standen dieselbe
+  Zeichenfolge mit und ohne Leerzeichen in zwei geschwärzten Zeilen, wurde nur
+  die erste gesucht: die Statuszeile meldete „1 gesuchte(r) Text steht nicht
+  mehr in der Ausgabe“ über eine Datei, in der die IBAN noch **siebenmal**
+  stand. Jetzt wird jede Schreibweise gesucht; die Decke von 1 000 Begriffen
+  zählt Schreibweisen, weil jede ein eigenes Muster im Automaten ist.
+* **Und ein abgewählter Text deckte zu viel.** Er nahm jede Schreibweise seiner
+  Normalform aus der Suche — samt einer Schwärzung, deren Rechteck daneben
+  ging. Die Entscheidung fällt jetzt **am Fund**: wer wörtlich in der Ausgabe
+  steht, ist ein Leck; trifft nur die Fassung ohne Leerraum eines bewusst
+  stehen gelassenen Textes, ist es keins. Der Fehlalarm, den die vorige Runde
+  abgestellt hat, bleibt abgestellt.
+* **Die Nachprüfung behauptet keine Ursache mehr.** Sie sagte „N Stelle(n)
+  wurden nicht geprüft (Entpackgrenze)“, auch wenn das Budget voll war und die
+  Tiefengrenze zugeschlagen hatte. Jetzt zählt sie die Stellen und gibt deren
+  eigenen Grund wieder — höchstens drei beim Namen, der Rest gezählt.
+* **Zwei Kleinigkeiten der Oberfläche.** Die Warnung eines Exports überlebt den
+  nächsten (gehalten je Ausgabedatei, höchstens zehn, bis zum nächsten
+  Dokument) — bisher ersetzte jeder geglückte Export die Liste, und bei zwei
+  Ausgabedateien war das Urteil über die erste weg. Und stirbt der Prüf-Thread,
+  wird das Neuzeichnen aus einem Drop-Wächter angefordert; bisher blieb die
+  Statuszeile auf „Nachprüfung läuft …“ stehen.
+* **Der Windows-Job der CI war rot — wieder durch einen Test.** Die
+  Speichermessung der Bombentests las auf jedem Ziel `/proc/self/status`. Unter
+  Linux misst sie unverändert scharf; auf anderen Zielen prüfen dieselben Tests
+  Frist, Fund und die Liste der ungeprüften Stellen, werden also nicht
+  bedingungslos grün. Dass das lokale Tor für Windows nur Clippy fährt und
+  nicht die Tests, bleibt die Lücke, durch die so etwas kommt.
 
 ### Fix-Runde 4: was die Gegenprüfung der Runde 3 noch fand
 
@@ -136,9 +288,14 @@ und Doku, die mehr sagte als der Code. Diese Runde schließt sie.
   liegt über `regex` ohnehin im Graphen) alle Begriffe in allen Kodierungen —
   UTF-8, UTF-16BE/LE, Hex groß und klein, Verkettung, ohne Leerraum — und
   läuft einmal je Datenblock. Gemessen (Release, 64-MiB-Datei mit nicht
-  komprimierbarem Bildstrom): 1 000 Begriffe kosteten **308,7 s**, jetzt
-  **6,45 s** — ein Begriff 5,4 s. Die Fundstellen sind Zeichen für Zeichen
-  dieselben (`positions_agree_with_the_naive_search`).
+  komprimierbarem Bildstrom, `zd_mess_1000_begriffe_kosten_wie_einer`):
+  1 Begriff **5,20 s**, 1 000 Begriffe **6,27 s** — Verhältnis 1,21, in der
+  Fix-Runde 5 nachgemessen. Vorher war es Begriffe × Bytes; die alte Fassung
+  ist nicht mehr im Baum, ihr Kostengesetz aber nachstellbar: dieselben
+  12 000 Muster (1 000 Begriffe × 12 Kodierungen) einzeln mit `memmem` über
+  64 MiB gesucht kosten **89,2 s**, ein Begriff (12 Muster) 0,08 s; derselbe
+  Durchgang mit einem Automaten kostet 0,28 s. Die Fundstellen sind Zeichen
+  für Zeichen dieselben (`positions_agree_with_the_naive_search`).
 * **Und es hat ein Budget: `leaks_many_within`.** Das Orakel packte jeden
   Strom aus, den es fand — die Grenze `--max-decompressed-mb` galt nur dem
   Schwärzen. Jetzt bekommt jede Sicht dasselbe Budget, es wird **beim
@@ -146,10 +303,15 @@ und Doku, die mehr sagte als der Code. Diese Runde schließt sie.
   Vorprüfung des Laders läuft mit derselben Zahl, damit lopdf keinen
   Objektstrom unbegrenzt auspackt. Ein Strom über dem Restbudget wird
   übersprungen und in `unchecked` benannt (Objekt und Grund); seine gepackten
-  Bytes werden roh trotzdem durchsucht. Gemessen an 1 GiB Nullen (1 042 919
-  Byte gepackt, als Seiteninhalt und als `/ObjStm`) mit 16 MiB Budget: 28 ms
-  bzw. 26 ms, Speicherspitze 27 MB. Ohne die Grenze beim Entpacken: 345 MB
-  bzw. 882 MB.
+  Bytes werden roh trotzdem durchsucht. In der Fix-Runde 5 nachgemessen
+  (`redact-rs <bombe> --check-leaks XX`, Spitze über
+  `getrusage(RUSAGE_CHILDREN).ru_maxrss`, 1 GiB Nullen, 1 044 089 bzw.
+  1 044 192 Byte gepackt): mit `--max-decompressed-mb 16` lehnt die Vorprüfung
+  beide Formen nach 0,02 s bei 24 MB ab (Rückgabewert 1); mit
+  `--max-decompressed-mb 4096` — dem Lauf ohne wirksame Grenze — steigt die
+  Spitze auf **2 173 MB** (Seiteninhalt) bzw. **3 220 MB** (`/ObjStm`), je rund
+  18 s. Hier standen bis dahin 345 MB und 882 MB; das konnte nicht stimmen, ein
+  wirklich entpacktes GiB liegt danach im Speicher.
 * **Filterketten: ein Verweis ist eine Schreibweise, kein Grund zur Absage.**
   `/Filter 5 0 R`, `/DecodeParms` als Verweis und Werte *im*
   Parameter-Dictionary (`/Columns 8 0 R`, `/Predictor 12 0 R`) wurden nicht
@@ -451,8 +613,11 @@ den übrigen Unix-Systemen gibt es nur das schwächere Mittel
 `setrlimit(RLIMIT_CORE, 0)`: eine Grenze, kein Verbot. Die Funktion liefert
 drei Antworten statt `true`/`false`; „hier gibt es kein Mittel“ ist keine
 Warnung, „der Aufruf schlug fehl“ schon.
-Dazu der Nebeneffekt: der Prozess ist danach für `ptrace` durch denselben
-Benutzer unerreichbar, `gdb` und `strace` brauchen `root`.
+Dazu der Nebeneffekt — **unter Linux**, denn nur dort läuft
+`prctl(PR_SET_DUMPABLE, 0)`: der Prozess ist danach für `ptrace` durch denselben
+Benutzer unerreichbar, `gdb` und `strace` brauchen `root`. Auf den übrigen
+Unix-Systemen setzt derselbe Aufruf nur `RLIMIT_CORE` und lässt `ptrace`
+unberührt.
 
 ### Die Oberfläche prüft nach dem Export selbst nach
 

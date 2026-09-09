@@ -18,10 +18,19 @@
 //! Binaries sind. Ändert sich das Programm, ist der Beleg neu zu erzeugen
 //! (`./scripts/make-preview.sh`), und der Test sagt, wann.
 //!
-//! Verglichen werden nur die Zeilen, die die Doku zitiert. Die Fundstellen
-//! darunter tragen Byte-Offsets, und die hängen am Objektlayout, das
-//! `make-preview.sh` ohnehin bei jedem Lauf neu erzeugt; ihr Vergleich stünde
-//! im `git diff` nach dem Lauf, nicht hier.
+//! Verglichen wird der **ganze Berichtsblock** — die `Geprüft:`-Zeile mit der
+//! Dateigröße, je Begriff die `GEFUNDEN`/`nicht gefunden`-Zeile und **jede**
+//! Fundstellenzeile darunter, samt Byte-Offset, Objektnummer und Ausschnitt.
+//!
+//! Hier stand bis zur Fix-Runde 5, die Fundstellen ließen sich nicht
+//! vergleichen: sie trügen Byte-Offsets, und die hingen am Objektlayout. Das
+//! stimmt nicht — dieser Test erzeugt die Demo mit demselben Binary neu, und
+//! der Weg ist bitgleich (drei Läufe von `--write-demo` + Schwärzen liefern
+//! dieselbe SHA-256-Summe). Die Lücke war teuer: die Gegenprüfung E4 mutierte
+//! „1862 Byte“ zu „1863“ und „(Objekt 4 0)“ zu „(Objekt 9 0)“ in
+//! `docs/pruefung.txt`, und beide Mutationen blieben grün — obwohl
+//! `scripts/check-preview.py` in seinem Kopf zusagt, dieser Test halte
+//! `pruefung.txt` am Programm fest.
 //!
 //! Die Suchbegriffe werden **aus dem Skript gelesen**, nicht hier
 //! abgeschrieben — sonst wären es zwei Listen, und dieser Test prüfte die
@@ -114,6 +123,22 @@ fn belegzeilen(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Der ganze Berichtsblock eines `--check-leaks`-Laufs: die `Geprüft:`-Zeile
+/// mit der Dateigröße, je Begriff seine Belegzeile und **jede**
+/// Fundstellenzeile darunter (sechs Leerzeichen eingerückt).
+///
+/// Die Zeilen des abgedruckten Aufrufs (`      --check-leaks "…" \`) sehen in
+/// `pruefung.txt` genauso eingerückt aus wie eine Fundstelle; sie stehen aber
+/// **vor** der `Geprüft:`-Zeile, und deshalb beginnt der Block dort.
+fn bericht(text: &str) -> Vec<String> {
+    text.lines()
+        .skip_while(|z| !z.starts_with("Geprüft: "))
+        .take_while(|z| !z.starts_with("Ergebnis: "))
+        .filter(|z| !z.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Der Abschnitt von `pruefung.txt` zwischen der Überschrift `von` und der
 /// nächsten Überschrift `bis`.
 fn abschnitt<'a>(text: &'a str, von: &str, bis: &str) -> &'a str {
@@ -183,6 +208,29 @@ fn die_fundstellen_in_pruefung_txt_sind_die_des_gebauten_binaries() {
             "docs/pruefung.txt ({datei}) sagt anderes als das gebaute Binary — \
              `./scripts/make-preview.sh` neu laufen lassen"
         );
+
+        // Und derselbe Vergleich über den ganzen Block: Dateigröße und jede
+        // Fundstellenzeile. Ohne ihn bleiben „1862 Byte“ und „(Objekt 4 0)“
+        // ungebunden (Gegenprüfung E4).
+        let gelaufen_block = bericht(&stdout(&out));
+        let belegter_block = bericht(beleg);
+        assert!(
+            belegter_block.first().is_some_and(
+                |z| z.starts_with(&format!("Geprüft: {datei} (")) && z.ends_with(" Byte)")
+            ),
+            "docs/pruefung.txt ({datei}) ohne Geprüft-Zeile mit Dateigröße: {belegter_block:?}"
+        );
+        assert!(
+            belegter_block.len() > begriffe.len() + 1,
+            "docs/pruefung.txt ({datei}) zitiert keine einzige Fundstellenzeile: \
+             {belegter_block:?}"
+        );
+        assert_eq!(
+            belegter_block, gelaufen_block,
+            "docs/pruefung.txt ({datei}) sagt anderes als das gebaute Binary — \
+             Dateigröße oder Fundstelle weicht ab; \
+             `./scripts/make-preview.sh` neu laufen lassen"
+        );
         assert_eq!(
             Some(rueckgabewert(beleg)),
             out.status.code(),
@@ -224,5 +272,57 @@ fn pruefung_txt_stammt_von_dieser_fassung() {
         erwartet,
         "docs/pruefung.txt stammt aus einer anderen Fassung — \
          `./scripts/make-preview.sh` neu laufen lassen"
+    );
+}
+
+/// Die Zahl der Prüfungen aus `scripts/check-preview.py` steht in der README —
+/// und zwar die, die das Skript wirklich druckt.
+///
+/// Gegenprüfung E5 der Fix-Runde 5: die README nannte „36 Prüfungen“, das
+/// Skript meldete 54. Eine abgeschriebene Zahl veraltet still. Jetzt liest
+/// dieser Test die letzte Zeile des Skriptlaufs (`Alle N Pruefungen
+/// bestanden.`) und verlangt genau dieses `N` im Satz der README.
+///
+/// Ohne `python3` im Pfad ist hier nichts zu prüfen — der Test sagt das und
+/// endet grün; im Gate läuft `python3 scripts/check-preview.py docs` ohnehin
+/// als eigener Schritt.
+///
+/// Mutation (nachgewiesen): „54 Prüfungen“ in der README auf „55“ gesetzt →
+/// dieser Test rot.
+#[test]
+fn die_zahl_der_pruefungen_steht_im_readme() {
+    let wurzel = repo_root();
+    let out = match Command::new("python3")
+        .arg(wurzel.join("scripts/check-preview.py"))
+        .arg(wurzel.join("docs"))
+        .current_dir(&wurzel)
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("kein python3 im Pfad ({e}) — die Zahl bleibt hier ungeprüft");
+            return;
+        }
+    };
+    let text = stdout(&out);
+    assert!(
+        out.status.success(),
+        "check-preview.py ist nicht grün:\n{text}{}",
+        stderr(&out)
+    );
+    let gemeldet = text
+        .lines()
+        .find_map(|z| {
+            z.strip_prefix("Alle ")
+                .and_then(|z| z.strip_suffix(" Pruefungen bestanden."))
+        })
+        .unwrap_or_else(|| panic!("check-preview.py meldet keine Zahl:\n{text}"));
+
+    let readme = std::fs::read_to_string(wurzel.join("README.md")).expect("README.md lesbar");
+    let satz = format!("# prüft sie ({gemeldet} Prüfungen");
+    assert!(
+        readme.contains(&satz),
+        "README.md nennt nicht „{satz}…)“ — check-preview.py meldet {gemeldet} Prüfungen"
     );
 }

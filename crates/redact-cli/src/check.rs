@@ -204,10 +204,12 @@ fn needles(cli: &Cli) -> Result<Vec<String>> {
     if out.len() > MAX_CHECK_NEEDLES {
         return Err(RedactError::Config(format!(
             "--check-leaks mit {} Suchbegriffen; mehr als {MAX_CHECK_NEEDLES} nimmt der Lauf \
-             nicht an. Die Prüfung kostet je Begriff einen Vergleich über die ganze \
-             Datei — bei dieser Zahl liefe sie so lange, dass sie wie ein Hänger \
-             aussieht. Teilen Sie die Liste auf und rufen Sie mehrmals auf; jeder Lauf \
-             meldet für sich.",
+             nicht an. Nicht der Zeit wegen — alle Begriffe laufen in einem Durchgang, \
+             1 000 kosten kaum mehr als einer. Aber der Automat, der sie alle in allen \
+             Kodierungen trägt, wächst mit der Liste (gemessen: 1,0 MB bei 1 000 \
+             Begriffen, 675 MB und 25 s allein für den Bau bei einer Million), und jeder \
+             Begriff bekommt eine eigene Zeile im Bericht. Teilen Sie die Liste auf und \
+             rufen Sie mehrmals auf; jeder Lauf meldet für sich.",
             out.len()
         )));
     }
@@ -345,11 +347,18 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
 
 /// Der Satz, der bei nicht geprüften Stellen an das Ergebnis tritt — mit
 /// oder ohne Fund derselbe, damit ein Skript ihn an einer Stelle sucht.
+///
+/// Hier stand bis zur Fix-Runde 5 nur „mehr davon packt
+/// `--max-decompressed-mb` aus“. Seit die Objektsicht auch ihre
+/// **Verschachtelungstiefe** meldet, wäre das ein falscher Rat: an dieser
+/// Grenze ändert der Schalter nichts. Der Satz verweist deshalb auf den Grund,
+/// der je Stelle oben steht.
 fn unvollstaendig(unchecked: usize) -> String {
     format!(
         "Ergebnis: {unchecked} Stelle(n) nicht geprüft — die Antwort ist unvollständig. \
-         Der Lauf hat sie oben als NICHT GEPRÜFT genannt; mehr davon packt \
-         --max-decompressed-mb aus."
+         Der Lauf hat sie oben als NICHT GEPRÜFT genannt, je Stelle mit ihrem Grund. \
+         Was an der Entpackgrenze hängt, holt ein höheres --max-decompressed-mb; \
+         was an der Verschachtelungstiefe hängt, nicht."
     )
 }
 
@@ -368,6 +377,10 @@ mod tests {
         );
         assert!(satz.contains("unvollständig"), "{satz}");
         assert!(satz.contains("--max-decompressed-mb"), "{satz}");
+        // Und er verspricht den Schalter nicht als Heilmittel für jede
+        // Ursache: die Tiefengrenze der Objektsicht bleibt, wie hoch das
+        // Budget auch steht (Gegenprüfung E9 der Fix-Runde 5).
+        assert!(satz.contains("Verschachtelungstiefe"), "{satz}");
     }
 
     fn cli(args: &[&str]) -> Cli {
@@ -427,7 +440,7 @@ mod tests {
         let err = needles(&cli(&borrowed)).expect_err("einer zu viel");
         let text = err.to_string();
         assert!(text.contains(&MAX_CHECK_NEEDLES.to_string()), "{text}");
-        assert!(text.contains("Hänger"), "der Grund fehlt: {text}");
+        assert!(text.contains("Automat"), "der Grund fehlt: {text}");
 
         // Gegenprobe: genau an der Grenze geht es durch. Eine Decke, die
         // schon den erlaubten Fall ablehnt, wäre keine Härtung.
@@ -445,7 +458,9 @@ mod tests {
     /// Fix-Runde 4 auch die drei Sätze zur Nachprüfung der Oberfläche
     /// (README „Nachprüfung nach dem Export“, CHANGELOG), die die
     /// Gegenprüfung g4 ungebunden fand; ihr Test `zc_g4_decke_doku.rs` ist
-    /// hierin aufgegangen.
+    /// hierin aufgegangen. Seit Fix-Runde 5 dazu die beiden Überschriftssätze
+    /// im CHANGELOG, die die Gegenprüfung E6 ungebunden fand — einer davon ist
+    /// der Satz, der die Bindung ankündigt.
     ///
     /// Zwei Fassungen der Zahl sind erlaubt und beide werden geprüft: die
     /// mit Tausendertrennzeichen im Fließtext („1 000“) und die nackte in
@@ -532,6 +547,13 @@ mod tests {
             format!("Decke von {formatiert} Begriffen je `--check-leaks`-Lauf"),
             format!("Gesucht werden höchstens {formatiert} verschiedene Texte"),
             format!("(`redact_core::MAX_CHECK_NEEDLES`, {formatiert})"),
+            // Gegenprüfung E6 der Fix-Runde 5: diese beiden trugen die Zahl
+            // als Literal — einer davon ist ausgerechnet der Satz, der die
+            // Bindung ankündigt.
+            format!(
+                "Die Decke von {formatiert} Begriffen war an drei weiteren Stellen ungebunden."
+            ),
+            format!("Die Decke von {formatiert} Begriffen ist eine Zahl, nicht fünf."),
         ] {
             assert!(changelog.contains(&satz), "CHANGELOG.md ohne „{satz}“");
         }

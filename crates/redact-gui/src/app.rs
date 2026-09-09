@@ -665,8 +665,40 @@ fn file_name_of(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Fordert beim Fallenlassen ein Neuzeichnen an — auch auf dem Weg einer
+/// Panik.
+///
+/// Der Prüf-Thread ([`RedactApp::start_export_check`]) rief
+/// `request_repaint` als **letzte Anweisung** auf. Starb er davor, ruhte die
+/// Oberfläche weiter: ohne Bild kein [`RedactApp::poll_export_checks`], ohne
+/// Abholen kein `Disconnected`, und die Statuszeile blieb auf
+/// [`EXPORT_CHECK_RUNNING`] stehen — der Satz „abgebrochen (interner
+/// Fehler)“ war zwar geschrieben, kam aber nie an. Als Wächter läuft es
+/// beim Abwickeln mit.
+///
+/// `None` heißt: es gab noch kein Bild (Tests ohne Bildschirm) — dann gibt
+/// es auch nichts anzustoßen.
+struct RepaintOnDrop(Option<egui::Context>);
+
+impl Drop for RepaintOnDrop {
+    fn drop(&mut self) {
+        if let Some(ctx) = &self.0 {
+            ctx.request_repaint();
+        }
+    }
+}
+
 /// Was die Statuszeile zeigt, solange die Nachprüfung läuft.
 pub const EXPORT_CHECK_RUNNING: &str = "Nachprüfung läuft …";
+
+/// Für so viele Ausgabedateien werden Export- und Prüfwarnungen gehalten.
+///
+/// Sie ersetzen einander nicht mehr ([`RedactApp::note_export_warnings`]),
+/// also braucht es eine Grenze: wer im selben Dokument dreißigmal exportiert,
+/// soll keine dreißig Warnungen vor sich haben. Die älteste Datei fällt
+/// heraus, die zehn jüngsten bleiben — und beim Dokumentwechsel ist die Liste
+/// ohnehin weg.
+pub const MAX_WARNED_FILES: usize = 10;
 
 /// Zustand der Oberfläche.
 pub struct RedactApp {
@@ -687,6 +719,10 @@ pub struct RedactApp {
     /// exportiert, bekommt **beide** Urteile. Ein verworfener Empfänger hieße,
     /// dass ein Leck in der ersten Datei nie gemeldet würde.
     checks: Vec<PendingCheck>,
+    /// Ausgabedateien, deren Warnungen gerade gehalten werden — jüngste
+    /// zuletzt. Siehe [`RedactApp::note_export_warnings`] und
+    /// [`MAX_WARNED_FILES`].
+    warned_files: Vec<String>,
     /// Der egui-Kontext des letzten Bildes — damit ein Thread, der fertig ist,
     /// ein Neuzeichnen anstoßen kann, auch wenn die Oberfläche gerade ruht.
     /// `None`, solange noch kein Bild gezeichnet wurde (Tests ohne Bildschirm).
@@ -741,6 +777,7 @@ impl RedactApp {
             central_rect: None,
             pages: PageCache::new(),
             checks: Vec::new(),
+            warned_files: Vec::new(),
             ui_ctx: None,
             theme,
             applied_theme: None,
@@ -1026,7 +1063,7 @@ impl RedactApp {
         match self.state.export(&out, Some(&audit)) {
             Ok(outcome) => {
                 self.error = None;
-                self.state.warnings = outcome.warnings.clone();
+                self.note_export_warnings(&file_name_of(&out), &outcome.warnings);
                 let prefix = export_status(
                     outcome.drawn_rects,
                     outcome.removed_glyphs,
@@ -1046,6 +1083,60 @@ impl RedactApp {
         }
     }
 
+    /// Trägt die Warnungen eines geglückten Exports ein — **ohne** die des
+    /// vorigen zu löschen.
+    ///
+    /// Vorher stand hier `self.state.warnings = outcome.warnings`: jeder
+    /// geglückte Export warf die Warnung des vorigen weg. Damit war genau der
+    /// Fall entwertet, für den Fix-Runde 4 den Dateinamen vor die Warnung
+    /// gesetzt hat ([`RedactApp::finish_export_check`]) — „welche Datei ist
+    /// gemeint?“ stellt sich nur, wenn mehr als eine dasteht. Der Doc-Kommentar
+    /// von `finish_export_check` versprach „bleiben, bis das nächste Dokument
+    /// kommt“; gehalten hat es nur, solange keine zweite Datei geschrieben
+    /// wurde (`zb_g5a4` überlebte, weil dort beide Prüfungen noch liefen).
+    ///
+    /// Gehalten wird **je Ausgabedatei**, am Dateinamen als Präfix: ein
+    /// zweiter Export derselben Datei ersetzt seine eigenen Warnungen (sonst
+    /// sammelten sich Wiederholungen), und mehr als [`MAX_WARNED_FILES`]
+    /// Dateien werden nicht gehalten. Beim **Dokumentwechsel** verschwinden
+    /// sie: `AppState::load_bytes` setzt die Liste auf die Warnungen des neuen
+    /// Dokuments. Die Namensliste selbst wird dabei nicht geleert — sie ist
+    /// durch [`MAX_WARNED_FILES`] gedeckelt, und ein Name aus dem vorigen
+    /// Dokument fällt als ältester zuerst heraus, ohne je eine Warnung mehr
+    /// oder weniger zu bewirken.
+    ///
+    /// Die Warnungen des **Dokuments** ([`AppState::extract_warnings`]) stehen
+    /// schon in der Liste — sie kamen beim Laden und gehören nicht der Datei,
+    /// die gerade geschrieben wurde. Sie werden hier übergangen, sonst stünden
+    /// sie nach jedem Export ein zweites Mal da.
+    fn note_export_warnings(&mut self, file: &str, warnings: &[String]) {
+        self.forget_warnings_of(file);
+        for warning in warnings {
+            if self.state.extract_warnings.contains(warning) {
+                continue;
+            }
+            self.state.warnings.push(format!("{file}: {warning}"));
+        }
+        self.remember_warnings_of(file);
+    }
+
+    /// Nimmt eine Ausgabedatei in die gehaltenen auf; die älteste fällt
+    /// heraus, wenn es mehr als [`MAX_WARNED_FILES`] werden.
+    fn remember_warnings_of(&mut self, file: &str) {
+        self.warned_files.retain(|held| held != file);
+        self.warned_files.push(file.to_string());
+        while self.warned_files.len() > MAX_WARNED_FILES {
+            let oldest = self.warned_files.remove(0);
+            self.forget_warnings_of(&oldest);
+        }
+    }
+
+    /// Streicht die Warnungen einer Ausgabedatei aus der Liste.
+    fn forget_warnings_of(&mut self, file: &str) {
+        let prefix = format!("{file}: ");
+        self.state.warnings.retain(|w| !w.starts_with(&prefix));
+    }
+
     /// Lässt die Nachprüfung auf einem eigenen Thread laufen.
     ///
     /// Vorher lief sie im Zeichentakt: 305 Seiten mit 200 Begriffen hielten
@@ -1060,7 +1151,7 @@ impl RedactApp {
     /// Erfolgsmeldung ohne Nachprüfung.
     fn start_export_check(&mut self, prefix: String, plan: ExportCheckPlan, out: PathBuf) {
         let (sender, receiver) = std::sync::mpsc::channel();
-        let repaint = self.ui_ctx.clone();
+        let repaint = RepaintOnDrop(self.ui_ctx.clone());
         let file = file_name_of(&out);
         #[cfg(test)]
         let force_panic = self.force_panic_in_check;
@@ -1070,15 +1161,20 @@ impl RedactApp {
                 let plan = plan.clone();
                 let out = out.clone();
                 move || {
+                    // Das Neuzeichnen hängt am **Ende des Threads**, nicht an
+                    // seinem Erfolg: stirbt er unterwegs, holt niemand mehr
+                    // etwas ab, wenn niemand zeichnet — und die Statuszeile
+                    // bliebe für immer auf „Nachprüfung läuft …“. Diese Zeile
+                    // zieht den Wächter in den Thread (sonst fiele er schon
+                    // hier draußen); fallen gelassen wird er dort — auch beim
+                    // Abwickeln einer Panik.
+                    let _repaint = repaint;
                     #[cfg(test)]
                     assert!(!force_panic, "Testhaken: die Nachprüfung panikt");
                     let check = plan.run(&out);
                     // Ein `Err` heißt: niemand wartet mehr — dann gibt es auch
                     // niemanden, dem man das sagen müsste.
                     let _ = sender.send(check);
-                    if let Some(ctx) = repaint {
-                        ctx.request_repaint();
-                    }
                 }
             });
         match spawned {
@@ -1123,7 +1219,7 @@ impl RedactApp {
                     // Auch in die Warnungen: die Statuszeile überschreibt
                     // die nächste Aktion, und ein Export ohne Nachprüfung
                     // darf nicht so aussehen wie einer mit.
-                    self.state.warnings.insert(0, format!("{file}: {sentence}"));
+                    self.note_check_warning(&file, sentence);
                     self.state.status = format!("{prefix}  ·  {sentence}");
                 }
             }
@@ -1134,16 +1230,27 @@ impl RedactApp {
     /// Trägt ein Urteil in Statuszeile und Warnungen ein.
     ///
     /// In die Warnungen geht, was [`ExportCheck::warning`] hergibt — ein
-    /// Fund, eine unvollständige Antwort (Entpackgrenze), nicht gesuchte
+    /// Fund, eine unvollständige Antwort (mit dem Grund je Stelle), nicht gesuchte
     /// Texte jenseits der Decke — mit dem Dateinamen davor. Die Statuszeile
     /// ist flüchtig; die Warnungen bleiben, bis das nächste Dokument kommt.
     fn finish_export_check(&mut self, prefix: &str, file: &str, check: ExportCheck) {
         if let Some(warning) = check.warning() {
             // Ganz nach vorn: die Statuszeile zeigt nur die **erste**
             // Warnung, und keine andere ist wichtiger als diese.
-            self.state.warnings.insert(0, format!("{file}: {warning}"));
+            self.note_check_warning(file, &warning);
         }
         self.state.status = format!("{prefix}  ·  {}", check.sentence());
+    }
+
+    /// Das Urteil einer Nachprüfung in die Warnungen — ganz nach vorn, mit
+    /// dem Dateinamen davor, und je Datei nur einmal (zwei Exporte derselben
+    /// Datei kurz hintereinander tragen dasselbe Urteil).
+    fn note_check_warning(&mut self, file: &str, warning: &str) {
+        let entry = format!("{file}: {warning}");
+        if !self.state.warnings.contains(&entry) {
+            self.state.warnings.insert(0, entry);
+        }
+        self.remember_warnings_of(file);
     }
 
     /// Läuft gerade eine Nachprüfung?

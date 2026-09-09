@@ -473,3 +473,93 @@ fn keine_seite_wird_doppelt_geschrieben() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Der Seiteninhalt bleibt streng — auch neben dem nachsichtigen Orakel
+// ---------------------------------------------------------------------------
+
+/// Eine Kette mit unbekanntem Glied: `[/ASCIIHexDecode /FlateDecode
+/// /DCTDecode]`. Nach zwei Filtern steht der **fertige Seiteninhalt** da,
+/// samt Geheimnis und samt gültiger PDF-Syntax; das dritte Glied ist ein
+/// Bildfilter, den dieses Modul bewusst nicht dekodiert.
+///
+/// Genau hier laufen die beiden Leser auseinander (Fix-Runde 5, Befund P1-1):
+///
+/// * Das **Orakel** (`leaks`, `filters::decoded_prefix_within`) ist
+///   nachsichtig und findet das Geheimnis im entzifferbaren Anfang.
+/// * Der **Interpreter** (`filters::page_content` für `content::scan_page`,
+///   `ops::page_ops` und `image`) bleibt streng: er nimmt diesen Anfang
+///   **nicht** als Seiteninhalt. Was hinter dem unbekannten Glied steht, ist
+///   keine PDF-Syntax; eine daraus gelesene Seite wäre erfunden, und eine
+///   Schwärzung darauf hätte einen anderen Strom vor sich als der Betrachter.
+///
+/// Die Gegenprobe zur Strenge ist der Abbruch: die Datei wird abgelehnt, statt
+/// als „nichts gefunden“ durchzugehen.
+#[test]
+fn halb_dekodierter_strom_wird_nie_seiteninhalt() {
+    use std::io::Write;
+
+    // Ein Inline-Bild gehört mit hinein: `image` liest denselben Seiteninhalt
+    // und darf ebenfalls nichts daraus machen.
+    let plain = format!(
+        "BT\n/F1 10 Tf\n72 700 Td\n(IBAN {SECRET}) Tj\nET\n\
+         q 10 0 0 10 0 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \u{0} EI Q\n"
+    );
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(plain.as_bytes()).expect("deflate");
+    let packed = common::ascii_hex_encode(&encoder.finish().expect("deflate"));
+
+    let mut d = page(&[]);
+    d.doc.objects.insert(
+        d.content_id,
+        Object::Stream(
+            Stream::new(
+                dictionary! { "Filter" => Object::Array(vec![
+                    "ASCIIHexDecode".into(),
+                    "FlateDecode".into(),
+                    "DCTDecode".into(),
+                ]) },
+                packed,
+            )
+            .with_compression(false),
+        ),
+    );
+    let bytes = d.finish();
+
+    // Das Orakel sieht das Geheimnis — sonst prüft der Test die falsche Datei.
+    assert!(
+        !leaks(&bytes, SECRET).is_empty(),
+        "das Orakel findet den entzifferbaren Anfang nicht"
+    );
+
+    let doc = load_from_bytes(&bytes).expect("PDF ladbar");
+    let page_id = *doc.get_pages().values().next().expect("eine Seite");
+
+    // Der Interpreter liest den Anfang nicht: `page_content` gibt die
+    // Rohbytes zurück, nicht die halb dekodierte Sicht.
+    let content = redact_pdf::filters::page_content(&doc, page_id);
+    let as_text = String::from_utf8_lossy(&content);
+    assert!(
+        !as_text.contains(SECRET),
+        "halb dekodiert gelesen: {as_text}"
+    );
+    assert!(
+        !as_text.contains(" Tj"),
+        "halb dekodiert gelesen: {as_text}"
+    );
+    // Und damit sieht auch `image` (dieselbe Quelle) kein `Do`.
+    assert!(
+        !redact_pdf::image::page_has_images(&doc, page_id),
+        "ein Bild aus einem halb dekodierten Strom"
+    );
+
+    // Statt still weiterzulaufen: Abbruch. Weder Extraktion noch Schwärzung
+    // geben eine Seite aus, die niemand gelesen hat.
+    let extracted = PdfExtractor::new().extract_with_warnings(&doc);
+    assert!(extracted.is_err(), "die Seite ging als lesbar durch");
+    let mut doc = load_from_bytes(&bytes).expect("PDF ladbar");
+    assert!(
+        PdfRedactor::new().apply_with_report(&mut doc, &[]).is_err(),
+        "die Schwärzung lief über eine ungelesene Seite"
+    );
+}

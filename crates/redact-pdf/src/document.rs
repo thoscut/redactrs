@@ -1189,10 +1189,6 @@ fn rect_from(obj: &Object) -> Option<Rect> {
 // Erreichbarkeit
 // ---------------------------------------------------------------------------
 
-/// Maximale Verschachtelungstiefe direkter Objekte (Arrays in Arrays in …).
-/// Referenzen zählen nicht mit, die laufen über die Arbeitsliste.
-const MAX_DIRECT_DEPTH: usize = 64;
-
 /// Meldet, ob das Dokument aus mehreren inkrementellen Revisionen besteht.
 ///
 /// Der Trailer der jüngsten Revision trägt in diesem Fall ein `/Prev` (Zeiger
@@ -1288,7 +1284,6 @@ fn reachable_objects(doc: &Document) -> BTreeSet<ObjectId> {
     // wird, den eine künftige PDF-Version einführt.
     collect_references(
         &Object::Dictionary(doc.trailer.clone()),
-        0,
         &mut seen,
         &mut queue,
     );
@@ -1298,46 +1293,38 @@ fn reachable_objects(doc: &Document) -> BTreeSet<ObjectId> {
         let Some(object) = doc.objects.get(&id) else {
             continue;
         };
-        collect_references(object, 0, &mut seen, &mut queue);
+        collect_references(object, &mut seen, &mut queue);
     }
     seen
 }
 
 /// Trägt alle Referenzen eines Objekts in die Arbeitsliste ein.
 ///
-/// Rekursiv durch Dictionaries, Arrays und Stream-Dictionaries — dort steckt
-/// unter anderem ein `/Length`, das als indirektes Objekt vorliegen darf.
-fn collect_references(
-    object: &Object,
-    depth: usize,
-    seen: &mut BTreeSet<ObjectId>,
-    queue: &mut Vec<ObjectId>,
-) {
-    if depth > MAX_DIRECT_DEPTH {
-        return;
-    }
-    match object {
-        Object::Reference(id) => {
-            if seen.insert(*id) {
-                queue.push(*id);
+/// Durch Dictionaries, Arrays und Stream-Dictionaries — dort steckt unter
+/// anderem ein `/Length`, das als indirektes Objekt vorliegen darf.
+///
+/// Ohne Rekursion und ohne Tiefengrenze: der eigene Stapel hält die noch
+/// offenen Zweige. Eine Tiefengrenze gab es hier einmal (64 Ebenen direkter
+/// Verschachtelung); alles darunter galt als **unerreichbar** und wurde von
+/// [`prune_unreachable`] gelöscht — ein XObject hinter 70 verschachtelten
+/// Arrays verschwand samt Bild aus der Ausgabe. Eine Erreichbarkeitsprüfung,
+/// die abbricht, muss „erreichbar“ sagen; hier bricht sie gar nicht mehr ab.
+/// Der Stapel wächst höchstens um die Größe des Dokuments, das ohnehin im
+/// Speicher liegt.
+fn collect_references(object: &Object, seen: &mut BTreeSet<ObjectId>, queue: &mut Vec<ObjectId>) {
+    let mut stack: Vec<&Object> = vec![object];
+    while let Some(object) = stack.pop() {
+        match object {
+            Object::Reference(id) => {
+                if seen.insert(*id) {
+                    queue.push(*id);
+                }
             }
+            Object::Array(items) => stack.extend(items.iter()),
+            Object::Dictionary(dict) => stack.extend(dict.iter().map(|(_, value)| value)),
+            Object::Stream(stream) => stack.extend(stream.dict.iter().map(|(_, value)| value)),
+            _ => {}
         }
-        Object::Array(items) => {
-            for item in items {
-                collect_references(item, depth + 1, seen, queue);
-            }
-        }
-        Object::Dictionary(dict) => {
-            for (_, value) in dict.iter() {
-                collect_references(value, depth + 1, seen, queue);
-            }
-        }
-        Object::Stream(stream) => {
-            for (_, value) in stream.dict.iter() {
-                collect_references(value, depth + 1, seen, queue);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -1360,21 +1347,44 @@ pub fn prune_unreachable(doc: &mut Document) -> usize {
     before - doc.objects.len()
 }
 
+/// Die Schlüssel, die im Trailer der Ausgabe stehen dürfen (PDF 32000-1,
+/// 7.5.5, Tabelle 15 — ohne `/Prev`, das eine Vorgeschichte beschreibt, die
+/// die Ausgabe nicht hat).
+///
+/// Alles andere fällt: `reachable_objects` nimmt den **ganzen** Trailer als
+/// Wurzel, ein Objekt unter einem erfundenen Schlüssel (`<< /Zusatz 7 0 R >>`)
+/// überlebte damit jedes Aufräumen und stand mit seinem Klartext in der
+/// Ausgabe. Dazu kommen die Reste eines XRef-Stroms (`/Type`, `/W`, `/Index`,
+/// `/Filter`, `/DecodeParms`, `/Length`), die `lopdf` beim Laden im Trailer
+/// ablegt und die in einer klassischen Trailer-Zeile nichts verloren haben;
+/// schreibt `lopdf` selbst einen XRef-Strom, setzt es sie ohnehin neu.
+const TRAILER_KEYS: [&[u8]; 5] = [b"Root", b"Info", b"Encrypt", b"ID", b"Size"];
+
 /// Serialisiert das Dokument in den Speicher.
 ///
-/// Vor dem Schreiben wird aufgeräumt: unerreichbare Objekte fliegen raus und
-/// der Trailer verliert die Zeiger auf ältere Revisionen (`/Prev`,
-/// `/XRefStm`). Die Ausgabe ist genau eine Revision — ohne Vorgeschichte und
-/// ohne Karteileichen. Das Dokument des Aufrufers bleibt unverändert.
+/// Vor dem Schreiben wird aufgeräumt: der Trailer behält nur die Schlüssel
+/// aus [`TRAILER_KEYS`] (und verliert damit auch die Zeiger auf ältere
+/// Revisionen, `/Prev` und `/XRefStm`), unerreichbare Objekte fliegen raus.
+/// Die Ausgabe ist genau eine Revision — ohne Vorgeschichte und ohne
+/// Karteileichen. Das Dokument des Aufrufers bleibt unverändert.
 pub fn save_to_bytes(doc: &Document) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
     let mut copy = doc.clone();
-    prune_unreachable(&mut copy);
-    // Die Ausgabe ist eine vollständige, in sich geschlossene Datei. Ein
-    // geerbtes `/Prev` zeigt in ihr auf einen völlig anderen Offset — im
+    // Zuerst der Trailer, dann die Erreichbarkeit: was nur ein fremder
+    // Trailerschlüssel gehalten hat, ist danach unerreichbar und fällt mit.
+    // Die Ausgabe ist eine vollständige, in sich geschlossene Datei — ein
+    // geerbtes `/Prev` zeigt in ihr auf einen völlig anderen Offset, im
     // Zweifel mitten in einen Content-Stream.
-    copy.trailer.remove(b"Prev");
-    copy.trailer.remove(b"XRefStm");
+    let fremd: Vec<Vec<u8>> = copy
+        .trailer
+        .iter()
+        .map(|(key, _)| key.clone())
+        .filter(|key| !TRAILER_KEYS.contains(&key.as_slice()))
+        .collect();
+    for key in fremd {
+        copy.trailer.remove(&key);
+    }
+    prune_unreachable(&mut copy);
     copy.save_to(&mut buffer)
         .map_err(|e| RedactError::Pdf(format!("Speichern fehlgeschlagen: {e}")))?;
     Ok(buffer)

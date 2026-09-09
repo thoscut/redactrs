@@ -254,14 +254,19 @@ fn g5b_dieselbe_iban_ohne_leerraum_abgewaehlt_ist_kein_leck() {
     app.state.export(&out, None).expect("Export");
 
     let plan = app.state.plan_export_check(&summary);
-    // Die Entscheidung fällt auf der Normalform der Suche (ohne Leerraum):
-    // beide Schreibweisen sind **ein** Text, und der steht in einer
-    // abgewählten Zeile. Mutation `squeeze` weg: `needles` trägt die
-    // Schreibweise mit Leerraum, `kept` ist 0.
-    assert!(plan.needles.is_empty(), "{plan:?}");
-    assert_eq!(plan.kept, 1, "{plan:?}");
+    // Seit Fix-Runde 5 fällt die Entscheidung nicht mehr im Plan: gesucht
+    // wird die geschwärzte Schreibweise, und der Plan merkt sich nur, dass
+    // eine abgewählte Zeile dieselbe Normalform trägt.
+    assert_eq!(plan.needles, vec![spaced.clone()], "{plan:?}");
+    assert_eq!(plan.kept_forms, vec![true], "{plan:?}");
+    assert_eq!(plan.kept, 0, "{plan:?}");
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
+    // Getroffen hat nur die Fassung ohne Leerraum — das kann die abgewählte
+    // Zeile sein, also kein Leck. Mutation (`kept_forms` im Lauf nicht
+    // beachtet): der Fehlalarm aus Runde 4 ist zurück, rot.
+    assert_eq!(check.kept, 1, "{check:?}");
+    assert_eq!(check.checked, 1, "{check:?}");
     // Das Orakel je Schreibweise: die geschwärzte ist weg (byteweise), nur
     // die stehen gelassene ist noch da.
     let bytes = std::fs::read(&out).unwrap();
@@ -339,7 +344,7 @@ fn g5b_ein_abgewaehlter_text_auf_seite_2_macht_das_leck_auf_seite_1_unpruefbar()
     assert!(!check.found_leak());
     assert!(check
         .sentence()
-        .contains("1 Text(e) stehen auch in einer abgewählten"));
+        .contains("1 Text(e) decken sich mit einer abgewählten"));
 
     // Das Orakel nennt die Seite des Lecks.
     let hits = redact_pdf::leaks(&std::fs::read(&out).unwrap(), "Musterbank");
@@ -400,7 +405,7 @@ fn g5b_leerer_text_und_tausend_gleiche() {
     let s = check.sentence();
     assert!(s.contains("2 Rechteck(e) ohne bekannten Text"), "{s}");
     assert!(
-        s.contains("1 Text(e) stehen auch in einer abgewählten"),
+        s.contains("1 Text(e) decken sich mit einer abgewählten"),
         "{s}"
     );
 }
@@ -486,36 +491,67 @@ fn g5a2_der_plan_traegt_die_entpackgrenze_des_ladens() {
 
 /// **Befund G5-A2 (Satz).** Was `leaks_many_within` nicht durchsucht hat,
 /// steht im Satz — „nicht gefunden“ ist dann keine Aussage — und zählt für
-/// die Warnungen wie ein Fund, ohne als „steht NOCH“ zu gelten. Der
-/// Platzhalter in `redact-pdf` liefert `unchecked` heute leer; der Satz muss
-/// trotzdem da sein, deshalb ein konstruiertes Ergebnis. Mutation (Satz
-/// weg, oder `warning()` sieht `unchecked` nicht): rot.
+/// die Warnungen wie ein Fund, ohne als „steht NOCH“ zu gelten.
+///
+/// **Fix-Runde 5:** Der Satz nennt die Ursache nicht mehr selbst. Er sagte
+/// „nicht geprüft (Entpackgrenze)“, und die Entpackgrenze ist längst nicht
+/// die einzige: die Objektsicht meldet auch „Verschachtelungstiefe 32
+/// erreicht“, die Vorprüfung des Laders ihre eigene Ablehnung. Jetzt zählt
+/// der Satz die Stellen und **nennt sie**, jede mit ihrem eigenen Grund —
+/// hier zwei verschiedene, und beide müssen bis in die Statuszeile und in
+/// die Warnung kommen. Mutation (`unchecked_places()` weg oder auf eine
+/// feste Ursache zurück): rot.
 #[test]
 fn g5a2_nicht_geprueft_steht_im_satz_und_zaehlt_als_warnung() {
+    let tief = "Objekt 5 0 /Kids[0]: nicht durchsucht — Verschachtelungstiefe 32 erreicht; \
+                was tiefer liegt, hat keine Sicht gelesen";
     let check = crate::state::ExportCheck {
         checked: 2,
         unchecked: vec![
             "Objekt 7 0 (Bildstrom): über der Entpackgrenze".to_string(),
-            "Objekt 9 0 (Bildstrom): über der Entpackgrenze".to_string(),
+            tief.to_string(),
         ],
         ..Default::default()
     };
     let sentence = check.sentence();
     println!("{sentence}");
     assert!(
-        sentence.contains(
-            "2 Stelle(n) wurden nicht geprüft (Entpackgrenze) — die Antwort ist unvollständig."
-        ),
+        sentence.contains("2 Stelle(n) wurden nicht geprüft — die Antwort ist unvollständig:"),
         "{sentence}"
     );
+    // Der Satz behauptet keine Ursache mehr — die Stellen nennen ihre.
+    assert!(
+        !sentence.contains("nicht geprüft (Entpackgrenze)"),
+        "{sentence}"
+    );
+    assert!(
+        sentence.contains("Objekt 7 0 (Bildstrom): über der Entpackgrenze"),
+        "{sentence}"
+    );
+    assert!(sentence.contains(tief), "{sentence}");
     assert!(!sentence.contains("steht NOCH"), "{sentence}");
     assert!(!check.found_leak());
     assert!(check.incomplete());
     let warning = check.warning().expect("unvollständig ist eine Warnung");
+    assert!(warning.contains("nicht geprüft"), "{warning}");
+    assert!(warning.contains("über der Entpackgrenze"), "{warning}");
     assert!(
-        warning.contains("nicht geprüft (Entpackgrenze)"),
+        warning.contains("Verschachtelungstiefe 32 erreicht"),
         "{warning}"
     );
+
+    // Mehr Stellen, als der Satz nennt: drei mit Namen, der Rest gezählt.
+    let viele = crate::state::ExportCheck {
+        checked: 1,
+        unchecked: (0..5).map(|i| format!("Objekt {i} 0: Grund {i}")).collect(),
+        ..Default::default()
+    };
+    let s = viele.sentence();
+    println!("{s}");
+    assert!(s.contains("5 Stelle(n) wurden nicht geprüft"), "{s}");
+    assert!(s.contains("Objekt 2 0: Grund 2"), "{s}");
+    assert!(!s.contains("Objekt 3 0: Grund 3"), "{s}");
+    assert!(s.contains("… und 2 weitere"), "{s}");
 
     // Vollständig geprüft, nichts gefunden, nichts übersprungen: kein Satz,
     // keine Warnung.

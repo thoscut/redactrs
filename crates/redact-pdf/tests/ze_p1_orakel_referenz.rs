@@ -47,6 +47,10 @@ fn variants(text: &str) -> Vec<(String, Vec<u8>)> {
     out.push(("UTF-16BE".into(), utf16.clone()));
     out.push(("Hex-String (UTF-16BE, gross)".into(), hex(&utf16, true)));
     out.push(("Hex-String (UTF-16BE, klein)".into(), hex(&utf16, false)));
+    let utf16le: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    out.push(("UTF-16LE".into(), utf16le.clone()));
+    out.push(("Hex-String (UTF-16LE, gross)".into(), hex(&utf16le, true)));
+    out.push(("Hex-String (UTF-16LE, klein)".into(), hex(&utf16le, false)));
     // Aufeinanderfolgende Doppelungen fallen weg (`variants.dedup_by`).
     let mut deduped: Vec<(String, Vec<u8>)> = Vec::new();
     for v in out {
@@ -142,6 +146,10 @@ fn die_rohdatei_sicht_findet_was_die_naive_suche_findet() {
     material.extend_from_slice(b"(");
     material.extend_from_slice(&[0xfe, 0xff]);
     material.extend("Max Mustermann".encode_utf16().flat_map(u16::to_be_bytes));
+    material.extend_from_slice(b")\n");
+    material.extend_from_slice(b"(");
+    material.extend_from_slice(&[0xff, 0xfe]);
+    material.extend("Max Mustermann".encode_utf16().flat_map(u16::to_le_bytes));
     material.extend_from_slice(b")\n");
     material.extend_from_slice("(Grüße Müller — 😀 e\u{0301})\n".as_bytes());
     material.extend_from_slice(b"aaaaaaaaaa\n");
@@ -247,9 +255,14 @@ fn die_rohdatei_sicht_an_echten_dateien() {
 }
 
 /// Eine Zeichenkette mit UTF-16**LE**-BOM (`FF FE`) — `decode_pdf_string`
-/// kennt diese Form ausdrücklich („in freier Wildbahn auch `FF FE`“), und
-/// keine Bytesicht kann sie ersetzen: die Muster eines Begriffs enthalten
-/// UTF-16BE, nicht LE. Ohne den LE-Zweig bliebe dieser Text unsichtbar.
+/// kennt diese Form ausdrücklich („in freier Wildbahn auch `FF FE`“).
+///
+/// Seit Fix-Runde 5 kennt auch [`variants`] eine LE-Bytefassung, damit
+/// LE-Bytes **in einem Strom** nicht unsichtbar bleiben. Damit dieser Test
+/// weiterhin den **Dekoder** misst und nicht bloß die neue Bytefassung,
+/// verlangt er eine Fundstelle aus der Zeichenketten-Sicht: deren Meldung
+/// trägt genau `[Zeichenkette, hex]`, während die Bytefassungen ihren
+/// Kodierungsnamen anhängen (`[Zeichenkette, hex, UTF-16LE]`).
 #[test]
 fn utf16le_zeichenketten_werden_gefunden() {
     use lopdf::{dictionary, Document, Object, StringFormat};
@@ -279,6 +292,68 @@ fn utf16le_zeichenketten_werden_gefunden() {
     assert!(
         !hits[0].is_empty(),
         "UTF-16LE-Zeichenkette nicht gefunden: {:?}",
+        hits[0]
+    );
+    assert!(
+        hits[0].iter().any(|h| h.contains("[Zeichenkette, hex]")),
+        "der Dekoder hat die LE-Zeichenkette nicht gelesen — gefunden wurde \
+         sie nur als Bytefolge: {:?}",
+        hits[0]
+    );
+    assert!(hits[1].is_empty(), "{:?}", hits[1]);
+}
+
+/// UTF-16**LE**-Bytes **in einem Strom** — ohne Zeichenketten-Syntax drumherum.
+///
+/// Hier hilft kein Dekoder: `decode_pdf_string` läuft nur an einem
+/// Zeichenketten-**Objekt** und an `(…)`/`<…>` innerhalb eines Blocks. Diese
+/// Bytes stehen nackt im entpackten Strom — gefunden werden sie nur, wenn
+/// `Needle::new` eine LE-Bytefassung kennt (Fix-Runde 5). Der Strom ist
+/// Flate-gepackt, damit auch die Rohdatei-Sicht ihn nicht sieht.
+#[test]
+fn utf16le_bytes_in_einem_strom_werden_gefunden() {
+    use std::io::Write;
+
+    use lopdf::{dictionary, Document, Object, Stream};
+
+    const GEHEIM: &str = "Max Mustermann";
+    let mut plain = b"BT ET % ".to_vec();
+    plain.extend(GEHEIM.encode_utf16().flat_map(u16::to_le_bytes));
+    // Gut komprimierbar, damit deflate wirklich packt statt „stored“ zu legen.
+    plain.extend_from_slice(&b"ABCABCABCABC ".repeat(200));
+
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(&plain).expect("deflate");
+    let packed = enc.finish().expect("deflate");
+
+    let mut doc = Document::with_version("1.5");
+    let pages = doc.new_object_id();
+    let content = doc.add_object(Object::Stream(
+        Stream::new(dictionary! { "Filter" => "FlateDecode" }, packed).with_compression(false),
+    ));
+    let page =
+        doc.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "Contents" => content });
+    doc.objects.insert(
+        pages,
+        Object::Dictionary(
+            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 },
+        ),
+    );
+    let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    doc.trailer.set("Root", catalog);
+    let mut pdf = Vec::new();
+    doc.save_to(&mut pdf).expect("PDF speicherbar");
+
+    // Die Gegenprobe: roh steht der Text nicht in der Datei.
+    assert!(
+        !pdf.windows(GEHEIM.len()).any(|w| w == GEHEIM.as_bytes()),
+        "der Klartext steht unverpackt in der Datei — der Test misst nichts"
+    );
+
+    let hits = leaks_many(&pdf, &[GEHEIM, "kommtnichtvor"]);
+    assert!(
+        hits[0].iter().any(|h| h.contains("UTF-16LE")),
+        "LE-Bytes im Strom nicht gefunden: {:?}",
         hits[0]
     );
     assert!(hits[1].is_empty(), "{:?}", hits[1]);

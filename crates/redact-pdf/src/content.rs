@@ -26,7 +26,7 @@
 //! über [`ContentSink::wants_graphics`] danach fragt; für die reine
 //! Textextraktion kostet der Ausbau also nichts.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use lopdf::content::Operation;
@@ -208,6 +208,41 @@ const MAX_CACHED_FONT_ENTRIES: usize = 400_000;
 /// [`Budget::charged_fonts`]) — dieselbe Schrift unter zweihundert Namen oder
 /// in zwanzig Verzeichnissen kostet einmal.
 const MAX_FONT_ENTRIES_PER_SCAN: usize = 1_000_000;
+
+/// Wie viele Formularplatzierungen [`ScanResult::close_forms`] für die
+/// Textspiegel **einer Seite** insgesamt aufzählen darf.
+///
+/// Die Schließung zählt Platzierungen auf, nicht Formulare: dasselbe Formular
+/// zweimal unter einem Spiegel zeichnet zweimal und zählt zweimal (siehe
+/// [`ScanResult::close_forms`]). Damit hängt ihr Umfang nicht mehr an der Zahl
+/// der *Objekte*, sondern am Baum der Platzierungen — und der lässt sich
+/// aufblähen: `nested_forms` hält die Kanten **eines** Durchlaufs je Formular,
+/// die Schließung läuft sie aber für jeden Abschnitt neu ab. Verschachtelte
+/// `BDC`-Klammern über demselben `Do` vervielfachen deshalb dieselbe
+/// Unterstruktur, ohne dass die Datei dafür Inhalt mitbringen müsste — genau
+/// die Fächerung, gegen die im Interpreter das Aufwandskonto [`Budget`] steht.
+///
+/// Gezählt wird das **Aufklappen**: was der Datensatz schon mitbrachte (die
+/// `Do` dieses Stroms, von [`scan_marked_text`] bereits vollständig erfasst
+/// und vom Aufwandskonto gedeckelt), bleibt auch über der Decke erhalten.
+///
+/// 100 000 sind die Decke. Gemessen (Debug, `ze_p2_spiegel::
+/// mess_zehntausend_platzierungen`, dieselbe Seite je einmal mit und einmal
+/// ohne den Spiegel darüber, damit nur die Schließung im Unterschied steht):
+///
+/// | Platzierungen | ohne Spiegel | mit Spiegel | Mehrspeicher |
+/// |--------------:|-------------:|------------:|-------------:|
+/// |        10 000 |      0,31 s  |     0,30 s  |      0,6 MB  |
+/// |        20 000 |      0,60 s  |     0,64 s  |      2,8 MB  |
+/// |110 000 (Decke)|      3,29 s  |     3,53 s  |      8,5 MB  |
+///
+/// Die Zeit steht praktisch ganz beim Interpreter, der jede Platzierung
+/// ohnehin durchläuft; die Schließung selbst kostet rund 80 Byte je
+/// Platzierung, an der Decke also unter 10 MB. Eine Seite, die sie erreicht,
+/// bekommt eine Warnung — die Glyphenzahl unter den letzten Spiegeln ist dann
+/// unvollständig, und das muss dastehen, statt still einen falschen Vergleich
+/// zu ergeben.
+const MAX_MIRROR_FORM_PLACEMENTS: usize = 100_000;
 
 /// Schriften eines Ressourcenverzeichnisses: Ressourcenname → Metriken.
 ///
@@ -1165,45 +1200,108 @@ pub struct ScanResult {
     /// Reihenfolge, jede genau einmal.
     seen_warnings: HashSet<String>,
     /// Formular → die Formulare, die es selbst zeichnet, je mit dem Index
-    /// des `Do` in seinem Strom, in `Do`-Reihenfolge (je Platzierung ein
-    /// Eintrag; die Schließung entdoppelt). Gefüllt über
+    /// des `Do` in seinem Strom, in `Do`-Reihenfolge. Gefüllt über
     /// [`ContentSink::form_within`], verbraucht von [`ScanResult::close_forms`].
-    nested_forms: BTreeMap<ObjectId, Vec<(usize, ObjectId)>>,
+    ///
+    /// Eine **Menge**, weil ein mehrfach platziertes Formular mehrfach
+    /// durchlaufen wird und seine Kanten dabei jedes Mal meldet: der Strom
+    /// eines Formulars zeichnet an einem Index aber genau einmal, und die
+    /// Schließung zählt Platzierungen. Stünde `(Index, Formular)` hier
+    /// zweimal, zählten die Glyphen dahinter doppelt. Nach `Index` sortiert,
+    /// also in Stromreihenfolge.
+    nested_forms: BTreeMap<ObjectId, BTreeSet<(usize, ObjectId)>>,
 }
 
 impl ScanResult {
     /// Schließt [`MarkedTextRecord::forms`] transitiv über
     /// [`ScanResult::nested_forms`]: zeichnet ein Formular im Geltungsbereich
     /// eines Spiegels seinerseits Formulare, gehören deren Glyphen zu
-    /// demselben Spiegel. Jedes Formular steht danach je Abschnitt einmal, mit
-    /// dem Pfad der `Do`-Indizes, über den es (mittelbar) erreicht wurde.
+    /// demselben Spiegel. Jede **Platzierung** steht danach mit dem Pfad der
+    /// `Do`-Indizes darin, über den sie erreicht wurde.
+    ///
+    /// **Platzierung, nicht Formular.** Steht dasselbe Formular zweimal unter
+    /// einem Spiegel (`… BDC /Fm0 Do /Fm0 Do EMC`, oder ein Formular, das ein
+    /// inneres zweimal zeichnet), zeigt der Betrachter seine Glyphen zweimal,
+    /// und der Spiegel schreibt sie zweimal aus. Eine Menge über Objekt-Ids
+    /// warf hier bis Fix-Runde 5 die zweite Platzierung weg; die Glyphen
+    /// zählten halb, und ein deckungsgleicher Spiegel („AlphaAlpha“ über
+    /// zweimal „Alpha“) galt als Widerspruch — eine Deckungslücke und damit
+    /// Rückgabewert 3 an gewöhnlichem Material. Perfide daran war, dass die
+    /// Schließung nur läuft, wenn *irgendwo* im Dokument ein Formular ein
+    /// Formular zeichnet: dieselbe Seite warnte je nach unbeteiligtem Beiwerk
+    /// oder nicht.
+    ///
+    /// **Was die Menge stattdessen leistet.** Ein Zyklus (ein Formular, das
+    /// sich selbst zeichnet) darf nicht in eine Endlosschleife laufen. Dagegen
+    /// steht hier die **Kette der Vorfahren** dieses Pfades, nicht der ganze
+    /// Datensatz: sie beendet den Zyklus genauso, lässt aber dasselbe Formular
+    /// an zwei verschiedenen Stellen zu. Dazu kommt die Tiefe
+    /// [`MAX_FORM_DEPTH`] — tiefer hat der Interpreter selbst nicht gelesen,
+    /// und was er nicht gelesen hat, hat hier keine Glyphen beizutragen — und
+    /// die Decke [`MAX_MIRROR_FORM_PLACEMENTS`] gegen die Fächerung.
     fn close_forms(&mut self) {
         if self.nested_forms.is_empty() {
             return;
         }
+        // Die Decke zählt aufgeklappte Platzierungen, nicht abgelegte: was der
+        // Datensatz schon mitbrachte (die `Do` dieses Stroms), bleibt auch
+        // darüber erhalten — sonst verlöre eine übervolle Seite ausgerechnet
+        // die Formulare, die unmittelbar unter dem Spiegel stehen.
+        let mut left = MAX_MIRROR_FORM_PLACEMENTS;
+        let mut truncated = false;
         for record in &mut self.marked {
             let mut closed: Vec<(Vec<usize>, ObjectId)> = Vec::new();
-            let mut seen: HashSet<ObjectId> = HashSet::new();
             for (path, id) in std::mem::take(&mut record.forms) {
-                // Tiefensuche in `Do`-Reihenfolge; `seen` beendet auch einen
-                // Zyklus (den der Interpreter über `visiting` gar nicht erst
-                // betritt).
-                let mut stack = vec![(path, id)];
-                while let Some((path, id)) = stack.pop() {
-                    if !seen.insert(id) {
+                // Tiefensuche in `Do`-Reihenfolge. Ein Eintrag im Stapel ist
+                // der ganze Weg als (Do-Index, Formular): daraus kommen der
+                // Pfad, das aktuelle Formular und die Vorfahren, die den
+                // Zyklus beenden.
+                let mut stack: Vec<Vec<(usize, ObjectId)>> = Vec::new();
+                // `scan_marked_text` liefert einen Pfad der Länge eins (das
+                // `Do` in diesem Strom); längere kämen nur aus einer schon
+                // geschlossenen Liste, und deren Vorfahren sind hier nicht
+                // mehr bekannt — dann steht `id` für die ganze Kette, was den
+                // Zyklusschutz höchstens strenger macht.
+                stack.push(path.into_iter().map(|at| (at, id)).collect());
+                while let Some(way) = stack.pop() {
+                    let Some(&(_, id)) = way.last() else {
+                        continue;
+                    };
+                    closed.push((way.iter().map(|(at, _)| *at).collect(), id));
+                    if way.len() >= MAX_FORM_DEPTH {
+                        continue;
+                    }
+                    if left == 0 {
+                        truncated = true;
                         continue;
                     }
                     if let Some(children) = self.nested_forms.get(&id) {
-                        stack.extend(children.iter().rev().map(|(at, child)| {
-                            let mut deeper = path.clone();
-                            deeper.push(*at);
-                            (deeper, *child)
-                        }));
+                        for (at, child) in children.iter().rev() {
+                            if way.iter().any(|(_, up)| up == child) {
+                                continue; // Zyklus
+                            }
+                            if left == 0 {
+                                truncated = true;
+                                break;
+                            }
+                            left -= 1;
+                            let mut deeper = way.clone();
+                            deeper.push((*at, *child));
+                            stack.push(deeper);
+                        }
                     }
-                    closed.push((path, id));
                 }
             }
             record.forms = closed;
+        }
+        if truncated {
+            self.warn(format!(
+                "Unter den Textspiegeln dieser Seite stehen mehr als \
+                 {MAX_MIRROR_FORM_PLACEMENTS} Formularplatzierungen; ab dort wurden die \
+                 Glyphen den Spiegeln nicht mehr zugeordnet. Der Vergleich zwischen \
+                 Spiegel und Glyphen ist für die letzten Abschnitte deshalb \
+                 unvollständig."
+            ));
         }
     }
 }
@@ -1213,7 +1311,10 @@ impl ContentSink for ScanResult {
         let StreamKey::Form(parent) = parent else {
             return;
         };
-        self.nested_forms.entry(parent).or_default().push((at, id));
+        self.nested_forms
+            .entry(parent)
+            .or_default()
+            .insert((at, id));
     }
 
     fn show(&mut self, record: ShowRecord) {
