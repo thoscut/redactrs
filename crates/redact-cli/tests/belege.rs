@@ -39,6 +39,16 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+/// Zeilenenden vereinheitlichen.
+///
+/// Unter Windows checkt git Textdateien mit CRLF aus, wenn `core.autocrlf`
+/// gesetzt ist. Die Vergleiche hier suchen Zeilen und Abschnitte mit `\n` —
+/// ohne diese Umschrift war der Windows-Job der CI rot, obwohl an den Belegen
+/// nichts fehlte. `.gitattributes` hält LF fest; das hier ist der zweite Zaun.
+fn lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -168,8 +178,8 @@ fn rueckgabewert(abschnitt: &str) -> i32 {
 #[test]
 fn die_fundstellen_in_pruefung_txt_sind_die_des_gebauten_binaries() {
     let begriffe = begriffe_aus_dem_skript();
-    let pruefung = std::fs::read_to_string(repo_root().join("docs/pruefung.txt"))
-        .expect("docs/pruefung.txt lesbar");
+    let pruefung = lf(&std::fs::read_to_string(repo_root().join("docs/pruefung.txt"))
+        .expect("docs/pruefung.txt lesbar"));
     let vorher = abschnitt(&pruefung, "VORHER", "NACHHER");
     let nachher = abschnitt(&pruefung, "NACHHER", "DIE VIER SCHRITTE");
 
@@ -261,8 +271,8 @@ fn die_fundstellen_in_pruefung_txt_sind_die_des_gebauten_binaries() {
 /// Fassung sagt nichts über diese.
 #[test]
 fn pruefung_txt_stammt_von_dieser_fassung() {
-    let pruefung = std::fs::read_to_string(repo_root().join("docs/pruefung.txt"))
-        .expect("docs/pruefung.txt lesbar");
+    let pruefung = lf(&std::fs::read_to_string(repo_root().join("docs/pruefung.txt"))
+        .expect("docs/pruefung.txt lesbar"));
     let version = stdout(&run_in(&repo_root(), &["--version"]));
     let version = version.trim();
     assert!(!version.is_empty(), "--version schweigt");
@@ -319,10 +329,33 @@ fn die_zahl_der_pruefungen_steht_im_readme() {
         })
         .unwrap_or_else(|| panic!("check-preview.py meldet keine Zahl:\n{text}"));
 
-    let readme = std::fs::read_to_string(wurzel.join("README.md")).expect("README.md lesbar");
+    let readme = lf(&std::fs::read_to_string(wurzel.join("README.md")).expect("README.md lesbar"));
     let satz = format!("# prüft sie ({gemeldet} Prüfungen");
     assert!(
         readme.contains(&satz),
         "README.md nennt nicht „{satz}…)“ — check-preview.py meldet {gemeldet} Prüfungen"
     );
+}
+
+/// **Die Regel hinter dem zweiten Zaun.** Zweimal war der Windows-Job der CI
+/// rot, weil ein Test eine Datei des Repositorys wörtlich las und git sie dort
+/// mit CRLF ausgecheckt hatte. `.gitattributes` hält für jede Art von Textdatei
+/// LF fest; dieser Test hält `.gitattributes` fest.
+///
+/// Gemessen wird nicht der Inhalt der Regel, sondern ihre **Wirkung**: für jede
+/// Endung, die ein Test hier oder in `redact-cli` wörtlich liest, muss eine
+/// Zeile `eol=lf` dastehen. Wird eine gestrichen, wird dieser Test rot — und
+/// nicht erst der Job auf einem fremden Betriebssystem.
+#[test]
+fn jede_gelesene_dateiart_wird_mit_lf_ausgecheckt() {
+    let attrs = lf(&std::fs::read_to_string(repo_root().join(".gitattributes"))
+        .expect(".gitattributes lesbar"));
+    for endung in ["md", "txt", "rs", "toml", "yml", "sh", "py"] {
+        let zeile = format!("*.{endung} text eol=lf");
+        assert!(
+            attrs.lines().any(|l| l.trim() == zeile),
+            ".gitattributes ohne „{zeile}“ — eine Datei dieser Art wird von einem \
+             Test wörtlich gelesen und käme unter Windows mit CRLF an"
+        );
+    }
 }

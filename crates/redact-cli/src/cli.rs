@@ -701,8 +701,15 @@ mod tests {
         use clap::CommandFactory;
 
         let wurzel = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // `replace`: unter Windows checkt git Textdateien mit CRLF aus, wenn
+        // `core.autocrlf` gesetzt ist. Der Vergleich unten sucht Zeilen mit
+        // `\n` — ohne diese Zeile war der Windows-Job der CI rot, obwohl an
+        // der Doku nichts fehlte. `.gitattributes` hält LF fest; das hier ist
+        // der zweite Zaun, damit der Test nicht von einer Einstellung abhängt.
         let lies = |name: &str| {
-            std::fs::read_to_string(wurzel.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+            std::fs::read_to_string(wurzel.join(name))
+                .unwrap_or_else(|e| panic!("{name}: {e}"))
+                .replace("\r\n", "\n")
         };
         let glatt = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
 

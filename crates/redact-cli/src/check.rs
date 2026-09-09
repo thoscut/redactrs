@@ -498,9 +498,11 @@ mod tests {
         let wurzel = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let lies = |name: &str| {
             glatt(
-                &std::fs::read_to_string(wurzel.join(name)).unwrap_or_else(|e| {
-                    panic!("{name} lesbar: {e}");
-                }),
+                &std::fs::read_to_string(wurzel.join(name))
+                    .unwrap_or_else(|e| {
+                        panic!("{name} lesbar: {e}");
+                    })
+                    .replace("\r\n", "\n"),
             )
         };
 
