@@ -516,21 +516,28 @@ impl ExportCheckPlan {
     /// `--max-decompressed-mb` (das gilt für den Export wie für die Suche).
     ///
     /// Die Decke davor rechnete **Begriffe × Dateibytes auf der Platte**
-    /// gegen ein Budget von 2 GiB. Das war die falsche Einheit: eine kleine
-    /// Datei mit stark gepackten Strömen packt sich auf ein Vielfaches aus,
-    /// und genau an den entpackten Bytes hängt die Arbeit. Die Doku dazu
-    /// („2 GiB ≈ 2 s Rechenzeit“) lag gemessen um rund den Faktor 10
-    /// daneben, weil die Grundkosten je Datei — lesen, Ströme auspacken, jede
-    /// Seite durch den Schriftdekoder — mit der Dateigröße auf der Platte
-    /// nichts zu tun haben. Die richtige Einheit ist vor dem Lauf nicht
-    /// bekannt (die Ströme werden erst beim Suchen ausgepackt); eine Decke,
-    /// die man nicht vor dem Lauf anwenden kann, ist keine.
+    /// gegen ein Budget von 2 GiB und versprach dafür „≈ 2 s bei jeder
+    /// Dateigröße“. Das war die falsche Einheit: gesucht wird in den
+    /// entpackten Strömen, und wie viel eine Datei davon trägt, sagt ihre
+    /// Größe auf der Platte nicht. Gemessen (Release,
+    /// `zb_mess_nachpruefung_je_begriff_gegen_einen_durchgang`, 305 Seiten):
+    /// dieselbe Datei wiegt ungepackt 1 094 kB und gepackt 179 kB, und 1 000
+    /// Begriffe kosten an beiden gleich viel (1,55 s gegen 1,58 s) — die alte
+    /// Decke ließ an der gepackten aber 11 683 statt 1 916 Begriffe zu, also
+    /// rund 11 s statt der versprochenen 2 s; bei stärker gepackten Dateien
+    /// entsprechend mehr. Die richtige Einheit ist vor dem Lauf nicht bekannt
+    /// (die Ströme werden erst beim Suchen ausgepackt), und eine Decke, die
+    /// man erst nach dem Lauf anwenden kann, ist keine.
     ///
-    /// Gemessen (Release, `zb_mess_nachpruefung_je_begriff_gegen_einen_durchgang`,
-    /// 305 Seiten, 1,7 MB): 1 Begriff MESSUNG_1, 200 Begriffe MESSUNG_200,
-    /// 1 000 Begriffe MESSUNG_1000 — ein Sockel je Datei und darüber
-    /// MESSUNG_JE_BEGRIFF je Begriff. Am oberen Rand der Decke ist das die
-    /// Zeit, die „Nachprüfung läuft …“ höchstens im Hintergrund steht.
+    /// Die Kosten in Begriffen, an derselben Datei (1 079 kB nach dem
+    /// Export): 1 Begriff 0,70 s, 200 Begriffe 0,89 s, 1 000 Begriffe 1,62 s
+    /// — ein Sockel je Datei (lesen, Ströme auspacken, jede Seite durch den
+    /// Schriftdekoder) und darüber rund 0,9 ms je Begriff. Am oberen Rand der
+    /// Decke sind das rund 2 s, die „Nachprüfung läuft …“ im Hintergrund
+    /// steht; die Oberfläche hängt daran nicht (die Prüfung läuft auf einem
+    /// eigenen Thread, siehe [`crate::app::RedactApp`]). Was die Decke
+    /// überschreitet, wird **gesagt** und nicht verschwiegen — siehe
+    /// [`ExportCheck::sentence`].
     ///
     /// Kein Freibrief (siehe [`ExportCheck::sentence`]) und keine Aussage über
     /// selbst gezogene Rechtecke: die haben keinen bekannten Text, und dafür
