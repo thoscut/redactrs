@@ -49,7 +49,12 @@
 //!
 //! Dieselben Messwerte je **Objekt** statt je Datei (802-Byte-Körper mit je
 //! 401 Objekten): ein leeres Array 632,4 Byte, jedes andere Objekt 153,6.
-//! Daher `ARRAY_BYTES = 640` und `OBJEKT_BYTES = 160`.
+//! Daher `ARRAY_BYTES = 640` und `OBJEKT_BYTES = 160`. Beide Konstanten sind
+//! öffentlich, und jede „gerechnete“ Zahl in diesem Test wird **aus ihnen**
+//! gebildet — nie als Literal getragen. Sonst bliebe der Test bei einer
+//! Änderung in `document.rs` grün und druckte eine Zahl, die der Code nicht
+//! mehr rechnet (gemessen: bei `OBJEKT_BYTES = 155` stünde hier weiter 800,
+//! wo der Code 775 rechnet, und 775 läge **unter** den gemessenen 777,9).
 //!
 //! ## Objekt-Streams (Debug, 200 000 Objekte je Datei, Querverweis-Strom)
 //!
@@ -72,7 +77,8 @@
 //!
 //! „Gerechnet“ ist hier nicht am Verhalten ablesbar (siehe den Kommentar im
 //! Test), sondern nach der Regel von `walk` gebildet: zwei Kopfzahlen und der
-//! Körper, `[` als 640, jedes andere Wort als 160. „Brutto“ ist alles, was
+//! Körper, `[` als `ARRAY_BYTES`, jedes andere Wort als `OBJEKT_BYTES` (die
+//! Tabelle zeigt die Werte für 640 und 160). „Brutto“ ist alles, was
 //! `lopdf` nach `load_mem` hält; „ohne Nutzlast“ zieht die Dateibytes ab, die
 //! `lopdf` als Inhalt des Objekt- und des Querverweis-Stroms behält. Die
 //! decken Byte-Budget und Dekompressionsbudget, nicht die Objektdecke — und
@@ -84,7 +90,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use redact_pdf::document::{prescan, Limits};
+use redact_pdf::document::{prescan, Limits, ARRAY_BYTES, OBJEKT_BYTES};
 
 // ---------------------------------------------------------------------------
 // Der zählende Allokator
@@ -334,6 +340,15 @@ fn gerechnet(bytes: &[u8], faktor: u64) -> Option<u64> {
 /// gerechnete Zahl passte dann nicht mehr zur gemessenen.
 const FAKTOR: u64 = 60;
 
+/// Was die Vorprüfung für **ein** Objekt in einem Objekt-Stream rechnet —
+/// nach der Regel von `walk`, mit den Konstanten aus `document.rs`: die zwei
+/// Kopfzahlen (Nummer und Versatz) und jedes andere Wort des Körpers kosten
+/// `OBJEKT_BYTES`; eine öffnende `[` kostet **stattdessen** `ARRAY_BYTES` und
+/// zählt nicht noch einmal als Wort.
+fn gerechnet_je_objekt(andere_woerter: u64, klammern: u64) -> u64 {
+    (2 + andere_woerter) * OBJEKT_BYTES + klammern * ARRAY_BYTES
+}
+
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -422,20 +437,22 @@ fn die_rechnung_liegt_nie_unter_dem_gemessenen_speicher() {
     // das prüfen die Rohkörper oben nicht: dort stehen die Objekte in einem
     // Array.
     //
-    // Gerechnet wird je Objekt wie in `walk`: die zwei Kopfzahlen zählen
-    // 2 × 160, dazu der Körper — `[` als 640, jedes andere Wort als 160.
-    // Gemessen wird der Speicher des Dokuments **ohne** die Nutzlast des
-    // Containers: `lopdf` behält den Stream-Inhalt (Dateibytes), und die
-    // deckt das Byte-Budget, nicht die Objektdecke.
+    // Gerechnet wird je Objekt wie in `walk` (siehe `gerechnet_je_objekt`):
+    // die zwei Kopfzahlen und jedes Wort des Körpers als `OBJEKT_BYTES`, `[`
+    // als `ARRAY_BYTES` — aus den Konstanten, nicht als Literal. Gemessen
+    // wird der Speicher des Dokuments **ohne** die Nutzlast des Containers:
+    // `lopdf` behält den Stream-Inhalt (Dateibytes), und die deckt das
+    // Byte-Budget, nicht die Objektdecke.
     let anzahl = 200_000usize;
-    let objstm_formen: [(&str, &[u8], u64); 7] = [
-        ("<</a 0>>", b"<</a 0>>", 2 * 160 + 3 * 160),
-        ("[]", b"[]", 2 * 160 + 640),
-        ("0", b"0", 2 * 160 + 160),
-        ("/a", b"/a", 2 * 160 + 160),
-        ("<<>>", b"<<>>", 2 * 160 + 160),
-        ("1 0 R", b"1 0 R", 2 * 160 + 3 * 160),
-        ("(a)", b"(a)", 2 * 160 + 160),
+    // (Anzeige, Körper, Wörter im Körper außer `[`, öffnende `[`)
+    let objstm_formen: [(&str, &[u8], u64, u64); 7] = [
+        ("<</a 0>>", b"<</a 0>>", 3, 0), // `<<`, `/a`, `0`
+        ("[]", b"[]", 0, 1),             // nur die `[`; `]` kostet nichts
+        ("0", b"0", 1, 0),
+        ("/a", b"/a", 1, 0),
+        ("<<>>", b"<<>>", 1, 0),
+        ("1 0 R", b"1 0 R", 3, 0), // drei Wörter, ein Objekt — gewollt
+        ("(a)", b"(a)", 1, 0),
     ];
     println!();
     println!(
@@ -443,7 +460,8 @@ fn die_rechnung_liegt_nie_unter_dem_gemessenen_speicher() {
         "ObjStm-Form", "Datei", "gemessen", "o. Nutzl.", "je Objekt", "gerechnet", "Verh."
     );
     let mut engste_objstm = f64::MAX;
-    for (name, koerper, gerechnet_je_objekt) in objstm_formen {
+    for (name, koerper, andere_woerter, klammern) in objstm_formen {
+        let gerechnet_je_objekt = gerechnet_je_objekt(andere_woerter, klammern);
         let bytes = objstm(koerper, anzahl);
         let nutzlast = bytes.len() - geruest().iter().map(Vec::len).sum::<usize>();
 
@@ -483,7 +501,10 @@ fn die_rechnung_liegt_nie_unter_dem_gemessenen_speicher() {
 
     // **Woher die beiden Beträge kommen.** Ein leeres Array kostet gemessen
     // 632 Byte, jedes andere Objekt 154 — Faktor 4, und genau dieses
-    // Verhältnis steht in `ARRAY_BYTES` (640) und `OBJEKT_BYTES` (160).
+    // Verhältnis steht in `ARRAY_BYTES` und `OBJEKT_BYTES`. Die Obergrenzen
+    // sind die Konstanten selbst: die Messung muss **unter** dem liegen, was
+    // der Code je Objekt verbucht, sonst ist die Begründung der Konstante
+    // hinfällig.
     for (name, wert) in &je_objekt {
         println!("{name:<20} {wert:.1} Byte je Objekt");
     }
@@ -494,14 +515,14 @@ fn die_rechnung_liegt_nie_unter_dem_gemessenen_speicher() {
         .1;
     let zahlen = je_objekt.iter().find(|(n, _)| *n == "Zahlen").unwrap().1;
     assert!(
-        (600.0..=640.0).contains(&arrays),
+        (600.0..=ARRAY_BYTES as f64).contains(&arrays),
         "ein leeres Array kostet {arrays:.1} Byte statt der 632, mit denen \
-         ARRAY_BYTES (640) begründet ist"
+         ARRAY_BYTES ({ARRAY_BYTES}) begründet ist"
     );
     assert!(
-        (140.0..=160.0).contains(&zahlen),
+        (140.0..=OBJEKT_BYTES as f64).contains(&zahlen),
         "ein gewöhnliches Objekt kostet {zahlen:.1} Byte statt der 154, mit \
-         denen OBJEKT_BYTES (160) begründet ist"
+         denen OBJEKT_BYTES ({OBJEKT_BYTES}) begründet ist"
     );
 
     // **Der Befund selbst, als Zusicherung.** Bei identischer Dateigröße

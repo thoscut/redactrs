@@ -47,22 +47,24 @@ Vorher stehen alle vier gesuchten Texte in der Datei:
 
 ```
 Geprüft: kontoauszug.pdf (1862 Byte)
-  GEFUNDEN (7 Fundstelle(n)): DE89 3704 0044 0532 0130 00
-  GEFUNDEN (5 Fundstelle(n)): COBADEFFXXX
-  GEFUNDEN (5 Fundstelle(n)): 532013000
-  GEFUNDEN (13 Fundstelle(n)): Max Mustermann
+  GEFUNDEN (8 Fundstelle(n)): DE89 3704 0044 0532 0130 00
+  GEFUNDEN (6 Fundstelle(n)): COBADEFFXXX
+  GEFUNDEN (6 Fundstelle(n)): 532013000
+  GEFUNDEN (14 Fundstelle(n)): Max Mustermann
 ```
 
 Nachher drei davon nicht mehr — auf keiner der Ebenen, auf denen
 `--check-leaks` sucht: Rohbytes, Altrevisionen, komprimierte Objektströme,
-Zeichenketten-Objekte, und das in Latin-1 wie in UTF-16BE:
+Zeichenketten-Objekte, und das in Latin-1 wie in UTF-16BE, dazu der Seitentext,
+wie ihn der Schriftdekoder liest (die Zeilen „Seite 1 [Schriftdekoder]“ in
+`pruefung.txt`):
 
 ```
 Geprüft: kontoauszug_geschwaerzt.pdf (1332 Byte)
   nicht gefunden: DE89 3704 0044 0532 0130 00
   nicht gefunden: COBADEFFXXX
   nicht gefunden: 532013000
-  GEFUNDEN (6 Fundstelle(n)): Max Mustermann
+  GEFUNDEN (7 Fundstelle(n)): Max Mustermann
 ```
 
 Wie das im Seiteninhalt aussieht, zeigt `--check-leaks` selbst. Es reiht in
@@ -258,9 +260,9 @@ Gemessene Größen:
 | `vorher.png` | 766 × 495 | — | 25 935 |
 | `nachher.png` | 766 × 495 | — | 22 380 |
 | `schwaerzung.gif` | 571 × 372 | 4 (8,3 s) | 18 033 |
-| `konsole.gif` | 720 × 494 | 60 (10,4 s) | 25 196 |
-| `konsole.txt` | — | — | 1 338 |
-| `pruefung.txt` | — | — | 7 462 |
+| `konsole.gif` | 720 × 513 | 61 (10,5 s) | 26 548 |
+| `konsole.txt` | — | — | 1 396 |
+| `pruefung.txt` | — | — | 7 972 |
 
 Nicht gemacht: Beschriftungen ins Bild, Pfeile, Rahmen, Hervorhebungen,
 gezeichnete Mauszeiger, Zusammensetzen zu einer Montage, Nachschärfen,

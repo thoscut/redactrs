@@ -1487,9 +1487,10 @@ pub fn load_manual_regions(
     // hier durchgehen, sind JSON von Hand gepflegter Größe; die Grenze greift
     // vor `serde_json`, und darauf kommt es an.
     let data = read_aux_text(path, AUX_LIMIT_HINT)?;
-    if let Ok(regions) = serde_json::from_str::<Vec<Region>>(&data) {
-        return Ok(regions.into_iter().map(normalize_region).collect());
-    }
+    let list_error = match serde_json::from_str::<Vec<Region>>(&data) {
+        Ok(regions) => return Ok(regions.into_iter().map(normalize_region).collect()),
+        Err(e) => e,
+    };
     match ReviewFile::from_json(&data) {
         Ok(review) => {
             check_review_identity(&review, document_sha, allow_unverified)?;
@@ -1500,10 +1501,21 @@ pub fn load_manual_regions(
                 .map(|i| normalize_region(i.region))
                 .collect())
         }
-        Err(e) => Err(RedactError::Parse(format!(
-            "{}: weder eine Regionsliste noch eine Review-Datei ({e})",
-            path.display()
-        ))),
+        Err(review_error) => {
+            // Zwei Lesarten, eine Meldung: die zu der Form, die die Datei
+            // erkennbar hat. Ein JSON-Array ist eine Regionsliste — deren
+            // Fehler („"page": … ist keine Seitenzahl“) hilft; „expected
+            // struct ReviewFile“ für dieselbe Datei hülfe nicht.
+            let cause = if data.trim_start().starts_with('[') {
+                list_error.to_string()
+            } else {
+                review_error.to_string()
+            };
+            Err(RedactError::Parse(format!(
+                "{}: weder eine Regionsliste noch eine Review-Datei ({cause})",
+                path.display()
+            )))
+        }
     }
 }
 
@@ -1680,13 +1692,21 @@ pub fn plan_outputs(config: &Config) -> Result<Option<PathBuf>> {
 ///
 /// Das `+ 1` ist Absicht und die einzige erlaubte Umrechnung: Fließtext sagt
 /// „Seite 1“, JSON zählt ab 0 (siehe [`audit::AuditEntry::page`]).
+///
+/// `saturating_add`, weil `BlockedRegion::page` über
+/// `blocked_by_negative_list` einer Review-Datei aus fremder Hand kommt: bei
+/// `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build über und löste
+/// eine Panic aus; im Release-Build stünde „Seite 0“ da. Die erste
+/// Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der
+/// Deserialisierung; diese hier gilt für jeden Aufrufer, der die Struktur
+/// selbst baut.
 pub fn describe_blocked(blocked: &[BlockedRegion]) -> Vec<String> {
     blocked
         .iter()
         .map(|b| {
             format!(
                 "Seite {}: „{}“ (Buchung {}) blockiert {}",
-                b.page + 1,
+                b.page.saturating_add(1),
                 b.pattern,
                 b.booking_id,
                 b.blocked_reason.as_deref().unwrap_or("einen Treffer")
@@ -1723,6 +1743,26 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )
+    }
+
+    /// Zweite Verteidigung hinter `MAX_PAGE_INDEX`, Gegenstück zu
+    /// `absurd_page_numbers_do_not_panic_in_warnings` in `audit.rs`.
+    #[test]
+    fn absurd_page_numbers_do_not_panic_in_labels() {
+        let blocked = BlockedRegion {
+            page: usize::MAX,
+            rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+            pattern: "Max".into(),
+            booking_id: "b003".into(),
+            blocked_reason: None,
+        };
+        let labels = describe_blocked(&[blocked]);
+        assert_eq!(labels.len(), 1);
+        assert!(
+            labels[0].starts_with("Seite 18446744073709551615:"),
+            "{}",
+            labels[0]
+        );
     }
 
     #[test]

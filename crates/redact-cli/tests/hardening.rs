@@ -1119,6 +1119,224 @@ fn ordinary_auxiliary_files_still_go_through() {
 }
 
 // ---------------------------------------------------------------------------
+// Befund 16 — feindliche Feldwerte in einer formal gültigen Review-Datei
+// ---------------------------------------------------------------------------
+//
+// Die Größengrenze oben prüft, ob die Datei gelesen werden darf. Was danach
+// **in** ihr steht, prüfte niemand: `serde_json` nimmt für ein `usize` jede
+// Zahl bis 18 446 744 073 709 551 615 an, und die Anzeige rechnet daraus
+// „Seite n + 1“. Gemessen mit `"page": 18446744073709551615` in einer sonst
+// gültigen Review-Datei — vorher / nachher:
+//
+// | Binary  | vorher                                       | nachher                |
+// |---------|----------------------------------------------|------------------------|
+// | Debug   | rc 101, Panic `audit.rs:453` (add overflow)  | rc 1, „keine Seitenzahl“ |
+// | Release | rc 0, Ausgabe geschrieben, Warnung „Seite 0“ | rc 1, „keine Seitenzahl“ |
+//
+// Der Release-Fall war der schlimmere: eine Ausgabedatei mit rc 0 und eine
+// Warnung, die auf die falsche Seite zeigt. Die Grenze steht in
+// `redact_core::model::MAX_PAGE_INDEX` (an lopdf gebunden, das Seiten als
+// `u32` zählt) und greift an der Deserialisierung, also vor dem ersten
+// Zugriff auf das Dokument. Dahinter steht als zweite Verteidigung ein
+// `saturating_add` an jeder Stelle, die „+ 1“ rechnet.
+
+/// Ein Wert der Review-Datei wird verbogen; was der Lauf damit tun soll.
+enum Expectation {
+    /// rc 1, keine Ausgabedatei, und die Meldung enthält diesen Text.
+    Refused(&'static str),
+    /// rc 0 und eine Ausgabedatei: der Wert ist krumm, aber ungefährlich.
+    Tolerated,
+}
+
+/// **Die Auflage:** kein Feldwert, der durch das Schema passt, bringt den
+/// Lauf zum Absturz. Entweder die Datei taugt nicht (rc 1, wie krummes JSON)
+/// oder der Wert ist harmlos (rc 0). Rückgabewert 101 — die Panic — kommt
+/// nicht vor, und ein Signal auch nicht.
+///
+/// Rückgabewert 1 und nicht 2: `read_aux_text` legt „die Datei taugt nicht“
+/// als `RedactError::Parse` fest; 2 ist für Fehler in der Bedienung
+/// reserviert, und an der Bedienung war hier nichts falsch.
+///
+/// `id` und `pages` werden absichtlich **nicht** geprüft — kein Aufrufer
+/// rechnet mit ihnen. Der Test füttert sie trotzdem, damit das so bleibt:
+/// sollte jemand einmal `pages + 1` rechnen, fällt es hier auf.
+#[test]
+fn hostile_field_values_in_a_valid_review_file_end_with_a_message_not_a_panic() {
+    let dir = workdir("feldwerte");
+    let input = write(&dir, "auszug.pdf", &redact_pdf::testing::demo_statement());
+
+    // Eine echte Review-Datei mit der Prüfsumme des Dokuments — genau so,
+    // wie sie ein Bedienender vor sich hat, bevor er darin herumschreibt.
+    let review = dir.join("review.json");
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--review",
+        "--review-out",
+        review.to_str().unwrap(),
+        "--patterns",
+        "iban_de",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let original: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&review).unwrap()).unwrap();
+    assert!(
+        original["items"].as_array().is_some_and(|i| !i.is_empty()),
+        "die Review-Datei hat keinen Treffer, an dem sich etwas verbiegen ließe: {original}"
+    );
+
+    type Twist = fn(&mut serde_json::Value);
+    let cases: [(&str, Twist, Expectation); 7] = [
+        (
+            "page_max",
+            |v| v["items"][0]["region"]["page"] = serde_json::json!(u64::MAX),
+            Expectation::Refused("keine Seitenzahl"),
+        ),
+        (
+            "page_minus_one",
+            |v| v["items"][0]["region"]["page"] = serde_json::json!(-1),
+            Expectation::Refused("Parse-Fehler"),
+        ),
+        (
+            "confidence_minus_one",
+            |v| {
+                v["items"][0]["region"]["source"]["pattern"]["confidence"] = serde_json::json!(-1.0)
+            },
+            Expectation::Tolerated,
+        ),
+        (
+            "text_empty",
+            |v| v["items"][0]["region"]["text"] = serde_json::json!(""),
+            Expectation::Tolerated,
+        ),
+        (
+            "id_max",
+            |v| v["items"][0]["id"] = serde_json::json!(u64::MAX),
+            Expectation::Tolerated,
+        ),
+        (
+            "pages_zero",
+            |v| v["input"]["pages"] = serde_json::json!(0),
+            Expectation::Tolerated,
+        ),
+        (
+            "pages_max",
+            |v| v["input"]["pages"] = serde_json::json!(u64::MAX),
+            Expectation::Tolerated,
+        ),
+    ];
+    let apply = |name: &str, datei: &Path| -> (Output, PathBuf) {
+        let ausgabe = dir.join(format!("out-{name}.pdf"));
+        let out = run(&[
+            input.to_str().unwrap(),
+            "-o",
+            ausgabe.to_str().unwrap(),
+            "--apply-review",
+            datei.to_str().unwrap(),
+        ]);
+        (out, ausgabe)
+    };
+
+    let assert_no_panic = |name: &str, out: &Output| {
+        let code = out.status.code();
+        assert!(
+            code.is_some(),
+            "{name}: der Prozess wurde durch ein Signal beendet: {:?}",
+            out.status
+        );
+        assert_ne!(
+            code,
+            Some(101),
+            "{name}: der Lauf ist abgestürzt (Panic) statt mit einer Meldung zu enden:\n{}",
+            stderr(out)
+        );
+    };
+
+    for (name, twist, expectation) in cases {
+        let mut value = original.clone();
+        twist(&mut value);
+        let datei = write(&dir, &format!("{name}.json"), value.to_string().as_bytes());
+        let (out, ausgabe) = apply(name, &datei);
+        assert_no_panic(name, &out);
+        match expectation {
+            Expectation::Refused(needle) => {
+                assert_eq!(out.status.code(), Some(1), "{name}:\n{}", stderr(&out));
+                assert!(
+                    stderr(&out).contains(needle),
+                    "{name}: die Meldung nennt den Grund nicht:\n{}",
+                    stderr(&out)
+                );
+                assert!(
+                    !ausgabe.exists(),
+                    "{name}: trotz Ablehnung wurde eine Ausgabedatei geschrieben"
+                );
+            }
+            Expectation::Tolerated => {
+                assert_eq!(
+                    out.status.code(),
+                    Some(0),
+                    "{name}: ein harmloser Wert wurde abgelehnt:\n{}",
+                    stderr(&out)
+                );
+                assert!(
+                    ausgabe.exists(),
+                    "{name}: keine Ausgabedatei:\n{}",
+                    stdout(&out)
+                );
+            }
+        }
+    }
+
+    // `NaN` ist kein JSON; das ist ein Fehler des Formats, nicht des Werts —
+    // aber auch er darf nur mit rc 1 enden.
+    let text = std::fs::read_to_string(&review).unwrap();
+    let stelle = text
+        .find("\"confidence\":")
+        .expect("die Review-Datei hat eine confidence");
+    let ende = stelle + text[stelle..].find([',', '\n', '}']).unwrap();
+    let nan = format!("{}\"confidence\": NaN{}", &text[..stelle], &text[ende..]);
+    let datei = write(&dir, "confidence_nan.json", nan.as_bytes());
+    let (out, ausgabe) = apply("confidence_nan", &datei);
+    assert_no_panic("confidence_nan", &out);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(!ausgabe.exists());
+
+    // Derselbe Wert hinter `--manual-regions`, als nacktes Array. Der Weg
+    // dorthin ist ein anderer (`serde_json::from_str::<Vec<Region>>`), die
+    // Grenze dieselbe — und die Meldung nennt den Grund, nicht „expected
+    // struct ReviewFile“.
+    let region = serde_json::json!([{
+        "page": u64::MAX,
+        "rect": original["items"][0]["region"]["rect"],
+        "text": null,
+        "source": { "manual": { "reason": "Feldwert" } }
+    }]);
+    let datei = write(
+        &dir,
+        "regionen_page_max.json",
+        region.to_string().as_bytes(),
+    );
+    let ausgabe = dir.join("out-regionen.pdf");
+    let out = run(&[
+        input.to_str().unwrap(),
+        "-o",
+        ausgabe.to_str().unwrap(),
+        "--no-patterns",
+        "--manual-regions",
+        datei.to_str().unwrap(),
+    ]);
+    assert_no_panic("manual_regions_page_max", &out);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("keine Seitenzahl"),
+        "die Meldung nennt den Grund nicht:\n{}",
+        stderr(&out)
+    );
+    assert!(!ausgabe.exists());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
 // Die Zusicherung selbst
 // ---------------------------------------------------------------------------
 

@@ -25,7 +25,13 @@
 //!   bei `lopdf`: dafür gibt es dort einen geprüften Dekoder (`weezl`), und
 //!   ihn zu kopieren wäre Abstraktion auf Vorrat. Trifft die Kette auf einen
 //!   solchen Filter, geht der **Rest der Kette** an `lopdf` — auch das ist
-//!   mehr, als `lopdf` allein kann (`[/ASCIIHexDecode /LZWDecode]`).
+//!   mehr, als `lopdf` allein kann (`[/ASCIIHexDecode /LZWDecode]`). Dabei
+//!   bekommt `lopdf` **genau den** `/DecodeParms`-Eintrag, der zum ersten
+//!   Restfilter gehört, als einzelnes Dictionary — denn `lopdf` liest
+//!   `/DecodeParms` nur als ein Dictionary (nie als Liste, nie über einen
+//!   Verweis) und wendet es auf jeden Filter an, den es dekodiert. Eine
+//!   Liste ungekürzt weiterzureichen hieße, dass der Prädiktor hinter
+//!   `[/ASCIIHexDecode /FlateDecode]` stillschweigend verloren ginge.
 //! * **Bildfilter** (`DCTDecode`, `JPXDecode`, `CCITTFaxDecode`, `JBIG2Decode`)
 //!   sind hier ein Fehler wie bei `lopdf`. Sie stehen nie an einem
 //!   Seiteninhalt; Bilder liest [`crate::image`] mit eigenem Weg.
@@ -42,7 +48,11 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 ///
 /// `None`, wenn ein Filter weder hier noch bei `lopdf` bekannt ist. Ein Strom
 /// ohne `/Filter` kommt unverändert zurück.
-pub fn decoded_content(stream: &Stream) -> Option<Vec<u8>> {
+///
+/// `doc` löst `/DecodeParms` auf — die Liste wie jeden Eintrag darin. Beides
+/// darf ein Verweis sein (PDF 32000-1, 7.3.8.2), und ein nicht aufgelöster
+/// Verweis läse sich wie „kein Prädiktor“.
+pub fn decoded_content(doc: &Document, stream: &Stream) -> Option<Vec<u8>> {
     // `filters()` ist `Err` sowohl ohne `/Filter` als auch bei einem
     // unbrauchbaren Wert — `lopdf` liest beides als „nicht gefiltert“, und
     // die Rohbytes sind dann das Einzige, was es zu lesen gibt.
@@ -51,8 +61,9 @@ pub fn decoded_content(stream: &Stream) -> Option<Vec<u8>> {
     };
     let mut data = stream.content.clone();
     for (index, filter) in filters.iter().enumerate() {
-        let Some(next) = decode_one(filter, &data, has_predictor(&stream.dict, index)) else {
-            return decode_rest_with_lopdf(stream, &filters[index..], data);
+        let parms = decode_parms(doc, &stream.dict, index);
+        let Some(next) = decode_one(filter, &data, has_predictor(parms.as_ref())) else {
+            return decode_rest_with_lopdf(stream, &filters[index..], parms, data);
         };
         data = next;
     }
@@ -72,7 +83,7 @@ pub fn page_content(doc: &Document, page_id: ObjectId) -> Vec<u8> {
         let Ok(stream) = doc.get_object(id).and_then(Object::as_stream) else {
             continue;
         };
-        match decoded_content(stream) {
+        match decoded_content(doc, stream) {
             Some(data) => content.extend_from_slice(&data),
             None => content.extend_from_slice(&stream.content),
         }
@@ -94,29 +105,57 @@ fn decode_one(filter: &[u8], data: &[u8], predictor: bool) -> Option<Vec<u8>> {
 }
 
 /// Reicht den Rest der Kette an `lopdf` weiter — als Strom, der nur noch die
-/// verbliebenen Filter trägt. `/DecodeParms` bleibt, wie er war: `lopdf` liest
-/// ihn ohnehin nur als einzelnes Dictionary.
-fn decode_rest_with_lopdf(stream: &Stream, rest: &[&[u8]], data: Vec<u8>) -> Option<Vec<u8>> {
+/// verbliebenen Filter trägt.
+///
+/// `parms` ist der aufgelöste `/DecodeParms`-Eintrag des **ersten**
+/// Restfilters, und genau der wird als einzelnes Dictionary eingetragen —
+/// so, wie `lopdf` ihn liest (`Stream::decompressed_content`: ein
+/// `as_dict()` auf `/DecodeParms`, angewandt auf jeden Filter der Kette).
+/// Die ursprüngliche Liste stünde dort mit dem Index der **ungekürzten**
+/// Kette und käme bei `lopdf` als „kein Dictionary“ an; `/DP` wird ebenfalls
+/// entfernt, damit nicht der alte Eintrag unter dem Kurznamen weiterwirkt.
+/// Ein zweiter Restfilter mit eigenen Parametern bekäme hier die des ersten
+/// mit — das ist die Lesart von `lopdf`, und mehr als einen `lopdf`-Filter
+/// (`LZWDecode`, Flate mit Prädiktor) hintereinander schreibt kein Erzeuger.
+fn decode_rest_with_lopdf(
+    stream: &Stream,
+    rest: &[&[u8]],
+    parms: Option<Dictionary>,
+    data: Vec<u8>,
+) -> Option<Vec<u8>> {
     let mut dict = stream.dict.clone();
     let names: Vec<Object> = rest.iter().map(|f| Object::Name(f.to_vec())).collect();
     dict.set("Filter", Object::Array(names));
+    dict.remove(b"DecodeParms");
+    dict.remove(b"DP");
+    if let Some(parms) = parms {
+        dict.set("DecodeParms", Object::Dictionary(parms));
+    }
     Stream::new(dict, data)
         .with_compression(false)
         .decompressed_content()
         .ok()
 }
 
-/// Steht für den `index`-ten Filter ein Prädiktor in `/DecodeParms`?
-fn has_predictor(dict: &Dictionary, index: usize) -> bool {
-    let Ok(parms) = dict.get(b"DecodeParms").or_else(|_| dict.get(b"DP")) else {
-        return false;
-    };
+/// Der `/DecodeParms`-Eintrag, der zum `index`-ten Filter gehört — aufgelöst.
+///
+/// Sowohl die Liste als auch der Eintrag darin dürfen Verweise sein. Ein
+/// einzelnes Dictionary (die Form bei genau einem Filter) gilt für jeden
+/// Index — so liest es auch `lopdf`, und ein Erzeuger, der zu einer Kette
+/// nur ein Dictionary schreibt, meint damit den Filter, der Parameter hat.
+fn decode_parms(doc: &Document, dict: &Dictionary, index: usize) -> Option<Dictionary> {
+    let parms = dict.get(b"DecodeParms").or_else(|_| dict.get(b"DP")).ok()?;
+    let (_, parms) = doc.dereference(parms).ok()?;
     let entry = match parms {
-        Object::Array(items) => items.get(index),
-        other => Some(other),
+        Object::Array(items) => items.get(index)?,
+        other => other,
     };
-    entry
-        .and_then(|o| o.as_dict().ok())
+    doc.dereference(entry).ok()?.1.as_dict().ok().cloned()
+}
+
+/// Steht in diesem `/DecodeParms`-Eintrag ein Prädiktor?
+fn has_predictor(parms: Option<&Dictionary>) -> bool {
+    parms
         .and_then(|d| d.get(b"Predictor").ok())
         .and_then(|p| p.as_i64().ok())
         .is_some_and(|p| p > 1)
@@ -257,6 +296,24 @@ mod tests {
 
     const PLAIN: &[u8] = b"BT /F1 10 Tf 72 700 Td (IBAN: DE89 3704 0044 0532 0130 00) Tj ET";
 
+    /// Ein leeres Dokument — genug, um `/DecodeParms` ohne Verweise
+    /// aufzulösen.
+    fn doc() -> Document {
+        Document::with_version("1.5")
+    }
+
+    /// `PLAIN`, zeilenweise mit dem PNG-Prädiktor „None“ (ein Filterbyte 0
+    /// vor jeder Zeile von 8 Byte) — was ein `/Predictor 12 /Columns 8`
+    /// beim Dekodieren wieder entfernt.
+    fn png_rows() -> Vec<u8> {
+        let mut rows = Vec::new();
+        for chunk in PLAIN.chunks(8) {
+            rows.push(0u8);
+            rows.extend_from_slice(chunk);
+        }
+        rows
+    }
+
     fn with_filter(filter: Object, content: Vec<u8>) -> Stream {
         Stream::new(dictionary! { "Filter" => filter }, content).with_compression(false)
     }
@@ -308,13 +365,13 @@ mod tests {
     #[test]
     fn ein_strom_ohne_filter_kommt_unveraendert_zurueck() {
         let stream = Stream::new(dictionary! {}, PLAIN.to_vec());
-        assert_eq!(decoded_content(&stream).as_deref(), Some(PLAIN));
+        assert_eq!(decoded_content(&doc(), &stream).as_deref(), Some(PLAIN));
     }
 
     #[test]
     fn asciihex_wird_dekodiert() {
         let stream = with_filter("ASCIIHexDecode".into(), hex(PLAIN));
-        assert_eq!(decoded_content(&stream).as_deref(), Some(PLAIN));
+        assert_eq!(decoded_content(&doc(), &stream).as_deref(), Some(PLAIN));
         // Leerraum und Kleinbuchstaben, ungerade letzte Ziffer.
         assert_eq!(ascii_hex_decode(b"4 1\n4 2 4>"), b"AB@");
     }
@@ -322,7 +379,7 @@ mod tests {
     #[test]
     fn runlength_wird_dekodiert() {
         let stream = with_filter("RunLengthDecode".into(), run_length(PLAIN));
-        assert_eq!(decoded_content(&stream).as_deref(), Some(PLAIN));
+        assert_eq!(decoded_content(&doc(), &stream).as_deref(), Some(PLAIN));
         assert_eq!(
             run_length_decode(&[2, b'X', b'Y', b'Z', 253, b'A', 128]),
             b"XYZAAAA"
@@ -332,7 +389,7 @@ mod tests {
     #[test]
     fn ascii85_wird_dekodiert() {
         let stream = with_filter("ASCII85Decode".into(), a85(PLAIN));
-        assert_eq!(decoded_content(&stream).as_deref(), Some(PLAIN));
+        assert_eq!(decoded_content(&doc(), &stream).as_deref(), Some(PLAIN));
         // Vier Nullbytes als `z`, angebrochene Schlussgruppe, Leerraum.
         assert_eq!(
             ascii85_decode(b"z87cU\nRD]i,\"Ebo80~>"),
@@ -340,7 +397,7 @@ mod tests {
         );
         // Deckungsgleich mit lopdf an derselben Eingabe.
         assert_eq!(
-            decoded_content(&stream),
+            decoded_content(&doc(), &stream),
             stream.decompressed_content().ok(),
             "ASCII85: eigener Dekoder und lopdf müssen dasselbe lesen"
         );
@@ -354,21 +411,24 @@ mod tests {
             stream.decompressed_content().is_err(),
             "lopdf kann die Kette nicht"
         );
-        assert_eq!(decoded_content(&stream).as_deref(), Some(PLAIN));
+        assert_eq!(decoded_content(&doc(), &stream).as_deref(), Some(PLAIN));
     }
 
     #[test]
     fn die_kette_runlength_flate_wird_in_reihenfolge_ausgepackt() {
         let chain = Object::Array(vec!["RunLengthDecode".into(), "FlateDecode".into()]);
         let stream = with_filter(chain, run_length(&deflate(PLAIN)));
-        assert_eq!(decoded_content(&stream).as_deref(), Some(PLAIN));
+        assert_eq!(decoded_content(&doc(), &stream).as_deref(), Some(PLAIN));
     }
 
     #[test]
     fn flate_allein_liest_dasselbe_wie_lopdf() {
         let stream = with_filter("FlateDecode".into(), deflate(PLAIN));
-        assert_eq!(decoded_content(&stream).as_deref(), Some(PLAIN));
-        assert_eq!(decoded_content(&stream), stream.decompressed_content().ok());
+        assert_eq!(decoded_content(&doc(), &stream).as_deref(), Some(PLAIN));
+        assert_eq!(
+            decoded_content(&doc(), &stream),
+            stream.decompressed_content().ok()
+        );
     }
 
     /// LZW bleibt bei `lopdf` — auch hinter einem eigenen Filter.
@@ -381,38 +441,110 @@ mod tests {
         let stream = with_filter("LZWDecode".into(), lzw.clone());
         let via_lopdf = stream.decompressed_content().expect("lopdf kann LZW");
         assert_eq!(via_lopdf, b"A");
-        assert_eq!(decoded_content(&stream).as_deref(), Some(b"A".as_slice()));
+        assert_eq!(
+            decoded_content(&doc(), &stream).as_deref(),
+            Some(b"A".as_slice())
+        );
         let chain = Object::Array(vec!["ASCIIHexDecode".into(), "LZWDecode".into()]);
         let stream = with_filter(chain, hex(&lzw));
         assert!(
             stream.decompressed_content().is_err(),
             "lopdf kann die Kette nicht"
         );
-        assert_eq!(decoded_content(&stream).as_deref(), Some(b"A".as_slice()));
+        assert_eq!(
+            decoded_content(&doc(), &stream).as_deref(),
+            Some(b"A".as_slice())
+        );
     }
 
     #[test]
     fn ein_praediktor_bleibt_bei_lopdf() {
-        // PNG-Prädiktor „None“ je Zeile: ein Filterbyte 0 vor jeder Zeile.
-        let mut rows = Vec::new();
-        for chunk in PLAIN.chunks(8) {
-            rows.push(0u8);
-            rows.extend_from_slice(chunk);
-        }
-        let mut stream = with_filter("FlateDecode".into(), deflate(&rows));
+        let mut stream = with_filter("FlateDecode".into(), deflate(&png_rows()));
         stream.dict.set(
             "DecodeParms",
             dictionary! { "Predictor" => 12, "Columns" => 8 },
         );
-        assert!(has_predictor(&stream.dict, 0));
-        assert_eq!(decoded_content(&stream), stream.decompressed_content().ok());
-        assert_eq!(decoded_content(&stream).as_deref(), Some(PLAIN));
+        assert!(has_predictor(
+            decode_parms(&doc(), &stream.dict, 0).as_ref()
+        ));
+        assert_eq!(
+            decoded_content(&doc(), &stream),
+            stream.decompressed_content().ok()
+        );
+        assert_eq!(decoded_content(&doc(), &stream).as_deref(), Some(PLAIN));
+    }
+
+    /// `[/ASCIIHexDecode /FlateDecode]` mit `/DecodeParms [null <<…>>]`: der
+    /// Prädiktor gehört zum **zweiten** Filter. Früher ging die Liste
+    /// ungekürzt an `lopdf`, das sie nicht als Dictionary lesen kann — der
+    /// Prädiktor fiel still weg, und die Filterbytes blieben im Text stehen.
+    #[test]
+    fn eine_kette_mit_praediktor_hinter_asciihex_wird_richtig_zerlegt() {
+        let chain = Object::Array(vec!["ASCIIHexDecode".into(), "FlateDecode".into()]);
+        let mut stream = with_filter(chain, hex(&deflate(&png_rows())));
+        stream.dict.set(
+            "DecodeParms",
+            Object::Array(vec![
+                Object::Null,
+                Object::Dictionary(dictionary! { "Predictor" => 12, "Columns" => 8 }),
+            ]),
+        );
+        assert!(!has_predictor(
+            decode_parms(&doc(), &stream.dict, 0).as_ref()
+        ));
+        assert!(has_predictor(
+            decode_parms(&doc(), &stream.dict, 1).as_ref()
+        ));
+        assert_eq!(decoded_content(&doc(), &stream).as_deref(), Some(PLAIN));
+        // Dasselbe unter dem Kurznamen, wie er in Inline-Bildern und bei
+        // manchen Erzeugern steht.
+        let parms = stream.dict.remove(b"DecodeParms").expect("gesetzt");
+        stream.dict.set("DP", parms);
+        assert_eq!(decoded_content(&doc(), &stream).as_deref(), Some(PLAIN));
+    }
+
+    /// `/DecodeParms 5 0 R` und `/DecodeParms [null 6 0 R]`: Liste und
+    /// Eintrag als Verweis (PDF 32000-1, 7.3.8.2). Unaufgelöst läse sich ein
+    /// Verweis wie „kein Prädiktor“ — mit demselben Ergebnis wie oben.
+    #[test]
+    fn decodeparms_als_verweis_wird_aufgeloest() {
+        let mut doc = doc();
+        let parms_id = doc.add_object(dictionary! { "Predictor" => 12, "Columns" => 8 });
+
+        // Ein Filter, die Liste selbst ist der Verweis.
+        let mut stream = with_filter("FlateDecode".into(), deflate(&png_rows()));
+        stream.dict.set("DecodeParms", Object::Reference(parms_id));
+        assert!(
+            stream
+                .decompressed_content()
+                .map(|d| d != PLAIN)
+                .unwrap_or(true),
+            "lopdf allein löst den Verweis nicht auf — sonst prüfte der Test nichts"
+        );
+        assert_eq!(decoded_content(&doc, &stream).as_deref(), Some(PLAIN));
+
+        // Eine Kette, der Eintrag in der Liste ist der Verweis.
+        let chain = Object::Array(vec!["ASCIIHexDecode".into(), "FlateDecode".into()]);
+        let mut stream = with_filter(chain, hex(&deflate(&png_rows())));
+        stream.dict.set(
+            "DecodeParms",
+            Object::Array(vec![Object::Null, Object::Reference(parms_id)]),
+        );
+        assert_eq!(decoded_content(&doc, &stream).as_deref(), Some(PLAIN));
+
+        // Und die Liste als Verweis auf ein Array mit einem Verweis darin.
+        let list_id = doc.add_object(Object::Array(vec![
+            Object::Null,
+            Object::Reference(parms_id),
+        ]));
+        stream.dict.set("DecodeParms", Object::Reference(list_id));
+        assert_eq!(decoded_content(&doc, &stream).as_deref(), Some(PLAIN));
     }
 
     #[test]
     fn ein_bildfilter_ist_keine_inhaltsdekodierung() {
         let stream = with_filter("DCTDecode".into(), vec![0xff, 0xd8]);
-        assert_eq!(decoded_content(&stream), None);
+        assert_eq!(decoded_content(&doc(), &stream), None);
     }
 
     #[test]
@@ -420,7 +552,7 @@ mod tests {
         let mut data = deflate(&PLAIN.repeat(40));
         data.truncate(data.len() / 2);
         let stream = with_filter("FlateDecode".into(), data);
-        let ours = decoded_content(&stream).expect("Teilergebnis");
+        let ours = decoded_content(&doc(), &stream).expect("Teilergebnis");
         let theirs = stream.decompressed_content().expect("lopdf: Teilergebnis");
         assert_eq!(ours, theirs);
     }

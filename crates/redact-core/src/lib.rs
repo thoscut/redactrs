@@ -29,7 +29,7 @@ pub use naming::{
     check_output_suffix, output_path_with_suffix, sibling_path, AUDIT_SUFFIX,
     DEFAULT_OUTPUT_SUFFIX, REVIEW_SUFFIX,
 };
-pub use read::{read_limited, MAX_AUX_FILE_BYTES};
+pub use read::{read_limited, MAX_AUX_FILE_BYTES, MAX_CHECK_NEEDLES};
 pub use review::{ReviewFile, ReviewInput, ReviewItem, REVIEW_FORMAT_VERSION};
 
 /// Re-Export, damit abhängige Crates dieselbe lopdf-Version verwenden.

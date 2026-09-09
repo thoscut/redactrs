@@ -637,7 +637,7 @@ impl Budget {
         stream: &Stream,
     ) -> PlacedStream {
         self.effort.decoded_streams += 1;
-        let (content, has_tokens) = match crate::filters::decoded_content(stream) {
+        let (content, has_tokens) = match crate::filters::decoded_content(doc, stream) {
             Some(data) => (
                 Some(crate::ops::decode_content_checked(&data)),
                 has_tokens(&data),
@@ -1058,17 +1058,27 @@ impl ShowRecord {
     }
 }
 
-/// Schlüssel einer Eigenschaftsliste, die den Text darunter **spiegeln**.
+/// Schlüssel einer Eigenschaftsliste, die den Text darunter **spiegeln** —
+/// drei Schlüssel, zwei Rollen.
 ///
-/// * `/ActualText` — der kanonische Ersatz für die Glyphen des Abschnitts
-///   (PDF 32000-1, 14.9.4). Word, InDesign und jeder PDF/UA-Erzeuger schreiben
-///   ihn routinemäßig, etwa für Ligaturen und Sonderzeichen.
-/// * `/Alt` — die Beschreibung für Hilfsmittel (14.9.3); bei `/Figure` steht
-///   dort regelmäßig genau der Text, den das Bild zeigt.
-/// * `/E` — die ausgeschriebene Form einer Abkürzung (14.9.5).
+/// * `/ActualText` — der **Ersatz** für die Glyphen des Abschnitts
+///   (PDF 32000-1, 14.9.4): ein Betrachter kopiert ihn *statt* der Glyphen.
+///   Er muss ihnen gleichen; Word, InDesign und jeder PDF/UA-Erzeuger
+///   schreiben ihn routinemäßig, etwa für Ligaturen und Sonderzeichen.
+/// * `/Alt` — die **Beschreibung** für Hilfsmittel (14.9.3); bei `/Figure`
+///   steht dort, was das Bild zeigt. Sie darf von den Glyphen abweichen —
+///   ein Bild hat keine.
+/// * `/E` — die **ausgeschriebene Form** einer Abkürzung (14.9.5): „z. B.“
+///   trägt `/E (zum Beispiel)`. Sie weicht von den Glyphen ab, das ist ihr
+///   Zweck.
 ///
-/// Alle drei geben wieder, was die Glyphen sagen; `pdftotext` bevorzugt in der
-/// Voreinstellung sogar den Spiegel. Verschwinden die Glyphen, muss er mit.
+/// Alle drei werden **gelesen** (als eigener Textlauf über dem Kasten der
+/// Glyphen, siehe `crate::extract`) und mit den Glyphen **geleert** (siehe
+/// `crate::redact::mirrors_to_clear`): `pdftotext` bevorzugt in der
+/// Voreinstellung sogar den Spiegel, und verschwinden die Glyphen, muss er
+/// mit. Als **Widerspruch gemeldet** wird nur der Ersatz — ein `/Alt` oder
+/// `/E`, der etwas anderes sagt als die Glyphen, ist die Normalform, kein
+/// Befund.
 pub const MIRROR_KEYS: [&[u8]; 3] = [b"ActualText", b"Alt", b"E"];
 
 /// Ein `BDC`/`DP`, dessen Eigenschaftsliste einen Textspiegel trägt.
@@ -1093,6 +1103,16 @@ pub struct MarkedTextRecord {
     /// Indizes der Textoperationen im Geltungsbereich (siehe
     /// [`scan_marked_text`]).
     pub shows: Vec<usize>,
+    /// Die Form-XObjects im Geltungsbereich: je `Do` dessen Index im Strom
+    /// und die Objekt-Id des Formulars. Der Spiegel gilt auch für deren
+    /// Glyphen — ein `/Span <</ActualText …>> BDC /Fm0 Do EMC` ist die Form,
+    /// in der ein Erzeuger einen Textbaustein beschriftet, und ohne diesen
+    /// Eintrag stünden „0 Glyphen“ unter einem Spiegel, der welche hat.
+    ///
+    /// Nach [`scan_page`] **transitiv geschlossen**: ein Formular, das das
+    /// Formular hier zeichnet, steht mit demselben Index ebenfalls darin.
+    /// Direkt aus [`scan_marked_text`] enthält die Liste nur die eigene Ebene.
+    pub forms: Vec<(usize, ObjectId)>,
 }
 
 /// Ergebnis eines Seiten-Scans.
@@ -1138,9 +1158,53 @@ pub struct ScanResult {
     /// Verhalten ändert sich nichts: dieselben Warnungen, dieselbe
     /// Reihenfolge, jede genau einmal.
     seen_warnings: HashSet<String>,
+    /// Formular → die Formulare, die es selbst zeichnet, in `Do`-Reihenfolge
+    /// (je Platzierung ein Eintrag; die Schließung entdoppelt). Gefüllt über
+    /// [`ContentSink::form_within`], verbraucht von [`ScanResult::close_forms`].
+    nested_forms: BTreeMap<ObjectId, Vec<ObjectId>>,
+}
+
+impl ScanResult {
+    /// Schließt [`MarkedTextRecord::forms`] transitiv über
+    /// [`ScanResult::nested_forms`]: zeichnet ein Formular im Geltungsbereich
+    /// eines Spiegels seinerseits Formulare, gehören deren Glyphen zu
+    /// demselben Spiegel. Jedes Formular steht danach je Abschnitt einmal, mit
+    /// dem Index des `Do`, über das es (mittelbar) erreicht wurde.
+    fn close_forms(&mut self) {
+        if self.nested_forms.is_empty() {
+            return;
+        }
+        for record in &mut self.marked {
+            let mut closed: Vec<(usize, ObjectId)> = Vec::new();
+            let mut seen: HashSet<ObjectId> = HashSet::new();
+            for &(at, id) in &record.forms {
+                // Tiefensuche in `Do`-Reihenfolge; `seen` beendet auch einen
+                // Zyklus (den der Interpreter über `visiting` gar nicht erst
+                // betritt).
+                let mut stack = vec![id];
+                while let Some(id) = stack.pop() {
+                    if !seen.insert(id) {
+                        continue;
+                    }
+                    closed.push((at, id));
+                    if let Some(children) = self.nested_forms.get(&id) {
+                        stack.extend(children.iter().rev().copied());
+                    }
+                }
+            }
+            record.forms = closed;
+        }
+    }
 }
 
 impl ContentSink for ScanResult {
+    fn form_within(&mut self, parent: StreamKey, id: ObjectId) {
+        let StreamKey::Form(parent) = parent else {
+            return;
+        };
+        self.nested_forms.entry(parent).or_default().push(id);
+    }
+
     fn show(&mut self, record: ShowRecord) {
         self.shows.push(record);
     }
@@ -1257,6 +1321,14 @@ pub trait ContentSink {
     }
     /// Ein Form-XObject wurde platziert.
     fn form(&mut self, _id: ObjectId) {}
+    /// Ein Form-XObject `id` wurde **aus dem Strom `parent`** heraus
+    /// platziert — Formular im Formular, wenn `parent` selbst eines ist.
+    ///
+    /// Nur die Verschachtelung, nicht die Platzierung: die zählt
+    /// [`ContentSink::form`]. Gebraucht wird sie, um den Geltungsbereich eines
+    /// Textspiegels ([`MarkedTextRecord::forms`]) über Formulargrenzen hinweg
+    /// zu schließen.
+    fn form_within(&mut self, _parent: StreamKey, _id: ObjectId) {}
     /// Ein Form-XObject **steht in den Ressourcen** eines gelesenen Stroms.
     ///
     /// Das ist nicht dasselbe wie [`ContentSink::form`]: dort wird gezeichnet,
@@ -1634,6 +1706,7 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
     );
     scan_annotations(doc, page_id, resources.as_ref(), &mut budget, &mut result);
     budget.result()?;
+    result.close_forms();
     result.effort = budget.effort;
     result.effort.retained_weight = budget.cached_operations;
     Ok(result)
@@ -2273,6 +2346,12 @@ fn merge_resources(target: &mut Dictionary, source: &Dictionary) {
 ///   (`BT … ET`), sonst der ganze Strom. Ein Punkt beschreibt die Stelle, an
 ///   der er steht; wird dort etwas entfernt, ist auch seine Beschreibung
 ///   falsch.
+/// * Ein `Do` im Bereich zieht das **Form-XObject** dahinter mit hinein
+///   ([`MarkedTextRecord::forms`]): dessen Glyphen stehen in einem anderen
+///   Strom, gehören aber zu diesem Spiegel. Aufgelöst wird nur die Objekt-Id
+///   — kein Rumpf, kein Aufwandskonto; ob das Formular lesbar ist, entscheidet
+///   [`load_xobject`] an derselben Stelle, und ein unlesbares hat keine
+///   Glyphen, die hier fehlen könnten.
 fn scan_marked_text(
     doc: &Document,
     operations: &[Operation],
@@ -2285,6 +2364,15 @@ fn scan_marked_text(
         .enumerate()
         .filter(|(_, op)| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
         .map(|(index, _)| index)
+        .collect();
+    let dos: Vec<(usize, ObjectId)> = operations
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| op.operator == "Do")
+        .filter_map(|(index, op)| match op.operands.first() {
+            Some(Object::Name(name)) => Some((index, form_id_of(doc, resources, name)?)),
+            _ => None,
+        })
         .collect();
 
     // Offene Klammern bzw. das offene Textobjekt, jeweils als Operationsindex.
@@ -2343,6 +2431,12 @@ fn scan_marked_text(
             .filter(|index| range.contains(index))
             .collect()
     };
+    let forms_in = |range: &std::ops::Range<usize>| -> Vec<(usize, ObjectId)> {
+        dos.iter()
+            .copied()
+            .filter(|(index, _)| range.contains(index))
+            .collect()
+    };
 
     // Eine Klammer bringt ihren Bereich selbst mit.
     for (op_index, properties, property_id) in brackets {
@@ -2356,6 +2450,7 @@ fn scan_marked_text(
             properties,
             property_id,
             shows: in_range(&range),
+            forms: forms_in(&range),
         });
     }
     // Ein Punkt erbt den Bereich, in dem er steht.
@@ -2370,8 +2465,26 @@ fn scan_marked_text(
             properties,
             property_id,
             shows: in_range(&range),
+            forms: forms_in(&range),
         });
     }
+}
+
+/// Die Objekt-Id des Form-XObjects hinter einem `Do`-Namen — nur die Id.
+///
+/// Der Rumpf bleibt unangetastet: [`load_xobject`] holt ihn ohnehin, mit
+/// Aufwandskonto und Warnung. Hier zählt nur, *welches* Objekt in den
+/// Geltungsbereich eines Spiegels fällt. `None` für Bilder, fehlende Einträge
+/// und alles, was kein eigenständiger Strom ist — ein Formular ohne eigene
+/// Objekt-Id liest auch der Interpreter nicht.
+fn form_id_of(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> Option<ObjectId> {
+    let entry = resources?.get(b"XObject").ok()?;
+    let (_, xobjects) = doc.dereference(entry).ok()?;
+    let (id, object) = doc
+        .dereference(xobjects.as_dict().ok()?.get(name).ok()?)
+        .ok()?;
+    let stream = object.as_stream().ok()?;
+    (crate::ops::xobject_subtype(doc, &stream.dict) == Some(b"Form".as_slice())).then_some(id?)
 }
 
 /// Trägt die Eigenschaftsliste eines `BDC`/`DP` einen Textspiegel?
@@ -2891,6 +3004,7 @@ fn scan_operations(
                             continue;
                         }
                         sink.form(form_id);
+                        sink.form_within(stream, form_id);
                         if !visiting.insert(form_id) {
                             continue; // Zyklus
                         }

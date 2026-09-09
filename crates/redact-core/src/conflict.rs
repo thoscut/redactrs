@@ -6,11 +6,15 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::Rect;
-use crate::model::{Region, Source};
+use crate::model::{page_index, Region, Source};
 
 /// Ein durch die Negativliste blockierter Treffer (für das Audit-Log).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockedRegion {
+    /// 0-basierte Seitennummer. Kommt über `blocked_by_negative_list` einer
+    /// Review-Datei von außen und wird wie [`Region::page`] geprüft — siehe
+    /// [`crate::model::MAX_PAGE_INDEX`].
+    #[serde(deserialize_with = "page_index")]
     pub page: usize,
     pub rect: Rect,
     /// Text der blockierenden Negativlisten-Region.

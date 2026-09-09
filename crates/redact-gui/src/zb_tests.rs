@@ -14,8 +14,12 @@
 //!    nur an, was sichtbar ist.
 //! 3. Die Trefferliste baute jede Zeile in jedem Bild. Jetzt nur die
 //!    sichtbaren ([`egui::ScrollArea::show_rows`]).
-//! 4. Die Decke der Nachprüfung zählte Begriffe; die Kosten sind Begriffe ×
-//!    Dateibytes ([`crate::state::MAX_EXPORT_CHECK_NEEDLE_BYTES`]).
+//! 4. Die Decke der Nachprüfung zählte erst Begriffe (200), dann Begriffe ×
+//!    Dateibytes auf der Platte — die falsche Einheit, die Kosten hängen an
+//!    den **entpackten** Streambytes, und die kennt vor dem Lauf niemand.
+//!    Jetzt zählt sie Begriffe mit derselben Zahl wie `--check-leaks`
+//!    ([`redact_core::MAX_CHECK_NEEDLES`]); die Bytes deckelt
+//!    `--max-decompressed-mb`.
 //! 5. Ein abgewählter Text galt als Leck. Jetzt als Entscheidung
 //!    ([`crate::state::ExportCheck::kept`]).
 //! 6. Eine Pfeiltaste während eines Griff-Zugs wurde vom Zug überschrieben.
@@ -38,10 +42,9 @@ use redact_core::{MatchType, Rect, Region, Source};
 use redact_pdf::testing::{build_pdf, TextItem};
 
 use crate::render::{MAX_THUMB_BYTES, THUMB_WIDTH};
-use crate::state::{
-    export_check_needle_limit, AnnotatedRegion, HitOutcome, MAX_EXPORT_CHECK_NEEDLE_BYTES,
-};
+use crate::state::{selection_on_missing_page, AnnotatedRegion, HitOutcome, NudgeKind};
 use crate::viewer::PageView;
+use redact_core::MAX_CHECK_NEEDLES;
 
 // --------------------------------------------------------------- Hilfsmittel
 
@@ -593,56 +596,74 @@ fn zb3_jede_zeilenart_ist_so_hoch_wie_angesagt() {
 }
 
 // ===========================================================================
-// 4 — Das Prüfbudget zählt Begriffe × Dateibytes
+// 4 — Die Nachprüfung deckelt Begriffe wie die Kommandozeile
 // ===========================================================================
 
-/// **Befund 4, entschieden.** Die Decke bleibt — als Budget in der Einheit,
-/// in der die Kosten anfallen, und angewendet dort, wo die Dateigröße bekannt
-/// ist. Der frühere Test fehlte ganz: die Decke ließ sich entfernen, und
-/// alles blieb grün.
+/// **Befund 4, zum zweiten Mal entschieden.** Die erste Korrektur rechnete
+/// Begriffe × Dateibytes auf der Platte gegen 2 GiB — die falsche Einheit
+/// (siehe [`crate::state::ExportCheckPlan::run`]). Jetzt gilt dieselbe Decke
+/// wie für `--check-leaks`, in Begriffen. Ohne die Korrektur (`.min(limit)`
+/// weg) würden alle Begriffe gesucht und `skipped` bliebe 0.
 #[test]
-fn zb4_das_pruefbudget_zaehlt_begriffe_mal_dateibytes() {
-    // Die Einheit: je größer die Datei, desto weniger Begriffe.
-    assert_eq!(export_check_needle_limit(1024 * 1024), 2048);
-    assert_eq!(export_check_needle_limit(5 * 1024 * 1024), 409);
-    assert_eq!(
-        export_check_needle_limit(MAX_EXPORT_CHECK_NEEDLE_BYTES + 1),
-        1
-    );
-    assert_eq!(export_check_needle_limit(u64::MAX), 1, "nie null");
-    assert!(export_check_needle_limit(0) >= 1 << 31);
-
-    // Am Lauf selbst: eine kleine Datei, ein kleines Budget.
+fn zb4_die_nachpruefung_deckelt_begriffe_wie_die_kommandozeile() {
     let out = tmp("zb4").join("out.pdf");
-    let mut app = demo_app();
+    let app = demo_app();
     let summary = app.state.hit_summary();
     app.state.export(&out, None).expect("Export");
-    let file_bytes = std::fs::metadata(&out).unwrap().len();
-
     let mut plan = app.state.plan_export_check(&summary);
-    for i in 0..8 {
+    let own = plan.needles.len();
+    assert!((1..MAX_CHECK_NEEDLES).contains(&own), "{plan:?}");
+
+    // Einen Begriff mehr, als die Decke zulässt: genau einer bleibt liegen.
+    for i in own..=MAX_CHECK_NEEDLES {
         plan.needles.push(format!("weiterer Begriff {i}"));
     }
-    assert_eq!(plan.needles.len(), 10);
+    assert_eq!(plan.needles.len(), MAX_CHECK_NEEDLES + 1);
+    let capped = plan.clone().run(&out);
+    assert_eq!(capped.checked, MAX_CHECK_NEEDLES, "{capped:?}");
+    assert_eq!(capped.skipped, 1, "{capped:?}");
+    assert_eq!(capped.limit, MAX_CHECK_NEEDLES);
+    let sentence = capped.sentence();
+    assert!(
+        sentence.contains("1 weitere Text(e) wurden nicht gesucht"),
+        "{sentence}"
+    );
+    assert!(
+        sentence.contains(&format!(
+            "höchstens {MAX_CHECK_NEEDLES} Begriffe je Nachprüfung (dieselbe Decke wie \
+             --check-leaks)"
+        )),
+        "{sentence}"
+    );
+    assert!(
+        sentence.contains("Trefferliste weiter hinten"),
+        "{sentence}"
+    );
+    // Die eigenen Begriffe stehen vorn und wurden gesucht — und stehen nicht
+    // mehr in der Datei.
+    assert!(capped.leaking.is_empty(), "{capped:?}");
 
-    let tight = plan.clone().run_within(&out, 4 * file_bytes);
+    // Mit tieferer Decke: 4 von 10, wie der Test der ersten Korrektur.
+    plan.needles.truncate(10);
+    let tight = plan.clone().run_within(&out, 4);
     assert_eq!(tight.checked, 4, "{tight:?}");
     assert_eq!(tight.skipped, 6, "{tight:?}");
-    assert_eq!(tight.needle_limit, 4);
-    assert_eq!(tight.file_bytes, file_bytes);
-    let sentence = tight.sentence();
+    assert_eq!(tight.limit, 4);
     assert!(
-        sentence.contains("6 weitere Text(e) wurden nicht gesucht"),
-        "{sentence}"
+        tight
+            .sentence()
+            .contains("6 weitere Text(e) wurden nicht gesucht"),
+        "{}",
+        tight.sentence()
     );
-    assert!(sentence.contains("höchstens 4 Begriffe"), "{sentence}");
     assert!(
-        sentence.contains(&format!("{} kB", file_bytes.div_ceil(1024))),
-        "{sentence}"
+        tight.sentence().contains("höchstens 4 Begriffe"),
+        "{}",
+        tight.sentence()
     );
 
-    // Die andere Richtung: mit dem echten Budget wird an dieser Datei alles
-    // gesucht — 2 GiB an ein paar Kilobyte sind Hunderttausende Begriffe.
+    // Die andere Richtung: 10 Begriffe an einer kleinen Datei werden alle
+    // gesucht — die Decke hängt nicht mehr an der Dateigröße.
     let real = plan.run(&out);
     assert_eq!(real.checked, 10, "{real:?}");
     assert_eq!(real.skipped, 0);
@@ -651,7 +672,28 @@ fn zb4_das_pruefbudget_zaehlt_begriffe_mal_dateibytes() {
         "{}",
         real.sentence()
     );
-    app.wait_for_export_checks();
+}
+
+/// Die Decke ist an der Kommandozeile und in der Oberfläche **eine** Zahl —
+/// der Satz der Oberfläche nennt sie mit derselben Konstante, die
+/// `--check-leaks` anwendet.
+#[test]
+fn zb4_die_decke_der_oberflaeche_ist_die_der_kommandozeile() {
+    let check = crate::state::ExportCheck {
+        checked: MAX_CHECK_NEEDLES,
+        skipped: 3,
+        limit: MAX_CHECK_NEEDLES,
+        ..Default::default()
+    };
+    let sentence = check.sentence();
+    assert!(
+        sentence.contains(&format!("höchstens {MAX_CHECK_NEEDLES} Begriffe")),
+        "{sentence}"
+    );
+    assert!(sentence.contains("--check-leaks"), "{sentence}");
+    // Die alte Einheit ist aus dem Satz verschwunden.
+    assert!(!sentence.contains("kB"), "{sentence}");
+    assert!(!sentence.contains("Prüfbudget"), "{sentence}");
 }
 
 // ===========================================================================
@@ -711,6 +753,62 @@ fn zb5_ein_abgewaehlter_text_ist_eine_entscheidung_kein_leck() {
     let bytes = std::fs::read(&out).unwrap();
     assert!(!redact_pdf::leaks(&bytes, same).is_empty());
     assert!(redact_pdf::leaks(&bytes, other).is_empty());
+}
+
+/// **Befund 5, die zweite Hälfte.** Derselbe Text in **zwei** geschwärzten
+/// Zeilen und einer abgewählten: das `retain` der ersten Korrektur strich
+/// ihn nach der ersten geschwärzten Zeile aus den stehen gelassenen, und die
+/// zweite Zeile trug ihn in `needles` — derselbe Text in `needles` **und**
+/// `kept`, und die Nachprüfung meldete ein Leck über eine Datei, die genau so
+/// gewollt war. Jetzt fällt je Text eine Entscheidung, gleich wie viele
+/// Zeilen ihn tragen.
+#[test]
+fn zb5_zweimal_geschwaerzt_einmal_abgewaehlt_ist_kein_leck() {
+    let out = tmp("zb5-zweimal").join("out.pdf");
+    let same = "DE89 3704 0044 0532 0130 00";
+    let pdf = build_pdf(&[
+        vec![TextItem::new(72.0, 700.0, 10.0, format!("IBAN: {same}"))],
+        vec![TextItem::new(72.0, 700.0, 10.0, format!("IBAN: {same}"))],
+        vec![TextItem::new(72.0, 700.0, 10.0, format!("IBAN: {same}"))],
+    ]);
+    let mut app = RedactApp::silent(iban_only());
+    app.open_bytes_and_analyze(&pdf, "drei.pdf");
+    assert_eq!(app.state.regions.len(), 3, "{:?}", app.state.regions);
+    for entry in &app.state.regions {
+        assert_eq!(entry.region.text.as_deref(), Some(same));
+    }
+
+    // Die Zeile auf Seite 2 bleibt bewusst stehen; Seite 1 und 3 werden
+    // geschwärzt.
+    assert!(app.state.set_enabled(1, false));
+    let summary = app.state.hit_summary();
+    assert_eq!(summary.outcome(0), HitOutcome::Redacted);
+    assert_eq!(summary.outcome(1), HitOutcome::Disabled);
+    assert_eq!(summary.outcome(2), HitOutcome::Redacted);
+
+    let plan = app.state.plan_export_check(&summary);
+    assert!(plan.needles.is_empty(), "{plan:?}");
+    assert_eq!(plan.kept, 1, "{plan:?}");
+
+    app.export_to(out.clone());
+    app.wait_for_export_checks();
+    let status = app.state.status.clone();
+    assert!(
+        !status.contains("steht NOCH"),
+        "die Entscheidung gilt als Leck: {status}"
+    );
+    assert!(
+        status.contains("Nachprüfung: es wurde nichts gesucht."),
+        "{status}"
+    );
+    assert!(
+        status.contains("1 Text(e) stehen auch in einer abgewählten"),
+        "{status}"
+    );
+
+    // Das Orakel: die abgewählte Zeile steht wirklich noch da — bewusst.
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(!redact_pdf::leaks(&bytes, same).is_empty());
 }
 
 /// Nur stehen gelassene Texte: dann wurde nichts gesucht, und der Satz sagt
@@ -899,6 +997,36 @@ fn zb7_strg_bild_ab_blaettert_am_echten_kontext() {
 }
 
 // ===========================================================================
+// #16 — Seitenzahlen aus fremder Hand laufen in der Anzeige nicht über
+// ===========================================================================
+
+/// `Region.page` kommt aus einer Review- oder Regionsdatei; `usize::MAX`
+/// steht dort, wenn jemand es hineinschreibt. Die 1-basierte Anzeige rechnet
+/// `+ 1`, und im Debug-Build ist das eine Panic — ausgerechnet in der Absage,
+/// die erklären soll, dass es die Seite nicht gibt, und beim Malen der
+/// Trefferliste. `saturating_add` hält die Zeile lesbar; mit `+ 1` fällt der
+/// Test um.
+#[test]
+fn absurd_page_numbers_do_not_panic_in_labels() {
+    let huge = "18446744073709551615";
+
+    let sentence = selection_on_missing_page(usize::MAX, 1, NudgeKind::Move);
+    assert!(sentence.contains(huge), "{sentence}");
+    assert!(sentence.contains("die es in diesem Dokument"), "{sentence}");
+
+    let sentence = crate::state::selection_on_other_page(usize::MAX, NudgeKind::Resize);
+    assert!(sentence.contains(huge), "{sentence}");
+
+    let entry = text_region(
+        usize::MAX,
+        Rect::new(72.0, 700.0, 300.0, 712.0),
+        "DE89 3704 0044 0532 0130 00",
+    );
+    let label = entry.label();
+    assert!(label.starts_with(&format!("S.{huge} ")), "{label}");
+}
+
+// ===========================================================================
 // Messungen — `cargo test -p redact-gui zb_mess -- --ignored --nocapture`
 // ===========================================================================
 
@@ -963,6 +1091,34 @@ fn zb_mess_nachpruefung_je_begriff_gegen_einen_durchgang() {
     println!(
         "je Begriff (vorher): {per_needle_time:?}; ein Durchgang (jetzt): {one_pass_time:?}; Verhältnis {:.1}",
         per_needle_time.as_secs_f64() / one_pass_time.as_secs_f64()
+    );
+
+    // Befund 4 (Fix-Runde 3): die Zahl für den Doc-Kommentar an
+    // `ExportCheckPlan::run` — ein Durchgang mit 1, 200 und
+    // `MAX_CHECK_NEEDLES` Begriffen an derselben Datei. Jeder Wert ist der
+    // schnellste von drei Läufen, damit ein Nachbar auf der Maschine nicht
+    // die Messung schreibt.
+    let padded = self::terms(MAX_CHECK_NEEDLES); // `terms` ist oben die Liste
+    let fastest = |n: usize| {
+        let needles: Vec<&str> = padded[..n].iter().map(String::as_str).collect();
+        (0..3)
+            .map(|_| {
+                let t = Instant::now();
+                let hits = redact_pdf::leaks_many(&bytes, &needles);
+                assert_eq!(hits.len(), n);
+                t.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let one = fastest(1);
+    let two_hundred = fastest(200);
+    let ceiling = fastest(MAX_CHECK_NEEDLES);
+    println!(
+        "ein Durchgang, {} kB: 1 Begriff {one:?}; 200 Begriffe {two_hundred:?}; \
+         {MAX_CHECK_NEEDLES} Begriffe {ceiling:?}; je Begriff über dem Sockel {:.2} ms",
+        bytes.len() / 1024,
+        (ceiling.as_secs_f64() - one.as_secs_f64()) * 1000.0 / (MAX_CHECK_NEEDLES - 1) as f64
     );
 }
 

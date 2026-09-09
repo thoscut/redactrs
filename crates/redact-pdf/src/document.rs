@@ -200,7 +200,7 @@ const OBJEKTSPEICHER_JE_BUDGETBYTE: u64 = 60;
 /// oder leerem Dictionary in einem Array; ein Dictionary-Eintrag kostet 231
 /// Byte und besteht aus zwei Wörtern (Schlüssel und Wert), bekommt also
 /// 2 × 160 verbucht. 160 liegt über beidem.
-const OBJEKT_BYTES: u64 = 160;
+pub const OBJEKT_BYTES: u64 = 160;
 
 /// Was ein **Array** zusätzlich kostet.
 ///
@@ -209,7 +209,7 @@ const OBJEKT_BYTES: u64 = 160;
 /// den `lopdf` dafür anlegt. Deshalb zählt eine öffnende `[` wie vier Objekte.
 /// Genau diese Form war die Bombe, die durch das Byte-Budget lief. Beide
 /// Beträge sind in `za_objektspeicher_gerechnet.rs` an die Messung gebunden.
-const ARRAY_BYTES: u64 = 640;
+pub const ARRAY_BYTES: u64 = 640;
 
 impl Default for Limits {
     fn default() -> Self {

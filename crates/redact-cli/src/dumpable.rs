@@ -183,21 +183,37 @@ pub fn deny_core_dumps() -> CoreDumps {
 mod tests {
     use super::*;
 
-    /// Der Aufruf gelingt — und er ist danach **nachweisbar** wirksam.
+    /// Der Aufruf liefert je Ziel, was die Funktion dort ehrlich liefern
+    /// **kann** — und unter Linux ist er danach **nachweisbar** wirksam.
     ///
     /// Die Rückgabe allein wäre kein Beleg: eine Funktion kann `Disabled`
     /// melden, ohne etwas getan zu haben. Unter Linux wird deshalb der
     /// Zustand gegengelesen, den der Kernel selbst führt.
+    ///
+    /// Dieselbe Dreiteilung wie in `main.rs`, und aus demselben Grund:
+    ///
+    /// * **Linux** streng `Disabled` — `prctl` gibt es dort immer, und die
+    ///   Gegenprobe darunter fragt den Kernel.
+    /// * **übrige Unix** nur `!= Failed` — `setrlimit` kann unter einem
+    ///   Syscall-Filter ehrlich `Unavailable` melden, und das ist kein
+    ///   Fehler des Programms.
+    /// * **nicht Unix** (Windows) genau `Unavailable` — dort gibt es kein
+    ///   Mittel, und die Funktion darf das nicht als Erfolg ausgeben.
+    ///
+    /// Eine frühere Fassung verlangte überall `Disabled`; der Windows-Job
+    /// der CI war damit rot, obwohl die Funktion dort genau das tat, was
+    /// der Modulkommentar zusagt.
     #[test]
     fn the_process_is_no_longer_dumpable() {
-        assert_eq!(
-            deny_core_dumps(),
-            CoreDumps::Disabled,
-            "Kernabzüge liessen sich nicht abschalten"
-        );
+        let result = deny_core_dumps();
 
         #[cfg(target_os = "linux")]
         {
+            assert_eq!(
+                result,
+                CoreDumps::Disabled,
+                "Kernabzüge liessen sich nicht abschalten"
+            );
             // `/proc/self/status` führt den Zustand als `CoreDumping`? Nein —
             // die Zeile heißt seit jeher anders, deshalb wird der Kernel
             // direkt gefragt.
@@ -205,5 +221,19 @@ mod tests {
             let state = unsafe { libc::prctl(libc::PR_GET_DUMPABLE) };
             assert_eq!(state, 0, "der Prozess ist weiterhin abzugsfähig");
         }
+
+        #[cfg(all(unix, not(target_os = "linux")))]
+        assert_ne!(
+            result,
+            CoreDumps::Failed,
+            "setrlimit(RLIMIT_CORE, 0) schlug fehl — der Schutz ist nicht aktiv"
+        );
+
+        #[cfg(not(unix))]
+        assert_eq!(
+            result,
+            CoreDumps::Unavailable,
+            "auf einem System ohne Mittel darf die Funktion keinen Schutz behaupten"
+        );
     }
 }

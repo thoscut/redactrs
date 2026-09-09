@@ -56,7 +56,7 @@
 use std::io::Read;
 use std::process::ExitCode;
 
-use redact_core::{safe_path, safe_text, RedactError, Result};
+use redact_core::{safe_path, safe_text, RedactError, Result, MAX_CHECK_NEEDLES};
 
 use crate::cli::Cli;
 
@@ -86,23 +86,6 @@ sie nicht.";
 /// Suchbegriffen ist genau das. Ohne Grenze bestimmte die Gegenseite einer
 /// Pipe, wie viel Arbeitsspeicher der Lauf belegt.
 const MAX_NEEDLE_INPUT: u64 = redact_core::MAX_AUX_FILE_BYTES;
-
-/// Obergrenze für die **Zahl** der Suchbegriffe.
-///
-/// Die Byte-Grenze darüber allein reicht nicht: 16 MB fassen rund eine
-/// Million kurze Zeilen. Gemessen an einer 898-kB-Datei mit 420 Seiten:
-/// 1 Begriff 1,7 s, 100 Begriffe 2,1 s, 1 000 Begriffe 5,9 s — ein Sockel
-/// (Datei lesen, Ströme auspacken, jede Seite durch den Schriftdekoder) und
-/// darüber rund 4 ms je Begriff, linear. Eine Million Begriffe liefen also
-/// über eine Stunde, ohne dass irgendetwas kaputt wäre; das sieht von außen
-/// aus wie ein Hänger. (Bis 0.7.0 kostete der Vergleich 65 ms je Begriff,
-/// Byte für Byte; seit `memmem` in `audit_bytes::find_all` nicht mehr.)
-///
-/// 1 000 ist großzügig für das, wofür der Schalter da ist: die Geheimnisse
-/// **eines** Dokuments, von Hand aufgeschrieben. Wer mehr hat, ruft zweimal
-/// auf — der Rückgabewert bleibt aussagekräftig, weil jeder Lauf für sich
-/// meldet.
-const MAX_NEEDLES: usize = 1_000;
 
 /// Führt die Prüfung aus. Rückgabe: [`crate::EXIT_OK`] oder
 /// [`crate::EXIT_INCOMPLETE`]; jeder Fehler wandert als [`RedactError`] nach
@@ -201,9 +184,12 @@ fn needles(cli: &Cli) -> Result<Vec<String>> {
                 .into(),
         ));
     }
-    if out.len() > MAX_NEEDLES {
+    // Die Decke selbst liegt in `redact-core` ([`MAX_CHECK_NEEDLES`], mit
+    // Messung und Begründung) — dieselbe Zahl, mit der die Oberfläche nach
+    // dem Export nachprüft. Hier steht nur, was passiert, wenn sie greift.
+    if out.len() > MAX_CHECK_NEEDLES {
         return Err(RedactError::Config(format!(
-            "--check-leaks mit {} Suchbegriffen; mehr als {MAX_NEEDLES} nimmt der Lauf \
+            "--check-leaks mit {} Suchbegriffen; mehr als {MAX_CHECK_NEEDLES} nimmt der Lauf \
              nicht an. Die Prüfung kostet je Begriff einen Vergleich über die ganze \
              Datei — bei dieser Zahl liefe sie so lange, dass sie wie ein Hänger \
              aussieht. Teilen Sie die Liste auf und rufen Sie mehrmals auf; jeder Lauf \
@@ -366,19 +352,130 @@ mod tests {
     #[test]
     fn too_many_needles_are_refused_with_a_reason() {
         let mut args = vec!["redact-rs".to_string(), "a.pdf".to_string()];
-        for i in 0..=MAX_NEEDLES {
+        for i in 0..=MAX_CHECK_NEEDLES {
             args.push("--check-leaks".to_string());
             args.push(format!("Begriff{i}"));
         }
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         let err = needles(&cli(&borrowed)).expect_err("einer zu viel");
         let text = err.to_string();
-        assert!(text.contains(&MAX_NEEDLES.to_string()), "{text}");
+        assert!(text.contains(&MAX_CHECK_NEEDLES.to_string()), "{text}");
         assert!(text.contains("Hänger"), "der Grund fehlt: {text}");
 
         // Gegenprobe: genau an der Grenze geht es durch. Eine Decke, die
         // schon den erlaubten Fall ablehnt, wäre keine Härtung.
         let borrowed: Vec<&str> = borrowed[..borrowed.len() - 2].to_vec();
-        assert_eq!(needles(&cli(&borrowed)).unwrap().len(), MAX_NEEDLES);
+        assert_eq!(needles(&cli(&borrowed)).unwrap().len(), MAX_CHECK_NEEDLES);
+    }
+    /// Die Decke ist **eine** Zahl — im Code, im Hilfetext und in der Doku.
+    ///
+    /// Bis hierher war der Test zur Decke aus der Konstante abgeleitet und
+    /// hätte bei jedem Wert bestanden; die Literale „1 000“ in `--help`,
+    /// README, SECURITY.md und CHANGELOG band nichts. Dieser Test liest die
+    /// vier Stellen und verlangt an jeder die formatierte Zahl aus
+    /// [`MAX_CHECK_NEEDLES`] — mit dem Satz drumherum, damit ein zufälliges
+    /// Vorkommen der Zahl an anderer Stelle nicht als Treffer zählt.
+    ///
+    /// Zwei Fassungen der Zahl sind erlaubt und beide werden geprüft: die
+    /// mit Tausendertrennzeichen im Fließtext („1 000“) und die nackte in
+    /// der zitierten Fehlermeldung („mehr als 1000 nimmt der Lauf nicht an“)
+    /// — so druckt sie `needles` wirklich.
+    #[test]
+    fn the_needle_ceiling_is_one_number_in_code_help_and_docs() {
+        use clap::CommandFactory;
+
+        /// „1 000“ statt „1000“ — Leerzeichen als Tausendertrenner, wie die
+        /// Doku es schreibt.
+        fn mit_tausendertrenner(n: usize) -> String {
+            let ziffern = n.to_string();
+            let mut aus = String::new();
+            for (i, z) in ziffern.chars().enumerate() {
+                if i > 0 && (ziffern.len() - i).is_multiple_of(3) {
+                    aus.push(' ');
+                }
+                aus.push(z);
+            }
+            aus
+        }
+        assert_eq!(mit_tausendertrenner(1_000), "1 000");
+        assert_eq!(mit_tausendertrenner(500), "500");
+        assert_eq!(mit_tausendertrenner(1_234_567), "1 234 567");
+
+        /// Zeilenumbrüche der Markdown-Quellen glätten, damit ein Umbruch
+        /// mitten im Satz nicht zählt.
+        fn glatt(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+
+        let formatiert = mit_tausendertrenner(MAX_CHECK_NEEDLES);
+        let nackt = MAX_CHECK_NEEDLES.to_string();
+        let wurzel = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lies = |name: &str| {
+            glatt(
+                &std::fs::read_to_string(wurzel.join(name)).unwrap_or_else(|e| {
+                    panic!("{name} lesbar: {e}");
+                }),
+            )
+        };
+
+        // Der Hilfetext, so wie clap ihn druckt.
+        let help = glatt(&Cli::command().render_long_help().to_string());
+        assert!(
+            help.contains(&format!("Höchstens {formatiert} Begriffe je Aufruf")),
+            "--help nennt die Decke nicht als {formatiert}"
+        );
+
+        // README: der Absatz zur Decke, samt der zitierten Fehlermeldung und
+        // dem ersten abgelehnten Begriff.
+        let readme = lies("README.md");
+        for satz in [
+            format!("**Höchstens {formatiert} Begriffe je Aufruf.**"),
+            format!(
+                "Der {}. Begriff",
+                mit_tausendertrenner(MAX_CHECK_NEEDLES + 1)
+            ),
+            format!(
+                "mit {} Suchbegriffen; mehr als {nackt} nimmt der Lauf nicht an",
+                MAX_CHECK_NEEDLES + 1
+            ),
+            format!("mit {formatiert} Zeilen läuft derselbe Aufruf durch"),
+        ] {
+            assert!(readme.contains(&satz), "README.md ohne „{satz}“");
+        }
+
+        // SECURITY.md: die Zeile in der Grenzentabelle.
+        let security = lies("SECURITY.md");
+        let zeile =
+            format!("| **Suchbegriffe je `--check-leaks`-Lauf** | **{formatiert}** | **fest** |");
+        assert!(security.contains(&zeile), "SECURITY.md ohne „{zeile}“");
+
+        // CHANGELOG: die Einführung der Decke und ihre Erwähnung im
+        // Hilfetext-Eintrag.
+        let changelog = lies("CHANGELOG.md");
+        for satz in [
+            format!("Obergrenze von {formatiert} Begriffen"),
+            format!("Decke von {formatiert} Begriffen je `--check-leaks`-Lauf"),
+        ] {
+            assert!(changelog.contains(&satz), "CHANGELOG.md ohne „{satz}“");
+        }
+
+        // Und die Fehlermeldung selbst druckt dieselbe Zahl — sonst zitierte
+        // die README einen Text, den das Programm nie ausgibt.
+        let mut args = vec!["redact-rs".to_string(), "a.pdf".to_string()];
+        for i in 0..=MAX_CHECK_NEEDLES {
+            args.push("--check-leaks".to_string());
+            args.push(format!("Begriff{i}"));
+        }
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let meldung = needles(&cli(&borrowed))
+            .expect_err("einer zu viel")
+            .to_string();
+        assert!(
+            meldung.contains(&format!(
+                "mit {} Suchbegriffen; mehr als {nackt} nimmt der Lauf nicht an",
+                MAX_CHECK_NEEDLES + 1
+            )),
+            "die Fehlermeldung lautet anders als in der README zitiert: {meldung}"
+        );
     }
 }

@@ -24,9 +24,10 @@ $ redact-rs kontoauszug_geschwaerzt.pdf --check-leaks "DE89 3704 0044 0532 0130 
 | Ergebnis: der Suchbegriff steht nicht mehr in der Datei.
 | Das heißt NICHT, dass in der Datei nichts mehr steht. Geprüft wurde genau diese
 | Liste. Was nicht darin steht — ein zweiter Name, eine weitere Kontonummer, eine
-| Schreibweise mit anderen Leerzeichen, Text in einem Rasterbild —, ist damit
-| nicht geprüft. Die Liste zu schreiben bleibt Handarbeit, und die Sichtprüfung
-| des Ergebnisses ersetzt sie nicht.
+| Schreibweise mit anderen Leerzeichen, Text in einem Rasterbild, Text in einer
+| Schrift ohne brauchbare Zeichenzuordnung —, ist damit nicht geprüft. Die Liste
+| zu schreiben bleibt Handarbeit, und die Sichtprüfung des Ergebnisses ersetzt
+| sie nicht.
 ~ 40
 |
 $ echo $?

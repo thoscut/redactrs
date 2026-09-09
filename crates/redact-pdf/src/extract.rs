@@ -96,18 +96,6 @@ impl PdfExtractor {
         Self
     }
 
-    /// Extrahiert die Zeilen einer einzelnen Seite (0-basiert).
-    pub fn extract_page(&self, doc: &Document, page_index: usize) -> Result<Vec<TextRun>> {
-        let pages = doc.get_pages();
-        let Some((_, page_id)) = pages.iter().nth(page_index) else {
-            return Ok(Vec::new());
-        };
-        let scan = scan_page(doc, *page_id)?;
-        let mut runs = Self::build_lines(page_index, glyph_items(&scan));
-        runs.extend(mirror_runs(doc, page_index, &scan).0);
-        Ok(runs)
-    }
-
     /// Wie [`PdfExtractor::extract`], liefert aber zusätzlich die Warnungen des
     /// Interpreters.
     ///
@@ -116,7 +104,42 @@ impl PdfExtractor {
     /// Analyse findet dann nichts, die Schwärzung meldet Erfolg — und der
     /// Nutzer hält eine Datei für sauber, in der alles stehen geblieben ist.
     /// Diese Warnungen dürfen deshalb nicht im Extraktor versanden.
+    ///
+    /// Eine Seite, die der Interpreter ablehnt, kippt das **ganze** Dokument:
+    /// die Schwärzung darf keine Datei ausgeben, deren Text sie nicht
+    /// vollständig gesehen hat.
     pub fn extract_with_warnings(&self, doc: &Document) -> Result<(Vec<TextRun>, Vec<String>)> {
+        self.extract_pages(doc, false)
+    }
+
+    /// Wie [`PdfExtractor::extract_with_warnings`], nur **nachsichtig**: eine
+    /// Seite, die der Interpreter ablehnt, wird übersprungen und als Warnung
+    /// genannt; die übrigen Seiten kommen zurück.
+    ///
+    /// Das ist der Weg des ehrlichen Orakels (`crate::audit_bytes`), das
+    /// jede Seite so lesen will, wie der Schriftdekoder sie liest — und dem
+    /// eine kaputte Seite 1 nicht die Seiten 2 bis n nehmen darf. Für die
+    /// Schwärzung wäre dieselbe Nachsicht ein Leck; sie nimmt
+    /// [`PdfExtractor::extract_with_warnings`].
+    ///
+    /// **Ein** Durchgang, **ein** Seitenbaum: früher fiel das Orakel nach
+    /// einem Fehler auf eine Schleife über eine seitenweise Extraktion
+    /// zurück, und die baute je Aufruf den Seitenbaum neu (`get_pages()`,
+    /// eine frische `BTreeMap` über alle Seiten) — quadratisch in der
+    /// Seitenzahl. Jetzt teilen sich beide Wege dieselbe Schleife in
+    /// [`PdfExtractor::extract_pages`]; die Seitenschleife um einen
+    /// seitenweisen Aufruf gibt es nicht mehr, und damit lässt sie sich auch
+    /// nicht mehr schreiben.
+    pub fn extract_lenient(&self, doc: &Document) -> (Vec<TextRun>, Vec<String>) {
+        // `lenient` liefert nie `Err` — der Rückfall steht nur der
+        // Signatur wegen da.
+        self.extract_pages(doc, true).unwrap_or_default()
+    }
+
+    /// Die eine Seitenschleife hinter [`PdfExtractor::extract_with_warnings`]
+    /// und [`PdfExtractor::extract_lenient`]; `lenient` entscheidet, was
+    /// eine abgelehnte Seite bewirkt: Abbruch oder Warnung.
+    fn extract_pages(&self, doc: &Document, lenient: bool) -> Result<(Vec<TextRun>, Vec<String>)> {
         let mut runs = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
         // Angeboten und gezeichnet — über **alle** Seiten hinweg, siehe
@@ -124,7 +147,17 @@ impl PdfExtractor {
         let mut declared: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
         let mut placed: BTreeSet<ObjectId> = BTreeSet::new();
         for (index, (_, page_id)) in doc.get_pages().iter().enumerate() {
-            let scan = scan_page(doc, *page_id)?;
+            let scan = match scan_page(doc, *page_id) {
+                Ok(scan) => scan,
+                Err(e) if lenient => {
+                    warnings.push(format!(
+                        "Seite {} ließ sich nicht lesen und fehlt in dieser Sicht: {e}",
+                        index + 1
+                    ));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             for warning in &scan.warnings {
                 if !warnings.contains(warning) {
                     warnings.push(warning.clone());
@@ -379,8 +412,23 @@ fn glyph_items(scan: &ScanResult) -> Vec<(usize, GlyphItem)> {
 /// eigene Zeile durchsucht (auf dem Kasten der Glyphen darunter — trifft dort
 /// ein Muster, verschwinden die Glyphen und mit ihnen der Spiegel, siehe
 /// `crate::redact::mirrors_to_clear`), **und** der Lauf meldet eine
-/// Deckungslücke. Ein Spiegel ohne Glyphen darunter hat keinen Kasten und
-/// bleibt bei der Warnung.
+/// Deckungslücke — **nur für `/ActualText`**, denn nur der Ersatz muss den
+/// Glyphen gleichen (PDF 32000-1, 14.9.4). `/Alt` beschreibt und `/E`
+/// schreibt aus (14.9.3, 14.9.5); beide dürfen abweichen, werden gelesen und
+/// geleert wie der Ersatz, aber nicht gemeldet — sonst wäre jedes Bild mit
+/// `/Figure <</Alt …>> BDC /Im0 Do EMC`, die Standardform der
+/// Barrierefreiheit, ein Befund. Ein `/ActualText` ohne Glyphen darunter hat
+/// keinen Kasten, bleibt bei der Warnung — und die sagt dann ausdrücklich,
+/// dass **nicht** durchsucht wurde.
+///
+/// **Formulargrenze.** Die Glyphen unter einem Spiegel liegen nicht immer im
+/// selben Strom: `/Span <</ActualText …>> BDC /Fm0 Do EMC` setzt sie über ein
+/// Form-XObject. Die Textoperationen der Formulare im Geltungsbereich
+/// ([`MarkedTextRecord::forms`]) zählen deshalb mit — an der Stelle ihres
+/// `Do`, in Stromreihenfolge. Zeichnet ein Formular selbst noch Text **und**
+/// weitere Formulare, stehen dessen eigene Glyphen vor denen der inneren;
+/// die genaue Verschränkung kennt der Datensatz nicht. Das kann eine Warnung
+/// zu viel geben, nie eine zu wenig.
 ///
 /// Die Warnung nennt keinen Text: sie steht später im Audit-Log, und dort
 /// hätte der Spiegel nichts verloren.
@@ -394,13 +442,46 @@ fn mirror_runs(doc: &Document, page: usize, scan: &ScanResult) -> (Vec<TextRun>,
     for show in &scan.shows {
         shows.entry((show.stream, show.op_index)).or_insert(show);
     }
+    // Formular → seine Textoperationen in Stromreihenfolge, je Operation
+    // einmal — nur für die Formulare, die unter einem Spiegel stehen.
+    let mut form_shows: HashMap<ObjectId, Vec<&ShowRecord>> = scan
+        .marked
+        .iter()
+        .flat_map(|record| record.forms.iter().map(|(_, id)| (*id, Vec::new())))
+        .collect();
+    if !form_shows.is_empty() {
+        for show in &scan.shows {
+            if let StreamKey::Form(id) = show.stream {
+                if let Some(list) = form_shows.get_mut(&id) {
+                    list.push(show);
+                }
+            }
+        }
+        for list in form_shows.values_mut() {
+            list.sort_by_key(|show| show.op_index);
+            list.dedup_by_key(|show| show.op_index);
+        }
+    }
     for record in &scan.marked {
-        let glyphs: Vec<&GlyphItem> = record
+        // Glyphen in Stromreihenfolge: die eigenen Textoperationen an ihrem
+        // Index, die eines Formulars an der Stelle seines `Do`. `sort_by_key`
+        // ist stabil, die Reihenfolge innerhalb eines Formulars bleibt.
+        let mut parts: Vec<(usize, &ShowRecord)> = record
             .shows
             .iter()
-            .filter_map(|index| shows.get(&(record.stream, *index)))
-            .flat_map(|show| show.glyphs())
+            .filter_map(|index| {
+                shows
+                    .get(&(record.stream, *index))
+                    .map(|show| (*index, *show))
+            })
             .collect();
+        for (at, id) in &record.forms {
+            if let Some(list) = form_shows.get(id) {
+                parts.extend(list.iter().map(|show| (*at, *show)));
+            }
+        }
+        parts.sort_by_key(|(at, _)| *at);
+        let glyphs: Vec<&GlyphItem> = parts.iter().flat_map(|(_, show)| show.glyphs()).collect();
         let beneath = fold(glyphs.iter().map(|g| g.text.as_str()));
         let rect = bounding_box(glyphs.iter().map(|g| &g.rect));
         for key in MIRROR_KEYS {
@@ -411,17 +492,26 @@ fn mirror_runs(doc: &Document, page: usize, scan: &ScanResult) -> (Vec<TextRun>,
             if folded.is_empty() || folded == beneath || folded.chars().count() == 1 {
                 continue;
             }
-            warnings.push(format!(
-                "Der Textspiegel (/{}) eines Marked-Content-Abschnitts auf Seite {} sagt \
-                 etwas anderes als die Glyphen darunter ({} Zeichen im Spiegel, {} in den \
-                 Glyphen). Welche der beiden Fassungen ein Betrachter zeigt oder kopiert, \
-                 kann das Werkzeug nicht wissen. Der Spiegel wurde zusätzlich als eigener \
-                 Text durchsucht; bitte das Ergebnis dort von Hand prüfen.",
-                String::from_utf8_lossy(key),
-                page + 1,
-                folded.chars().count(),
-                beneath.chars().count()
-            ));
+            // Nur der Ersatz muss gleichen.
+            if key == b"ActualText" {
+                warnings.push(format!(
+                    "Der Textspiegel (/{}) eines Marked-Content-Abschnitts auf Seite {} sagt \
+                     etwas anderes als die Glyphen darunter ({} Zeichen im Spiegel, {} in den \
+                     Glyphen). Welche der beiden Fassungen ein Betrachter zeigt oder kopiert, \
+                     kann das Werkzeug nicht wissen.{}",
+                    String::from_utf8_lossy(key),
+                    page + 1,
+                    folded.chars().count(),
+                    beneath.chars().count(),
+                    if rect.is_some() {
+                        " Der Spiegel wurde zusätzlich als eigener Text durchsucht; bitte das \
+                         Ergebnis dort von Hand prüfen."
+                    } else {
+                        " Ohne Glyphen darunter hat der Spiegel keinen Kasten: er wurde nicht \
+                         durchsucht und kann von diesem Werkzeug nicht geschwärzt werden."
+                    }
+                ));
+            }
             if let Some(rect) = rect {
                 runs.push(spread(page, &text, rect));
             }

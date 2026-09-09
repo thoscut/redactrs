@@ -44,7 +44,14 @@ target_dir="${1:-$repo_root/docs}"
 # Wohin cargo baut. CARGO_TARGET_DIR gilt fuer `cargo build` von selbst; der
 # Pfad zu den gebauten Programmen unten muss dieselbe Variable lesen, sonst
 # baut das Skript an einen Ort und sucht an einem anderen (Abbruch mit 127).
+#
+# Ein relativer Wert (`CARGO_TARGET_DIR=target`) meint bei cargo das
+# Verzeichnis, in dem cargo laeuft - das ist unten `$repo_root`. Das Skript
+# wechselt danach in ein Wegwerfverzeichnis; ein relativer Pfad zeigte von
+# dort ins Leere. Deshalb wird er hier gegen `$repo_root` aufgeloest, bevor
+# irgendwo hin gewechselt wird.
 build_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+case "$build_dir" in /*) ;; *) build_dir="$repo_root/$build_dir" ;; esac
 
 # Aufloesung: die Seite wird mit BREITE Pixeln gerendert und danach auf den
 # beschriebenen Teil zugeschnitten; uebrig bleiben rund 770 Pixel Breite.

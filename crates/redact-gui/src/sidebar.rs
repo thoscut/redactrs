@@ -519,7 +519,10 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     let mut action = entry.action.clone();
 
     ui.label(RichText::new("Auswahl").strong());
-    ui.label(format!("Seite {}", page + 1));
+    // `saturating_add`, weil `page` aus fremder Hand kommt (Review- oder
+    // Regionsdatei): bei `usize::MAX` liefe die 1-basierte Anzeige im
+    // Debug-Build über und löste eine Panic aus — mitten im Zeichnen.
+    ui.label(format!("Seite {}", page.saturating_add(1)));
     ui.label(description);
     ui.label(
         RichText::new(format!(

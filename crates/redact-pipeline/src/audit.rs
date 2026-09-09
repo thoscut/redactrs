@@ -447,10 +447,19 @@ impl Effects {
         if self.missing_page > 0 {
             // Das `+ 1` ist die einzige erlaubte Umrechnung: Fließtext sagt
             // „Seite 1“, JSON zählt ab 0 (siehe [`AuditEntry::page`]).
+            //
+            // `saturating_add`, weil die Seitennummer aus fremder Hand kommt
+            // (Review-Datei, `--manual-regions`): bei `usize::MAX` liefe die
+            // 1-basierte Anzeige im Debug-Build über und löste eine Panic
+            // aus — ausgerechnet in dem Zweig, der die falsche Seite melden
+            // soll; im Release-Build stünde stattdessen „Seite 0“ da. Die
+            // erste Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an
+            // der Deserialisierung; diese hier gilt für jeden Aufrufer, der
+            // `Region` selbst baut.
             let list = self
                 .missing_pages
                 .iter()
-                .map(|p| (p + 1).to_string())
+                .map(|p| p.saturating_add(1).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             warnings.push(format!(
@@ -479,10 +488,11 @@ impl Effects {
         // Oberfläche („neben der Seite“), damit beide Wege wiedererkennbar
         // dasselbe sagen.
         if self.off_page > 0 {
+            // `saturating_add` aus demselben Grund wie bei `missing_pages`.
             let list = self
                 .off_page_pages
                 .iter()
-                .map(|p| (p + 1).to_string())
+                .map(|p| p.saturating_add(1).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             warnings.push(format!(
@@ -1271,6 +1281,29 @@ mod tests {
         let effects = Effects::measure(&[region], -100.0, &sheets(1), &RedactionReport::default());
         assert_eq!(effects.per_entry, vec![EntryEffect::MissingPage]);
         assert_eq!(effects.degenerate, 0);
+    }
+
+    /// Zweite Verteidigung hinter `MAX_PAGE_INDEX`: wer `Effects` mit einer
+    /// Seitennummer aus fremder Hand füttert, bekommt eine Warnung mit der
+    /// Zahl darin — keine Panic (Debug) und kein „Seite 0“ (Release).
+    #[test]
+    fn absurd_page_numbers_do_not_panic_in_warnings() {
+        let effects = Effects {
+            per_entry: vec![EntryEffect::MissingPage, EntryEffect::OffPage],
+            removed_glyphs: vec![0, 0],
+            pages: 1,
+            missing_page: 1,
+            off_page: 1,
+            missing_pages: vec![usize::MAX],
+            off_page_pages: vec![usize::MAX],
+            ..Effects::default()
+        };
+        let warnings = effects.warnings(&RedactionReport::default());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        for w in &warnings {
+            assert!(w.contains("Seite 18446744073709551615"), "{w}");
+            assert!(!w.contains("Seite 0"), "{w}");
+        }
     }
 
     #[test]

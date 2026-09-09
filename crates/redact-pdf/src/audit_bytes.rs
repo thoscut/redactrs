@@ -681,20 +681,17 @@ fn scan_text(text: &str, location: &str, how: &str, probe: &mut Probe) {
 ///
 /// Eine Seite, die der Interpreter ablehnt (Aufwandskonto gerissen, Strom
 /// nicht zerlegbar), fehlt in dieser Sicht — die Bytesichten haben sie
-/// trotzdem durchsucht. Damit sie nicht die anderen Seiten mitnimmt, wird
-/// nach einem Fehler Seite für Seite gelesen. Das ist der Rückfall, nicht
-/// der Regelweg: [`PdfExtractor::extract_page`] baut je Aufruf den
-/// Seitenbaum neu, und das ist bei 4 000 Seiten quadratisch — gemessen
-/// 8,7 s je Seite gegenüber 1,3 s für [`PdfExtractor::extract`].
+/// trotzdem durchsucht. Damit sie nicht die anderen Seiten mitnimmt, liest
+/// [`PdfExtractor::extract_lenient`] in **einem** Durchgang über **einen**
+/// Seitenbaum und überspringt nur die abgelehnte Seite. Der frühere
+/// Rückfall — nach dem ersten Fehler Seite für Seite über eine
+/// seitenweise Extraktion, die je Aufruf den Seitenbaum neu baute — war
+/// quadratisch in der Seitenzahl: gemessen an einem 4 000-Seiten-Dokument
+/// 8,7 s für das **ganze Dokument** gegenüber 1,3 s für
+/// [`PdfExtractor::extract`]; heute misst `zb_rueckfall_linear.rs` den
+/// Speicher, und der wächst linear.
 fn scan_decoded_text(doc: &Document, probe: &mut Probe) {
-    let extractor = PdfExtractor::new();
-    let runs = match extractor.extract(doc) {
-        Ok(runs) => runs,
-        Err(_) => (0..doc.get_pages().len())
-            .filter_map(|index| extractor.extract_page(doc, index).ok())
-            .flatten()
-            .collect(),
-    };
+    let (runs, _) = PdfExtractor::new().extract_lenient(doc);
     // Die Zeilen kommen seitenweise sortiert; je Seite ein Text.
     for page_runs in runs.chunk_by(|a, b| a.page == b.page) {
         let text: String = page_runs

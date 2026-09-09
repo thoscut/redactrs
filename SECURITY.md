@@ -315,6 +315,12 @@ anzeigende Software. Wer die Datei öffnen darf, kann sie hier schwärzen.
 
 ## Grenzen für Eingabedateien
 
+**MB heißt hier wie überall in diesem Projekt 1024² Byte** — 16 MB sind
+16 777 216 Byte, so rechnet es auch der Abschnitt „Wo gewöhnlicher Text an
+die Decke stößt“ vor. Wo eine Messung weiter unten MiB schreibt, ist dieselbe
+Einheit gemeint, nur ausdrücklich; die Schalter (`--max-input-mb` und die
+übrigen) nehmen dieselben Vielfachen von 1024².
+
 | Grenze | Vorgabe | Stellschraube |
 |--------|---------|---------------|
 | **Größe der Eingabedatei** | **512 MB** | **`--max-input-mb`** |
@@ -1590,6 +1596,26 @@ Prüfung, mit TOCTOU zwischen `exists()` und `write()`) schrieb dagegen
 tatsächlich in die Zieldatei des Links.
 
 Wenn `libc` einmal ohnehin im Graphen liegt, gehört hier `O_NOFOLLOW` hin.
+
+### Der Textspiegel eines Bildes (`/Alt`)
+
+Ein getaggtes PDF darf Glyphen einen Spiegeltext beistellen — drei Schlüssel
+an einem Marked-Content-Abschnitt, `MIRROR_KEYS` in
+`crates/redact-pdf/src/content.rs`. Sie haben **zwei Rollen**: `/ActualText`
+(PDF 32000-1, 14.9.4) ist der *Ersatz* der Glyphen und muss ihnen gleichen;
+`/Alt` (14.9.3) *beschreibt*, `/E` (14.9.5) *schreibt aus* — beide dürfen von
+den Glyphen abweichen. Gelesen und mit den Glyphen geleert werden alle drei;
+gewarnt wird bei einem Widerspruch nur für `/ActualText`.
+
+Das lässt eine benannte Lücke: der **`/Alt` eines Bildes**. Ein
+`/Figure <</Alt (…)>> BDC /Im0 Do EMC` hat keine Glyphen darunter, ist die
+Standardform der Barrierefreiheit und kein Befund. Steht in der Beschreibung
+aber, was auf dem Bild zu lesen ist, überlebt sie die Pixel-Schwärzung des
+Bildes: die Analyse liest den `/Alt` eines Bildes so wenig wie dessen Pixel —
+derselbe blinde Fleck wie bei gescannten Seiten (README, „Gescannte
+Dokumente“). `--check-leaks` sieht ihn: der Text steht als Klartext im
+Seitenstrom, und die Rohsichten der Nachprüfung lesen den Strom, nicht die
+Struktur.
 
 ### `lopdf` steht auf 0.42 — RUSTSEC-2026-0187 ist behoben
 

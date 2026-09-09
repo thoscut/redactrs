@@ -61,9 +61,15 @@
 //!   benanntes Ziel ist eine Zeichenkette. Gemessen: alle drei Formen
 //!   überlebten die Schwärzung mit Rückgabewert 0. Ein `/Dest` als Feld
 //!   (`[Seite /XYZ x y z]`) bleibt — es trägt Zahlen und Verweise, keinen
-//!   Text. Preis: Verweise ins Netz und in andere Dateien funktionieren
-//!   danach nicht mehr,
-//! * die Kommentartexte `/Contents`, `/RC`, `/T` (Verfasser) und `/Subj`.
+//!   Text. Entschieden wird über das **Feld**, nicht über die Schreibweise:
+//!   ein `/Dest 12 0 R` wird aufgelöst, und was dahinter steht, bleibt oder
+//!   fällt nach derselben Regel wie ein direkt eingebettetes Ziel. Preis:
+//!   Verweise ins Netz und in andere Dateien funktionieren danach nicht
+//!   mehr,
+//! * die Kommentartexte `/Contents`, `/RC`, `/T` (Verfasser; an einem Widget
+//!   der Feldname) und `/Subj`, dazu an einem Widget `/TU` (der alternative
+//!   Feldname — das ist der Tooltip, den der Betrachter beim Überfahren
+//!   zeigt) und `/TM` (der Exportname; PDF 32000-1, 12.7.3.1, Tabelle 220).
 //!   Gemessen: eine Notiz mit Symbol-Erscheinungsstrom trug die IBAN in
 //!   `/Contents`, ein `/T` und ein `/RC` neben einem Erscheinungsstrom
 //!   ebenso — alle mit Rückgabewert 0. Was eine Annotation **zeichnet**
@@ -134,7 +140,7 @@ pub struct MetadataReport {
     pub outlines_removed: usize,
     /// `/A`, `/AA` und benannte `/Dest` an Annotationen.
     pub annotation_actions_removed: usize,
-    /// `/Contents`, `/RC`, `/T` und `/Subj` an Annotationen.
+    /// `/Contents`, `/RC`, `/T`, `/Subj`, `/TU` und `/TM` an Annotationen.
     pub annotation_texts_cleared: usize,
 }
 
@@ -210,8 +216,8 @@ impl MetadataReport {
         );
         count(
             self.annotation_texts_cleared,
-            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj)",
-            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj)",
+            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM)",
+            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM)",
         );
         out
     }
@@ -497,15 +503,23 @@ fn clean_annotations(
     for annot in annots {
         match annot {
             Object::Reference(id) => {
+                // Ob das Ziel bleibt, steht fest, solange `doc` noch lesbar
+                // ist — die Auflösung eines `/Dest 12 0 R` braucht das ganze
+                // Dokument, der Zugriff danach nur noch die Annotation.
+                let keep_dest = doc
+                    .get_dictionary(id)
+                    .ok()
+                    .is_some_and(|dict| keeps_destination(doc, dict));
                 if let Ok(dict) = doc.get_dictionary_mut(id) {
-                    let (a, t) = clean_annotation(dict, to_delete);
+                    let (a, t) = clean_annotation(dict, keep_dest, to_delete);
                     actions += a;
                     texts += t;
                 }
                 inline.push(Object::Reference(id));
             }
             Object::Dictionary(mut dict) => {
-                let (a, t) = clean_annotation(&mut dict, to_delete);
+                let keep_dest = keeps_destination(doc, &dict);
+                let (a, t) = clean_annotation(&mut dict, keep_dest, to_delete);
                 inline_changed |= a + t > 0;
                 actions += a;
                 texts += t;
@@ -524,20 +538,37 @@ fn clean_annotations(
 
 /// Die Schlüssel, unter denen eine Annotation Klartext neben ihrem
 /// Erscheinungsbild führt.
-const ANNOTATION_TEXT_KEYS: [&[u8]; 4] = [b"Contents", b"RC", b"T", b"Subj"];
+///
+/// `/Contents`, `/RC`, `/T` und `/Subj` sind die Kommentartexte (PDF 32000-1,
+/// 12.5.2 und 12.5.6.2); an einem Widget ist `/T` der Feldname. `/TU` und
+/// `/TM` stehen nur an Formularfeldern (12.7.3.1, Tabelle 220): `/TU` ist der
+/// alternative Feldname, den der Betrachter als **Tooltip** zeigt, `/TM` der
+/// Exportname beim Absenden. Beide sind frei wählbarer Text und werden von
+/// Formulargeneratoren mit dem Beschriftungstext gefüllt — „Konto von Max
+/// Mustermann“ ist ein Tooltip, wie ihn jeder Editor schreibt.
+const ANNOTATION_TEXT_KEYS: [&[u8]; 6] = [b"Contents", b"RC", b"T", b"Subj", b"TU", b"TM"];
 
-fn clean_annotation(dict: &mut Dictionary, to_delete: &mut BTreeSet<ObjectId>) -> (usize, usize) {
+/// Darf das `/Dest` dieser Annotation stehen bleiben? Nur, wenn es eines
+/// trägt **und** dieses — nach Auflösung — ein ausdrückliches Ziel ist.
+fn keeps_destination(doc: &Document, dict: &Dictionary) -> bool {
+    dict.get(b"Dest")
+        .is_ok_and(|dest| is_explicit_destination(doc, dest))
+}
+
+/// Nimmt einer Annotation Aktionen und Kommentartexte. `keep_dest` ist vorher
+/// am unveränderten Dokument bestimmt (siehe [`keeps_destination`]).
+fn clean_annotation(
+    dict: &mut Dictionary,
+    keep_dest: bool,
+    to_delete: &mut BTreeSet<ObjectId>,
+) -> (usize, usize) {
     let mut actions = 0usize;
     for key in [b"A".as_slice(), b"AA".as_slice()] {
         if take(dict, key, to_delete) {
             actions += 1;
         }
     }
-    if dict
-        .get(b"Dest")
-        .is_ok_and(|dest| !is_explicit_destination(dest))
-        && take(dict, b"Dest", to_delete)
-    {
+    if !keep_dest && take(dict, b"Dest", to_delete) {
         actions += 1;
     }
     let mut texts = 0usize;
@@ -552,13 +583,19 @@ fn clean_annotation(dict: &mut Dictionary, to_delete: &mut BTreeSet<ObjectId>) -
 /// Ein `/Dest` ohne Text: ein Feld aus Verweis, Zahlen und einem der
 /// Anzeigenamen aus PDF 32000-1, Tabelle 151 (`[Seite /XYZ x y z]`).
 ///
+/// Ein Verweis wird zuerst **aufgelöst**: `/Dest 12 0 R` ist, was in Objekt
+/// 12 steht — ein Feld bleibt, eine Zeichenkette fällt. Entschieden wird
+/// über den Inhalt, nicht über die Schreibweise; ein Erzeuger, der jedes
+/// Ziel als eigenes Objekt ablegt, verliert seine Sprünge sonst grundlos.
+///
 /// Alles andere — eine Zeichenkette (benanntes Ziel), ein Name als Ziel,
-/// ein Feld mit einem fremden Namen darin — kann Text tragen und fällt.
-fn is_explicit_destination(dest: &Object) -> bool {
+/// ein Feld mit einem fremden Namen darin — kann Text tragen und fällt; ein
+/// Verweis ins Leere fällt mit, er führt ohnehin nirgendwohin.
+fn is_explicit_destination(doc: &Document, dest: &Object) -> bool {
     const FIT: [&[u8]; 8] = [
         b"XYZ", b"Fit", b"FitH", b"FitV", b"FitR", b"FitB", b"FitBH", b"FitBV",
     ];
-    let Object::Array(items) = dest else {
+    let Some(Object::Array(items)) = resolve(doc, dest) else {
         return false;
     };
     items.iter().all(|item| match item {

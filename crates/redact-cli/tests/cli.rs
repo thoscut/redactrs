@@ -825,6 +825,9 @@ fn the_input_is_protected_in_every_spelling() {
     let sub = dir.join("unter");
     std::fs::create_dir_all(&sub).unwrap();
 
+    // `mut` braucht nur der Unix-Zweig darunter (Symlink, Hardlink); unter
+    // Windows hielte `clippy -D warnings` es sonst für überflüssig.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut aliases: Vec<PathBuf> = vec![
         // absolut
         input.clone(),

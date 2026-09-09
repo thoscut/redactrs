@@ -37,6 +37,80 @@ Vierter Durchgang, und diesmal fast nur an der **Doku** — mit demselben
 Maßstab wie am Code: jede Angabe hier stammt aus einem Lauf des gebauten
 Binaries, nicht aus dem Quelltext.
 
+### Fix-Runde 3: was die Gegenprüfung der letzten Runde noch fand
+
+Fünf Prüfer hatten die Korrekturen der vorigen Runde mit eigenem Material
+gegengelesen. Die Befunde hielten; die **Korrekturen** ließen Lücken. Diese
+Runde schließt sie. Drei Klassen kehren wieder: eine Decke zählt die falsche
+Einheit, eine Zusicherung wird an die nächste Stelle mitgenommen, wo sie nicht
+gilt, und ein Test bleibt ohne seine Korrektur grün.
+
+<!-- FIX-RUNDE-3: hier folgen die Sätze der Agenten 1 (Spiegel /ActualText,
+     /Alt, /E über Form-XObjects; nachsichtige Extraktion statt Rückfall;
+     /DecodeParms je Filter), 2 (Objektspeicher aus den Konstanten gerechnet;
+     /TU und /TM an Annotationen; /Dest als Verweis), 3 (Seitenzahl aus
+     Review-JSON und --manual-regions gegen u32 geprüft, saturating_add) und
+     5 (Nachprüfung der Oberfläche in Begriffen gedeckelt; je Text eine
+     Entscheidung). Trägt der Orchestrator nach dem Merge ein. -->
+
+* **Der Windows-Job der CI war rot — durch einen Test, nicht durch das
+  Programm.** `the_process_is_no_longer_dumpable` verlangte auf jedem System
+  `Disabled`; unter Windows liefert `deny_core_dumps` ehrlich `Unavailable`
+  (siehe „Kein Kernabzug“ oben), und genau das hielt der Test für einen
+  Fehler. Er erwartet jetzt je Ziel, was die Funktion dort liefern *kann*:
+  Linux streng `Disabled` samt Gegenprobe beim Kernel (`PR_GET_DUMPABLE`),
+  übrige Unix „nicht `Failed`“ (`Unavailable` unter einem Syscall-Filter ist
+  legitim), Windows genau `Unavailable`. Die Funktion selbst ist unverändert.
+  Der Windows-Job ist per `workflow_call` das Tor vor dem Release; solange er
+  rot war, gab es keines. Dahinter lag noch ein zweiter Stolperstein desselben
+  Laufs: ein `mut` in `tests/cli.rs`, das nur der Unix-Zweig (Symlink,
+  Hardlink) braucht und das `clippy -D warnings` für das Windows-Ziel als
+  überflüssig ablehnte — jetzt an `cfg(not(unix))` gebunden erlaubt.
+* **Die Decke von 1 000 Begriffen ist eine Zahl, nicht fünf.** Sie lag als
+  `MAX_NEEDLES` in der Kommandozeile und als Literal in `--help`, README,
+  SECURITY.md und diesem Verlauf; der Test dazu war aus der Konstante
+  abgeleitet und hätte jeden Wert durchgewinkt. Jetzt heißt sie
+  `redact_core::MAX_CHECK_NEEDLES`, die Oberfläche deckelt ihre Nachprüfung
+  damit (siehe oben), und `the_needle_ceiling_is_one_number_in_code_help_and_docs`
+  liest Hilfetext und die drei Dokumente und verlangt an jeder Stelle die
+  Zahl aus der Konstante — samt der zitierten Fehlermeldung. Konstante auf
+  500 gesetzt: rot. Zahl in der README geändert: rot.
+* **`docs/pruefung.txt` zählte Fundstellen aus einer älteren Fassung.** Die
+  Belege waren vor der siebten Sicht von `--check-leaks` erzeugt; seither
+  findet der Lauf je Begriff eine Fundstelle mehr, und die Datei sagte es
+  nicht. Sie ist neu erzeugt, und **`crates/redact-cli/tests/belege.rs`**
+  hält sie am gebauten Binary fest: `--write-demo`, schwärzen, `--check-leaks`
+  mit den vier Begriffen aus `scripts/make-preview.sh` — die
+  `GEFUNDEN (N …)`/`nicht gefunden:`-Zeilen und die Rückgabewerte müssen
+  denen in `pruefung.txt` gleichen. `scripts/check-preview.py` prüft
+  zusätzlich, dass `docs/vorher-nachher.md` aus `pruefung.txt` wortgleich
+  zitiert. Eine geänderte Zahl an einer der drei Stellen: rot.
+* **`scripts/make-preview.sh` löst ein relatives `CARGO_TARGET_DIR` auf.**
+  `CARGO_TARGET_DIR=target ./scripts/make-preview.sh` baute nach
+  `<repo>/target` und suchte die Programme dann von einem Wegwerfverzeichnis
+  aus unter `target/` — Abbruch mit 127. Ein relativer Wert wird jetzt gegen
+  das Repository aufgelöst, bevor das Skript das Verzeichnis wechselt.
+* **Doku.** Die Nachprüfung der Oberfläche heißt `leaks_many`, nicht `leaks`;
+  ihre Decke ist oben in der richtigen Einheit beschrieben; „über vier
+  Stunden“ für eine Million Begriffe war der Wert vor `memmem` — heute sind es
+  über eine Stunde (rund 4 ms je Begriff); `SECURITY.md` sagt an der
+  Grenzentabelle, dass MB dort wie überall 1024² Byte heißt und MiB dieselbe
+  Einheit ist; README und `SECURITY.md` nennen die zwei Rollen der drei
+  Spiegel-Schlüssel (`/ActualText` muss den Glyphen gleichen, `/Alt` und `/E`
+  dürfen abweichen) und den `/Alt` eines Bildes als blinden Fleck.
+* **Nicht in dieser Runde: der Export selbst in den Hintergrund.** Der Export
+  läuft weiter im Zeichentakt der Oberfläche (6,3 s bei 305 Seiten, gemessen);
+  nur die Nachprüfung danach ist im Hintergrund. Ein `PendingExport` mit
+  gesperrter Bedienung, Fehlerkanal und verketteter Nachprüfung berührt
+  dieselben Dateien, an denen diese Runde die Decke und die Doppelentscheidung
+  korrigiert — das kommt als eigener Schritt, nicht nebenbei.
+* **Bewusst offen: der `/Alt` eines Bildes.** Beschreibt ein getaggtes PDF
+  ein Bild mit `/Figure <</Alt (…)>> BDC /Im0 Do EMC` und steht in der
+  Beschreibung, was auf dem Bild zu lesen ist, überlebt sie die
+  Pixel-Schwärzung des Bildes. Die Analyse liest den `/Alt` eines Bildes so
+  wenig wie dessen Pixel — derselbe blinde Fleck, jetzt benannt statt
+  verschwiegen; `--check-leaks` sieht ihn im Rohstrom.
+
 ### Die CI lässt Clippy jetzt auch unter Windows laufen
 
 `cargo clippy --workspace --all-targets -- -D warnings` war für das
@@ -125,7 +199,7 @@ Benutzer unerreichbar, `gdb` und `strace` brauchen `root`.
 ### Die Oberfläche prüft nach dem Export selbst nach
 
 Neu: nach jedem Export liest die Oberfläche die geschriebenen Bytes zurück und
-sucht darin mit `redact_pdf::leaks` die Texte, die sie gerade geschwärzt hat.
+sucht darin mit `redact_pdf::leaks_many` die Texte, die sie gerade geschwärzt hat.
 Das ist die **stärkere Fassung** von `--check-leaks`, weil die Oberfläche
 etwas hat, was der Kommandozeilennutzer nicht hat: sie kennt die Suchbegriffe
 schon (in jeder geschwärzten Zeile steht der gefundene Text) und muss sie
@@ -143,10 +217,13 @@ Drei Dinge stehen in der Zeile, die dabei entsteht, und zwar immer:
   es bei der Sichtprüfung. Verschwiegen wäre die neue Anzeige an einem
   Dokument mit lauter Handregionen selbst eine falsche Entwarnung.
 
-Gesucht werden höchstens 200 verschiedene Texte (`MAX_EXPORT_CHECK_NEEDLES`) —
-`leaks` liest die Datei je Begriff einmal ganz durch, und die Trefferliste darf
-100 000 Zeilen lang werden. Was darüber liegt, wird gesagt und nicht
-verschwiegen.
+Gesucht werden höchstens 1 000 verschiedene Texte — dieselbe Decke wie bei
+`--check-leaks`, dieselbe Konstante (`redact_core::MAX_CHECK_NEEDLES`) und
+dieselbe Einheit: **Begriffe**, nicht Bytes. (Eine Zwischenfassung deckelte
+das Produkt aus Begriffen und Dateibytes; die Kosten hängen aber an den
+*entpackten* Streambytes, und die kennt niemand vor dem Lauf. Die sind durch
+`--max-decompressed-mb` gedeckelt, die Begriffe hier.) Was über der Decke
+liegt, wird gesagt und nicht verschwiegen.
 
 ### Drei Ungenauigkeiten der Oberfläche
 
@@ -331,8 +408,10 @@ Zahl der Begriffe.
 
 `redact_pdf::leaks(bytes, begriff)` bleibt unverändert und benutzt intern
 denselben Durchgang. Neu ist eine Obergrenze von 1 000 Begriffen: die
-Byte-Grenze allein ließ rund eine Million Zeilen zu, was über vier Stunden
-Laufzeit ergäbe — von außen nicht von einem Hänger zu unterscheiden.
+Byte-Grenze allein ließ rund eine Million Zeilen zu, was über eine Stunde
+Laufzeit ergäbe (rund 4 ms je Begriff, gemessen an einer 898-kB-Datei mit
+420 Seiten — die Messung steht an `redact_core::MAX_CHECK_NEEDLES`) — von
+außen nicht von einem Hänger zu unterscheiden.
 
 ### Der Beleg, den man ansehen kann
 

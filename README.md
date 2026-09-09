@@ -1527,6 +1527,12 @@ nicht steht, ist deshalb nicht automatisch abgedeckt.
   GUI mit der Maus oder über `--manual-regions`. Was gezogen wurde, wird dann
   aber auch wirklich entfernt (siehe [Bilder](#bilder)); das ist der
   Unterschied zwischen „nicht gefunden“ und „nicht geschwärzt“.
+* **Der `/Alt` eines Bildes gehört zu demselben blinden Fleck.** Ein
+  getaggtes PDF darf ein Bild beschreiben (`/Figure <</Alt (…)>> BDC /Im0 Do
+  EMC`); steht in der Beschreibung, was auf dem Bild zu lesen ist, überlebt sie
+  die Pixel-Schwärzung. Die Analyse liest den `/Alt` eines Bildes so wenig
+  wie dessen Pixel. `--check-leaks` sieht ihn im Rohstrom — der Text steht
+  als Klartext im Seiteninhalt.
 * **Ein reiner Scan meldet 0 Schwärzungen.** Ohne extrahierbaren Text gibt es
   keine Treffer. Die Warnung dazu erscheint aber inzwischen **auch dann**, wenn
   gar nichts geschwärzt wurde — nachgemessen:
@@ -1621,6 +1627,16 @@ bevorzugt.
 Die drei Schlüssel `/ActualText`, `/Alt` und `/E`
 (`MIRROR_KEYS` in `crates/redact-pdf/src/content.rs`) werden jetzt **geleert**,
 sobald von den Glyphen darunter etwas entfernt wurde — nicht nur gefunden.
+
+Drei Schlüssel, zwei Rollen: nach PDF 32000-1 ist `/ActualText` (14.9.4) der
+*Ersatz* der Glyphen und muss ihnen gleichen; `/Alt` (14.9.3) *beschreibt*,
+`/E` (14.9.5) *schreibt aus* — beide dürfen abweichen. Gelesen und geleert
+werden alle drei; die Warnung „Spiegel widerspricht den Glyphen“ gibt es nur
+für `/ActualText`. Ein `/Figure <</Alt …>> BDC /Im0 Do EMC` ohne Glyphen
+darunter ist die Standardform der Barrierefreiheit und kein Befund — der
+`/Alt` eines Bildes gehört zu demselben blinden Fleck wie dessen Pixel, siehe
+[Gescannte Dokumente](#gescannte-dokumente); `--check-leaks` sieht ihn im
+Rohstrom.
 Gedeckt sind neun Wege, auf denen so ein Spiegel in einer Datei stehen kann:
 
 | Fall | Test |

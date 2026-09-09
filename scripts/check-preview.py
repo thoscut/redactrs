@@ -38,6 +38,19 @@ Einzelbild leer ist und die mitgeschnittenen Rueckgabewerte stimmen.
 Was das NICHT leistet: es merkt nicht, wenn die Bilder im Repository veralten,
 weil jemand den Rasterizer geaendert und `make-preview.sh` nicht laufen lassen
 hat. Dagegen hilft nur der Lauf selbst - `git status` sagt es danach.
+
+WAS ZUSAETZLICH GEPRUEFT WIRD: DIE ZITATE
+
+docs/vorher-nachher.md zitiert aus pruefung.txt - die GEFUNDEN-/nicht
+gefunden-Zeilen, die beiden Verkettungszeilen und die zwei Dateigroessen.
+Abgeschrieben veraltet so ein Zitat still; die Belege der letzten Runde waren
+in jeder Fundstellenzahl um eins zu klein, und niemand sah es. Deshalb wird
+hier verlangt, dass jede zitierte Zeile wortgleich in pruefung.txt steht.
+Liegt neben pruefung.txt keine vorher-nachher.md (die CI erzeugt die Belege
+in ein Wegwerfverzeichnis), wird die aus docs/ neben diesem Skript genommen -
+dann prueft der Lauf, dass die eingecheckte Doku zu dem passt, was das
+gebaute Programm heute ausgibt. Dass pruefung.txt selbst zum Programm passt,
+haelt crates/redact-cli/tests/belege.rs fest.
 """
 
 import struct
@@ -382,7 +395,87 @@ def main():
     pruefe("GEFUNDEN" in pr.split("NACHHER")[-1],
            "pruefung.txt verschweigt nicht, was nach dem Lauf noch dasteht")
 
+    zitate_pruefen(ordner, pr)
+
     return ende()
+
+
+# --------------------------------------------------------------------------
+# Die Zitate in vorher-nachher.md
+# --------------------------------------------------------------------------
+
+def codebloecke(markdown):
+    """Die Zeilen jedes ```-Blocks, in Reihenfolge."""
+    bloecke, offen = [], None
+    for zeile in markdown.splitlines():
+        if zeile.startswith("```"):
+            if offen is None:
+                offen = []
+            else:
+                bloecke.append(offen)
+                offen = None
+            continue
+        if offen is not None:
+            offen.append(zeile)
+    return bloecke
+
+
+def zitate_pruefen(ordner, pr):
+    md = ordner / "vorher-nachher.md"
+    if not md.is_file():
+        md = Path(__file__).resolve().parent.parent / "docs" / "vorher-nachher.md"
+    if not md.is_file():
+        pruefe(False, "vorher-nachher.md gefunden (weder in %s noch in docs/)" % ordner)
+        return
+    text = md.read_text(encoding="utf-8")
+    zeilen_pr = set(pr.splitlines())
+    vorher_pr = pr.split("NACHHER")[0]
+    nachher_pr = pr.split("NACHHER")[-1].split("DIE VIER SCHRITTE")[0]
+
+    # 1. Die Kaesten mit "Geprueft:" - jede Zeile steht wortgleich in
+    #    pruefung.txt, und zwar im richtigen Abschnitt.
+    kaesten = [b for b in codebloecke(text) if any(z.startswith("Geprüft:") for z in b)]
+    pruefe(len(kaesten) == 2,
+           "%s zitiert zwei Kaesten mit »Geprüft:« (gefunden: %d)" % (md.name, len(kaesten)))
+    for kasten, abschnitt, name in zip(kaesten, (vorher_pr, nachher_pr), ("VORHER", "NACHHER")):
+        for zeile in kasten:
+            if not zeile.strip():
+                continue
+            pruefe(zeile in zeilen_pr and zeile in abschnitt.splitlines(),
+                   "%s steht wortgleich im Abschnitt %s von pruefung.txt: %s"
+                   % (md.name, name, zeile.strip()))
+        gezaehlt = sum(1 for z in kasten if z.startswith("  GEFUNDEN") or z.startswith("  nicht gefunden"))
+        erwartet = sum(1 for z in abschnitt.splitlines()
+                       if z.startswith("  GEFUNDEN") or z.startswith("  nicht gefunden"))
+        pruefe(gezaehlt == erwartet,
+               "%s zitiert im Kasten %s alle %d Belegzeilen (zitiert: %d)"
+               % (md.name, name, erwartet, gezaehlt))
+
+    # 2. Die beiden Verkettungszeilen "vorher:" / "nachher:" sind Ausschnitte
+    #    echter Zeilen des jeweiligen Abschnitts.
+    verkettung = [b for b in codebloecke(text)
+                  if any(z.startswith("vorher:") for z in b) and any(z.startswith("nachher:") for z in b)]
+    pruefe(len(verkettung) == 1, "%s hat genau einen vorher:/nachher:-Kasten" % md.name)
+    for kasten in verkettung:
+        for zeile in kasten:
+            for marke, abschnitt in (("vorher:", vorher_pr), ("nachher:", nachher_pr)):
+                if zeile.startswith(marke):
+                    stueck = zeile[len(marke):].strip()
+                    pruefe(bool(stueck) and any(stueck in z for z in abschnitt.splitlines()),
+                           "%s: »%s %s« ist ein Ausschnitt aus dem Abschnitt %s"
+                           % (md.name, marke, stueck, "VORHER" if marke == "vorher:" else "NACHHER"))
+
+    # 3. Die Dateigroessen im Fliesstext ("1862 → 1332") sind die aus den
+    #    beiden Geprueft-Zeilen.
+    groessen = []
+    for abschnitt in (vorher_pr, nachher_pr):
+        for z in abschnitt.splitlines():
+            if z.startswith("Geprüft:") and z.endswith(" Byte)"):
+                groessen.append(z[z.rfind("(") + 1:-len(" Byte)")])
+    pruefe(len(groessen) == 2, "pruefung.txt nennt beide Dateigroessen")
+    if len(groessen) == 2:
+        pfeil = "%s → %s" % tuple(groessen)
+        pruefe(pfeil in text, "%s nennt die Dateigroessen als »%s«" % (md.name, pfeil))
 
 
 def ende():

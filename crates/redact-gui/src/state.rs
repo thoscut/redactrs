@@ -11,7 +11,7 @@
 //! Geometrie (MediaBox plus `/Rotate`), kein Fenster, keine Grafik. Sie liegt
 //! im Sichtmodul, weil sie dort gebraucht und geprüft wird.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -82,7 +82,11 @@ pub fn selection_on_other_page(page: usize, kind: NudgeKind) -> String {
          eine andere. Zu ihr blättern, oder mit Esc die Auswahl aufheben (dann \
          blättern die Pfeiltasten wieder).",
         kind.refusal(),
-        page + 1
+        // `saturating_add`, weil `page` aus fremder Hand kommt (Review- oder
+        // Regionsdatei): bei `usize::MAX` liefe die 1-basierte Anzeige im
+        // Debug-Build über und löste eine Panic aus — in dem Satz, der die
+        // Absage erklären soll.
+        page.saturating_add(1)
     )
 }
 
@@ -100,7 +104,9 @@ pub fn selection_on_missing_page(page: usize, pages: usize, kind: NudgeKind) -> 
          Zeile mit Entf löschen oder die Seitenzahl in der Review-Datei berichtigen \
          — dort ist die erste Seite die 0.",
         kind.refusal(),
-        page + 1,
+        // `saturating_add` wie oben — hier erst recht: diese Zeile gibt es
+        // nur, weil die Seitenzahl aus einer Datei kam, die niemand geprüft hat.
+        page.saturating_add(1),
         pages
     )
 }
@@ -362,39 +368,6 @@ impl HitOutcome {
     }
 }
 
-/// Prüfbudget der Nachprüfung nach dem Export: **Begriffe × Dateibytes**.
-///
-/// [`redact_pdf::leaks_many`] liest die Datei einmal und vergleicht dann
-/// jeden Datenblock mit jedem Begriff. Die Kosten sind also Grundkosten je
-/// Datei plus ein Anteil, der mit Begriffen **und** Dateigröße wächst —
-/// gemessen (Release, 1,1 MB, 305 Seiten): 0,45 s für einen Begriff, 1,69 s
-/// für 1 000, also rund 1,2 ms je Begriff und Megabyte.
-///
-/// Die Decke davor zählte Begriffe allein (200) und sah die Datei nicht:
-/// dieselben 200 Begriffe kosten an 50 kB fast nichts und an 5 MB Sekunden.
-/// Hier zählt das Produkt. Bei 2 GiB sind das ≈ 2 s Rechenzeit im
-/// Hintergrund für jede Dateigröße — 1 900 Begriffe an 1,1 MB, 430 an 5 MB,
-/// 20 000 an 100 kB. Angewendet wird die Decke dort, wo die Dateigröße
-/// bekannt ist: in [`ExportCheckPlan::run`], nach dem Lesen der Datei.
-///
-/// Die Oberfläche hängt daran nicht mehr (die Prüfung läuft auf einem
-/// eigenen Thread, siehe [`crate::app::RedactApp`]); die Decke begrenzt nur,
-/// wie lange „Nachprüfung läuft …“ dort stehen kann. Was sie überschreitet,
-/// wird **gesagt** und nicht verschwiegen — siehe [`ExportCheck::sentence`].
-pub const MAX_EXPORT_CHECK_NEEDLE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-
-/// Wie viele Begriffe das Prüfbudget bei dieser Dateigröße zulässt —
-/// mindestens einer, sonst würde bei einer riesigen Datei gar nichts geprüft.
-pub fn export_check_needle_limit(file_bytes: u64) -> usize {
-    needle_limit(MAX_EXPORT_CHECK_NEEDLE_BYTES, file_bytes)
-}
-
-/// [`export_check_needle_limit`] mit beliebigem Budget.
-fn needle_limit(budget: u64, file_bytes: u64) -> usize {
-    let allowed = budget / file_bytes.max(1);
-    usize::try_from(allowed).unwrap_or(usize::MAX).max(1)
-}
-
 /// Ergebnis der Nachprüfung über die geschriebene Datei.
 ///
 /// Siehe [`AppState::check_export`].
@@ -408,19 +381,19 @@ pub struct ExportCheck {
     pub leaking: Vec<String>,
     /// Geschwärzte Zeilen ohne bekannten Text — von Hand gezogene Rechtecke.
     pub without_text: usize,
-    /// Texte, die das Prüfbudget ([`MAX_EXPORT_CHECK_NEEDLE_BYTES`]) bei
-    /// dieser Dateigröße nicht mehr zuließ.
+    /// Texte jenseits der Decke ([`redact_core::MAX_CHECK_NEEDLES`]) — sie
+    /// wurden nicht gesucht, und der Satz sagt das.
     pub skipped: usize,
     /// Texte, die **auch** in einer bewusst stehen gelassenen Zeile stehen —
     /// abgewählt, durch die Negativliste geschützt oder selbst ein
     /// Schutzeintrag. Sie werden nicht gesucht: dass sie in der Ausgabe
     /// stehen, ist eine Entscheidung und kein Leck.
     pub kept: usize,
-    /// Größe der zurückgelesenen Datei in Bytes — die zweite Größe, an der
-    /// das Prüfbudget hängt.
-    pub file_bytes: u64,
-    /// Wie viele Begriffe das Budget bei dieser Größe zuließ.
-    pub needle_limit: usize,
+    /// Die Decke, die für diesen Lauf galt — im Regelfall
+    /// [`redact_core::MAX_CHECK_NEEDLES`]; ein Test darf sie tiefer legen
+    /// ([`ExportCheckPlan::run_within`]). Der Satz nennt sie, damit der
+    /// Nutzer weiß, wo die Grenze liegt, und nicht nur, dass es eine gibt.
+    pub limit: usize,
 }
 
 impl ExportCheck {
@@ -472,11 +445,10 @@ impl ExportCheck {
         };
         let skipped = if self.skipped > 0 {
             format!(
-                " {} weitere Text(e) wurden nicht gesucht — das Prüfbudget lässt bei {} kB \
-                 höchstens {} Begriffe zu.",
-                self.skipped,
-                self.file_bytes.div_ceil(1024),
-                self.needle_limit
+                " {} weitere Text(e) wurden nicht gesucht — höchstens {} Begriffe je \
+                 Nachprüfung (dieselbe Decke wie --check-leaks); sie stehen in der \
+                 Trefferliste weiter hinten.",
+                self.skipped, self.limit
             )
         } else {
             String::new()
@@ -531,22 +503,42 @@ impl ExportCheckPlan {
     /// das wird nicht geschwärzt und wäre für eine Nachprüfung mit ihm auch
     /// unsichtbar.
     ///
-    /// Hier wird das Prüfbudget angewendet ([`export_check_needle_limit`]),
-    /// denn erst hier ist die Dateigröße bekannt. Was nicht mehr hineinpasst,
-    /// zählt [`ExportCheck::skipped`].
+    /// ## Die Decke: Begriffe, dieselbe Zahl wie `--check-leaks`
+    ///
+    /// Gesucht werden höchstens [`redact_core::MAX_CHECK_NEEDLES`] Begriffe;
+    /// was darüber liegt, zählt [`ExportCheck::skipped`] und steht im Satz.
+    /// Die Kosten der Suche sind Begriffe × **entpackte** Streambytes — und
+    /// beide Faktoren sind gedeckelt: die Begriffe hier, die Bytes durch
+    /// `--max-decompressed-mb` (das gilt für den Export wie für die Suche).
+    ///
+    /// Die Decke davor rechnete **Begriffe × Dateibytes auf der Platte**
+    /// gegen ein Budget von 2 GiB. Das war die falsche Einheit: eine kleine
+    /// Datei mit stark gepackten Strömen packt sich auf ein Vielfaches aus,
+    /// und genau an den entpackten Bytes hängt die Arbeit. Die Doku dazu
+    /// („2 GiB ≈ 2 s Rechenzeit“) lag gemessen um rund den Faktor 10
+    /// daneben, weil die Grundkosten je Datei — lesen, Ströme auspacken, jede
+    /// Seite durch den Schriftdekoder — mit der Dateigröße auf der Platte
+    /// nichts zu tun haben. Die richtige Einheit ist vor dem Lauf nicht
+    /// bekannt (die Ströme werden erst beim Suchen ausgepackt); eine Decke,
+    /// die man nicht vor dem Lauf anwenden kann, ist keine.
+    ///
+    /// Gemessen (Release, `zb_mess_nachpruefung_je_begriff_gegen_einen_durchgang`,
+    /// 305 Seiten, 1,7 MB): 1 Begriff MESSUNG_1, 200 Begriffe MESSUNG_200,
+    /// 1 000 Begriffe MESSUNG_1000 — ein Sockel je Datei und darüber
+    /// MESSUNG_JE_BEGRIFF je Begriff. Am oberen Rand der Decke ist das die
+    /// Zeit, die „Nachprüfung läuft …“ höchstens im Hintergrund steht.
     ///
     /// Kein Freibrief (siehe [`ExportCheck::sentence`]) und keine Aussage über
     /// selbst gezogene Rechtecke: die haben keinen bekannten Text, und dafür
     /// kann diese Prüfung nichts sagen. Beides steht im Satz, den der Nutzer
     /// liest — verschwiegen wäre die Anzeige selbst eine falsche Entwarnung.
     pub fn run(self, out: &Path) -> ExportCheck {
-        self.run_within(out, MAX_EXPORT_CHECK_NEEDLE_BYTES)
+        self.run_within(out, redact_core::MAX_CHECK_NEEDLES)
     }
 
-    /// [`ExportCheckPlan::run`] mit beliebigem Prüfbudget (Begriffe ×
-    /// Dateibytes) — damit ein Test die Decke an einer kleinen Datei
-    /// erreicht, statt an einer, die Gigabytes wiegt.
-    pub fn run_within(self, out: &Path, budget: u64) -> ExportCheck {
+    /// [`ExportCheckPlan::run`] mit beliebiger Decke in Begriffen — damit ein
+    /// Test sie mit einer Handvoll Begriffe erreicht, statt mit tausend.
+    pub fn run_within(self, out: &Path, limit: usize) -> ExportCheck {
         let bytes = match std::fs::read(out) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -557,13 +549,10 @@ impl ExportCheckPlan {
                     without_text: self.without_text,
                     skipped: self.needles.len(),
                     kept: self.kept,
-                    file_bytes: 0,
-                    needle_limit: 0,
+                    limit,
                 }
             }
         };
-        let file_bytes = bytes.len() as u64;
-        let limit = needle_limit(budget, file_bytes);
         let checked = self.needles.len().min(limit);
         let skipped = self.needles.len() - checked;
         let needles: Vec<&str> = self.needles[..checked].iter().map(String::as_str).collect();
@@ -582,8 +571,7 @@ impl ExportCheckPlan {
             without_text: self.without_text,
             skipped,
             kept: self.kept,
-            file_bytes,
-            needle_limit: limit,
+            limit,
         }
     }
 }
@@ -828,7 +816,14 @@ impl AnnotatedRegion {
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .unwrap_or("(ohne Text)");
-        format!("S.{} {}", self.region.page + 1, shorten(text, 34))
+        // `saturating_add`, weil `page` aus fremder Hand kommt (Review- oder
+        // Regionsdatei): bei `usize::MAX` liefe die 1-basierte Anzeige im
+        // Debug-Build über und löste eine Panic aus — beim Malen der Liste.
+        format!(
+            "S.{} {}",
+            self.region.page.saturating_add(1),
+            shorten(text, 34)
+        )
     }
 
     /// Beschreibung in Klartext — siehe [`plain_description`].
@@ -2661,8 +2656,17 @@ impl AppState {
     /// gewollt war. Gesagt wird es trotzdem ([`ExportCheck::kept`]): dass
     /// dieser Text nicht geprüft werden konnte, gehört in den Satz.
     ///
-    /// Das Prüfbudget wird hier **nicht** angewendet — es hängt an der
-    /// Dateigröße, und die ist erst in [`ExportCheckPlan::run`] bekannt.
+    /// Je Text fällt **eine** Entscheidung, gleich wie viele Zeilen ihn
+    /// tragen: gesucht oder stehen gelassen. Vorher wurde ein stehen
+    /// gelassener Text nach der ersten geschwärzten Zeile aus der Liste
+    /// gestrichen — bei zwei geschwärzten Zeilen und einer abgewählten stand
+    /// derselbe Text dann in `needles` **und** `kept`, und die Nachprüfung
+    /// schlug Alarm über eine Datei, die genau so gewollt war.
+    ///
+    /// Die Decke ([`redact_core::MAX_CHECK_NEEDLES`]) wird hier **nicht**
+    /// angewendet, sondern im Lauf ([`ExportCheckPlan::run`]) — der Plan
+    /// trägt alle Texte, damit der Lauf sagen kann, wie viele er nicht
+    /// gesucht hat.
     pub fn plan_export_check(&self, summary: &HitSummary) -> ExportCheckPlan {
         let text_of = |entry: &AnnotatedRegion| {
             entry
@@ -2693,24 +2697,25 @@ impl AppState {
         let mut needles: Vec<String> = Vec::new();
         let mut kept = 0usize;
         let mut without_text = 0usize;
+        // Je Text eine Entscheidung — `seen` merkt sich, welche schon
+        // gefallen ist. Ein `retain` an `kept_texts` täte das nicht: nach der
+        // ersten geschwärzten Zeile wäre der Text dort weg, und die zweite
+        // landete in `needles`.
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         for (index, entry) in self.regions.iter().enumerate() {
             if !summary.outcome(index).is_redacted() {
                 continue;
             }
             match text_of(entry) {
                 Some(text) => {
-                    if needles.contains(&text) {
+                    if !seen.insert(text.clone()) {
                         continue;
                     }
                     if kept_texts.contains(&text) {
-                        // Einmal je Text zählen, nicht je Zeile.
                         kept += 1;
-                        // Damit derselbe Text nicht bei der nächsten Zeile
-                        // noch einmal zählt.
-                        kept_texts.retain(|k| k != &text);
-                        continue;
+                    } else {
+                        needles.push(text);
                     }
-                    needles.push(text);
                 }
                 None => without_text += 1,
             }

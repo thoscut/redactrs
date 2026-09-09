@@ -478,7 +478,8 @@ impl PdfRedactor {
                     }
                 }
             }
-            let mut mirrors = mirrors_to_clear(&scan.marked, StreamKey::Page, &page_plans);
+            let mut mirrors =
+                mirrors_to_clear(&scan.marked, StreamKey::Page, &page_plans, &form_plans);
             property_objects.append(&mut mirrors.objects);
             for warning in std::mem::take(&mut mirrors.warnings) {
                 push_warning(&mut report, warning);
@@ -529,7 +530,8 @@ impl PdfRedactor {
             report.removed_glyphs += removed_here;
             add_per_redaction(&mut report, plans.values());
             let marked = form_marked.get(&form_id).unwrap_or(&no_marked);
-            let mut mirrors = mirrors_to_clear(marked, StreamKey::Form(form_id), plans);
+            let mut mirrors =
+                mirrors_to_clear(marked, StreamKey::Form(form_id), plans, &form_plans);
             property_objects.append(&mut mirrors.objects);
             for warning in std::mem::take(&mut mirrors.warnings) {
                 push_warning(&mut report, warning);
@@ -1013,12 +1015,25 @@ struct MirrorFixes {
 /// **Und wenn die Schwärzung den Abschnitt nicht berührt**, bleibt der Spiegel
 /// unangetastet. Alle `/ActualText` vorsorglich zu löschen würde getaggte PDFs
 /// für Screenreader unbrauchbar machen, ohne irgendetwas zu schützen.
+///
+/// **Berührt** ist ein Abschnitt, wenn eine seiner eigenen Textoperationen
+/// Glyphen verliert **oder** eines der Form-XObjects in seinem Geltungsbereich
+/// ([`MarkedTextRecord::forms`], `form_plans`). Ein
+/// `/Span <</ActualText (IBAN …)>> BDC /Fm0 Do EMC` setzt seine Glyphen im
+/// Formular; wer nur `shows` fragte, ließe den Spiegel im Seitenstrom stehen,
+/// während die Glyphen im Formular verschwinden — gelesen, aber nicht
+/// geleert, und das wäre ein neues Leck. Bekannte Grenze: ein Formular, das
+/// erst eine spätere Seite trifft, lässt den Spiegel dieser Seite stehen;
+/// [`warn_about_shared_form`] meldet den Fall.
 fn mirrors_to_clear(
     marked: &[MarkedTextRecord],
     stream: StreamKey,
     plans: &BTreeMap<usize, Plan>,
+    form_plans: &BTreeMap<ObjectId, BTreeMap<usize, Plan>>,
 ) -> MirrorFixes {
     let mut fixes = MirrorFixes::default();
+    let loses_glyphs =
+        |plans: &BTreeMap<usize, Plan>| plans.values().any(|plan| plan.hidden_count() > 0);
     for record in marked {
         if record.stream != stream {
             continue;
@@ -1026,7 +1041,11 @@ fn mirrors_to_clear(
         let touched = record
             .shows
             .iter()
-            .any(|index| plans.get(index).is_some_and(|plan| plan.hidden_count() > 0));
+            .any(|index| plans.get(index).is_some_and(|plan| plan.hidden_count() > 0))
+            || record
+                .forms
+                .iter()
+                .any(|(_, form)| form_plans.get(form).is_some_and(loses_glyphs));
         if !touched {
             continue;
         }
@@ -1384,7 +1403,7 @@ fn rewrite_form(
             .get_object(form_id)
             .and_then(|o| o.as_stream())
             .map_err(|e| RedactError::Pdf(e.to_string()))?;
-        crate::filters::decoded_content(stream).ok_or_else(|| {
+        crate::filters::decoded_content(doc, stream).ok_or_else(|| {
             RedactError::Pdf(format!(
                 "Form-XObject {} {} ließ sich nicht dekodieren",
                 form_id.0, form_id.1

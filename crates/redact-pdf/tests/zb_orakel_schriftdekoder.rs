@@ -294,10 +294,12 @@ fn kanarienvogel_luegendes_tounicode_bleibt_blind() {
 /// Eine Seite, die der Interpreter ablehnt, nimmt die anderen nicht mit.
 ///
 /// `extract` bricht beim ersten Fehler für das ganze Dokument ab; die Sicht
-/// fällt dann auf die Seitenschleife zurück. Seite 1 ist hier kaputt (ein
-/// nie geschlossenes Zeichenkettenliteral, der Interpreter lehnt den Strom
-/// ab), Seite 2 trägt das Geheimnis in der Teilmengen-Schrift — nur der
-/// Dekoder kann es sehen, und er muss es trotz Seite 1 sehen.
+/// liest deshalb **nachsichtig** (`extract_lenient`): die abgelehnte Seite
+/// wird übersprungen und als Warnung genannt, die übrigen kommen zurück.
+/// Seite 1 ist hier kaputt (ein nie geschlossenes Zeichenkettenliteral, der
+/// Interpreter lehnt den Strom ab), Seite 2 trägt das Geheimnis in der
+/// Teilmengen-Schrift — nur der Dekoder kann es sehen, und er muss es trotz
+/// Seite 1 sehen.
 #[test]
 fn eine_kaputte_seite_nimmt_die_anderen_nicht_mit() {
     let good = libreoffice_export(false);
@@ -330,9 +332,36 @@ fn eine_kaputte_seite_nimmt_die_anderen_nicht_mit() {
     // Die Vorbedingung des Tests: der Extraktor lehnt das Dokument als
     // Ganzes ab. Sonst prüfte er nicht den Rückfall.
     let reloaded = Document::load_mem(&bytes).expect("parsebar");
+    let extractor = redact_pdf::PdfExtractor::new();
     assert!(
-        redact_pdf::PdfExtractor::new().extract(&reloaded).is_err(),
+        extractor.extract(&reloaded).is_err(),
         "Seite 1 sollte den Interpreter zum Abbruch bringen"
+    );
+
+    // Die nachsichtige Extraktion: Seite 2 kommt zurück, Seite 1 wird
+    // genannt — und nur Seite 1.
+    let (runs, warnings) = extractor.extract_lenient(&reloaded);
+    assert!(
+        runs.iter().any(|r| r.page == 1 && r.text.contains(IBAN)),
+        "Seite 2 fehlt in der nachsichtigen Extraktion: {runs:?}"
+    );
+    assert!(
+        runs.iter().all(|r| r.page != 0),
+        "von der kaputten Seite darf nichts kommen: {runs:?}"
+    );
+    let skipped: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("fehlt in dieser Sicht"))
+        .collect();
+    assert_eq!(
+        skipped.len(),
+        1,
+        "genau eine übersprungene Seite: {warnings:?}"
+    );
+    assert!(
+        skipped[0].starts_with("Seite 1 "),
+        "die Warnung nennt die übersprungene Seite: {}",
+        skipped[0]
     );
 
     let hits = leaks(&bytes, IBAN);
