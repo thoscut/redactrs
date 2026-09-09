@@ -12,9 +12,9 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use lopdf::dictionary;
 use redact_core::{Rect, Region, Source, MAX_CHECK_NEEDLES};
 use redact_pdf::testing::{build_pdf, TextItem};
-use lopdf::dictionary;
 use redact_pipeline::Config;
 
 use crate::state::{AnnotatedRegion, ExportCheckPlan, HitOutcome};
@@ -163,7 +163,12 @@ fn g5a_die_decke_schneidet_in_listenreihenfolge_ein_leck_dahinter_bleibt_ungepru
     let export_time = t.elapsed();
 
     let plan = app.state.plan_export_check(&summary);
-    assert_eq!(plan.needles.len(), MAX_CHECK_NEEDLES + 1, "{}", plan.needles.len());
+    assert_eq!(
+        plan.needles.len(),
+        MAX_CHECK_NEEDLES + 1,
+        "{}",
+        plan.needles.len()
+    );
     assert_eq!(plan.needles.last().map(String::as_str), Some("Musterbank"));
     let t = Instant::now();
     let check = plan.run(&out);
@@ -186,7 +191,9 @@ fn g5a_die_decke_schneidet_in_listenreihenfolge_ein_leck_dahinter_bleibt_ungepru
         "{sentence}"
     );
     assert!(
-        sentence.contains(&format!("{MAX_CHECK_NEEDLES} gesuchte Text(e) stehen nicht mehr")),
+        sentence.contains(&format!(
+            "{MAX_CHECK_NEEDLES} gesuchte Text(e) stehen nicht mehr"
+        )),
         "{sentence}"
     );
 
@@ -218,7 +225,6 @@ fn g5a_die_decke_schneidet_in_listenreihenfolge_ein_leck_dahinter_bleibt_ungepru
 /// Genau der Fehlalarm, den Befund 5 abstellen sollte, eine Schreibweise
 /// weiter.
 #[test]
-#[ignore = "Befund G5-B1: Fehlalarm über zwei Schreibweisen derselben IBAN — rot bis zur Korrektur"]
 fn g5b_dieselbe_iban_ohne_leerraum_abgewaehlt_ist_kein_leck() {
     let out = tmp("b-leerraum").join("out.pdf");
     let spaced = valid_iban(532_013_000, true);
@@ -232,8 +238,14 @@ fn g5b_dieselbe_iban_ohne_leerraum_abgewaehlt_ist_kein_leck() {
     let mut app = RedactApp::new(iban_only());
     app.open_bytes_and_analyze(&pdf, "zwei.pdf");
     assert_eq!(app.state.regions.len(), 2, "{:?}", app.state.regions);
-    assert_eq!(app.state.regions[0].region.text.as_deref(), Some(spaced.as_str()));
-    assert_eq!(app.state.regions[1].region.text.as_deref(), Some(plain.as_str()));
+    assert_eq!(
+        app.state.regions[0].region.text.as_deref(),
+        Some(spaced.as_str())
+    );
+    assert_eq!(
+        app.state.regions[1].region.text.as_deref(),
+        Some(plain.as_str())
+    );
 
     // Seite 2 bleibt bewusst stehen.
     assert!(app.state.set_enabled(1, false));
@@ -242,6 +254,12 @@ fn g5b_dieselbe_iban_ohne_leerraum_abgewaehlt_ist_kein_leck() {
     app.state.export(&out, None).expect("Export");
 
     let plan = app.state.plan_export_check(&summary);
+    // Die Entscheidung fällt auf der Normalform der Suche (ohne Leerraum):
+    // beide Schreibweisen sind **ein** Text, und der steht in einer
+    // abgewählten Zeile. Mutation `squeeze` weg: `needles` trägt die
+    // Schreibweise mit Leerraum, `kept` ist 0.
+    assert!(plan.needles.is_empty(), "{plan:?}");
+    assert_eq!(plan.kept, 1, "{plan:?}");
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
     // Das Orakel je Schreibweise: die geschwärzte ist weg (byteweise), nur
@@ -263,7 +281,12 @@ fn g5b_dieselbe_iban_ohne_leerraum_abgewaehlt_ist_kein_leck() {
 fn g5b_teilstring_eines_abgewaehlten_textes_gilt_als_leck() {
     let out = tmp("b-teil").join("out.pdf");
     let iban = valid_iban(532_013_000, true);
-    let pdf = build_pdf(&[vec![TextItem::new(72.0, 700.0, 10.0, format!("IBAN: {iban}"))]]);
+    let pdf = build_pdf(&[vec![TextItem::new(
+        72.0,
+        700.0,
+        10.0,
+        format!("IBAN: {iban}"),
+    )]]);
     let mut app = RedactApp::new(iban_only());
     app.open_bytes_and_analyze(&pdf, "eins.pdf");
     assert_eq!(app.state.regions.len(), 1);
@@ -297,9 +320,11 @@ fn g5b_ein_abgewaehlter_text_auf_seite_2_macht_das_leck_auf_seite_1_unpruefbar()
     app.state
         .regions
         .push(text_region(0, empty_corner(), "Musterbank"));
-    app.state
-        .regions
-        .push(text_region(1, Rect::new(72.0, 690.0, 300.0, 712.0), "Musterbank"));
+    app.state.regions.push(text_region(
+        1,
+        Rect::new(72.0, 690.0, 300.0, 712.0),
+        "Musterbank",
+    ));
     assert!(app.state.set_enabled(1, false));
     let summary = app.state.hit_summary();
     assert_eq!(summary.outcome(0), HitOutcome::Redacted);
@@ -312,7 +337,9 @@ fn g5b_ein_abgewaehlter_text_auf_seite_2_macht_das_leck_auf_seite_1_unpruefbar()
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
     assert!(!check.found_leak());
-    assert!(check.sentence().contains("1 Text(e) stehen auch in einer abgewählten"));
+    assert!(check
+        .sentence()
+        .contains("1 Text(e) stehen auch in einer abgewählten"));
 
     // Das Orakel nennt die Seite des Lecks.
     let hits = redact_pdf::leaks(&std::fs::read(&out).unwrap(), "Musterbank");
@@ -334,7 +361,9 @@ fn g5b_leerer_text_und_tausend_gleiche() {
         0,
         distinct_corner(0),
         Some(String::new()),
-        Source::Manual { reason: "G5".into() },
+        Source::Manual {
+            reason: "G5".into(),
+        },
     )));
     r.push(text_region(0, distinct_corner(1), "   "));
     for i in 0..MAX_CHECK_NEEDLES {
@@ -342,7 +371,11 @@ fn g5b_leerer_text_und_tausend_gleiche() {
     }
     // Drei abgewählte und zwei geschwärzte Zeilen eines zweiten Texts.
     for i in 0..5 {
-        r.push(text_region(0, distinct_corner(2 + MAX_CHECK_NEEDLES + i), "Zweiter"));
+        r.push(text_region(
+            0,
+            distinct_corner(2 + MAX_CHECK_NEEDLES + i),
+            "Zweiter",
+        ));
     }
     let n = r.len();
     for index in n - 5..n - 2 {
@@ -353,7 +386,12 @@ fn g5b_leerer_text_und_tausend_gleiche() {
     app.state.export(&out, None).expect("Export");
     let plan = app.state.plan_export_check(&summary);
     assert_eq!(plan.without_text, 2, "{plan:?}");
-    assert_eq!(plan.needles, vec!["Musterbank".to_string()], "{}", plan.needles.len());
+    assert_eq!(
+        plan.needles,
+        vec!["Musterbank".to_string()],
+        "{}",
+        plan.needles.len()
+    );
     assert_eq!(plan.kept, 1, "{plan:?}");
     let check = plan.run(&out);
     assert_eq!(check.checked, 1);
@@ -361,7 +399,10 @@ fn g5b_leerer_text_und_tausend_gleiche() {
     assert_eq!(check.leaking, vec!["Musterbank".to_string()]);
     let s = check.sentence();
     assert!(s.contains("2 Rechteck(e) ohne bekannten Text"), "{s}");
-    assert!(s.contains("1 Text(e) stehen auch in einer abgewählten"), "{s}");
+    assert!(
+        s.contains("1 Text(e) stehen auch in einer abgewählten"),
+        "{s}"
+    );
 }
 
 // ===========================================================================
@@ -406,6 +447,130 @@ fn g5c_der_detailbereich_der_seitenleiste_zeichnet_seite_usize_max() {
 }
 
 // ===========================================================================
+// A2 — Die Nachprüfung läuft mit der Entpackgrenze des Ladens und sagt,
+//      was sie nicht geprüft hat
+// ===========================================================================
+
+/// **Befund G5-A2 (Aufrufer).** Der Plan trägt das Byte-Budget, mit dem die
+/// Oberfläche das Dokument geladen hat (`Config::limits.max_decompressed_bytes`
+/// — dieselbe Zahl wie `--max-decompressed-mb`), und reicht es an
+/// `leaks_many_within`. Nicht die Vorgabe, sondern die Zahl aus **dieser**
+/// `Config`: mit einer engeren Grenze trägt der Plan die engere. Mutation
+/// (Vorgabe statt `self.config.limits`): der zweite Teil wird rot.
+#[test]
+fn g5a2_der_plan_traegt_die_entpackgrenze_des_ladens() {
+    let app = RedactApp::new(iban_only());
+    let summary = app.state.hit_summary();
+    let plan = app.state.plan_export_check(&summary);
+    assert_eq!(
+        plan.max_decompressed_bytes,
+        app.state.config.limits.max_decompressed_bytes
+    );
+    assert_eq!(
+        plan.max_decompressed_bytes,
+        redact_pdf::document::Limits::default().max_decompressed_bytes
+    );
+
+    let tight = 3 * 1024 * 1024;
+    let app = RedactApp::new(Config {
+        limits: redact_pdf::document::Limits {
+            max_decompressed_bytes: tight,
+            ..redact_pdf::document::Limits::default()
+        },
+        ..iban_only()
+    });
+    let summary = app.state.hit_summary();
+    let plan = app.state.plan_export_check(&summary);
+    assert_eq!(plan.max_decompressed_bytes, tight, "{plan:?}");
+}
+
+/// **Befund G5-A2 (Satz).** Was `leaks_many_within` nicht durchsucht hat,
+/// steht im Satz — „nicht gefunden“ ist dann keine Aussage — und zählt für
+/// die Warnungen wie ein Fund, ohne als „steht NOCH“ zu gelten. Der
+/// Platzhalter in `redact-pdf` liefert `unchecked` heute leer; der Satz muss
+/// trotzdem da sein, deshalb ein konstruiertes Ergebnis. Mutation (Satz
+/// weg, oder `warning()` sieht `unchecked` nicht): rot.
+#[test]
+fn g5a2_nicht_geprueft_steht_im_satz_und_zaehlt_als_warnung() {
+    let check = crate::state::ExportCheck {
+        checked: 2,
+        unchecked: vec![
+            "Objekt 7 0 (Bildstrom): über der Entpackgrenze".to_string(),
+            "Objekt 9 0 (Bildstrom): über der Entpackgrenze".to_string(),
+        ],
+        ..Default::default()
+    };
+    let sentence = check.sentence();
+    println!("{sentence}");
+    assert!(
+        sentence.contains(
+            "2 Stelle(n) wurden nicht geprüft (Entpackgrenze) — die Antwort ist unvollständig."
+        ),
+        "{sentence}"
+    );
+    assert!(!sentence.contains("steht NOCH"), "{sentence}");
+    assert!(!check.found_leak());
+    assert!(check.incomplete());
+    let warning = check.warning().expect("unvollständig ist eine Warnung");
+    assert!(
+        warning.contains("nicht geprüft (Entpackgrenze)"),
+        "{warning}"
+    );
+
+    // Vollständig geprüft, nichts gefunden, nichts übersprungen: kein Satz,
+    // keine Warnung.
+    let clean = crate::state::ExportCheck {
+        checked: 2,
+        ..Default::default()
+    };
+    assert!(
+        !clean.sentence().contains("nicht geprüft"),
+        "{}",
+        clean.sentence()
+    );
+    assert!(!clean.incomplete());
+    assert_eq!(clean.warning(), None);
+
+    // Ein Fund bleibt ein Fund, und der Satz nennt beides.
+    let both = crate::state::ExportCheck {
+        checked: 2,
+        leaking: vec!["Musterbank".to_string()],
+        unchecked: vec!["Objekt 7 0 (Bildstrom): über der Entpackgrenze".to_string()],
+        ..Default::default()
+    };
+    let sentence = both.sentence();
+    assert!(
+        sentence.contains("1 von 2 gesuchten Text(en) steht NOCH"),
+        "{sentence}"
+    );
+    assert!(
+        sentence.contains("1 Stelle(n) wurden nicht geprüft"),
+        "{sentence}"
+    );
+    assert_eq!(both.warning().as_deref(), Some(sentence.as_str()));
+}
+
+/// Die unlesbare Ausgabe trägt kein `unchecked` — dort gibt es ohnehin
+/// keine Aussage, und der Satz dafür steht schon.
+#[test]
+fn g5a2_der_lauf_reicht_unchecked_durch() {
+    let out = tmp("a2-lauf").join("out.pdf");
+    let mut app = RedactApp::new(iban_only());
+    app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+    let summary = app.state.hit_summary();
+    app.state.export(&out, None).expect("Export");
+    let plan = app.state.plan_export_check(&summary);
+    assert!(!plan.needles.is_empty());
+    let check = plan.clone().run(&out);
+    // Der Platzhalter prüft alles; eine echte Grenze trägt hier Sätze ein.
+    assert!(check.unchecked.is_empty(), "{:?}", check.unchecked);
+    assert!(!check.incomplete());
+    let missing = plan.run(&out.with_extension("fehlt.pdf"));
+    assert!(missing.unreadable.is_some());
+    assert!(missing.unchecked.is_empty());
+}
+
+// ===========================================================================
 // Messung — `cargo test --release -p redact-gui g5_mess -- --ignored --nocapture`
 // ===========================================================================
 
@@ -444,7 +609,13 @@ fn g5_mess_bildstrom_unter_der_entpackdecke() {
         image.compress().unwrap();
         let image_id = doc.add_object(image);
         let page_id = *doc.get_pages().get(&1).unwrap();
-        let resources_id = match doc.get_object(page_id).unwrap().as_dict().unwrap().get(b"Resources") {
+        let resources_id = match doc
+            .get_object(page_id)
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"Resources")
+        {
             Ok(lopdf::Object::Reference(id)) => *id,
             other => panic!("Resources: {other:?}"),
         };
@@ -457,7 +628,10 @@ fn g5_mess_bildstrom_unter_der_entpackdecke() {
         doc.save_to(&mut bytes).unwrap();
         bytes
     };
-    println!("Eingabe: {} kB auf der Platte, Bildstrom {mb} MiB entpackt", pdf.len() / 1024);
+    println!(
+        "Eingabe: {} kB auf der Platte, Bildstrom {mb} MiB entpackt",
+        pdf.len() / 1024
+    );
 
     let mut app = RedactApp::new(iban_only());
     app.open_bytes_and_analyze(&pdf, "bild.pdf");
@@ -484,7 +658,11 @@ fn g5_mess_bildstrom_unter_der_entpackdecke() {
     .run(&out);
     let one_time = t.elapsed();
     assert!(!one.found_leak(), "{}", one.sentence());
-    println!("1 Begriff: {one_time:?}; VmHWM {} MB → {} MB", before / 1024, vm_hwm_kb() / 1024);
+    println!(
+        "1 Begriff: {one_time:?}; VmHWM {} MB → {} MB",
+        before / 1024,
+        vm_hwm_kb() / 1024
+    );
 
     let t = Instant::now();
     let many = ExportCheckPlan {

@@ -11,7 +11,10 @@ use lopdf::{dictionary, Document, Object, ObjectId, Stream};
 use redact_pdf::{load_from_bytes, PdfExtractor};
 
 fn add_page(d: &mut Doc, content: &[u8]) -> ObjectId {
-    let content_id = d.add(Object::Stream(Stream::new(dictionary! {}, content.to_vec())));
+    let content_id = d.add(Object::Stream(Stream::new(
+        dictionary! {},
+        content.to_vec(),
+    )));
     let resources = d.resources_id;
     let pages_id = d.pages_id;
     let page_id = d.add(Object::Dictionary(dictionary! {
@@ -50,10 +53,16 @@ fn seitennummer_der_warnung_ist_die_dokumentweite_bei_verschachteltem_baum() {
     let p2 = add_page(&mut d, BROKEN);
     let p3 = add_page(&mut d, &text_ops(&["Seite drei"]));
     for pid in [p1, p2] {
-        d.doc.get_dictionary_mut(pid).expect("Seite").set("Parent", inner);
+        d.doc
+            .get_dictionary_mut(pid)
+            .expect("Seite")
+            .set("Parent", inner);
     }
     let inner_dict = d.doc.get_dictionary_mut(inner).expect("Pages");
-    inner_dict.set("Kids", vec![p1.into(), Object::Reference((999, 0)), p2.into()]);
+    inner_dict.set(
+        "Kids",
+        vec![p1.into(), Object::Reference((999, 0)), p2.into()],
+    );
     inner_dict.set("Count", 2);
     let root = d.pages_id;
     let root_dict = d.doc.get_dictionary_mut(root).expect("Pages");
@@ -61,7 +70,10 @@ fn seitennummer_der_warnung_ist_die_dokumentweite_bei_verschachteltem_baum() {
     root_dict.set("Count", 3);
 
     let doc = load_from_bytes(&d.finish()).expect("ladbar");
-    assert!(PdfExtractor::new().extract(&doc).is_err(), "streng: Abbruch");
+    assert!(
+        PdfExtractor::new().extract(&doc).is_err(),
+        "streng: Abbruch"
+    );
     let (runs, warnings) = PdfExtractor::new().extract_lenient(&doc);
     let skipped: Vec<&String> = warnings
         .iter()
@@ -81,7 +93,10 @@ fn seitennummer_der_warnung_ist_die_dokumentweite_bei_verschachteltem_baum() {
 fn seite_ohne_ressourcen_und_contents_ins_leere_sind_kein_abbruch() {
     let mut d = page(&["Seite eins"]);
     let p2 = add_page(&mut d, &text_ops(&["Seite zwei ohne Ressourcen"]));
-    d.doc.get_dictionary_mut(p2).expect("Seite").remove(b"Resources");
+    d.doc
+        .get_dictionary_mut(p2)
+        .expect("Seite")
+        .remove(b"Resources");
     let p3 = add_page(&mut d, b"");
     d.doc
         .get_dictionary_mut(p3)
@@ -94,7 +109,10 @@ fn seite_ohne_ressourcen_und_contents_ins_leere_sind_kein_abbruch() {
         .expect("streng liest");
     let (runs, warnings) = PdfExtractor::new().extract_lenient(&doc);
     assert_eq!(strict_runs.len(), runs.len());
-    assert!(strict_warnings.is_empty() && warnings.is_empty(), "{warnings:?}");
+    assert!(
+        strict_warnings.is_empty() && warnings.is_empty(),
+        "{warnings:?}"
+    );
     assert!(runs.iter().any(|r| r.page == 3 && r.text.contains("vier")));
 }
 

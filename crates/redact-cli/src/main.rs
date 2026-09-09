@@ -34,7 +34,7 @@ pub const EXIT_USAGE: u8 = 2;
 /// Die Ausgabe ist geschrieben, und was gefunden wurde, ist geschwärzt. Für
 /// einen Teil des Dokuments konnte die Analyse aber nicht einstehen: ein Font
 /// ohne `/ToUnicode`, ein Form-XObject unterhalb der Verschachtelungsgrenze,
-/// ein Kachelmuster mit Text, eine Annotation ohne Erscheinungsstrom. Dort kann
+/// ein Kachelmuster mit Text, ein XObject ohne bekanntes `/Subtype`. Dort kann
 /// etwas stehen geblieben sein, ohne dass es jemand gemerkt hätte.
 ///
 /// ## Warum ein eigener Wert und nicht die 2
@@ -68,6 +68,15 @@ pub const EXIT_USAGE: u8 = 2;
 ///
 /// Ein Skript unterscheidet damit drei Fälle, ohne die Ausgabe zu lesen:
 /// `0` sauber (im Rahmen der geprüften Liste), `3` Fund, alles andere Fehler.
+///
+/// ## Der dritte Fall: `--check-leaks` konnte eine Stelle nicht prüfen
+///
+/// Die Suche entpackt in Summe höchstens `--max-decompressed-mb`. Ein Strom,
+/// der das Restbudget sprengte, wurde nicht entpackt, und „nicht gefunden“
+/// sagt über ihn nichts.
+/// Das ist dieselbe Nachricht wie eine Deckungslücke beim Schwärzen —
+/// „verarbeitet, aber nicht vollständig geprüft“ — und bekommt dieselbe Zahl,
+/// auch ohne Fund. Siehe `check::report`.
 pub const EXIT_INCOMPLETE: u8 = 3;
 
 fn main() -> ExitCode {

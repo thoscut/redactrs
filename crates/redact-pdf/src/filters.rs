@@ -1,4 +1,4 @@
-//! Stromfilter, die der Schwärzer selbst dekodiert.
+//! Stromfilter, die der Schwärzer selbst dekodiert — mit Obergrenze.
 //!
 //! # Warum nicht `lopdf::Stream::decompressed_content`
 //!
@@ -9,29 +9,35 @@
 //! `[/ASCIIHexDecode /FlateDecode]` wurde deshalb mit Rückgabewert 1
 //! abgelehnt („ließ sich nicht in Operationen zerlegen“). Gemessen an einer
 //! 900-Byte-Datei je Filter: `ASCII85Decode` ging durch, die drei anderen
-//! nicht.
+//! nicht. Dazu löst `lopdf` keinen Verweis auf: weder in `/Filter` noch in
+//! `/DecodeParms` (Befunde G1-C1, G1-C2).
 //!
-//! Das ehrliche Orakel ([`crate::audit_bytes`]) kann diese Filter seit jeher —
-//! es hat einen eigenen Dekoder (`manual_decode`), damit `--check-leaks` auch
-//! dort sucht, wo `lopdf` passt. Schwärzer und Orakel müssen aber dasselbe
-//! lesen: eine Datei, die das Orakel dekodieren kann, muss der Schwärzer auch
-//! dekodieren können, sonst lehnt er ab, was gar nicht gefährlich ist. Dieses
-//! Modul ist deshalb die Kopie jener Logik, um `ASCII85Decode` ergänzt und
-//! **vor** `lopdf` in den Inhaltsleser gezogen.
+//! Das ehrliche Orakel ([`crate::audit_bytes`]) und der Schwärzer müssen
+//! dasselbe lesen: eine Datei, die das Orakel dekodieren kann, muss der
+//! Schwärzer auch dekodieren können, sonst lehnt er ab, was gar nicht
+//! gefährlich ist. Beide lesen deshalb über **dieses** Modul.
+//!
+//! # Obergrenze
+//!
+//! [`decoded_content_within`] entpackt keinen Filter über `limit` Byte
+//! hinaus — und zwar **beim** Entpacken, nicht erst hinterher gemessen:
+//! Flate liest über `Read::take`, LZW schreibt in einen Puffer, der ab der
+//! Grenze ablehnt, ASCII85 und RunLength prüfen in ihrer Schleife. Eine
+//! Dekompressionsbombe (1 GiB Nullen, 1 MB gepackt) belegt so höchstens
+//! `limit + 1` Byte, bevor sie als [`Oversize`] zurückkommt. Das ist die
+//! Grundlage des Budgets in [`crate::audit_bytes::leaks_many_within`].
+//! [`decoded_content`] ist dieselbe Kette ohne Grenze — der Schwärzer
+//! bekommt seine Datei bereits durch [`crate::document::prescan`] gedeckelt.
 //!
 //! # Was hier bewusst nicht steht
 //!
-//! * **`LZWDecode`** und **Prädiktoren** (`/DecodeParms /Predictor`) bleiben
-//!   bei `lopdf`: dafür gibt es dort einen geprüften Dekoder (`weezl`), und
-//!   ihn zu kopieren wäre Abstraktion auf Vorrat. Trifft die Kette auf einen
-//!   solchen Filter, geht der **Rest der Kette** an `lopdf` — auch das ist
-//!   mehr, als `lopdf` allein kann (`[/ASCIIHexDecode /LZWDecode]`). Dabei
-//!   bekommt `lopdf` **genau den** `/DecodeParms`-Eintrag, der zum ersten
-//!   Restfilter gehört, als einzelnes Dictionary — denn `lopdf` liest
-//!   `/DecodeParms` nur als ein Dictionary (nie als Liste, nie über einen
-//!   Verweis) und wendet es auf jeden Filter an, den es dekodiert. Eine
-//!   Liste ungekürzt weiterzureichen hieße, dass der Prädiktor hinter
-//!   `[/ASCIIHexDecode /FlateDecode]` stillschweigend verloren ginge.
+//! * **Der LZW-Dekoder** selbst ist `weezl`, dieselbe Bibliothek mit
+//!   denselben Einstellungen wie bei `lopdf` (`Msb`, 9 Bit, `EarlyChange`
+//!   aus `/DecodeParms`); nur der Ausgabepuffer ist hier begrenzt.
+//! * **Der PNG-Prädiktor** ist `lopdf::filters::png::decode_frame`; gelesen
+//!   werden `/Predictor`, `/Columns`, `/Colors`, `/BitsPerComponent` mit den
+//!   Vorgaben von `lopdf`, damit beide dasselbe Ergebnis liefern
+//!   (`ein_praediktor_liest_sich_wie_bei_lopdf`).
 //! * **Bildfilter** (`DCTDecode`, `JPXDecode`, `CCITTFaxDecode`, `JBIG2Decode`)
 //!   sind hier ein Fehler wie bei `lopdf`. Sie stehen nie an einem
 //!   Seiteninhalt; Bilder liest [`crate::image`] mit eigenem Weg.
@@ -40,34 +46,80 @@
 //!   dahinter — [`crate::content::scan_page`] lehnt einen Strom ab, der sich
 //!   nicht vollständig in Operationen zerlegen lässt.
 
-use std::io::Read;
+use std::io::{self, Read, Write};
 
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 
-/// Der ausgepackte Inhalt eines Stroms — über die ganze Filterkette.
+/// Ein Strom wurde **nicht** entpackt: er hätte mehr als die zugelassenen
+/// Bytes ergeben. Was bis dahin entpackt war, ist verworfen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Oversize;
+
+/// Der ausgepackte Inhalt eines Stroms — über die ganze Filterkette, ohne
+/// Grenze.
 ///
-/// `None`, wenn ein Filter weder hier noch bei `lopdf` bekannt ist. Ein Strom
-/// ohne `/Filter` kommt unverändert zurück.
+/// `None`, wenn ein Filter hier nicht bekannt ist. Ein Strom ohne `/Filter`
+/// kommt unverändert zurück.
 ///
-/// `doc` löst `/DecodeParms` auf — die Liste wie jeden Eintrag darin. Beides
-/// darf ein Verweis sein (PDF 32000-1, 7.3.8.2), und ein nicht aufgelöster
-/// Verweis läse sich wie „kein Prädiktor“.
+/// `doc` löst Verweise auf: `/Filter` (den Wert wie jedes Element einer
+/// Liste) und `/DecodeParms` (die Liste, jeden Eintrag darin und jeden Wert
+/// im Dictionary). Alles davon darf ein Verweis sein (PDF 32000-1, 7.3.8.2);
+/// `lopdf` löst keinen davon auf — ein Verweis las sich dort wie „kein
+/// Filter“ (Rohbytes als Klartext, Seite abgelehnt) oder wie „kein
+/// Prädiktor“ / „`Columns` 1“ (Filterbytes im Text).
 pub fn decoded_content(doc: &Document, stream: &Stream) -> Option<Vec<u8>> {
-    // `filters()` ist `Err` sowohl ohne `/Filter` als auch bei einem
-    // unbrauchbaren Wert — `lopdf` liest beides als „nicht gefiltert“, und
-    // die Rohbytes sind dann das Einzige, was es zu lesen gibt.
-    let Ok(filters) = stream.filters() else {
-        return Some(stream.content.clone());
+    // Ohne Grenze gibt es kein `Oversize`.
+    decoded_content_within(doc, stream, usize::MAX).unwrap_or(None)
+}
+
+/// Wie [`decoded_content`], aber kein Filter der Kette erzeugt mehr als
+/// `limit` Byte: darüber bricht das Entpacken ab und liefert [`Oversize`].
+///
+/// `Ok(None)` heißt wie oben „unbekannter Filter“. Ein Strom ohne `/Filter`
+/// wird nicht gemessen — seine Bytes stehen ohnehin in der Datei.
+pub fn decoded_content_within(
+    doc: &Document,
+    stream: &Stream,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, Oversize> {
+    // Ohne `/Filter` oder mit einem unbrauchbaren Wert liest `lopdf` den
+    // Strom als „nicht gefiltert“, und die Rohbytes sind dann das Einzige,
+    // was es zu lesen gibt.
+    let Some(filters) = filter_names(doc, &stream.dict) else {
+        return Ok(Some(stream.content.clone()));
     };
     let mut data = stream.content.clone();
     for (index, filter) in filters.iter().enumerate() {
         let parms = decode_parms(doc, &stream.dict, index);
-        let Some(next) = decode_one(filter, &data, has_predictor(parms.as_ref())) else {
-            return decode_rest_with_lopdf(stream, &filters[index..], parms, data);
+        let Some(next) = decode_one(filter, &data, parms.as_ref(), limit)? else {
+            return Ok(None);
         };
         data = next;
     }
-    Some(data)
+    Ok(Some(data))
+}
+
+/// Die Filterkette aus `/Filter` — aufgelöst, in Dekodierreihenfolge.
+///
+/// Wie `lopdf::Stream::filters`, nur dass der Wert und jedes Element einer
+/// Liste ein Verweis sein dürfen (`/Filter 5 0 R`, Befund G1-C1). `None`
+/// heißt „kein brauchbarer Filter“: Schlüssel fehlt, Verweis ins Leere, weder
+/// Name noch Liste von Namen — für `lopdf` ist das alles „ungefiltert“.
+pub(crate) fn filter_names(doc: &Document, dict: &Dictionary) -> Option<Vec<Vec<u8>>> {
+    let (_, filter) = doc.dereference(dict.get(b"Filter").ok()?).ok()?;
+    match filter {
+        Object::Name(name) => Some(vec![name.clone()]),
+        Object::Array(items) => items
+            .iter()
+            .map(|item| {
+                doc.dereference(item)
+                    .ok()
+                    .and_then(|(_, o)| o.as_name().ok())
+                    .map(<[u8]>::to_vec)
+            })
+            .collect(),
+        _ => None,
+    }
 }
 
 /// Der Seiteninhalt — alle `/Contents`-Ströme in Reihenfolge, je durch
@@ -92,57 +144,49 @@ pub fn page_content(doc: &Document, page_id: ObjectId) -> Vec<u8> {
     content
 }
 
-/// Ein einzelner Filter. `None` für alles, was `lopdf` besser kann oder was
-/// hier nicht hingehört.
-fn decode_one(filter: &[u8], data: &[u8], predictor: bool) -> Option<Vec<u8>> {
-    match filter {
-        b"FlateDecode" | b"Fl" if !predictor => Some(inflate(data)),
-        b"ASCIIHexDecode" | b"AHx" => Some(ascii_hex_decode(data)),
-        b"ASCII85Decode" | b"A85" => Some(ascii85_decode(data)),
-        b"RunLengthDecode" | b"RL" => Some(run_length_decode(data)),
-        _ => None,
+/// Ein einzelner Filter mit seinem `/DecodeParms`-Eintrag. `Ok(None)` für
+/// alles, was hier nicht hingehört (Bildfilter, Unbekanntes).
+fn decode_one(
+    filter: &[u8],
+    data: &[u8],
+    parms: Option<&Dictionary>,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, Oversize> {
+    let out = match filter {
+        b"FlateDecode" | b"Fl" => inflate_within(data, limit)?,
+        b"LZWDecode" | b"LZW" => lzw_within(data, parms, limit)?,
+        b"ASCIIHexDecode" | b"AHx" => ascii_hex_decode(data),
+        b"ASCII85Decode" | b"A85" => ascii85_decode_within(data, limit)?,
+        b"RunLengthDecode" | b"RL" => run_length_decode_within(data, limit)?,
+        _ => return Ok(None),
+    };
+    // ASCIIHex halbiert; die anderen prüfen in ihrer Schleife. Trotzdem noch
+    // einmal am Ergebnis, damit die Zusicherung nicht am Dekoder hängt.
+    if out.len() > limit {
+        return Err(Oversize);
     }
-}
-
-/// Reicht den Rest der Kette an `lopdf` weiter — als Strom, der nur noch die
-/// verbliebenen Filter trägt.
-///
-/// `parms` ist der aufgelöste `/DecodeParms`-Eintrag des **ersten**
-/// Restfilters, und genau der wird als einzelnes Dictionary eingetragen —
-/// so, wie `lopdf` ihn liest (`Stream::decompressed_content`: ein
-/// `as_dict()` auf `/DecodeParms`, angewandt auf jeden Filter der Kette).
-/// Die ursprüngliche Liste stünde dort mit dem Index der **ungekürzten**
-/// Kette und käme bei `lopdf` als „kein Dictionary“ an; `/DP` wird ebenfalls
-/// entfernt, damit nicht der alte Eintrag unter dem Kurznamen weiterwirkt.
-/// Ein zweiter Restfilter mit eigenen Parametern bekäme hier die des ersten
-/// mit — das ist die Lesart von `lopdf`, und mehr als einen `lopdf`-Filter
-/// (`LZWDecode`, Flate mit Prädiktor) hintereinander schreibt kein Erzeuger.
-fn decode_rest_with_lopdf(
-    stream: &Stream,
-    rest: &[&[u8]],
-    parms: Option<Dictionary>,
-    data: Vec<u8>,
-) -> Option<Vec<u8>> {
-    let mut dict = stream.dict.clone();
-    let names: Vec<Object> = rest.iter().map(|f| Object::Name(f.to_vec())).collect();
-    dict.set("Filter", Object::Array(names));
-    dict.remove(b"DecodeParms");
-    dict.remove(b"DP");
-    if let Some(parms) = parms {
-        dict.set("DecodeParms", Object::Dictionary(parms));
-    }
-    Stream::new(dict, data)
-        .with_compression(false)
-        .decompressed_content()
-        .ok()
+    Ok(match filter {
+        // Ein Prädiktor gehört zu Flate und LZW — so liest es auch `lopdf`.
+        b"FlateDecode" | b"Fl" | b"LZWDecode" | b"LZW" => png_predictor(out, parms),
+        _ => Some(out),
+    })
 }
 
 /// Der `/DecodeParms`-Eintrag, der zum `index`-ten Filter gehört — aufgelöst.
 ///
-/// Sowohl die Liste als auch der Eintrag darin dürfen Verweise sein. Ein
-/// einzelnes Dictionary (die Form bei genau einem Filter) gilt für jeden
-/// Index — so liest es auch `lopdf`, und ein Erzeuger, der zu einer Kette
-/// nur ein Dictionary schreibt, meint damit den Filter, der Parameter hat.
+/// Die Liste, der Eintrag darin und jeder Wert im Dictionary dürfen Verweise
+/// sein. Ein einzelnes Dictionary (die Form bei genau einem Filter) gilt für
+/// jeden Index — so liest es auch `lopdf`, und ein Erzeuger, der zu einer
+/// Kette nur ein Dictionary schreibt, meint damit den Filter, der Parameter
+/// hat.
+///
+/// Die Werte werden aufgelöst, weil `lopdf` sie unaufgelöst liest
+/// (`decompress_predictor`: `as_i64` auf `/Predictor` und `/Columns`, sonst
+/// Vorgabe): `/Columns 7 0 R` hieße dort „1 Spalte“, `/Predictor 7 0 R`
+/// „kein Prädiktor“ — die Filterbytes blieben im Text (Befund G1-C2).
+/// `Document::dereference` folgt Verweisketten bis zu seiner Grenze
+/// (`DEREF_LIMIT`, 128) und meldet einen Kreis als Fehler; ein Wert, der sich
+/// nicht auflösen lässt, bleibt stehen und wirkt wie bei `lopdf` als Vorgabe.
 fn decode_parms(doc: &Document, dict: &Dictionary, index: usize) -> Option<Dictionary> {
     let parms = dict.get(b"DecodeParms").or_else(|_| dict.get(b"DP")).ok()?;
     let (_, parms) = doc.dereference(parms).ok()?;
@@ -150,38 +194,119 @@ fn decode_parms(doc: &Document, dict: &Dictionary, index: usize) -> Option<Dicti
         Object::Array(items) => items.get(index)?,
         other => other,
     };
-    doc.dereference(entry).ok()?.1.as_dict().ok().cloned()
+    let entry = doc.dereference(entry).ok()?.1.as_dict().ok()?;
+    let mut resolved = Dictionary::new();
+    for (key, value) in entry.iter() {
+        let value = doc.dereference(value).map_or(value, |(_, o)| o);
+        resolved.set(key.clone(), value.clone());
+    }
+    Some(resolved)
 }
 
-/// Steht in diesem `/DecodeParms`-Eintrag ein Prädiktor?
-fn has_predictor(parms: Option<&Dictionary>) -> bool {
-    parms
-        .and_then(|d| d.get(b"Predictor").ok())
-        .and_then(|p| p.as_i64().ok())
-        .is_some_and(|p| p > 1)
+/// Entfernt den PNG-Prädiktor — genau wie `lopdf::Stream::decompress_predictor`:
+/// `/Predictor` 10–15 mit `/Columns`, `/Colors`, `/BitsPerComponent` (Vorgaben
+/// 1, 1, 8); alles andere lässt die Daten unverändert. `None`, wenn der
+/// Zeilendekoder die Daten ablehnt — bei `lopdf` ist das derselbe Fehler.
+fn png_predictor(data: Vec<u8>, parms: Option<&Dictionary>) -> Option<Vec<u8>> {
+    let Some(parms) = parms else {
+        return Some(data);
+    };
+    let int = |key: &[u8], default: i64| {
+        parms
+            .get(key)
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+            .unwrap_or(default)
+    };
+    if !(10..=15).contains(&int(b"Predictor", 1)) {
+        return Some(data);
+    }
+    let columns = int(b"Columns", 1).max(1) as usize;
+    let colors = int(b"Colors", 1).max(1) as usize;
+    let bits = int(b"BitsPerComponent", 8).max(8) as usize;
+    lopdf::filters::png::decode_frame(&data, colors * bits / 8, columns).ok()
+}
+
+/// Liest höchstens `limit` Byte; ein Byte mehr heißt [`Oversize`].
+///
+/// Ein Lesefehler unterwegs (verkürzter oder kaputter Strom) zählt nicht:
+/// das Teilergebnis bleibt, wie bei `lopdf`.
+pub(crate) fn read_within(reader: impl Read, limit: usize) -> Result<Vec<u8>, Oversize> {
+    let mut out = Vec::new();
+    let cap = u64::try_from(limit.saturating_add(1)).unwrap_or(u64::MAX);
+    let _ = reader.take(cap).read_to_end(&mut out);
+    if out.len() > limit {
+        return Err(Oversize);
+    }
+    Ok(out)
 }
 
 /// Flate wie bei `lopdf`: zlib, bei Fehlschlag rohes Deflate hinter dem
-/// 2-Byte-Kopf; ein Teilergebnis zählt.
-fn inflate(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
+/// 2-Byte-Kopf; ein Teilergebnis zählt. Nie mehr als `limit` Byte.
+pub(crate) fn inflate_within(data: &[u8], limit: usize) -> Result<Vec<u8>, Oversize> {
     if data.is_empty() {
-        return out;
+        return Ok(Vec::new());
     }
-    if flate2::read::ZlibDecoder::new(data)
-        .read_to_end(&mut out)
-        .is_err()
-        && out.is_empty()
-        && data.len() > 2
-    {
-        let _ = flate2::read::DeflateDecoder::new(&data[2..]).read_to_end(&mut out);
+    let out = read_within(flate2::read::ZlibDecoder::new(data), limit)?;
+    if out.is_empty() && data.len() > 2 {
+        return read_within(flate2::read::DeflateDecoder::new(&data[2..]), limit);
     }
-    out
+    Ok(out)
+}
+
+/// Ein Schreibziel, das ab `limit` Byte ablehnt — für Dekoder, die in einen
+/// `Write` schreiben (`weezl`).
+struct Bounded {
+    out: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for Bounded {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.out.len().saturating_add(buf.len()) > self.limit {
+            self.exceeded = true;
+            return Err(io::Error::other("Obergrenze erreicht"));
+        }
+        self.out.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `LZWDecode` über `weezl` mit den Einstellungen von `lopdf`: MSB zuerst,
+/// 9-Bit-Startcodes, `/EarlyChange` (Vorgabe 1). Ein Fehler im Strom lässt
+/// das Teilergebnis stehen — wie dort.
+fn lzw_within(data: &[u8], parms: Option<&Dictionary>, limit: usize) -> Result<Vec<u8>, Oversize> {
+    use weezl::{decode::Decoder, BitOrder};
+    let early_change = parms
+        .and_then(|p| p.get(b"EarlyChange").ok())
+        .and_then(|o| o.as_i64().ok())
+        .is_none_or(|v| v != 0);
+    let mut decoder = if early_change {
+        Decoder::with_tiff_size_switch(BitOrder::Msb, 8)
+    } else {
+        Decoder::new(BitOrder::Msb, 8)
+    };
+    let mut sink = Bounded {
+        out: Vec::new(),
+        limit,
+        exceeded: false,
+    };
+    let _ = decoder.into_stream(&mut sink).decode_all(data);
+    if sink.exceeded {
+        return Err(Oversize);
+    }
+    Ok(sink.out)
 }
 
 /// `ASCIIHexDecode` (PDF 32000-1, 7.4.2): Leerraum wird übersprungen, `>`
-/// beendet, eine ungerade letzte Ziffer zählt als `x0`.
-fn ascii_hex_decode(data: &[u8]) -> Vec<u8> {
+/// beendet, eine ungerade letzte Ziffer zählt als `x0`. Halbiert — braucht
+/// keine Grenze.
+pub(crate) fn ascii_hex_decode(data: &[u8]) -> Vec<u8> {
     let mut nibbles = Vec::with_capacity(data.len());
     for &b in data {
         if b == b'>' {
@@ -197,7 +322,7 @@ fn ascii_hex_decode(data: &[u8]) -> Vec<u8> {
     nibbles.chunks(2).map(|c| (c[0] << 4) | c[1]).collect()
 }
 
-fn hex_value(b: u8) -> Option<u8> {
+pub(crate) fn hex_value(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
@@ -209,9 +334,10 @@ fn hex_value(b: u8) -> Option<u8> {
 /// `ASCII85Decode` (PDF 32000-1, 7.4.3): Fünfergruppen aus `!`..`u`, `z` für
 /// vier Nullbytes, `~>` beendet; eine angebrochene Schlussgruppe wird mit `u`
 /// aufgefüllt und liefert `n-1` Bytes. Ein Zeichen außerhalb des Alphabets
-/// beendet die Dekodierung — wie bei `lopdf`.
-fn ascii85_decode(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() * 4 / 5);
+/// beendet die Dekodierung — wie bei `lopdf`. Höchstens `limit` Byte (`z`
+/// vervierfacht).
+fn ascii85_decode_within(data: &[u8], limit: usize) -> Result<Vec<u8>, Oversize> {
+    let mut out = Vec::with_capacity((data.len() * 4 / 5).min(limit));
     let mut group = [0u8; 5];
     let mut count = 0usize;
     let mut i = 0usize;
@@ -228,6 +354,9 @@ fn ascii85_decode(data: &[u8]) -> Vec<u8> {
         }
         if b == b'~' {
             break;
+        }
+        if out.len() + 4 > limit {
+            return Err(Oversize);
         }
         if b == b'z' && count == 0 {
             out.extend_from_slice(&[0, 0, 0, 0]);
@@ -249,7 +378,10 @@ fn ascii85_decode(data: &[u8]) -> Vec<u8> {
         }
         out.extend_from_slice(&ascii85_group(&group)[..count - 1]);
     }
-    out
+    if out.len() > limit {
+        return Err(Oversize);
+    }
+    Ok(out)
 }
 
 fn ascii85_group(group: &[u8; 5]) -> [u8; 4] {
@@ -263,8 +395,8 @@ fn ascii85_group(group: &[u8; 5]) -> [u8; 4] {
 
 /// `RunLengthDecode` (PDF 32000-1, 7.4.5): Länge `0..=127` heißt „die nächsten
 /// `n+1` Bytes wörtlich“, `129..=255` heißt „das nächste Byte `257-n`-mal“,
-/// `128` ist das Ende.
-fn run_length_decode(data: &[u8]) -> Vec<u8> {
+/// `128` ist das Ende. Höchstens `limit` Byte (ein Lauf verhundertachtundzwanzigfacht).
+fn run_length_decode_within(data: &[u8], limit: usize) -> Result<Vec<u8>, Oversize> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < data.len() {
@@ -275,18 +407,25 @@ fn run_length_decode(data: &[u8]) -> Vec<u8> {
             0..=127 => {
                 let n = length as usize + 1;
                 let end = (i + n).min(data.len());
+                if out.len() + (end - i) > limit {
+                    return Err(Oversize);
+                }
                 out.extend_from_slice(&data[i..end]);
                 i = end;
             }
             _ => {
                 if let Some(&b) = data.get(i) {
-                    out.extend(std::iter::repeat_n(b, 257 - length as usize));
+                    let n = 257 - length as usize;
+                    if out.len() + n > limit {
+                        return Err(Oversize);
+                    }
+                    out.extend(std::iter::repeat_n(b, n));
                 }
                 i += 1;
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -316,6 +455,21 @@ mod tests {
 
     fn with_filter(filter: Object, content: Vec<u8>) -> Stream {
         Stream::new(dictionary! { "Filter" => filter }, content).with_compression(false)
+    }
+
+    fn has_predictor(parms: Option<&Dictionary>) -> bool {
+        parms
+            .and_then(|d| d.get(b"Predictor").ok())
+            .and_then(|p| p.as_i64().ok())
+            .is_some_and(|p| p > 1)
+    }
+
+    fn run_length_decode(data: &[u8]) -> Vec<u8> {
+        run_length_decode_within(data, usize::MAX).expect("ohne Grenze")
+    }
+
+    fn ascii85_decode(data: &[u8]) -> Vec<u8> {
+        ascii85_decode_within(data, usize::MAX).expect("ohne Grenze")
     }
 
     fn deflate(data: &[u8]) -> Vec<u8> {
@@ -431,9 +585,10 @@ mod tests {
         );
     }
 
-    /// LZW bleibt bei `lopdf` — auch hinter einem eigenen Filter.
+    /// LZW über `weezl` liest dasselbe wie `lopdf` — auch hinter einem
+    /// Filter, den `lopdf` nicht kennt.
     #[test]
-    fn der_rest_der_kette_geht_an_lopdf() {
+    fn lzw_liest_dasselbe_wie_lopdf() {
         // `lzw_encode` aus den Integrationstests ist hier nicht erreichbar;
         // stattdessen der kleinste gültige LZW-Strom: Clear-Code, `A`, EOD —
         // 9-Bit-Codes 256, 65, 257, MSB-first: 100000000 001000001 100000001.
@@ -458,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn ein_praediktor_bleibt_bei_lopdf() {
+    fn ein_praediktor_liest_sich_wie_bei_lopdf() {
         let mut stream = with_filter("FlateDecode".into(), deflate(&png_rows()));
         stream.dict.set(
             "DecodeParms",
@@ -561,5 +716,111 @@ mod tests {
     fn ascii85_stuerzt_an_einer_ueberlaufenden_gruppe_nicht_ab() {
         let _ = ascii85_decode(b"uuuuu~>");
         let _ = ascii85_decode(b"s8W-!~>");
+    }
+
+    /// `/Filter 5 0 R` und `/Filter [6 0 R]`: der Filtername als Verweis
+    /// (Befund G1-C1). `lopdf` liest das als „ungefiltert“.
+    #[test]
+    fn filter_als_verweis_wird_aufgeloest() {
+        let mut doc = doc();
+        let name_id = doc.add_object(Object::Name(b"FlateDecode".to_vec()));
+        let stream = with_filter(Object::Reference(name_id), deflate(PLAIN));
+        assert!(
+            stream.filters().is_err(),
+            "lopdf allein: sonst prüft der Test nichts"
+        );
+        assert_eq!(decoded_content(&doc, &stream).as_deref(), Some(PLAIN));
+        let stream = with_filter(
+            Object::Array(vec![Object::Reference(name_id)]),
+            deflate(PLAIN),
+        );
+        assert_eq!(decoded_content(&doc, &stream).as_deref(), Some(PLAIN));
+        // Verweis ins Leere: wie bei `lopdf` „ungefiltert“ — die Rohbytes.
+        let stream = with_filter(Object::Reference((999, 0)), deflate(PLAIN));
+        assert_eq!(decoded_content(&doc, &stream), Some(deflate(PLAIN)));
+    }
+
+    /// Werte im `/DecodeParms`-Dictionary als Verweis (Befund G1-C2) — auch
+    /// über eine Kette von Verweisen; ein Kreis endet als „Vorgabe“ statt
+    /// als Endlosschleife.
+    #[test]
+    fn werte_im_parms_dictionary_als_verweis_werden_aufgeloest() {
+        let mut doc = doc();
+        let columns = doc.add_object(Object::Integer(8));
+        let columns_chain = doc.add_object(Object::Reference(columns));
+        let predictor = doc.add_object(Object::Integer(12));
+        let mut stream = with_filter("FlateDecode".into(), deflate(&png_rows()));
+        stream.dict.set(
+            "DecodeParms",
+            dictionary! { "Predictor" => predictor, "Columns" => columns_chain },
+        );
+        assert_ne!(
+            stream.decompressed_content().ok().as_deref(),
+            Some(PLAIN),
+            "lopdf allein: sonst prüft der Test nichts"
+        );
+        let parms = decode_parms(&doc, &stream.dict, 0).expect("Parms");
+        assert_eq!(parms.get(b"Columns").and_then(Object::as_i64).ok(), Some(8));
+        assert_eq!(decoded_content(&doc, &stream).as_deref(), Some(PLAIN));
+
+        // Ein Kreis: `Columns` zeigt auf sich selbst.
+        let loop_id = doc.new_object_id();
+        doc.objects.insert(loop_id, Object::Reference(loop_id));
+        stream.dict.set(
+            "DecodeParms",
+            dictionary! { "Predictor" => 12, "Columns" => loop_id },
+        );
+        let parms = decode_parms(&doc, &stream.dict, 0).expect("Parms");
+        assert!(parms.get(b"Columns").and_then(Object::as_i64).is_err());
+        // Mit `Columns` 1 liest sich der Prädiktor falsch — aber er endet.
+        let _ = decoded_content(&doc, &stream);
+    }
+
+    /// Die Grenze greift **beim** Entpacken: 64 MiB Nullen (gepackt ein paar
+    /// Kilobyte) kommen mit Grenze 1 MiB als `Oversize` zurück, und die
+    /// Grenze genau in Stromgröße lässt den Strom durch.
+    #[test]
+    fn flate_wird_nur_bis_zur_grenze_entpackt() {
+        let zeros = vec![0u8; 64 * 1024 * 1024];
+        let stream = with_filter("FlateDecode".into(), deflate(&zeros));
+        assert_eq!(
+            decoded_content_within(&doc(), &stream, 1024 * 1024),
+            Err(Oversize)
+        );
+        assert_eq!(
+            decoded_content_within(&doc(), &stream, zeros.len() - 1),
+            Err(Oversize)
+        );
+        assert_eq!(
+            decoded_content_within(&doc(), &stream, zeros.len()).map(|d| d.map(|d| d.len())),
+            Ok(Some(zeros.len()))
+        );
+        // Hinter einem eigenen Filter gilt dieselbe Grenze.
+        let chain = Object::Array(vec!["ASCIIHexDecode".into(), "FlateDecode".into()]);
+        let stream = with_filter(chain, hex(&deflate(&zeros)));
+        assert_eq!(
+            decoded_content_within(&doc(), &stream, 1024 * 1024),
+            Err(Oversize)
+        );
+    }
+
+    /// RunLength (ein Byte → 128), ASCII85 (`z` → 4) und LZW halten die
+    /// Grenze ebenfalls ein.
+    #[test]
+    fn die_anderen_filter_halten_die_grenze_ein() {
+        // 1000 Läufe à 128 Nullen = 128 000 Byte aus 2 000 Byte.
+        let rl: Vec<u8> = [129u8, 0].repeat(1000);
+        assert_eq!(run_length_decode_within(&rl, 100_000), Err(Oversize));
+        assert_eq!(
+            run_length_decode_within(&rl, 128_000).map(|d| d.len()),
+            Ok(128_000)
+        );
+        let a85 = b"zzzz~>";
+        assert_eq!(ascii85_decode_within(a85, 15), Err(Oversize));
+        assert_eq!(ascii85_decode_within(a85, 16).map(|d| d.len()), Ok(16));
+        // LZW: Clear, `A`, EOD — ein Byte; Grenze 0 lehnt ab, Grenze 1 nicht.
+        let lzw = [0x80, 0x10, 0x60, 0x20];
+        assert_eq!(lzw_within(&lzw, None, 0), Err(Oversize));
+        assert_eq!(lzw_within(&lzw, None, 1).as_deref(), Ok(&b"A"[..]));
     }
 }

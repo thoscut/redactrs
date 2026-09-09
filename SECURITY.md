@@ -220,9 +220,13 @@ getötet und ist nicht etwa vorher sauber ausgestiegen.
 
 **Was das nicht abdeckt — bitte genau lesen:**
 
-* **Windows: gar nichts.** Es gibt dort kein Gegenstück; ein Prozess kann sich
-  dem Abbild nicht entziehen, weil `MiniDumpWriteDump` beim *Aufrufer* liegt
-  und nicht beim Ziel. Das ist ausgerechnet die Plattform der Zielgruppe.
+* **Windows: nichts umgesetzt.** Ein Mittel gäbe es —
+  `WerAddExcludedApplication` nimmt den Prozess aus der
+  Windows-Fehlerberichterstattung (WER) und damit aus deren Abbildern —, aber
+  dieses Programm ruft es nicht auf. Ein Abbild, das ein *anderer* Prozess
+  zieht (`MiniDumpWriteDump`, ein Debugger), bliebe davon ohnehin unberührt.
+  Das ist ausgerechnet die Plattform der Zielgruppe; die Zusage lautet dort
+  schlicht: keine.
 * **macOS, BSD und die übrigen Unix-Systeme: das schwächere Mittel.** Dort
   gibt es kein `prctl`; die Funktion setzt `setrlimit(RLIMIT_CORE, 0)` — eine
   Grenze, kein Verbot. Wer den Prozess mit angehobener Grenze startet, ändert
@@ -233,10 +237,11 @@ getötet und ist nicht etwa vorher sauber ausgestiegen.
   |---|---|---|
   | Linux | `prctl(PR_SET_DUMPABLE, 0)` | Der Kernel schreibt gar nichts, `root` eingeschlossen. |
   | macOS, BSD, übrige Unix | `setrlimit(RLIMIT_CORE, 0)` | Schwächer: eine Grenze, kein Verbot. |
-  | Windows | **keins** | Ein Prozess kann sich dem Abbild nicht entziehen. |
+  | Windows | **nicht umgesetzt** | `WerAddExcludedApplication` wird nicht aufgerufen; ein Abbild aus einem fremden Prozess bliebe ohnehin. |
 
   Die Funktion liefert drei Antworten statt `true`/`false`: „abgeschaltet“,
-  „hier gibt es kein Mittel“ (Windows, oder ein Kern, der die Option ablehnt)
+  „hier ist nichts abgeschaltet worden“ (Windows: nicht umgesetzt; oder ein
+  Kern, der die Option ablehnt)
   und „das Mittel gibt es, der Aufruf schlug fehl“ — nur die letzte ist eine
   Warnung wert (`crates/redact-cli/src/dumpable.rs`).
 * **Ein Abzug, den ein *anderes* Programm zieht**, etwa ein Debugger mit
@@ -341,6 +346,7 @@ Einheit gemeint, nur ausdrücklich; die Schalter (`--max-input-mb` und die
 | **Regionsliste** (`--manual-regions`) | **16 MB** | **fest** |
 | **Musterkonfiguration** (`--patterns-config`) | **1 MB** | **fest** |
 | **Suchbegriffe je `--check-leaks`-Lauf** | **1 000** | **fest** |
+| **Budget der Nachprüfung** — Summe der entpackten Bytes je Sicht von `--check-leaks`; ein Strom, der sie sprengte, wird nicht entpackt: `NICHT GEPRÜFT`, Rückgabewert 3 | **1024 MB** | **`--max-decompressed-mb`** (dieselbe Zahl) |
 
 Alle Grenzen, die dem **Eingabe-PDF** gelten, gelten für verschlüsselte Dateien
 genauso — siehe „Die Grenzen gelten auch hinter der Entschlüsselung“.
@@ -563,14 +569,18 @@ liefert endlos), dann muss die Länge unter der Grenze liegen, und gelesen wird
 danach trotzdem über einen begrenzten Leser — zwischen Frage und Antwort kann
 eine Datei wachsen.
 
-**Und nach der Größe der Wertebereich.** Feldwerte aus Review- und
-Regionsdateien werden nicht nur der Größe, sondern auch dem Wertebereich nach
-geprüft: eine Seitennummer ist höchstens `u32::MAX` (so nummeriert `lopdf`
+**Und nach der Größe der Wertebereich — für die Seitennummer.** Von den
+Feldwerten aus Review- und Regionsdateien wird genau einer dem Wertebereich
+nach geprüft: die Seitennummer, höchstens `u32::MAX` (so nummeriert `lopdf`
 Seiten; `redact_core::model::MAX_PAGE_INDEX`); alles darüber beendet den Lauf
-mit Rückgabewert 1; eine Ausgabedatei entsteht nicht. Gemessen (Debug und
-Release, `--apply-review` und `--manual-regions`): kein Rückgabewert 101,
-keine Ausgabedatei. Jede 1-basierte Seitenanzeige rechnet zusätzlich
-sättigend — ein zweiter Zaun hinter dem ersten.
+mit Rückgabewert 1; eine Ausgabedatei entsteht nicht. Gemessen im Test
+(`hostile_field_values_in_a_valid_review_file_end_with_a_message_not_a_panic`,
+Dev-Profil, `--apply-review` und `--manual-regions`) und im Release-Bau von
+Hand: kein Rückgabewert 101, keine Ausgabedatei. Die übrigen Feldwerte —
+Koordinaten, Texte — bekommen hier keine Bereichsprüfung; unbrauchbare
+Koordinaten (NaN, Unendlich, Überlauf) fängt die Rechteckbildung dort, wo die
+Zahl neu entsteht (`Rect::is_usable`). Jede 1-basierte Seitenanzeige rechnet
+zusätzlich sättigend — ein zweiter Zaun hinter dem ersten.
 
 Die Vorprüfung (`redact_pdf::document::prescan`) läuft über die **Rohbytes** der
 Datei, bevor `lopdf` sie zu sehen bekommt, und schließt die ausgepackten Streams
@@ -984,6 +994,24 @@ zählte. Nachgemessen an der heutigen, `0 0 0 rg` unkomprimiert und
 Die Richtung des Fehlers in den alten Tabellen ist damit die harmlose: sie
 versprechen mehr Durchlass, als der Code heute gibt. Die Faktoren selbst
 (Byte je Byte) gelten unverändert für das, was durchkommt.
+
+**Und die Nachprüfung war bis 0.6.0 die offene Flanke desselben Bildes.**
+`--check-leaks` und die Nachprüfung der Oberfläche packten jeden Strom aus, den
+sie fanden; die Grenze `--max-decompressed-mb` galt nur dem Schwärzen. Seit
+dieser Fassung gilt sie beiden, und zwar **beim Entpacken** (der Leser bekommt
+das Restbudget, es wird nicht hinterher gemessen), samt einer Vorprüfung mit
+derselben Zahl, damit `lopdf` keinen Objektstrom unbegrenzt auspackt.
+Nachgemessen an 1 GiB Nullen (1 042 919 Byte in der Datei), Budget 16 MiB:
+
+| Form der Bombe | Zeit | Spitzenspeicher | ohne die Grenze beim Entpacken |
+|---|---|---|---|
+| als Seiteninhalt | 28 ms | 27 MB | 345 MB |
+| als Objektstrom (`/ObjStm`) | 26 ms | 27 MB | 882 MB |
+
+Ein Strom über dem Restbudget wird übersprungen und **benannt** — die Antwort
+lautet dann „nicht geprüft“, nicht „nicht gefunden“ (Rückgabewert 3, siehe
+README, „Prüfen, ob die Schwärzung gewirkt hat“). Seine gepackten Bytes
+durchsucht die Rohsicht trotzdem.
 
 ### Was die Zahl 62–100 nicht ist
 
@@ -1626,11 +1654,20 @@ Dokumente“). `--check-leaks` sieht ihn: der Text steht als Klartext im
 Seitenstrom, und die Rohsichten der Nachprüfung lesen den Strom, nicht die
 Struktur.
 
-Eine zweite benannte Grenze derselben Prüfung: ein Spiegel über einem
-**Formular**, das erst auf einer späteren Seite getroffen wird, bleibt auf der
-früheren Seite stehen — die Formularglyphen werden dort geleert, wo das
-Formular geschwärzt wird, der Spiegel im Seitenstrom davor nicht. Die Warnung
-zum geteilten Formular weist darauf hin; `--check-leaks` sieht auch ihn.
+Ein Spiegel über einem **Formular**, das erst auf einer anderen Seite
+getroffen wird, fällt mit: die Seiten werden erst geschrieben, wenn alle
+Formularpläne feststehen. Die Warnung zum geteilten Formular nennt weiterhin
+die Seiten, auf denen das Formular steht; ein Spiegel bleibt auf keiner davon
+stehen (gemessen mit `leaks`: 0 Fundstellen).
+
+### `/DA` an Annotationen bleibt stehen
+
+Die Klartexte einer Annotation und alles, was sie erreichbar hält, werden mit
+den Metadaten entfernt (README, Tabelle unter „Sicherheit“). **Eine benannte
+Lücke bleibt:** `/DA` (Default Appearance) an FreeText/Widgets bleibt stehen —
+Pflichtschlüssel und Operatorfolge, kein Menschentext; eine IBAN als
+Schriftname in `/DA` überlebt. `--check-leaks` sieht sie: `/DA` ist eine
+Zeichenkette unter einem Schlüssel, und die Objektsicht liest jede.
 
 ### `lopdf` steht auf 0.42 — RUSTSEC-2026-0187 ist behoben
 
@@ -1690,7 +1727,13 @@ Drei Punkte, die zur Aussage gehören:
   der Prozessliste (`ps`) und in der Shell-Historie — dasselbe Problem wie beim
   Passwort. `--check-leaks -` liest sie zeilenweise von der Standardeingabe:
   `redact-rs geschwaerzt.pdf --check-leaks - < begriffe.txt`.
-* **Ein Fund ist Rückgabewert 3**, siehe oben.
+* **Ein Fund ist Rückgabewert 3**, siehe oben — **und eine nicht geprüfte
+  Stelle auch.** Die Suche entpackt in Summe höchstens `--max-decompressed-mb`
+  (Vorgabe 1024 MB, dieselbe Zahl wie in der Grenzentabelle; je Sicht der
+  Suche einmal). Ein Strom, der das Restbudget sprengte, wird nicht entpackt
+  und steht als `NICHT GEPRÜFT: …` in der Ausgabe, und der Lauf endet
+  auch ohne Fund mit 3, nie mit 0: „nicht gefunden“ in einem Strom, der nie
+  aufgemacht wurde, ist keine Aussage.
 * **Kein Freibrief.** Geprüft ist die angegebene Liste, nicht die Datei. Ein
   zweiter Name, eine weitere Kontonummer, eine Schreibweise mit anderen
   Leerzeichen, Text in einem Rasterbild — nichts davon ist damit geprüft.

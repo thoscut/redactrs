@@ -38,6 +38,20 @@
 //! |  3 200 |              177,3 MB |                          649,7 MB |
 //! | Verh.  |         65,4 (1,02×)  |                    229,3 (3,58×)  |
 //!
+//! ## Warum die Schwelle 1,1 ist und nicht 2,0
+//!
+//! Befund G1-B1: ein quadratischer Baumlauf, der je Seite fast nichts
+//! anfordert, blieb unter der alten Schwelle 2,0. Gemessen mit der Mutation
+//! `std::hint::black_box(doc.page_iter().count())` je Seite in der
+//! Seitenschleife von `extract_pages` (Fix-Runde 4): 50 Seiten 2 746 068
+//! Byte, 3 200 Seiten 219 988 782 Byte, Verhältnis 80,1, je Seite das
+//! **1,25**-fache — grün bei 2,0, rot bei 1,1. Der Grundwert ist über drei
+//! Läufe bitgleich 1,02 (2 709 818 gegen 177 348 782 Byte, Verhältnis
+//! 65,4): der Allokator zählt deterministisch, eine Uhr steckt nicht drin.
+//! Die Schwelle 1,1 lässt dem Grundwert Luft für kleine Verschiebungen (ein
+//! zusätzliches Feld je Seite) und fängt jeden Anteil, der mit n² wächst,
+//! sobald er mehr als ein paar Byte je Seite² ausmacht.
+//!
 //! ## Warum eine eigene Datei mit einem einzigen Test
 //!
 //! Der Allokator zählt den ganzen Prozess; ein zweiter Test daneben zählte
@@ -183,10 +197,11 @@ fn measured_run(pages: usize) -> usize {
     allocated
 }
 
-/// Faktor 64 in den Seiten, Faktor < 128 im Speicher — je Seite also
-/// weniger als das Doppelte. Ein linearer Lauf liegt bei etwa 64; die
-/// Schleife mit `get_pages()` je Seite deutlich über 200 (Zahlen im
-/// Modulkommentar).
+/// Faktor 64 in den Seiten, Faktor < 70,4 im Speicher — je Seite also
+/// weniger als das 1,1-fache. Ein linearer Lauf liegt bei 65,4 (1,02×); die
+/// Schleife mit `get_pages()` je Seite über 200 (3,58×), der allokationsarme
+/// Baumlauf `page_iter().count()` je Seite bei 80,1 (1,25×) — Zahlen im
+/// Modulkommentar.
 #[test]
 fn die_nachsichtige_extraktion_bleibt_linear_in_der_seitenzahl() {
     // Ein Aufwärmlauf, damit einmalige Anforderungen (Muster, Tabellen)
@@ -202,7 +217,7 @@ fn die_nachsichtige_extraktion_bleibt_linear_in_der_seitenzahl() {
          Verhältnis {ratio:.1}, je Seite das {per_page:.2}-fache"
     );
     assert!(
-        per_page < 2.0,
+        per_page < 1.1,
         "quadratisch: {LARGE} Seiten fordern je Seite das {per_page:.2}-fache von {SMALL} \
          Seiten an ({large} gegen {small} Byte, Verhältnis {ratio:.1})"
     );

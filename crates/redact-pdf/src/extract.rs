@@ -425,10 +425,11 @@ fn glyph_items(scan: &ScanResult) -> Vec<(usize, GlyphItem)> {
 /// selben Strom: `/Span <</ActualText …>> BDC /Fm0 Do EMC` setzt sie über ein
 /// Form-XObject. Die Textoperationen der Formulare im Geltungsbereich
 /// ([`MarkedTextRecord::forms`]) zählen deshalb mit — an der Stelle ihres
-/// `Do`, in Stromreihenfolge. Zeichnet ein Formular selbst noch Text **und**
-/// weitere Formulare, stehen dessen eigene Glyphen vor denen der inneren;
-/// die genaue Verschränkung kennt der Datensatz nicht. Das kann eine Warnung
-/// zu viel geben, nie eine zu wenig.
+/// `Do`, in Stromreihenfolge, auch über mehrere Ebenen: der Pfad der
+/// `Do`-Indizes im Datensatz ordnet ein Formular, das erst ein inneres
+/// Formular zeichnet und dann eigenen Text, genau so ein (Befund G1-A3: die
+/// frühere Fassung stellte die eigenen Glyphen stets voran und meldete eine
+/// ehrliche Datei als Widerspruch).
 ///
 /// Die Warnung nennt keinen Text: sie steht später im Audit-Log, und dort
 /// hätte der Spiegel nichts verloren.
@@ -464,23 +465,30 @@ fn mirror_runs(doc: &Document, page: usize, scan: &ScanResult) -> (Vec<TextRun>,
     }
     for record in &scan.marked {
         // Glyphen in Stromreihenfolge: die eigenen Textoperationen an ihrem
-        // Index, die eines Formulars an der Stelle seines `Do`. `sort_by_key`
-        // ist stabil, die Reihenfolge innerhalb eines Formulars bleibt.
-        let mut parts: Vec<(usize, &ShowRecord)> = record
+        // Index, die eines Formulars an der Stelle seines `Do` — als Pfad
+        // `[Do-Index, …, Operationsindex]`, damit ein inneres Formular
+        // zwischen die Textoperationen des äußeren fällt, an der Stelle
+        // seines `Do`. Die Pfade sind untereinander verschieden, die
+        // Sortierung damit eindeutig.
+        let mut parts: Vec<(Vec<usize>, &ShowRecord)> = record
             .shows
             .iter()
             .filter_map(|index| {
                 shows
                     .get(&(record.stream, *index))
-                    .map(|show| (*index, *show))
+                    .map(|show| (vec![*index], *show))
             })
             .collect();
-        for (at, id) in &record.forms {
+        for (path, id) in &record.forms {
             if let Some(list) = form_shows.get(id) {
-                parts.extend(list.iter().map(|show| (*at, *show)));
+                parts.extend(list.iter().map(|show| {
+                    let mut key = path.clone();
+                    key.push(show.op_index);
+                    (key, *show)
+                }));
             }
         }
-        parts.sort_by_key(|(at, _)| *at);
+        parts.sort_by(|(a, _), (b, _)| a.cmp(b));
         let glyphs: Vec<&GlyphItem> = parts.iter().flat_map(|(_, show)| show.glyphs()).collect();
         let beneath = fold(glyphs.iter().map(|g| g.text.as_str()));
         let rect = bounding_box(glyphs.iter().map(|g| &g.rect));

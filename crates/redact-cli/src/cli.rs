@@ -256,6 +256,11 @@ pub struct Cli {
     ///
     /// Schutz gegen Dekompressionsbomben: eine kleine Datei, die sich beim
     /// Öffnen vervielfacht.
+    ///
+    /// Bei `--check-leaks` ist dieselbe Zahl das **Budget der Nachprüfung**
+    /// (Summe der entpackten Bytes, je Sicht der Suche einmal): was die Suche
+    /// darunter nicht auspacken kann, nennt sie als
+    /// `NICHT GEPRÜFT` und endet mit Rückgabewert `3` — nie mit `0`.
     #[arg(long, value_name = "MB", default_value_t = 1024)]
     pub max_decompressed_mb: u64,
 
@@ -363,6 +368,14 @@ pub struct Cli {
     /// Rückgabewert: `0`, wenn keiner der Begriffe gefunden wurde, `3`, wenn
     /// mindestens einer noch dasteht. Ein Fund ist kein Verarbeitungsfehler —
     /// der Lauf ist gelungen, das *Ergebnis* ist es nicht.
+    ///
+    /// **Die Suche hat ein Budget:** mehr als `--max-decompressed-mb` (Vorgabe
+    /// 1024 MB) wird in Summe nicht ausgepackt — je Sicht der Suche einmal.
+    /// Ein Strom, der das Restbudget sprengte, wird nicht entpackt und steht als
+    /// `NICHT GEPRÜFT: …` in der Ausgabe, und der Lauf endet auch ohne Fund
+    /// mit `3` — „nicht gefunden“ in einer Datei, deren größter Strom nie
+    /// aufgemacht wurde, wäre keine Antwort. Wer die Stelle prüfen will, hebt
+    /// den Schalter.
     ///
     /// **Nichts gefunden ist kein Freibrief:** geprüft ist damit genau diese
     /// Liste und sonst nichts.
@@ -609,7 +622,7 @@ Rückgabewerte:
        geschrieben und was gefunden wurde, ist geschwärzt — für einen Teil des
        Dokuments konnte die Analyse aber nicht einstehen: ein Font ohne
        /ToUnicode, ein zu tief verschachteltes Form-XObject, ein Kachelmuster
-       mit Text, eine Annotation ohne Erscheinungsstrom, ein Bild, das sich
+       mit Text, ein XObject ohne bekanntes /Subtype, ein Bild, das sich
        nicht dekodieren ließ. Dort kann etwas stehen geblieben sein.
        Diese Ausgabe gehört von Hand geprüft. Die betroffenen Stellen stehen
        auf stderr und im Audit-Log; im Stapel weist die Zusammenfassung solche

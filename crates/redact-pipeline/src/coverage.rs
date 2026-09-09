@@ -61,6 +61,15 @@ pub const NOT_A_COVERAGE_GAP: &[(&str, &str)] = &[
         "zu viel geschwärzt, nicht zu wenig — das Gegenteil einer Lücke",
     ),
     (
+        "wird mit den Metadaten als Ganzes entfernt",
+        "eine Annotation mit Text, aber ohne Erscheinungsstrom: der Text hat \
+         keine Glyphen und wird nicht anteilig geschwärzt — `strip_metadata` \
+         nimmt ihn als Ganzes, und das läuft in der Kette immer (Fix-Runde 4, \
+         Befund G2-7: vorher Rückgabewert 3 an einer Datei, an der \
+         `--check-leaks` danach 0 meldete). Gemessen: nach `strip_metadata` \
+         findet `leaks` den Text nicht mehr",
+    ),
+    (
         "Die Maske verbirgt nichts und ist deshalb",
         "am dekodierten Bild nachgemessen: kein Abtastwert fällt in den \
          Schlüsselbereich, samt Band für den verlustbehafteten Decoder. Es wird \
@@ -204,12 +213,6 @@ mod tests {
         // ---------------------------------------------- Deckungslücken
         (
             true,
-            "Eine Annotation trägt Text in /Contents, hat aber keinen lesbaren \
-             Erscheinungsstrom (/AP). Dieser Text wurde nicht durchsucht und kann \
-             deshalb nicht geschwärzt worden sein.",
-        ),
-        (
-            true,
             "Der Erscheinungsstrom einer Annotation (Objekt 12 0) ließ sich nicht \
              dekodieren; sein Text wurde nicht durchsucht und kann deshalb nicht \
              geschwärzt worden sein.",
@@ -259,6 +262,14 @@ mod tests {
              ersetzt werden.",
         ),
         // ------------------------------------------ keine Deckungslücken
+        (
+            false,
+            "Eine Annotation trägt Text (/Contents oder einen der Schlüssel /RC, /T, \
+             /Subj, /TU, /TM), hat aber keinen lesbaren Erscheinungsstrom (/AP). \
+             Dieser Text hat keine Glyphen und wird deshalb nicht anteilig \
+             geschwärzt; er wird mit den Metadaten als Ganzes entfernt \
+             (strip_metadata, in der Verarbeitungskette immer).",
+        ),
         (
             false,
             "1 von 3 Seite(n) enthalten Rasterbilder. Geschwärzte Bereiche werden im \

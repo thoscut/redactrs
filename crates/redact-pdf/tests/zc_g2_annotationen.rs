@@ -6,10 +6,11 @@
 //!
 //! * gewöhnliche Tests (grün; ihr Mutationsnachweis steht im Bericht des
 //!   Gegenprüfers),
-//! * mit `#[ignore]` markierte **Befunde**: Material, an dem das Geheimnis
-//!   nach `strip_metadata` + `save_to_bytes` noch in der Datei steht. Sie
-//!   laufen mit `--ignored` und sind rot, bis die Lücke geschlossen ist;
-//!   danach das `#[ignore]` entfernen.
+//! * die **Befunde** G2-1 bis G2-6 (Abschnitt „Befunde“): Material, an dem
+//!   das Geheimnis nach `strip_metadata` + `save_to_bytes` noch in der Datei
+//!   stand. Sie waren mit `#[ignore]` rot, bis die Lücke geschlossen war, und
+//!   laufen jetzt scharf. Einzig `/DA` bleibt ignoriert — eine benannte
+//!   Lücke, siehe `meta.rs`.
 //!
 //! Orakel ist [`redact_pdf::leaks`] an den geschriebenen Bytes.
 
@@ -102,7 +103,9 @@ fn annots_und_annotation_hinter_verweisketten_werden_bereinigt() {
     let (_, out) = strip(&d.finish());
     let doc = load_from_bytes(&out).expect("Ausgabe ladbar");
     assert!(
-        !doc.get_dictionary(annot_id).expect("Annotation").has(b"Contents"),
+        !doc.get_dictionary(annot_id)
+            .expect("Annotation")
+            .has(b"Contents"),
         "/Contents steht noch an der Annotation hinter der Kette"
     );
 }
@@ -168,9 +171,7 @@ fn dest_hinter_zweistufigem_verweis_bleibt_und_fuehrt_auf_das_feld() {
 fn zirkulaerer_dest_verweis_endet_und_faellt() {
     let mut d = page(&["Harmloser Text"]);
     let loop_id = d.doc.new_object_id();
-    d.doc
-        .objects
-        .insert(loop_id, Object::Reference(loop_id));
+    d.doc.objects.insert(loop_id, Object::Reference(loop_id));
     let annot_id = d.add(Object::Dictionary(dictionary! {
         "Type" => "Annot",
         "Subtype" => "Link",
@@ -181,7 +182,10 @@ fn zirkulaerer_dest_verweis_endet_und_faellt() {
     let (report, out) = strip(&d.finish());
     assert_eq!(report.annotation_actions_removed, 1);
     let doc = load_from_bytes(&out).expect("Ausgabe ladbar");
-    assert!(!doc.get_dictionary(annot_id).expect("Annotation").has(b"Dest"));
+    assert!(!doc
+        .get_dictionary(annot_id)
+        .expect("Annotation")
+        .has(b"Dest"));
     assert!(!doc.objects.contains_key(&loop_id));
 }
 
@@ -211,12 +215,22 @@ fn dest_feld_mit_fremdem_namen_vorn_faellt() {
     }));
     d.page_dict_set(
         "Annots",
-        Object::Array(vec![Object::Reference(fremd), Object::Reference(nur_anzeigenamen)]),
+        Object::Array(vec![
+            Object::Reference(fremd),
+            Object::Reference(nur_anzeigenamen),
+        ]),
     );
     let bytes = d.finish();
-    assert!(!leaks(&bytes, &compact).is_empty(), "Probe trägt die IBAN nicht");
+    assert!(
+        !leaks(&bytes, &compact).is_empty(),
+        "Probe trägt die IBAN nicht"
+    );
     let (report, out) = strip(&bytes);
-    assert!(leaks(&out, &compact).is_empty(), "{:?}", leaks(&out, &compact));
+    assert!(
+        leaks(&out, &compact).is_empty(),
+        "{:?}",
+        leaks(&out, &compact)
+    );
     assert_eq!(report.annotation_actions_removed, 1);
     let doc = load_from_bytes(&out).expect("Ausgabe ladbar");
     assert!(!doc.get_dictionary(fremd).unwrap().has(b"Dest"));
@@ -364,7 +378,12 @@ fn links_auf_ausdrueckliche_ziele_bleiben_und_der_bericht_ist_leer() {
     let doc = load_from_bytes(&out).expect("Ausgabe ladbar");
     let page_id = doc.get_pages()[&1];
     for id in [direct, indirect] {
-        let dest = doc.get_dictionary(id).unwrap().get(b"Dest").unwrap().clone();
+        let dest = doc
+            .get_dictionary(id)
+            .unwrap()
+            .get(b"Dest")
+            .unwrap()
+            .clone();
         let (_, target) = doc.dereference(&dest).unwrap();
         assert_eq!(
             target.as_array().unwrap().first(),
@@ -475,7 +494,10 @@ fn lesezeichen_in_einem_objektstrom_fallen() {
     );
     // Die Probe ist, was sie sein soll: der Eintrag ist ausgepackt erreichbar.
     let probe = load_from_bytes(&bytes).expect("ladbar");
-    assert!(probe.get_dictionary((item_id, 0)).is_ok(), "Eintrag nicht ausgepackt");
+    assert!(
+        probe.get_dictionary((item_id, 0)).is_ok(),
+        "Eintrag nicht ausgepackt"
+    );
     let report = assert_gone(&bytes, "/Outlines im Objekt-Stream");
     assert_eq!(report.outlines_removed, 1);
 }
@@ -496,7 +518,10 @@ fn outline_chain(d: &mut Doc, n: usize, flach: bool) -> ObjectId {
             "Parent" => if flach || k == 0 { outlines_id } else { ids[k - 1] },
         };
         if k + 1 < n {
-            dict.set(if flach { "Next" } else { "First" }, Object::Reference(ids[k + 1]));
+            dict.set(
+                if flach { "Next" } else { "First" },
+                Object::Reference(ids[k + 1]),
+            );
         }
         d.doc.objects.insert(*id, Object::Dictionary(dict));
     }
@@ -549,7 +574,6 @@ fn hunderttausend_lesezeichen_enden_zuegig() {
 /// Ein `/Popup`, das nur über den `/Popup`-Schlüssel der Notiz hängt (nicht
 /// in `/Annots`), bleibt erreichbar und behält sein `/Contents`.
 #[test]
-#[ignore = "Befund G2-1: Popup außerhalb von /Annots behält /Contents"]
 fn popup_nur_ueber_den_popup_schluessel_traegt_weiter() {
     let mut d = page(&["Harmloser Text"]);
     let popup_id = d.doc.new_object_id();
@@ -597,7 +621,6 @@ fn parent_field_with(key: &str, value: Object) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "Befund G2-2: /TU am Elternfeld eines Widgets bleibt"]
 fn tooltip_am_elternfeld_eines_widgets_traegt_weiter() {
     assert_gone(
         &parent_field_with("TU", Object::string_literal(format!("Konto von {SECRET}"))),
@@ -606,7 +629,6 @@ fn tooltip_am_elternfeld_eines_widgets_traegt_weiter() {
 }
 
 #[test]
-#[ignore = "Befund G2-2: /T am Elternfeld eines Widgets bleibt"]
 fn feldname_am_elternfeld_eines_widgets_traegt_weiter() {
     assert_gone(
         &parent_field_with("T", Object::string_literal(format!("Konto {SECRET}"))),
@@ -615,19 +637,20 @@ fn feldname_am_elternfeld_eines_widgets_traegt_weiter() {
 }
 
 #[test]
-#[ignore = "Befund G2-3: /Opt (Auswahlliste) am Feld bleibt"]
 fn auswahlliste_am_elternfeld_traegt_weiter() {
     assert_gone(
         &parent_field_with(
             "Opt",
-            Object::Array(vec![Object::string_literal(SECRET), Object::string_literal("andere")]),
+            Object::Array(vec![
+                Object::string_literal(SECRET),
+                Object::string_literal("andere"),
+            ]),
         ),
         "/Opt am Elternfeld",
     );
 }
 
 #[test]
-#[ignore = "Befund G2-3: /AA mit JavaScript am Elternfeld bleibt"]
 fn ereignisaktion_am_elternfeld_traegt_weiter() {
     assert_gone(
         &parent_field_with(
@@ -659,7 +682,6 @@ fn annotation_with(subtype: &str, key: &str, value: Object) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "Befund G2-3: /Opt an einem Auswahl-Widget bleibt"]
 fn auswahlliste_am_widget_traegt_weiter() {
     let mut d = page(&["Harmloser Text"]);
     let id = d.add(Object::Dictionary(dictionary! {
@@ -673,29 +695,32 @@ fn auswahlliste_am_widget_traegt_weiter() {
 }
 
 #[test]
-#[ignore = "Befund G2-3: /MK /CA (Beschriftung) an einem Widget bleibt"]
 fn beschriftung_mk_ca_am_widget_traegt_weiter() {
     assert_gone(
         &annotation_with(
             "Widget",
             "MK",
-            Object::Dictionary(dictionary! { "CA" => Object::string_literal(format!("Konto {SECRET}")) }),
+            Object::Dictionary(
+                dictionary! { "CA" => Object::string_literal(format!("Konto {SECRET}")) },
+            ),
         ),
         "/MK /CA",
     );
 }
 
 #[test]
-#[ignore = "Befund G2-3: /OverlayText an einer Redact-Annotation bleibt"]
 fn overlaytext_einer_redact_annotation_traegt_weiter() {
     assert_gone(
-        &annotation_with("Redact", "OverlayText", Object::string_literal(format!("war: {SECRET}"))),
+        &annotation_with(
+            "Redact",
+            "OverlayText",
+            Object::string_literal(format!("war: {SECRET}")),
+        ),
         "/OverlayText",
     );
 }
 
 #[test]
-#[ignore = "Befund G2-3: /PA (URI-Aktion eines Links, Tabelle 173) bleibt"]
 fn pa_aktion_eines_links_traegt_weiter() {
     assert_gone(
         &annotation_with(
@@ -711,28 +736,38 @@ fn pa_aktion_eines_links_traegt_weiter() {
 }
 
 #[test]
-#[ignore = "Befund G2-3: /NM (Annotationsname) bleibt"]
 fn nm_traegt_weiter() {
     assert_gone(
-        &annotation_with("Text", "NM", Object::string_literal(format!("Notiz {SECRET}"))),
+        &annotation_with(
+            "Text",
+            "NM",
+            Object::string_literal(format!("Notiz {SECRET}")),
+        ),
         "/NM",
     );
 }
 
 #[test]
-#[ignore = "Befund G2-3: /DS (Default Style) bleibt"]
 fn ds_traegt_weiter() {
     assert_gone(
-        &annotation_with("FreeText", "DS", Object::string_literal(format!("font: {SECRET}"))),
+        &annotation_with(
+            "FreeText",
+            "DS",
+            Object::string_literal(format!("font: {SECRET}")),
+        ),
         "/DS",
     );
 }
 
 #[test]
-#[ignore = "Befund G2-3: /DA (Default Appearance) bleibt"]
+#[ignore = "benannte Lücke: /DA (Default Appearance) ist Pflichtschlüssel und Operatorfolge — bleibt, siehe meta.rs"]
 fn da_traegt_weiter() {
     assert_gone(
-        &annotation_with("FreeText", "DA", Object::string_literal(format!("/{SECRET} 0 Tf"))),
+        &annotation_with(
+            "FreeText",
+            "DA",
+            Object::string_literal(format!("/{SECRET} 0 Tf")),
+        ),
         "/DA",
     );
 }
@@ -741,7 +776,6 @@ fn da_traegt_weiter() {
 /// im Feld wird nicht aufgelöst, das Feld gilt als ausdrückliches Ziel und
 /// hält die Zeichenkette erreichbar.
 #[test]
-#[ignore = "Befund G2-4: Verweis im Zielfeld wird nicht aufgelöst"]
 fn dest_feld_mit_verweis_auf_eine_zeichenkette_traegt_weiter() {
     let mut d = page(&["Harmloser Text"]);
     let string_id = d.add(Object::string_literal(format!("IBAN {SECRET}")));
@@ -760,7 +794,6 @@ fn dest_feld_mit_verweis_auf_eine_zeichenkette_traegt_weiter() {
 /// `take` löscht das referenzierte Objekt, auch wenn es geteilt ist:
 /// `/Contents 4 0 R` auf den Seiteninhalt nimmt der Seite ihren Inhalt.
 #[test]
-#[ignore = "Befund G2-5: take() löscht geteilte Objekte (Seiteninhalt)"]
 fn annotation_contents_als_verweis_auf_den_seiteninhalt_loescht_die_seite() {
     let mut d = page(&["Harmloser Text"]);
     let content_id = d.content_id;
@@ -769,7 +802,12 @@ fn annotation_contents_als_verweis_auf_den_seiteninhalt_loescht_die_seite() {
     let (_, out) = strip(&d.finish());
     let doc = load_from_bytes(&out).expect("Ausgabe ladbar");
     let page_id = doc.get_pages()[&1];
-    let contents = doc.get_dictionary(page_id).unwrap().get(b"Contents").unwrap().clone();
+    let contents = doc
+        .get_dictionary(page_id)
+        .unwrap()
+        .get(b"Contents")
+        .unwrap()
+        .clone();
     assert!(
         doc.dereference(&contents).is_ok(),
         "der Seiteninhalt ist mit dem Annotationstext gelöscht worden"
@@ -779,7 +817,6 @@ fn annotation_contents_als_verweis_auf_den_seiteninhalt_loescht_die_seite() {
 /// Ein `/Outlines /First` auf die Seite selbst (kaputte Datei): der
 /// Lesezeichenlauf löscht die Seite.
 #[test]
-#[ignore = "Befund G2-5: Lesezeichenlauf löscht, worauf /First zeigt — auch die Seite"]
 fn outlines_first_auf_die_seite_loescht_die_seite() {
     let mut d = page(&["Harmloser Text"]);
     let page_id = d.page_id;
@@ -796,7 +833,6 @@ fn outlines_first_auf_die_seite_loescht_die_seite() {
 /// die Geschwister der oberen Ebenen nicht mehr — die Objekte fallen zwar
 /// (unerreichbar), aber der Bericht nennt zu wenige.
 #[test]
-#[ignore = "Befund G2-6: Zählung bricht bei Tiefe > 32 ab (break statt continue)"]
 fn tiefer_baum_zaehlt_die_geschwister_der_oberen_ebene_nicht() {
     let mut d = page(&["Harmloser Text"]);
     let outlines_id = d.doc.new_object_id();
@@ -831,5 +867,8 @@ fn tiefer_baum_zaehlt_die_geschwister_der_oberen_ebene_nicht() {
     d.catalog_set("Outlines", Object::Reference(outlines_id));
     chain.clear();
     let report = assert_gone(&d.finish(), "tiefer Baum");
-    assert_eq!(report.outlines_removed, 42, "2 Einträge auf Ebene 0 und 40 Stufen");
+    assert_eq!(
+        report.outlines_removed, 42,
+        "2 Einträge auf Ebene 0 und 40 Stufen"
+    );
 }

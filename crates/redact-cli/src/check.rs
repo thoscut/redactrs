@@ -16,8 +16,9 @@
 //! ## Was hier passiert — und was nicht
 //!
 //! Dieses Modul **reicht durch**. Gesucht wird nichts eigenes: die Arbeit
-//! macht [`redact_pdf::leaks`], dieselbe Funktion, die die Tests von
-//! `redact-pdf` als Messgerät benutzen. Hier steht nur, was drumherum gehört —
+//! macht [`redact_pdf::leaks_many_within`], derselbe Durchgang, den die Tests
+//! von `redact-pdf` als Messgerät benutzen ([`redact_pdf::leaks`] ist die
+//! Fassung für einen Begriff ohne Budget). Hier steht nur, was drumherum gehört —
 //! die Datei sicher lesen, das Ergebnis lesbar ausgeben, den richtigen
 //! Rückgabewert setzen.
 //!
@@ -31,7 +32,14 @@
 //! `redact-rs geschwaerzt.pdf --check-leaks "DE89 …" --check-leaks "Max
 //! Mustermann"`.
 //!
-//! **2. Rückgabewert 3 für einen Fund.** Siehe [`crate::EXIT_INCOMPLETE`].
+//! **2. Rückgabewert 3 für einen Fund — und für eine nicht geprüfte Stelle.**
+//! Siehe [`crate::EXIT_INCOMPLETE`]. Die Suche entpackt in Summe höchstens
+//! `--max-decompressed-mb` ([`redact_pdf::leaks_many_within`], je Sicht
+//! einmal); ein Strom, der das verbleibende Budget sprengte, wird nicht
+//! entpackt, steht als `NICHT GEPRÜFT: …` in der Ausgabe, und der Lauf
+//! endet auch ohne Fund mit 3. „Nicht gefunden“ in einer Datei, deren
+//! größter Strom nie aufgemacht wurde, wäre die alte falsche Entwarnung in
+//! neuem Gewand.
 //!
 //! **3. Die Suchbegriffe sind Geheimnisse.** Auf der Kommandozeile stehen sie
 //! in der Prozessliste (`ps`) und in der Shell-Historie — dasselbe Problem wie
@@ -100,12 +108,18 @@ pub fn run(cli: &Cli) -> Result<ExitCode> {
     let bytes = redact_pipeline::read_input(path, cli.max_input_mb.saturating_mul(1024 * 1024))?;
 
     // Und dieselbe Prüfung des Inhalts: %PDF-Header, Vorprüfung gegen
-    // Dekompressionsbomben, Ablehnung verschlüsselter Dateien. Das ist hier
-    // kein Selbstzweck:
+    // Dekompressionsbomben und zu tiefe Verschachtelung, Ablehnung
+    // verschlüsselter Dateien. Das ist hier kein Selbstzweck:
     //
-    // * `leaks` packt jeden Stream aus, den es findet, und zwar **ohne
-    //   Budget** — die Vorprüfung ist die Stelle, an der eine kleine Datei
-    //   mit riesigem Inhalt abgelehnt wird, bevor sie ausgepackt wird.
+    // * Die Vorprüfung ist die Stelle, an der eine kleine Datei mit riesigem
+    //   Inhalt abgelehnt wird (Rückgabewert 1), bevor `lopdf` sie parst —
+    //   das schützt den Parser der Suche vor Stapelüberlauf und Speicherfraß.
+    //   Die Suche selbst trägt seit Fix-Runde 4 ein eigenes Budget (dieselbe
+    //   Zahl und Einheit wie `--max-decompressed-mb`: die Summe der entpackten
+    //   Bytes, je Sicht der Suche einmal); was sie darunter nicht
+    //   auspacken kann — etwa einen Strom, den die Vorprüfung nicht als
+    //   Flate erkennt, die Rohsicht aber doch aufbläst —, nennt sie als
+    //   „NICHT GEPRÜFT“ statt es still als „nicht gefunden“ durchzuwinken.
     // * In einer verschlüsselten Datei stehen die Zeichenketten verschlüsselt.
     //   Eine Bytesuche fände darin nichts — und „nichts gefunden“ wäre die
     //   falscheste aller Antworten. Lieber gar keine Auskunft als eine
@@ -245,12 +259,17 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
     // Ein Durchgang durch die Datei für alle Begriffe: das Entpacken der
     // Streams und das Parsen des Objektgraphen hängt an der Datei, nicht am
     // Suchbegriff. Zehn Begriffe kosten sonst zehnmal dieselbe Arbeit.
+    //
+    // Mit Budget: je Sicht wird in Summe nicht mehr als `--max-decompressed-mb`
+    // ausgepackt. Ein Strom, der das Restbudget sprengte, wird nicht entpackt
+    // — er ist kein Fund und kein „nicht gefunden“,
+    // sondern eine Stelle, über die die Prüfung nichts sagen kann — und die
+    // sie deshalb nennt (`unchecked`).
     let by_needle: Vec<&str> = needles.iter().map(String::as_str).collect();
+    let check =
+        redact_pdf::leaks_many_within(bytes, &by_needle, cli.limits().max_decompressed_bytes);
     let mut leaking = 0usize;
-    for (needle, hits) in needles
-        .iter()
-        .zip(redact_pdf::leaks_many(bytes, &by_needle))
-    {
+    for (needle, hits) in needles.iter().zip(check.findings) {
         if hits.is_empty() {
             if !cli.quiet {
                 println!("  nicht gefunden: {}", safe_text(needle));
@@ -270,6 +289,16 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
         }
     }
 
+    // Auch bei `--quiet`, aus demselben Grund wie ein Fund: eine Stelle, die
+    // nicht durchsucht wurde, ist die Nachricht, die aus „nicht gefunden“
+    // keine Entwarnung werden lässt. Dieselbe Marke wie beim Schwärzen
+    // (`report_warnings` in `main.rs`), damit ein Skript beide mit einem
+    // `grep` findet.
+    let unchecked = check.unchecked.len();
+    for stelle in &check.unchecked {
+        println!("  NICHT GEPRÜFT: {}", safe_text(stelle));
+    }
+
     if leaking > 0 {
         println!();
         // Ein einzelner Begriff bekommt einen eigenen Satz: „1 von 1
@@ -282,6 +311,22 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
         println!(
             "Ergebnis: {befund} noch in der Datei. Diese Datei ist nicht geschwärzt — sie darf \
              so nicht weitergegeben werden. (Rückgabewert {}.)",
+            crate::EXIT_INCOMPLETE
+        );
+        if unchecked > 0 {
+            println!("{}", unvollstaendig(unchecked));
+        }
+        return Ok(ExitCode::from(crate::EXIT_INCOMPLETE));
+    }
+
+    // Kein Fund, aber nicht alles gesehen: das ist **keine 0**. Ein Skript,
+    // das `--check-leaks … && versenden` schreibt, verschickte sonst eine
+    // Datei, deren größter Strom nie durchsucht wurde.
+    if unchecked > 0 {
+        println!();
+        println!(
+            "{} (Rückgabewert {}.)",
+            unvollstaendig(unchecked),
             crate::EXIT_INCOMPLETE
         );
         return Ok(ExitCode::from(crate::EXIT_INCOMPLETE));
@@ -298,10 +343,32 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
     Ok(ExitCode::from(crate::EXIT_OK))
 }
 
+/// Der Satz, der bei nicht geprüften Stellen an das Ergebnis tritt — mit
+/// oder ohne Fund derselbe, damit ein Skript ihn an einer Stelle sucht.
+fn unvollstaendig(unchecked: usize) -> String {
+    format!(
+        "Ergebnis: {unchecked} Stelle(n) nicht geprüft — die Antwort ist unvollständig. \
+         Der Lauf hat sie oben als NICHT GEPRÜFT genannt; mehr davon packt \
+         --max-decompressed-mb aus."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    /// Der Satz nennt die Zahl und sagt, wie man weiterkommt.
+    #[test]
+    fn the_incomplete_sentence_names_the_count_and_the_switch() {
+        let satz = unvollstaendig(2);
+        assert!(
+            satz.starts_with("Ergebnis: 2 Stelle(n) nicht geprüft"),
+            "{satz}"
+        );
+        assert!(satz.contains("unvollständig"), "{satz}");
+        assert!(satz.contains("--max-decompressed-mb"), "{satz}");
+    }
 
     fn cli(args: &[&str]) -> Cli {
         Cli::parse_from(args)
@@ -372,9 +439,13 @@ mod tests {
     /// Bis hierher war der Test zur Decke aus der Konstante abgeleitet und
     /// hätte bei jedem Wert bestanden; die Literale „1 000“ in `--help`,
     /// README, SECURITY.md und CHANGELOG band nichts. Dieser Test liest die
-    /// vier Stellen und verlangt an jeder die formatierte Zahl aus
+    /// vier Quellen und verlangt an jeder Stelle die formatierte Zahl aus
     /// [`MAX_CHECK_NEEDLES`] — mit dem Satz drumherum, damit ein zufälliges
-    /// Vorkommen der Zahl an anderer Stelle nicht als Treffer zählt.
+    /// Vorkommen der Zahl an anderer Stelle nicht als Treffer zählt. Seit
+    /// Fix-Runde 4 auch die drei Sätze zur Nachprüfung der Oberfläche
+    /// (README „Nachprüfung nach dem Export“, CHANGELOG), die die
+    /// Gegenprüfung g4 ungebunden fand; ihr Test `zc_g4_decke_doku.rs` ist
+    /// hierin aufgegangen.
     ///
     /// Zwei Fassungen der Zahl sind erlaubt und beide werden geprüft: die
     /// mit Tausendertrennzeichen im Fließtext („1 000“) und die nackte in
@@ -426,7 +497,9 @@ mod tests {
         );
 
         // README: der Absatz zur Decke, samt der zitierten Fehlermeldung und
-        // dem ersten abgelehnten Begriff.
+        // dem ersten abgelehnten Begriff — und der Satz im Abschnitt zur
+        // Oberfläche („Nachprüfung nach dem Export“), der dieselbe Decke
+        // nennt. Gegenprüfung g4: der stand ungebunden daneben.
         let readme = lies("README.md");
         for satz in [
             format!("**Höchstens {formatiert} Begriffe je Aufruf.**"),
@@ -439,6 +512,7 @@ mod tests {
                 MAX_CHECK_NEEDLES + 1
             ),
             format!("mit {formatiert} Zeilen läuft derselbe Aufruf durch"),
+            format!("Gesucht werden höchstens {formatiert} Begriffe je Nachprüfung"),
         ] {
             assert!(readme.contains(&satz), "README.md ohne „{satz}“");
         }
@@ -449,12 +523,15 @@ mod tests {
             format!("| **Suchbegriffe je `--check-leaks`-Lauf** | **{formatiert}** | **fest** |");
         assert!(security.contains(&zeile), "SECURITY.md ohne „{zeile}“");
 
-        // CHANGELOG: die Einführung der Decke und ihre Erwähnung im
-        // Hilfetext-Eintrag.
+        // CHANGELOG: die Einführung der Decke, ihre Erwähnung im
+        // Hilfetext-Eintrag und die beiden Sätze zur Nachprüfung der
+        // Oberfläche (Gegenprüfung g4: ungebunden).
         let changelog = lies("CHANGELOG.md");
         for satz in [
             format!("Obergrenze von {formatiert} Begriffen"),
             format!("Decke von {formatiert} Begriffen je `--check-leaks`-Lauf"),
+            format!("Gesucht werden höchstens {formatiert} verschiedene Texte"),
+            format!("(`redact_core::MAX_CHECK_NEEDLES`, {formatiert})"),
         ] {
             assert!(changelog.contains(&satz), "CHANGELOG.md ohne „{satz}“");
         }

@@ -16,4 +16,10 @@ flate2 = "1"
 # Teilstring-Suche im Leck-Detektor (audit_bytes): liegt ohnehin im Graphen,
 # siehe Cargo.lock.
 memchr = "2"
+# Ein Automat für alle Suchbegriffe im Leck-Detektor (audit_bytes): liegt
+# ohnehin im Graphen (über `regex`), siehe Cargo.lock.
+aho-corasick = "1"
+# LZWDecode mit begrenztem Ausgabepuffer (filters): dieselbe Bibliothek, die
+# lopdf benutzt — liegt ohnehin im Graphen, siehe Cargo.lock.
+weezl = "0.1"
 zune-jpeg = "0.5"

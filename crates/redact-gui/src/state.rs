@@ -398,12 +398,46 @@ pub struct ExportCheck {
     /// ([`ExportCheckPlan::run_within`]). Der Satz nennt sie, damit der
     /// Nutzer weiß, wo die Grenze liegt, und nicht nur, dass es eine gibt.
     pub limit: usize,
+    /// Stellen der Datei, die die Suche **nicht** durchsucht hat, weil das
+    /// Entpackbudget nicht reichte ([`redact_pdf::LeakCheck::unchecked`]) —
+    /// je Stelle ein Satz. Nicht leer heißt: „nicht gefunden“ ist keine
+    /// Aussage, und der Satz sagt das. Zählt für die Warnungen wie ein Fund,
+    /// nicht als „steht NOCH“ — gesehen wurde ja nichts.
+    pub unchecked: Vec<String>,
 }
 
 impl ExportCheck {
     /// Hat die Prüfung etwas gefunden?
     pub fn found_leak(&self) -> bool {
         !self.leaking.is_empty()
+    }
+
+    /// Ist die Antwort unvollständig, weil Stellen der Datei ungeprüft
+    /// blieben (Entpackgrenze)?
+    pub fn incomplete(&self) -> bool {
+        !self.unchecked.is_empty()
+    }
+
+    /// Der Satz für die Warnungen — `None`, wenn es nichts zu warnen gibt.
+    ///
+    /// Ein Fund und eine unvollständige Antwort tragen den ganzen Satz der
+    /// Statuszeile; nicht gesuchte Texte jenseits der Decke (`skipped`)
+    /// bekommen einen eigenen: der Satz der Statuszeile beginnt dort mit
+    /// „stehen nicht mehr in der Ausgabe“, und das läse sich als Warnung
+    /// wie eine Entwarnung. Die Statuszeile überschreibt die nächste
+    /// Aktion; die Warnungen bleiben — deshalb steht es dort noch einmal.
+    pub fn warning(&self) -> Option<String> {
+        if self.found_leak() || self.incomplete() {
+            return Some(self.sentence());
+        }
+        if self.skipped > 0 {
+            return Some(format!(
+                "Nachprüfung unvollständig — {} Text(e) wurden nicht gesucht (höchstens {} \
+                 Begriffe je Nachprüfung; sie stehen in der Trefferliste weiter hinten).",
+                self.skipped, self.limit
+            ));
+        }
+        None
     }
 
     /// Der Satz für die Statuszeile.
@@ -447,6 +481,15 @@ impl ExportCheck {
                 self.checked
             )
         };
+        let unchecked = if self.incomplete() {
+            format!(
+                " {} Stelle(n) wurden nicht geprüft (Entpackgrenze) — die Antwort ist \
+                 unvollständig.",
+                self.unchecked.len()
+            )
+        } else {
+            String::new()
+        };
         let skipped = if self.skipped > 0 {
             format!(
                 " {} weitere Text(e) wurden nicht gesucht — höchstens {} Begriffe je \
@@ -467,7 +510,7 @@ impl ExportCheck {
             String::new()
         };
         format!(
-            "{head}{skipped}{kept} Geprüft ist genau diese Liste, nicht die Datei.{}",
+            "{head}{unchecked}{skipped}{kept} Geprüft ist genau diese Liste, nicht die Datei.{}",
             self.hand_made()
         )
     }
@@ -490,7 +533,7 @@ impl ExportCheck {
 /// liest und durchsucht und dafür **nicht** auf dem Oberflächen-Thread laufen
 /// darf: 305 Seiten mit 200 Begriffen hielten das Fenster sekundenlang an.
 /// Der Plan ist reine Daten und wandert auf den Thread.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportCheckPlan {
     /// Die zu suchenden Texte, jeder einmal, in der Reihenfolge der Liste.
     pub needles: Vec<String>,
@@ -498,6 +541,26 @@ pub struct ExportCheckPlan {
     pub without_text: usize,
     /// Siehe [`ExportCheck::kept`].
     pub kept: usize,
+    /// Das Entpackbudget der Suche in Byte — **dieselbe** Zahl, mit der die
+    /// Oberfläche das Dokument geladen hat (`Config::limits`, also
+    /// `--max-decompressed-mb`). Was darüber liegt, wird nicht durchsucht
+    /// und steht in [`ExportCheck::unchecked`].
+    pub max_decompressed_bytes: u64,
+}
+
+impl Default for ExportCheckPlan {
+    /// Das Budget der Vorgabe — dieselbe Zahl wie `Config::default().limits`.
+    /// Ein Plan aus [`AppState::plan_export_check`] trägt die Zahl der
+    /// geladenen `Config`; die Vorgabe hier ist für Pläne, die ein Test von
+    /// Hand baut. Ein abgeleitetes `Default` gäbe 0 — und damit nichts.
+    fn default() -> Self {
+        Self {
+            needles: Vec::new(),
+            without_text: 0,
+            kept: 0,
+            max_decompressed_bytes: redact_pdf::document::Limits::default().max_decompressed_bytes,
+        }
+    }
 }
 
 impl ExportCheckPlan {
@@ -561,6 +624,7 @@ impl ExportCheckPlan {
                     skipped: self.needles.len(),
                     kept: self.kept,
                     limit,
+                    unchecked: Vec::new(),
                 }
             }
         };
@@ -568,7 +632,11 @@ impl ExportCheckPlan {
         let skipped = self.needles.len() - checked;
         let needles: Vec<&str> = self.needles[..checked].iter().map(String::as_str).collect();
 
-        let leaking = redact_pdf::leaks_many(&bytes, &needles)
+        // Mit dem Entpackbudget des Ladens: was die Suche deshalb nicht
+        // durchsucht, kommt als `unchecked` zurück und steht im Satz.
+        let found = redact_pdf::leaks_many_within(&bytes, &needles, self.max_decompressed_bytes);
+        let leaking = found
+            .findings
             .into_iter()
             .zip(needles.iter())
             .filter(|(hits, _)| !hits.is_empty())
@@ -583,6 +651,7 @@ impl ExportCheckPlan {
             skipped,
             kept: self.kept,
             limit,
+            unchecked: found.unchecked,
         }
     }
 }
@@ -2680,6 +2749,20 @@ impl AppState {
     /// angewendet, sondern im Lauf ([`ExportCheckPlan::run`]) — der Plan
     /// trägt alle Texte, damit der Lauf sagen kann, wie viele er nicht
     /// gesucht hat.
+    ///
+    /// ## Dieselbe Normalform wie die Suche
+    ///
+    /// Die Entscheidung „gesucht oder stehen gelassen“ fällt auf dem Text
+    /// **ohne Leerraum** ([`redact_pdf::squeeze`]) — derselben Normalform,
+    /// auf der [`redact_pdf::leaks_many`] sucht. Vorher verglich sie
+    /// wörtlich: dieselbe IBAN einmal als „DE89 3704 …“ (geschwärzt) und
+    /// einmal als „DE893704…“ (abgewählt) waren zwei Texte, die Suche fand
+    /// die stehen gelassene Schreibweise auch gequetscht, und die
+    /// Nachprüfung meldete „steht NOCH in der Ausgabe“ über eine Datei, die
+    /// genau so gewollt war (Befund G5-B1). Gesucht wird der Originaltext
+    /// der ersten Zeile seiner Normalform. Ein Teilstring bleibt ein
+    /// eigener Text: „DE89“ geschwärzt und die ganze IBAN abgewählt ist
+    /// weiter ein Fund — wörtlich richtig.
     pub fn plan_export_check(&self, summary: &HitSummary) -> ExportCheckPlan {
         let text_of = |entry: &AnnotatedRegion| {
             entry
@@ -2694,16 +2777,14 @@ impl AppState {
         // Erst die stehen gelassenen Texte, dann die zu suchenden — die Frage
         // „steht er auch in einer stehen gelassenen Zeile?“ braucht die ganze
         // Liste, nicht nur die Zeilen davor.
-        let mut kept_texts: Vec<String> = Vec::new();
+        let mut kept_texts: BTreeSet<String> = BTreeSet::new();
         for (index, entry) in self.regions.iter().enumerate() {
             let kept = matches!(
                 summary.outcome(index),
                 HitOutcome::Disabled | HitOutcome::Blocked | HitOutcome::Protecting
             );
             if let Some(text) = text_of(entry).filter(|_| kept) {
-                if !kept_texts.contains(&text) {
-                    kept_texts.push(text);
-                }
+                kept_texts.insert(redact_pdf::squeeze(&text));
             }
         }
 
@@ -2721,10 +2802,11 @@ impl AppState {
             }
             match text_of(entry) {
                 Some(text) => {
-                    if !seen.insert(text.clone()) {
+                    let key = redact_pdf::squeeze(&text);
+                    if !seen.insert(key.clone()) {
                         continue;
                     }
-                    if kept_texts.contains(&text) {
+                    if kept_texts.contains(&key) {
                         kept += 1;
                     } else {
                         needles.push(text);
@@ -2738,6 +2820,7 @@ impl AppState {
             needles,
             without_text,
             kept,
+            max_decompressed_bytes: self.config.limits.max_decompressed_bytes,
         }
     }
 

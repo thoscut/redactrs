@@ -2782,10 +2782,12 @@ dependencies = [
 name = "redact-pdf"
 version = "0.6.0"
 dependencies = [
+ "aho-corasick",
  "flate2",
  "lopdf",
  "memchr",
  "redact-core",
+ "weezl",
  "zune-jpeg",
 ]
 

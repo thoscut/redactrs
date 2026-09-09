@@ -651,7 +651,18 @@ struct PendingCheck {
     /// damit der Satz auch dann noch stimmt, wenn inzwischen ein anderes
     /// Dokument offen ist.
     prefix: String,
+    /// Der Name der geschriebenen Datei — vor jede Warnung, die das Urteil
+    /// hinterlässt: nach einem zweiten Export wäre ein nackter Satz sonst
+    /// keiner Datei mehr zuzuordnen (Befund G5-A4).
+    file: String,
     result: Receiver<ExportCheck>,
+}
+
+/// Der Dateiname für die Warnung — der ganze Pfad steht in der Exportmeldung.
+fn file_name_of(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Was die Statuszeile zeigt, solange die Nachprüfung läuft.
@@ -699,6 +710,10 @@ pub struct RedactApp {
     /// eines Eingabefelds, kein Zustand des Dokuments. Nach jedem Versuch wird
     /// es geleert, damit das Passwort nicht länger im Speicher steht als nötig.
     password_input: String,
+    /// Testhaken: lässt die Nachprüfung auf ihrem Thread paniken, damit der
+    /// Weg „Thread ohne Ergebnis verschwunden“ einen Test hat (Befund G5-A3).
+    #[cfg(test)]
+    force_panic_in_check: bool,
 }
 
 impl Default for RedactApp {
@@ -734,6 +749,8 @@ impl RedactApp {
             ask: Ask::User,
             text_focus: crate::focus::TextFieldFocus::default(),
             password_input: String::new(),
+            #[cfg(test)]
+            force_panic_in_check: false,
         }
     }
 
@@ -1044,12 +1061,17 @@ impl RedactApp {
     fn start_export_check(&mut self, prefix: String, plan: ExportCheckPlan, out: PathBuf) {
         let (sender, receiver) = std::sync::mpsc::channel();
         let repaint = self.ui_ctx.clone();
+        let file = file_name_of(&out);
+        #[cfg(test)]
+        let force_panic = self.force_panic_in_check;
         let spawned = std::thread::Builder::new()
             .name("redact-export-check".to_string())
             .spawn({
                 let plan = plan.clone();
                 let out = out.clone();
                 move || {
+                    #[cfg(test)]
+                    assert!(!force_panic, "Testhaken: die Nachprüfung panikt");
                     let check = plan.run(&out);
                     // Ein `Err` heißt: niemand wartet mehr — dann gibt es auch
                     // niemanden, dem man das sagen müsste.
@@ -1064,10 +1086,11 @@ impl RedactApp {
                 self.state.status = format!("{prefix}  ·  {EXPORT_CHECK_RUNNING}");
                 self.checks.push(PendingCheck {
                     prefix,
+                    file,
                     result: receiver,
                 });
             }
-            Err(_) => self.finish_export_check(&prefix, plan.run(&out)),
+            Err(_) => self.finish_export_check(&prefix, &file, plan.run(&out)),
         }
     }
 
@@ -1079,26 +1102,29 @@ impl RedactApp {
         self.checks
             .retain(|pending| match pending.result.try_recv() {
                 Ok(check) => {
-                    done.push((pending.prefix.clone(), Some(check)));
+                    done.push((pending.prefix.clone(), pending.file.clone(), Some(check)));
                     false
                 }
                 Err(TryRecvError::Empty) => true,
                 // Der Thread ist ohne Ergebnis verschwunden (Panik). Schweigen
                 // wäre eine Entwarnung, die keine ist.
                 Err(TryRecvError::Disconnected) => {
-                    done.push((pending.prefix.clone(), None));
+                    done.push((pending.prefix.clone(), pending.file.clone(), None));
                     false
                 }
             });
         let count = done.len();
-        for (prefix, check) in done {
+        for (prefix, file, check) in done {
             match check {
-                Some(check) => self.finish_export_check(&prefix, check),
+                Some(check) => self.finish_export_check(&prefix, &file, check),
                 None => {
-                    self.state.status = format!(
-                        "{prefix}  ·  Nachprüfung: abgebrochen (interner Fehler) — es wurde \
-                         nichts nachgeprüft."
-                    );
+                    let sentence = "Nachprüfung: abgebrochen (interner Fehler) — es wurde \
+                                    nichts nachgeprüft.";
+                    // Auch in die Warnungen: die Statuszeile überschreibt
+                    // die nächste Aktion, und ein Export ohne Nachprüfung
+                    // darf nicht so aussehen wie einer mit.
+                    self.state.warnings.insert(0, format!("{file}: {sentence}"));
+                    self.state.status = format!("{prefix}  ·  {sentence}");
                 }
             }
         }
@@ -1106,11 +1132,16 @@ impl RedactApp {
     }
 
     /// Trägt ein Urteil in Statuszeile und Warnungen ein.
-    fn finish_export_check(&mut self, prefix: &str, check: ExportCheck) {
-        if check.found_leak() {
+    ///
+    /// In die Warnungen geht, was [`ExportCheck::warning`] hergibt — ein
+    /// Fund, eine unvollständige Antwort (Entpackgrenze), nicht gesuchte
+    /// Texte jenseits der Decke — mit dem Dateinamen davor. Die Statuszeile
+    /// ist flüchtig; die Warnungen bleiben, bis das nächste Dokument kommt.
+    fn finish_export_check(&mut self, prefix: &str, file: &str, check: ExportCheck) {
+        if let Some(warning) = check.warning() {
             // Ganz nach vorn: die Statuszeile zeigt nur die **erste**
             // Warnung, und keine andere ist wichtiger als diese.
-            self.state.warnings.insert(0, check.sentence());
+            self.state.warnings.insert(0, format!("{file}: {warning}"));
         }
         self.state.status = format!("{prefix}  ·  {}", check.sentence());
     }

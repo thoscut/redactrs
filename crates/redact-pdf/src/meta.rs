@@ -53,40 +53,64 @@
 //! * Annotationen vom Typ `/FileAttachment` — ein Dateianhang hängt nicht nur
 //!   im `/Names`-Baum, er kann auch direkt an einer Seite kleben.
 //!
-//! Aus **jeder verbliebenen Annotation**:
+//! Aus **jeder verbliebenen Annotation** — und aus allem, was sie erreichbar
+//! hält: ihrem `/Popup`, der `/Parent`-Kette nach oben (das Feld einer
+//! Radiogruppe, das Feld hinter mehreren Widgets), `/Kids` nach unten und
+//! `/IRT` (Antwortkette). Ein Träger, den nur `/AcroForm` erreichbar machte,
+//! fällt mit dem Formular; einen, den ein Widget in `/Annots` über `/Parent`
+//! hält, überlebt es — und der trägt `/T`, `/TU`, `/Opt` und `/AA` genauso
+//! wie das Widget selbst. Gemessen (vor dieser Änderung): `/Contents` eines
+//! nur über `/Popup` erreichbaren Popups, `/T` und `/TU` am Elternfeld,
+//! `/Opt` am Feld und am Widget, `/AA /K /JS` am Elternfeld, `/MK /CA`,
+//! `/OverlayText`, `/PA`, `/NM` und `/DS` an der Annotation — alle mit
+//! Rückgabewert 0 überlebt. Entfernt wird an jedem erreichten Dictionary:
 //!
-//! * die Aktionen `/A` und `/AA` und ein benanntes `/Dest`. Ein Link fern des
-//!   Textes trägt seinen Klartext in `/URI` (`mailto:…?subject=DE89 …`), in
-//!   `/F` (`/GoToR`, `/Launch`: `Kontoauszug_DE89….pdf`) oder in `/JS`; ein
-//!   benanntes Ziel ist eine Zeichenkette. Gemessen: alle drei Formen
-//!   überlebten die Schwärzung mit Rückgabewert 0. Ein `/Dest` als Feld
-//!   (`[Seite /XYZ x y z]`) bleibt — es trägt Zahlen und Verweise, keinen
-//!   Text. Entschieden wird über das **Feld**, nicht über die Schreibweise:
-//!   ein `/Dest 12 0 R` wird aufgelöst, und was dahinter steht, bleibt oder
-//!   fällt nach derselben Regel wie ein direkt eingebettetes Ziel. Preis:
-//!   Verweise ins Netz und in andere Dateien funktionieren danach nicht
-//!   mehr,
-//! * die Kommentartexte `/Contents`, `/RC`, `/T` (Verfasser; an einem Widget
-//!   der Feldname) und `/Subj`, dazu an einem Widget `/TU` (der alternative
-//!   Feldname — das ist der Tooltip, den der Betrachter beim Überfahren
-//!   zeigt) und `/TM` (der Exportname; PDF 32000-1, 12.7.3.1, Tabelle 220).
-//!   Gemessen: eine Notiz mit Symbol-Erscheinungsstrom trug die IBAN in
-//!   `/Contents`, ein `/T` und ein `/RC` neben einem Erscheinungsstrom
-//!   ebenso — alle mit Rückgabewert 0. Was eine Annotation **zeichnet**
-//!   (`/AP`), geht wie Seitentext durch die Schwärzung und bleibt; was sie
-//!   daneben als Klartext mitführt, hat keine Glyphengeometrie und kann
-//!   nicht anteilig geschwärzt werden. Das ist dieselbe Entscheidung wie bei
-//!   den Feldwerten — und dieselbe, die Acrobats „Dokument bereinigen“
-//!   trifft. Ein `/Popup` und eine `/IRT`-Antwortkette tragen danach nichts
-//!   mehr.
+//! * die Aktionen `/A`, `/AA` und `/PA` (die URI-Aktion eines Links) und ein
+//!   benanntes `/Dest`. Ein Link fern des Textes trägt seinen Klartext in
+//!   `/URI` (`mailto:…?subject=DE89 …`), in `/F` (`/GoToR`, `/Launch`:
+//!   `Kontoauszug_DE89….pdf`) oder in `/JS`; ein benanntes Ziel ist eine
+//!   Zeichenkette. Gemessen: alle drei Formen überlebten die Schwärzung mit
+//!   Rückgabewert 0. Ein `/Dest` als Feld (`[Seite /XYZ x y z]`) bleibt — es
+//!   trägt Zahlen und Verweise, keinen Text. Entschieden wird über das
+//!   **Feld**, elementweise aufgelöst: ein `/Dest 12 0 R` wird aufgelöst, und
+//!   ein Verweis *im* Feld muss auf ein Seitenobjekt (`/Type /Page`) führen —
+//!   `[12 0 R /XYZ …]` mit einer Zeichenkette in Objekt 12 ist kein Ziel,
+//!   sondern ein Versteck. Preis: Verweise ins Netz und in andere Dateien
+//!   funktionieren danach nicht mehr,
+//! * die Klartexte `/Contents`, `/RC`, `/T` (Verfasser; an einem Feld der
+//!   Feldname) und `/Subj`, dazu `/TU` (der alternative Feldname — das ist
+//!   der Tooltip, den der Betrachter beim Überfahren zeigt), `/TM` (der
+//!   Exportname; PDF 32000-1, 12.7.3.1, Tabelle 220), `/Opt` (die
+//!   Auswahltexte einer Liste, Tabelle 231), `/OverlayText` (Redact,
+//!   Tabelle 195), `/NM` (der Annotationsname), `/DS` (die Stilangabe eines
+//!   FreeText) und die Beschriftungen `/MK /CA`, `/MK /RC`, `/MK /AC`
+//!   (Tabelle 189). Gemessen: eine Notiz mit Symbol-Erscheinungsstrom trug
+//!   die IBAN in `/Contents`, ein `/T` und ein `/RC` neben einem
+//!   Erscheinungsstrom ebenso — alle mit Rückgabewert 0. Was eine Annotation
+//!   **zeichnet** (`/AP`), geht wie Seitentext durch die Schwärzung und
+//!   bleibt; was sie daneben als Klartext mitführt, hat keine
+//!   Glyphengeometrie und kann nicht anteilig geschwärzt werden. Das ist
+//!   dieselbe Entscheidung wie bei den Feldwerten — und dieselbe, die
+//!   Acrobats „Dokument bereinigen“ trifft.
+//!
+//! **Benannte Lücke:** `/DA` (Default Appearance) bleibt. Es ist bei FreeText
+//! und Widgets Pflicht und eine Operatorfolge (`/Helv 12 Tf 0 g`), keine
+//! Zeichenkette für Menschen — wer eine IBAN als Schriftnamen in `/DA`
+//! schreibt, kommt durch. Ein Dictionary mit einem fremden `/Type` (Seite,
+//! Seitenbaum) ist kein Träger und wird weder bereinigt noch abgelaufen: eine
+//! kaputte `/Parent`-Kette, die auf die Seite führt, darf ihr nicht
+//! `/Contents` nehmen.
 //!
 //! ## Was hier bewusst *nicht* passiert
 //!
-//! * Objekte werden nur dann direkt gelöscht, wenn die entfernte Referenz die
-//!   einzige war, die sie erreichbar gemacht hat. Alles Übrige erledigt
-//!   [`crate::document::prune_unreachable`]: `lopdf` schreibt beim Speichern
-//!   alles, was in `doc.objects` steht — Erreichbarkeit interessiert den Writer
-//!   nicht.
+//! * Objekte werden nie einzeln gelöscht — nur Schlüssel. Was dadurch
+//!   unerreichbar wird, räumt [`crate::document::prune_unreachable`] am Ende
+//!   dieses Laufs weg (und noch einmal beim Speichern): `lopdf` schreibt
+//!   alles, was in `doc.objects` steht — Erreichbarkeit interessiert den
+//!   Writer nicht. Gemessen (vor dieser Änderung): das Löschen je Schlüssel
+//!   traf auch geteilte Objekte — `/Contents 4 0 R` an einer Notiz auf den
+//!   Seiteninhalt nahm der Seite ihren Inhalt, ein `/Outlines /First` auf die
+//!   Seite löschte die Seite („enthält keine Seiten“).
 //! * Der Inhalt einer Ebene wird nicht angerührt. Entfernt wird ihr *Name*,
 //!   nicht der Text, den sie zeichnet — der geht denselben Weg wie jeder
 //!   andere Seiteninhalt durch [`crate::redact`].
@@ -138,9 +162,13 @@ pub struct MetadataReport {
     pub optional_content_names_cleared: usize,
     /// Lesezeichen (`/Outlines`-Einträge), mit dem Baum entfernt.
     pub outlines_removed: usize,
-    /// `/A`, `/AA` und benannte `/Dest` an Annotationen.
+    /// `/A`, `/AA`, `/PA` und benannte `/Dest` an Annotationen und an
+    /// allem, was sie erreichbar halten (`/Popup`, `/Parent`, `/Kids`,
+    /// `/IRT`).
     pub annotation_actions_removed: usize,
-    /// `/Contents`, `/RC`, `/T`, `/Subj`, `/TU` und `/TM` an Annotationen.
+    /// Klartexte an Annotationen und erreichbaren Feldern — je Schlüssel
+    /// einer: `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`,
+    /// `/OverlayText`, `/NM`, `/DS` sowie `/CA`, `/RC`, `/AC` in `/MK`.
     pub annotation_texts_cleared: usize,
 }
 
@@ -211,13 +239,13 @@ impl MetadataReport {
         );
         count(
             self.annotation_actions_removed,
-            "Aktion oder benanntes Ziel an einer Annotation (/A, /AA, /Dest)",
-            "Aktionen oder benannte Ziele an Annotationen (/A, /AA, /Dest)",
+            "Aktion oder benanntes Ziel an einer Annotation (/A, /AA, /PA, /Dest)",
+            "Aktionen oder benannte Ziele an Annotationen (/A, /AA, /PA, /Dest)",
         );
         count(
             self.annotation_texts_cleared,
-            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM)",
-            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM)",
+            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK)",
+            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK)",
         );
         out
     }
@@ -227,14 +255,9 @@ impl MetadataReport {
 /// Restdaten.
 pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     let mut report = MetadataReport::default();
-    let mut to_delete: BTreeSet<ObjectId> = BTreeSet::new();
 
     // --- Trailer /Info ---
-    if let Ok(info) = doc.trailer.get(b"Info") {
-        if let Object::Reference(id) = info {
-            to_delete.insert(*id);
-        }
-        doc.trailer.remove(b"Info");
+    if doc.trailer.remove(b"Info").is_some() {
         report.info_removed = true;
     }
 
@@ -272,87 +295,94 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
         collect_widget_fields(doc, *page_id, &mut field_ids);
     }
     report.field_values_cleared = clear_field_values(doc, &field_ids);
-    // Lesezeichen: zählen und ihre Objekte vormerken, solange der Baum steht.
-    // Ein Eintrag ist nur über `/Outlines` erreichbar; er fiele auch bei
-    // `prune_unreachable`, aber die Zahl gehört in den Bericht.
+    // Lesezeichen: zählen, solange der Baum steht. Ein Eintrag ist nur über
+    // `/Outlines` erreichbar; er fällt mit `prune_unreachable`, aber die Zahl
+    // gehört in den Bericht.
     if let Some(outlines) = catalog_id
         .and_then(|id| doc.get_dictionary(id).ok())
         .and_then(|catalog| catalog.get(b"Outlines").ok())
     {
-        report.outlines_removed = collect_outline_items(doc, outlines, &mut to_delete);
+        report.outlines_removed = collect_outline_items(doc, outlines);
     }
 
     // --- Katalog --------------------------------------------------------
     if let Some(catalog_id) = catalog_id {
         if let Ok(catalog) = doc.get_dictionary_mut(catalog_id) {
-            if take(catalog, b"Metadata", &mut to_delete) {
+            if take(catalog, b"Metadata") {
                 report.xmp_removed = true;
             }
-            if take(catalog, b"PieceInfo", &mut to_delete) {
+            if take(catalog, b"PieceInfo") {
                 report.piece_info_removed += 1;
             }
-            if take(catalog, b"StructTreeRoot", &mut to_delete) {
+            if take(catalog, b"StructTreeRoot") {
                 report.struct_tree_removed = true;
             }
             catalog.remove(b"MarkInfo");
             // `/Names` — benannte Ziele, JavaScript, eingebettete Dateien.
-            if take(catalog, b"Names", &mut to_delete) {
+            if take(catalog, b"Names") {
                 report.names_removed += 1;
             }
             // `/Dests` ist der alte, gleichwertige Weg zu benannten Zielen.
-            if take(catalog, b"Dests", &mut to_delete) {
+            if take(catalog, b"Dests") {
                 report.names_removed += 1;
             }
-            if take(catalog, b"AcroForm", &mut to_delete) {
+            if take(catalog, b"AcroForm") {
                 report.acroform_removed = true;
             } else {
                 // Ohne `/AcroForm` gibt es auch kein `/XFA`.
                 report.xfa_removed = false;
             }
-            if take(catalog, b"OpenAction", &mut to_delete) {
+            if take(catalog, b"OpenAction") {
                 report.open_action_removed = true;
             }
-            if take(catalog, b"AA", &mut to_delete) {
+            if take(catalog, b"AA") {
                 report.additional_actions_removed += 1;
             }
-            if take(catalog, b"OCProperties", &mut to_delete) {
+            if take(catalog, b"OCProperties") {
                 report.optional_content_removed = true;
             }
-            take(catalog, b"Outlines", &mut to_delete);
+            take(catalog, b"Outlines");
         }
     }
 
     // --- Seiten ---------------------------------------------------------
+    //
+    // Die Besuchsmenge gilt für das ganze Dokument: ein Feld, dessen Widgets
+    // auf zwei Seiten liegen, wird einmal bereinigt und einmal gezählt.
+    let mut visited: BTreeSet<ObjectId> = BTreeSet::new();
     for page_id in &page_ids {
-        report.file_attachments_removed += remove_file_attachments(doc, *page_id, &mut to_delete);
+        report.file_attachments_removed += remove_file_attachments(doc, *page_id);
         if let Ok(page) = doc.get_dictionary_mut(*page_id) {
-            if take(page, b"PieceInfo", &mut to_delete) {
+            if take(page, b"PieceInfo") {
                 report.piece_info_removed += 1;
             }
             page.remove(b"StructParents");
-            // Seiten-XMP: die Id muss mit auf die Löschliste, sonst bleibt der
-            // Strom als verwaistes Objekt in der Datei stehen.
-            if take(page, b"Metadata", &mut to_delete) {
+            if take(page, b"Metadata") {
                 report.xmp_removed = true;
             }
-            if take(page, b"AA", &mut to_delete) {
+            if take(page, b"AA") {
                 report.additional_actions_removed += 1;
             }
         }
-        let (actions, texts) = clean_annotations(doc, *page_id, &mut to_delete);
+        let (actions, texts) = clean_annotations(doc, *page_id, &mut visited);
         report.annotation_actions_removed += actions;
         report.annotation_texts_cleared += texts;
     }
 
-    for id in to_delete {
-        doc.objects.remove(&id);
-    }
+    // --- Aufräumen ------------------------------------------------------
+    //
+    // Bis hierher sind nur Schlüssel gefallen. Alles, was dadurch niemand
+    // mehr referenziert (das `/Info`-Objekt, der `/Names`-Baum, jeder
+    // Lesezeichen-Eintrag, ein `/RC`-Strom), fällt jetzt — und ein geteiltes
+    // Objekt (`/Contents 4 0 R` auf den Seiteninhalt) bleibt, weil die Seite
+    // es weiterhin hält.
+    crate::document::prune_unreachable(doc);
 
     // --- Ebenennamen ----------------------------------------------------
     //
-    // Erst *nach* dem Löschen: was mit `/OCProperties` verschwunden ist, muss
-    // hier nicht mehr angefasst werden. Was übrig bleibt, ist genau der Fall,
-    // den dieses Modul bis Aufgabe #57 offen gelassen hat.
+    // Erst *nach* dem Aufräumen: was mit `/OCProperties` verschwunden ist,
+    // wird hier weder angefasst noch gezählt. Was übrig bleibt, ist genau der
+    // Fall, den dieses Modul bis Aufgabe #57 offen gelassen hat.
     report.optional_content_names_cleared = clear_optional_content_names(doc);
 
     report
@@ -423,23 +453,19 @@ fn clear_ocg_names_in_dict(dict: &mut Dictionary, depth: usize) -> usize {
 // Hilfsfunktionen
 // ---------------------------------------------------------------------------
 
-/// Entfernt `key` und merkt sich das Objekt, das dadurch seine Referenz
-/// verliert. Rückgabe: war der Schlüssel überhaupt vorhanden?
-/// Zählt die Einträge eines Lesezeichenbaums und merkt ihre Objekte zum
-/// Löschen vor.
+/// Zählt die Einträge eines Lesezeichenbaums.
 ///
 /// Gelaufen wird `/First` → `/Next` je Ebene und `/First` in die Tiefe, mit
-/// Besuchsmenge: ein Baum, der auf sich selbst zeigt, wäre sonst endlos. Die
-/// Tiefe ist mit [`MAX_TREE_DEPTH`] gedeckelt, die Breite mit der Zahl der
-/// Objekte in der Datei — mehr verschiedene Einträge kann es nicht geben.
-fn collect_outline_items(
-    doc: &Document,
-    root: &Object,
-    to_delete: &mut BTreeSet<ObjectId>,
-) -> usize {
+/// Besuchsmenge: ein Baum, der auf sich selbst zeigt, wäre sonst endlos.
+/// Gedeckelt ist der Lauf allein durch die Besuchsmenge — jede Id wird
+/// höchstens einmal angefasst, und mehr Ids als Objekte gibt es nicht. Eine
+/// Tiefengrenze gab es hier einmal; sie brach mit `break` ab und ließ die
+/// Geschwister der oberen Ebenen ungezählt (33 statt 42). Der Stapel wächst
+/// je Eintrag um höchstens zwei Einträge, Rekursion gibt es nicht — 100 000
+/// Stufen tief enden in Millisekunden.
+fn collect_outline_items(doc: &Document, root: &Object) -> usize {
     let mut seen: BTreeSet<ObjectId> = BTreeSet::new();
     if let Object::Reference(id) = root {
-        to_delete.insert(*id);
         seen.insert(*id);
     }
     let Some(first) = resolve(doc, root)
@@ -448,43 +474,43 @@ fn collect_outline_items(
     else {
         return 0;
     };
-    let limit = doc.objects.len();
     let mut count = 0usize;
-    let mut stack: Vec<(Object, usize)> = vec![(first.clone(), 0)];
-    while let Some((item, depth)) = stack.pop() {
-        if depth > MAX_TREE_DEPTH || count > limit {
-            break;
-        }
+    let mut stack: Vec<Object> = vec![first.clone()];
+    while let Some(item) = stack.pop() {
         let Object::Reference(id) = item else {
             continue;
         };
         if !seen.insert(id) {
             continue;
         }
-        to_delete.insert(id);
         let Ok(dict) = doc.get_dictionary(id) else {
             continue;
         };
         count += 1;
-        if let Ok(next) = dict.get(b"Next") {
-            stack.push((next.clone(), depth));
-        }
-        if let Ok(child) = dict.get(b"First") {
-            stack.push((child.clone(), depth + 1));
+        for key in [b"Next".as_slice(), b"First".as_slice()] {
+            if let Ok(link) = dict.get(key) {
+                stack.push(link.clone());
+            }
         }
     }
     count
 }
 
-/// Nimmt jeder Annotation der Seite ihre Aktionen und Kommentartexte.
+/// Nimmt jeder Annotation der Seite — und allem, was sie erreichbar hält —
+/// ihre Aktionen und Klartexte.
 ///
 /// Liefert (entfernte Aktionen und benannte Ziele, entfernte Texte). Eine
 /// Annotation steht gewöhnlich als eigenes Objekt in `/Annots`; ein direkt
-/// eingebettetes Dictionary wird im Feld selbst bereinigt.
+/// eingebettetes Dictionary wird im Feld selbst bereinigt. Von jeder
+/// Annotation aus werden [`ANNOTATION_LINK_KEYS`] verfolgt: das `/Popup`
+/// hängt sonst nur an der Notiz, das Elternfeld eines Widgets nur an dessen
+/// `/Parent`, und dessen `/Kids` halten die Geschwister-Widgets. `visited`
+/// endet Zyklen (`/Parent` ↔ `/Kids`, `/Popup` ↔ `/Parent`) und sorgt dafür,
+/// dass ein geteiltes Feld einmal gezählt wird.
 fn clean_annotations(
     doc: &mut Document,
     page_id: ObjectId,
-    to_delete: &mut BTreeSet<ObjectId>,
+    visited: &mut BTreeSet<ObjectId>,
 ) -> (usize, usize) {
     let Some(annots) = doc
         .get_dictionary(page_id)
@@ -498,28 +524,19 @@ fn clean_annotations(
     };
     let mut actions = 0usize;
     let mut texts = 0usize;
+    let mut stack: Vec<ObjectId> = Vec::new();
     let mut inline: Vec<Object> = Vec::new();
     let mut inline_changed = false;
     for annot in annots {
         match annot {
             Object::Reference(id) => {
-                // Ob das Ziel bleibt, steht fest, solange `doc` noch lesbar
-                // ist — die Auflösung eines `/Dest 12 0 R` braucht das ganze
-                // Dokument, der Zugriff danach nur noch die Annotation.
-                let keep_dest = doc
-                    .get_dictionary(id)
-                    .ok()
-                    .is_some_and(|dict| keeps_destination(doc, dict));
-                if let Ok(dict) = doc.get_dictionary_mut(id) {
-                    let (a, t) = clean_annotation(dict, keep_dest, to_delete);
-                    actions += a;
-                    texts += t;
-                }
+                stack.push(id);
                 inline.push(Object::Reference(id));
             }
             Object::Dictionary(mut dict) => {
                 let keep_dest = keeps_destination(doc, &dict);
-                let (a, t) = clean_annotation(&mut dict, keep_dest, to_delete);
+                linked_ids(&dict, &mut stack);
+                let (a, t) = clean_carrier(&mut dict, keep_dest);
                 inline_changed |= a + t > 0;
                 actions += a;
                 texts += t;
@@ -533,6 +550,52 @@ fn clean_annotations(
             page.set("Annots", Object::Array(inline));
         }
     }
+
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        // Was sich nur am unveränderten Dokument entscheiden lässt — das
+        // Ziel, die Nachbarn, die Id hinter einer Verweiskette — kommt
+        // zuerst; der schreibende Zugriff danach braucht nur noch die Id.
+        let reference = Object::Reference(id);
+        let Ok((resolved, object)) = doc.dereference(&reference) else {
+            continue;
+        };
+        let id = resolved.unwrap_or(id);
+        let (keep_dest, mk) = match object {
+            // `/Kids 5 0 R` — das Feld selbst als eigenes Objekt.
+            Object::Array(items) => {
+                stack.extend(items.iter().filter_map(|item| item.as_reference().ok()));
+                continue;
+            }
+            Object::Dictionary(dict) => {
+                if !is_carrier(dict) {
+                    continue;
+                }
+                linked_ids(dict, &mut stack);
+                let mk = match dict.get(b"MK") {
+                    Ok(Object::Reference(mk)) => Some(*mk),
+                    _ => None,
+                };
+                (keeps_destination(doc, dict), mk)
+            }
+            _ => continue,
+        };
+        if let Ok(dict) = doc.get_dictionary_mut(id) {
+            let (a, t) = clean_carrier(dict, keep_dest);
+            actions += a;
+            texts += t;
+        }
+        // Ein `/MK` als eigenes Objekt — von mehreren Widgets geteilt.
+        if let Some(mk) = mk {
+            if visited.insert(mk) {
+                if let Ok(dict) = doc.get_dictionary_mut(mk) {
+                    texts += clean_captions(dict);
+                }
+            }
+        }
+    }
     (actions, texts)
 }
 
@@ -540,13 +603,71 @@ fn clean_annotations(
 /// Erscheinungsbild führt.
 ///
 /// `/Contents`, `/RC`, `/T` und `/Subj` sind die Kommentartexte (PDF 32000-1,
-/// 12.5.2 und 12.5.6.2); an einem Widget ist `/T` der Feldname. `/TU` und
-/// `/TM` stehen nur an Formularfeldern (12.7.3.1, Tabelle 220): `/TU` ist der
+/// 12.5.2 und 12.5.6.2); an einem Feld ist `/T` der Feldname. `/TU` und
+/// `/TM` stehen an Formularfeldern (12.7.3.1, Tabelle 220): `/TU` ist der
 /// alternative Feldname, den der Betrachter als **Tooltip** zeigt, `/TM` der
 /// Exportname beim Absenden. Beide sind frei wählbarer Text und werden von
 /// Formulargeneratoren mit dem Beschriftungstext gefüllt — „Konto von Max
-/// Mustermann“ ist ein Tooltip, wie ihn jeder Editor schreibt.
-const ANNOTATION_TEXT_KEYS: [&[u8]; 6] = [b"Contents", b"RC", b"T", b"Subj", b"TU", b"TM"];
+/// Mustermann“ ist ein Tooltip, wie ihn jeder Editor schreibt. `/Opt` sind
+/// die Auswahltexte einer Liste oder die Exportwerte einer Radiogruppe
+/// (Tabelle 231), `/OverlayText` der Text, den eine Redact-Annotation über
+/// die Stelle schreibt (Tabelle 195), `/NM` der frei wählbare Name der
+/// Annotation (Tabelle 164) und `/DS` die Stilangabe eines FreeText
+/// (Tabelle 174) — alle vier Zeichenketten ohne Glyphengeometrie.
+pub(crate) const ANNOTATION_TEXT_KEYS: [&[u8]; 10] = [
+    b"Contents",
+    b"RC",
+    b"T",
+    b"Subj",
+    b"TU",
+    b"TM",
+    b"Opt",
+    b"OverlayText",
+    b"NM",
+    b"DS",
+];
+
+/// Aktionen an einer Annotation oder einem Feld: `/A` und `/AA`
+/// (Tabelle 164) und `/PA`, die URI-Aktion eines Links (Tabelle 173).
+const ANNOTATION_ACTION_KEYS: [&[u8]; 3] = [b"A", b"AA", b"PA"];
+
+/// Die Beschriftungen im `/MK`-Dictionary eines Widgets (Tabelle 189):
+/// normal, beim Überfahren, beim Drücken.
+const CAPTION_KEYS: [&[u8]; 3] = [b"CA", b"RC", b"AC"];
+
+/// Die Schlüssel, über die eine Annotation weitere Träger erreichbar hält:
+/// ihr `/Popup` (Tabelle 170), das Elternfeld (`/Parent`, Tabelle 220), die
+/// Kindfelder und Geschwister-Widgets (`/Kids`) und die Annotation, auf die
+/// sie antwortet (`/IRT`, Tabelle 170).
+const ANNOTATION_LINK_KEYS: [&[u8]; 4] = [b"Popup", b"Parent", b"Kids", b"IRT"];
+
+/// Trägt die Ids hinter [`ANNOTATION_LINK_KEYS`] ein — einzeln oder als
+/// Feld (`/Kids`).
+fn linked_ids(dict: &Dictionary, out: &mut Vec<ObjectId>) {
+    for key in ANNOTATION_LINK_KEYS {
+        match dict.get(key) {
+            Ok(Object::Reference(id)) => out.push(*id),
+            Ok(Object::Array(items)) => {
+                out.extend(items.iter().filter_map(|item| item.as_reference().ok()));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Ist dieses Dictionary eine Annotation oder ein Formularfeld?
+///
+/// Beide tragen entweder kein `/Type` (Felder, und Annotationen dürfen es
+/// weglassen) oder `/Type /Annot`. Alles andere — eine Seite, der
+/// Seitenbaum, ein Katalog — ist kein Träger: eine kaputte `/Parent`-Kette,
+/// die auf die Seite führt, darf ihr weder `/Contents` noch `/Kids` nehmen.
+fn is_carrier(dict: &Dictionary) -> bool {
+    match dict.get(b"Type") {
+        Ok(Object::Name(name)) => name == b"Annot",
+        Ok(_) => false,
+        Err(_) => true,
+    }
+}
 
 /// Darf das `/Dest` dieser Annotation stehen bleiben? Nur, wenn es eines
 /// trägt **und** dieses — nach Auflösung — ein ausdrückliches Ziel ist.
@@ -555,38 +676,46 @@ fn keeps_destination(doc: &Document, dict: &Dictionary) -> bool {
         .is_ok_and(|dest| is_explicit_destination(doc, dest))
 }
 
-/// Nimmt einer Annotation Aktionen und Kommentartexte. `keep_dest` ist vorher
-/// am unveränderten Dokument bestimmt (siehe [`keeps_destination`]).
-fn clean_annotation(
-    dict: &mut Dictionary,
-    keep_dest: bool,
-    to_delete: &mut BTreeSet<ObjectId>,
-) -> (usize, usize) {
+/// Nimmt einer Annotation oder einem Feld Aktionen und Klartexte. `keep_dest`
+/// ist vorher am unveränderten Dokument bestimmt (siehe
+/// [`keeps_destination`]). Liefert (Aktionen, Texte).
+fn clean_carrier(dict: &mut Dictionary, keep_dest: bool) -> (usize, usize) {
     let mut actions = 0usize;
-    for key in [b"A".as_slice(), b"AA".as_slice()] {
-        if take(dict, key, to_delete) {
+    for key in ANNOTATION_ACTION_KEYS {
+        if take(dict, key) {
             actions += 1;
         }
     }
-    if !keep_dest && take(dict, b"Dest", to_delete) {
+    if !keep_dest && take(dict, b"Dest") {
         actions += 1;
     }
     let mut texts = 0usize;
     for key in ANNOTATION_TEXT_KEYS {
-        if take(dict, key, to_delete) {
+        if take(dict, key) {
             texts += 1;
         }
+    }
+    if let Ok(Object::Dictionary(mk)) = dict.get_mut(b"MK") {
+        texts += clean_captions(mk);
     }
     (actions, texts)
 }
 
-/// Ein `/Dest` ohne Text: ein Feld aus Verweis, Zahlen und einem der
+/// Leert die Beschriftungen eines `/MK`-Dictionaries. Rückgabe: wie viele.
+fn clean_captions(mk: &mut Dictionary) -> usize {
+    CAPTION_KEYS.into_iter().filter(|key| take(mk, key)).count()
+}
+
+/// Ein `/Dest` ohne Text: ein Feld aus Seitenverweis, Zahlen und einem der
 /// Anzeigenamen aus PDF 32000-1, Tabelle 151 (`[Seite /XYZ x y z]`).
 ///
-/// Ein Verweis wird zuerst **aufgelöst**: `/Dest 12 0 R` ist, was in Objekt
-/// 12 steht — ein Feld bleibt, eine Zeichenkette fällt. Entschieden wird
-/// über den Inhalt, nicht über die Schreibweise; ein Erzeuger, der jedes
-/// Ziel als eigenes Objekt ablegt, verliert seine Sprünge sonst grundlos.
+/// Ein Verweis wird zuerst **aufgelöst** — das Feld selbst wie jedes seiner
+/// Elemente: `/Dest 12 0 R` ist, was in Objekt 12 steht, und `[12 0 R /XYZ …]`
+/// ist nur dann ein Ziel, wenn Objekt 12 eine Seite (`/Type /Page`) ist.
+/// Entschieden wird über den Inhalt, nicht über die Schreibweise; ein
+/// Erzeuger, der jedes Ziel als eigenes Objekt ablegt, verliert seine Sprünge
+/// sonst grundlos — und einer, der eine Zeichenkette hinter den Verweis im
+/// Feld legt, kommt nicht durch.
 ///
 /// Alles andere — eine Zeichenkette (benanntes Ziel), ein Name als Ziel,
 /// ein Feld mit einem fremden Namen darin — kann Text tragen und fällt; ein
@@ -598,23 +727,24 @@ fn is_explicit_destination(doc: &Document, dest: &Object) -> bool {
     let Some(Object::Array(items)) = resolve(doc, dest) else {
         return false;
     };
-    items.iter().all(|item| match item {
-        Object::Reference(_) | Object::Integer(_) | Object::Real(_) | Object::Null => true,
-        Object::Name(name) => FIT.contains(&name.as_slice()),
+    items.iter().all(|item| match resolve(doc, item) {
+        Some(Object::Integer(_) | Object::Real(_) | Object::Null) => true,
+        Some(Object::Name(name)) => FIT.contains(&name.as_slice()),
+        // Eine Seite ist immer ein eigenes Objekt — ein direkt eingebettetes
+        // Dictionary im Zielfeld ist keine.
+        Some(Object::Dictionary(dict)) => {
+            matches!(item, Object::Reference(_))
+                && dict.get(b"Type").and_then(Object::as_name).ok() == Some(b"Page")
+        }
         _ => false,
     })
 }
 
-fn take(dict: &mut Dictionary, key: &[u8], to_delete: &mut BTreeSet<ObjectId>) -> bool {
-    let referenced = match dict.get(key) {
-        Ok(Object::Reference(id)) => Some(*id),
-        _ => None,
-    };
-    let existed = dict.remove(key).is_some();
-    if let (true, Some(id)) = (existed, referenced) {
-        to_delete.insert(id);
-    }
-    existed
+/// Entfernt `key`. Rückgabe: war der Schlüssel überhaupt vorhanden? Das
+/// Objekt dahinter bleibt stehen — ob es noch jemand hält, entscheidet
+/// `prune_unreachable`, nicht diese Stelle.
+fn take(dict: &mut Dictionary, key: &[u8]) -> bool {
+    dict.remove(key).is_some()
 }
 
 fn resolve<'a>(doc: &'a Document, object: &'a Object) -> Option<&'a Object> {
@@ -749,11 +879,7 @@ fn clear_field_values(doc: &mut Document, ids: &BTreeSet<ObjectId>) -> usize {
 }
 
 /// Entfernt Annotationen vom Typ `/FileAttachment` aus einer Seite.
-fn remove_file_attachments(
-    doc: &mut Document,
-    page_id: ObjectId,
-    to_delete: &mut BTreeSet<ObjectId>,
-) -> usize {
+fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> usize {
     let Some(items) = doc
         .get_dictionary(page_id)
         .ok()
@@ -773,9 +899,6 @@ fn remove_file_attachments(
             .map(|d| matches!(d.get(b"Subtype"), Ok(Object::Name(n)) if n == b"FileAttachment"))
             .unwrap_or(false);
         if is_attachment {
-            if let Object::Reference(id) = item {
-                to_delete.insert(id);
-            }
             removed += 1;
         } else {
             kept.push(item);
@@ -1132,6 +1255,78 @@ mod tests {
         // Die unbeteiligte Annotation bleibt stehen.
         assert!(doc.objects.contains_key(&other));
         assert_no_leak(&doc, "/FileAttachment-Annotation");
+    }
+
+    /// Eine kaputte `/Parent`-Kette, die auf die Seite führt: die Seite ist
+    /// kein Träger und behält `/Contents` — und über ihr `/Parent` (den
+    /// Seitenbaum) läuft die Bereinigung nicht weiter.
+    #[test]
+    fn a_parent_chain_onto_the_page_tree_is_not_cleaned() {
+        let mut doc = doc_with_info();
+        let page_id = *doc.get_pages().values().next().unwrap();
+        let content = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"BT (Seitentext) Tj ET".to_vec(),
+        )));
+        let widget = doc.add_object(Object::Dictionary(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Widget",
+            "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+            "T" => Object::string_literal("feld"),
+            "Parent" => Object::Reference(page_id),
+        }));
+        let page = doc.get_dictionary_mut(page_id).unwrap();
+        page.set("Contents", Object::Reference(content));
+        page.set("Annots", Object::Array(vec![Object::Reference(widget)]));
+
+        let report = strip_metadata(&mut doc);
+        assert_eq!(report.annotation_texts_cleared, 1, "nur /T am Widget");
+        let page = doc.get_dictionary(page_id).unwrap();
+        assert_eq!(
+            page.get(b"Contents").ok(),
+            Some(&Object::Reference(content))
+        );
+        assert!(doc.objects.contains_key(&content));
+        assert_eq!(doc.get_pages().len(), 1);
+    }
+
+    /// Zwei Widgets teilen sich ein Elternfeld: dessen Texte fallen einmal
+    /// und werden einmal gezählt — der Bericht nennt, was fiel, nicht, wie
+    /// oft es erreicht wurde. Und `/Parent` ↔ `/Kids` ist ein Zyklus, der
+    /// enden muss.
+    #[test]
+    fn a_shared_parent_field_is_cleaned_and_counted_once() {
+        let mut doc = doc_with_info();
+        let field = doc.new_object_id();
+        let widgets: Vec<ObjectId> = (0..2)
+            .map(|_| {
+                doc.add_object(Object::Dictionary(dictionary! {
+                    "Type" => "Annot",
+                    "Subtype" => "Widget",
+                    "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+                    "Parent" => Object::Reference(field),
+                }))
+            })
+            .collect();
+        doc.objects.insert(
+            field,
+            Object::Dictionary(dictionary! {
+                "FT" => "Btn",
+                "T" => Object::string_literal("gruppe"),
+                "TU" => Object::string_literal(format!("Konto {SECRET}")),
+                "Kids" => widgets.iter().map(|id| Object::Reference(*id)).collect::<Vec<_>>(),
+            }),
+        );
+        let page_id = *doc.get_pages().values().next().unwrap();
+        doc.get_dictionary_mut(page_id).unwrap().set(
+            "Annots",
+            Object::Array(widgets.iter().map(|id| Object::Reference(*id)).collect()),
+        );
+
+        let report = strip_metadata(&mut doc);
+        assert_eq!(report.annotation_texts_cleared, 2, "/T und /TU, je einmal");
+        assert!(!doc.get_dictionary(field).unwrap().has(b"TU"));
+        assert_no_leak(&doc, "/TU am geteilten Elternfeld");
     }
 
     #[test]

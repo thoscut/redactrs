@@ -1103,16 +1103,22 @@ pub struct MarkedTextRecord {
     /// Indizes der Textoperationen im Geltungsbereich (siehe
     /// [`scan_marked_text`]).
     pub shows: Vec<usize>,
-    /// Die Form-XObjects im Geltungsbereich: je `Do` dessen Index im Strom
-    /// und die Objekt-Id des Formulars. Der Spiegel gilt auch für deren
-    /// Glyphen — ein `/Span <</ActualText …>> BDC /Fm0 Do EMC` ist die Form,
-    /// in der ein Erzeuger einen Textbaustein beschriftet, und ohne diesen
-    /// Eintrag stünden „0 Glyphen“ unter einem Spiegel, der welche hat.
+    /// Die Form-XObjects im Geltungsbereich: je `Do` der **Pfad** dorthin
+    /// und die Objekt-Id des Formulars. Der Pfad ist die Folge der
+    /// `Do`-Indizes von diesem Strom bis zum Formular — `[7]` für ein `Do` an
+    /// Index 7 dieses Stroms, `[7, 2]` für das Formular, das jenes an seinem
+    /// Index 2 zeichnet. Der Spiegel gilt auch für deren Glyphen — ein
+    /// `/Span <</ActualText …>> BDC /Fm0 Do EMC` ist die Form, in der ein
+    /// Erzeuger einen Textbaustein beschriftet, und ohne diesen Eintrag
+    /// stünden „0 Glyphen“ unter einem Spiegel, der welche hat.
     ///
     /// Nach [`scan_page`] **transitiv geschlossen**: ein Formular, das das
-    /// Formular hier zeichnet, steht mit demselben Index ebenfalls darin.
-    /// Direkt aus [`scan_marked_text`] enthält die Liste nur die eigene Ebene.
-    pub forms: Vec<(usize, ObjectId)>,
+    /// Formular hier zeichnet, steht mit dem um seinen `Do`-Index verlängerten
+    /// Pfad ebenfalls darin. Der Pfad ordnet die Glyphen aller Formulare in
+    /// Stromreihenfolge (`crate::extract`); wer nur wissen will, *welche*
+    /// Formulare betroffen sind, liest die Id. Direkt aus
+    /// [`scan_marked_text`] enthält die Liste nur die eigene Ebene.
+    pub forms: Vec<(Vec<usize>, ObjectId)>,
 }
 
 /// Ergebnis eines Seiten-Scans.
@@ -1158,10 +1164,11 @@ pub struct ScanResult {
     /// Verhalten ändert sich nichts: dieselben Warnungen, dieselbe
     /// Reihenfolge, jede genau einmal.
     seen_warnings: HashSet<String>,
-    /// Formular → die Formulare, die es selbst zeichnet, in `Do`-Reihenfolge
-    /// (je Platzierung ein Eintrag; die Schließung entdoppelt). Gefüllt über
+    /// Formular → die Formulare, die es selbst zeichnet, je mit dem Index
+    /// des `Do` in seinem Strom, in `Do`-Reihenfolge (je Platzierung ein
+    /// Eintrag; die Schließung entdoppelt). Gefüllt über
     /// [`ContentSink::form_within`], verbraucht von [`ScanResult::close_forms`].
-    nested_forms: BTreeMap<ObjectId, Vec<ObjectId>>,
+    nested_forms: BTreeMap<ObjectId, Vec<(usize, ObjectId)>>,
 }
 
 impl ScanResult {
@@ -1169,27 +1176,31 @@ impl ScanResult {
     /// [`ScanResult::nested_forms`]: zeichnet ein Formular im Geltungsbereich
     /// eines Spiegels seinerseits Formulare, gehören deren Glyphen zu
     /// demselben Spiegel. Jedes Formular steht danach je Abschnitt einmal, mit
-    /// dem Index des `Do`, über das es (mittelbar) erreicht wurde.
+    /// dem Pfad der `Do`-Indizes, über den es (mittelbar) erreicht wurde.
     fn close_forms(&mut self) {
         if self.nested_forms.is_empty() {
             return;
         }
         for record in &mut self.marked {
-            let mut closed: Vec<(usize, ObjectId)> = Vec::new();
+            let mut closed: Vec<(Vec<usize>, ObjectId)> = Vec::new();
             let mut seen: HashSet<ObjectId> = HashSet::new();
-            for &(at, id) in &record.forms {
+            for (path, id) in std::mem::take(&mut record.forms) {
                 // Tiefensuche in `Do`-Reihenfolge; `seen` beendet auch einen
                 // Zyklus (den der Interpreter über `visiting` gar nicht erst
                 // betritt).
-                let mut stack = vec![id];
-                while let Some(id) = stack.pop() {
+                let mut stack = vec![(path, id)];
+                while let Some((path, id)) = stack.pop() {
                     if !seen.insert(id) {
                         continue;
                     }
-                    closed.push((at, id));
                     if let Some(children) = self.nested_forms.get(&id) {
-                        stack.extend(children.iter().rev().copied());
+                        stack.extend(children.iter().rev().map(|(at, child)| {
+                            let mut deeper = path.clone();
+                            deeper.push(*at);
+                            (deeper, *child)
+                        }));
                     }
+                    closed.push((path, id));
                 }
             }
             record.forms = closed;
@@ -1198,11 +1209,11 @@ impl ScanResult {
 }
 
 impl ContentSink for ScanResult {
-    fn form_within(&mut self, parent: StreamKey, id: ObjectId) {
+    fn form_within(&mut self, parent: StreamKey, at: usize, id: ObjectId) {
         let StreamKey::Form(parent) = parent else {
             return;
         };
-        self.nested_forms.entry(parent).or_default().push(id);
+        self.nested_forms.entry(parent).or_default().push((at, id));
     }
 
     fn show(&mut self, record: ShowRecord) {
@@ -1322,13 +1333,15 @@ pub trait ContentSink {
     /// Ein Form-XObject wurde platziert.
     fn form(&mut self, _id: ObjectId) {}
     /// Ein Form-XObject `id` wurde **aus dem Strom `parent`** heraus
-    /// platziert — Formular im Formular, wenn `parent` selbst eines ist.
+    /// platziert, durch das `Do` an Index `at` dieses Stroms — Formular im
+    /// Formular, wenn `parent` selbst eines ist.
     ///
     /// Nur die Verschachtelung, nicht die Platzierung: die zählt
     /// [`ContentSink::form`]. Gebraucht wird sie, um den Geltungsbereich eines
     /// Textspiegels ([`MarkedTextRecord::forms`]) über Formulargrenzen hinweg
-    /// zu schließen.
-    fn form_within(&mut self, _parent: StreamKey, _id: ObjectId) {}
+    /// zu schließen — mit `at`, damit die Glyphen des inneren Formulars an
+    /// der Stelle seines `Do` in die Glyphenfolge des äußeren fallen.
+    fn form_within(&mut self, _parent: StreamKey, _at: usize, _id: ObjectId) {}
     /// Ein Form-XObject **steht in den Ressourcen** eines gelesenen Stroms.
     ///
     /// Das ist nicht dasselbe wie [`ContentSink::form`]: dort wird gezeichnet,
@@ -2081,15 +2094,23 @@ fn scan_annotations(
             }
         }
 
-        // Ohne Erscheinungsstrom bleibt nur der Klartext in `/Contents` — der
-        // hat keine Glyphengeometrie, kann also weder verortet noch geschwärzt
-        // werden. Verschwiegen werden darf er trotzdem nicht.
+        // Ohne Erscheinungsstrom bleibt nur der Klartext in `/Contents` (und
+        // den übrigen Textschlüsseln, siehe `crate::meta::ANNOTATION_TEXT_KEYS`)
+        // — der hat keine Glyphengeometrie, kann also nicht verortet und
+        // deshalb nicht *anteilig* geschwärzt werden. Entfernt wird er
+        // trotzdem: `crate::meta::strip_metadata` nimmt jeder Annotation genau
+        // diese Schlüssel, als Ganzes. Die Warnung sagt das — und nicht mehr
+        // „nicht durchsucht“, was `redact_pipeline::coverage` zu Recht als
+        // Deckungslücke (Rückgabewert 3) las, während `--check-leaks` an der
+        // Ausgabe nichts fand (Befund G2-7).
         if streams.is_empty() {
             if annot_has_text(doc, dict) {
                 sink.warn(
-                    "Eine Annotation trägt Text in /Contents, hat aber keinen lesbaren \
-                     Erscheinungsstrom (/AP). Dieser Text wurde nicht durchsucht und \
-                     kann deshalb nicht geschwärzt worden sein."
+                    "Eine Annotation trägt Text (/Contents oder einen der Schlüssel /RC, /T, \
+                     /Subj, /TU, /TM), hat aber keinen lesbaren Erscheinungsstrom (/AP). \
+                     Dieser Text hat keine Glyphen und wird deshalb nicht anteilig \
+                     geschwärzt; er wird mit den Metadaten als Ganzes entfernt \
+                     (strip_metadata, in der Verarbeitungskette immer)."
                         .to_string(),
                 );
             }
@@ -2104,19 +2125,19 @@ fn scan_annotations(
     }
 }
 
-/// Trägt die Annotation überhaupt Text in `/Contents` (oder `/RC`)?
+/// Trägt die Annotation überhaupt Text — in einem der Schlüssel, die
+/// `strip_metadata` entfernt? Dieselbe Liste an beiden Stellen: was hier
+/// gemeldet wird, ist genau das, was dort fällt.
 fn annot_has_text(doc: &Document, dict: &Dictionary) -> bool {
-    [b"Contents".as_slice(), b"RC".as_slice()]
-        .iter()
-        .any(|key| {
-            dict.get(key)
-                .ok()
-                .and_then(|o| doc.dereference(o).ok())
-                .is_some_and(|(_, o)| match o {
-                    Object::String(bytes, _) => bytes.iter().any(|b| !b.is_ascii_whitespace()),
-                    _ => false,
-                })
-        })
+    crate::meta::ANNOTATION_TEXT_KEYS.iter().any(|key| {
+        dict.get(key)
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .is_some_and(|(_, o)| match o {
+                Object::String(bytes, _) => bytes.iter().any(|b| !b.is_ascii_whitespace()),
+                _ => false,
+            })
+    })
 }
 
 /// Objekt-Ids aller Ströme unter einem `/AP`-Eintrag.
@@ -2431,10 +2452,10 @@ fn scan_marked_text(
             .filter(|index| range.contains(index))
             .collect()
     };
-    let forms_in = |range: &std::ops::Range<usize>| -> Vec<(usize, ObjectId)> {
+    let forms_in = |range: &std::ops::Range<usize>| -> Vec<(Vec<usize>, ObjectId)> {
         dos.iter()
-            .copied()
             .filter(|(index, _)| range.contains(index))
+            .map(|(index, id)| (vec![*index], *id))
             .collect()
     };
 
@@ -3004,7 +3025,7 @@ fn scan_operations(
                             continue;
                         }
                         sink.form(form_id);
-                        sink.form_within(stream, form_id);
+                        sink.form_within(stream, op_index, form_id);
                         if !visiting.insert(form_id) {
                             continue; // Zyklus
                         }

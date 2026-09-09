@@ -1027,6 +1027,168 @@ fn absurd_page_numbers_do_not_panic_in_labels() {
 }
 
 // ===========================================================================
+// Fix-Runde 4, Gegenprüfung G5: was die Nachprüfung sagt, muss stehen
+// bleiben — und die Datei nennen
+// ===========================================================================
+
+/// Lauter verschiedene kleine Rechtecke in einer leeren Ecke — deckungsgleiche
+/// gleicher Herkunft gälten sonst als „doppelt“, nicht als geschwärzt.
+fn distinct_corner(i: usize) -> Rect {
+    let x = 400.0 + (i % 50) as f64 * 2.0;
+    let y = 20.0 + (i / 50) as f64 * 2.0;
+    Rect::new(x, y, x + 1.5, y + 1.5)
+}
+
+/// **Befund G5-A1.** „N weitere Text(e) wurden nicht gesucht“ stand nur in
+/// der Statuszeile, und die nächste Aktion überschreibt sie. Jetzt steht es
+/// zusätzlich vorn in den Warnungen — wie ein Fund, mit eigenem Satz, mit
+/// dem Namen der Datei. Mutation (`skipped`-Zweig in `warning()` weg): rot.
+#[test]
+fn zb_g5a1_nicht_gesuchte_texte_stehen_in_den_warnungen() {
+    let out = tmp("g5a1").join("geschwaerzt.pdf");
+    let mut app = demo_app();
+    // Einen Begriff mehr, als die Decke zulässt — jeder in einer eigenen
+    // Zeile, keiner steht in der Datei.
+    for (i, term) in terms(MAX_CHECK_NEEDLES + 1).iter().enumerate() {
+        app.state
+            .regions
+            .push(text_region(0, distinct_corner(i), term));
+    }
+    let summary = app.state.hit_summary();
+    let plan = app.state.plan_export_check(&summary);
+    assert!(
+        plan.needles.len() > MAX_CHECK_NEEDLES,
+        "{}",
+        plan.needles.len()
+    );
+
+    app.export_to(out.clone());
+    app.wait_for_export_checks();
+    let status = app.state.status.clone();
+    assert!(!status.contains("steht NOCH"), "{status}");
+    assert!(status.contains("wurden nicht gesucht"), "{status}");
+
+    let warning = app
+        .state
+        .warnings
+        .first()
+        .cloned()
+        .unwrap_or_else(|| panic!("keine Warnung: {:?}", app.state.warnings));
+    assert!(warning.starts_with("geschwaerzt.pdf: "), "{warning}");
+    assert!(
+        warning.contains("Nachprüfung unvollständig"),
+        "eigener Satz: {warning}"
+    );
+    assert!(warning.contains("wurden nicht gesucht"), "{warning}");
+    assert!(
+        warning.contains(&format!("höchstens {MAX_CHECK_NEEDLES} Begriffe")),
+        "{warning}"
+    );
+    assert!(!warning.contains("steht NOCH"), "{warning}");
+
+    // Die nächste Aktion überschreibt die Statuszeile — die Warnung bleibt.
+    app.state.status = "etwas anderes".to_string();
+    assert_eq!(app.state.warnings.first(), Some(&warning));
+}
+
+/// **Befund G5-A3.** Verschwindet der Prüf-Thread ohne Ergebnis (Panik),
+/// sagt die Oberfläche „abgebrochen (interner Fehler)“ — bisher ohne Test:
+/// die Zeile `done.push((prefix, None))` konnte fallen, und 306 Tests blieben
+/// grün. Hier lässt ein Testhaken die Prüfung im Thread paniken. Mutation
+/// (die Zeile weg): der Eintrag verschwindet stumm, die Statuszeile bleibt
+/// bei „läuft“ — rot.
+#[test]
+fn zb_g5a3_eine_panik_im_pruefthread_wird_gesagt_und_nicht_verschwiegen() {
+    let out = tmp("g5a3").join("geschwaerzt.pdf");
+    let mut app = demo_app();
+    app.force_panic_in_check = true;
+    app.export_to(out.clone());
+    assert!(app.export_check_running());
+    app.wait_for_export_checks();
+    assert!(!app.export_check_running());
+    let status = app.state.status.clone();
+    assert!(
+        status.contains("Nachprüfung: abgebrochen (interner Fehler)"),
+        "{status}"
+    );
+    assert!(!status.contains(EXPORT_CHECK_RUNNING), "{status}");
+    assert!(status.starts_with("Export:"), "{status}");
+    // Auch in den Warnungen, mit der Datei — die Statuszeile ist flüchtig.
+    let warning = app
+        .state
+        .warnings
+        .first()
+        .cloned()
+        .unwrap_or_else(|| panic!("keine Warnung: {:?}", app.state.warnings));
+    assert!(warning.starts_with("geschwaerzt.pdf: "), "{warning}");
+    assert!(
+        warning.contains("abgebrochen (interner Fehler)"),
+        "{warning}"
+    );
+
+    // Ohne den Haken kommt das Urteil wie immer.
+    app.force_panic_in_check = false;
+    app.export_to(out.clone());
+    app.wait_for_export_checks();
+    assert!(
+        app.state
+            .status
+            .contains("stehen nicht mehr in der Ausgabe"),
+        "{}",
+        app.state.status
+    );
+}
+
+/// **Befund G5-A4.** Ein Fund ging als nackter Satz in die Warnungen; nach
+/// einem zweiten Export war nicht mehr zu sagen, welche Datei gemeint ist.
+/// Jetzt steht der Dateiname davor. Zwei Exporte, beide mit Leck, beide
+/// unterwegs, bevor das erste Urteil kommt: zwei Warnungen, jede mit ihrer
+/// Datei. Mutation (Präfix weg): rot.
+#[test]
+fn zb_g5a4_die_warnung_nennt_die_datei() {
+    let dir = tmp("g5a4");
+    let first = dir.join("erste.pdf");
+    let second = dir.join("zweite.pdf");
+    let mut app = demo_app();
+    app.state.regions.push(text_region(
+        0,
+        Rect::new(40.0, 40.0, 120.0, 60.0),
+        "Musterbank",
+    ));
+    let index = app.state.regions.len() - 1;
+    assert_eq!(app.state.hit_summary().outcome(index), HitOutcome::Redacted);
+
+    app.export_to(first.clone());
+    app.export_to(second.clone());
+    app.wait_for_export_checks();
+
+    let warnings = app.state.warnings.clone();
+    let leaks: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("steht NOCH in der Ausgabe"))
+        .collect();
+    assert_eq!(leaks.len(), 2, "{warnings:?}");
+    assert!(
+        leaks
+            .iter()
+            .any(|w| w.starts_with("erste.pdf: Nachprüfung:")),
+        "{warnings:?}"
+    );
+    assert!(
+        leaks
+            .iter()
+            .any(|w| w.starts_with("zweite.pdf: Nachprüfung:")),
+        "{warnings:?}"
+    );
+    // Der Satz selbst ist unverändert der der Statuszeile.
+    assert!(
+        app.state.status.contains("steht NOCH in der Ausgabe"),
+        "{}",
+        app.state.status
+    );
+}
+
+// ===========================================================================
 // Messungen — `cargo test -p redact-gui zb_mess -- --ignored --nocapture`
 // ===========================================================================
 

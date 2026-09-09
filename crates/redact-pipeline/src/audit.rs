@@ -598,6 +598,16 @@ pub struct EffectRecord {
 }
 
 /// Was der Metadatenlauf entfernt hat — die Zahlen aus [`MetadataReport`].
+///
+/// Die vier jüngeren Zähler (`outlines_removed`, `annotation_actions_removed`,
+/// `annotation_texts_cleared`, `optional_content_names_cleared`) tragen
+/// `#[serde(default)]`: ein Log aus einer Fassung ohne sie bleibt lesbar.
+/// Geschrieben werden sie immer. Das Log hat keine eigene Schemaversion —
+/// nur `tool.version` — und braucht für ein zusätzliches Feld keine: jeder
+/// Leser, der die alten Felder kennt, liest ein neues Log weiterhin, und ein
+/// altes Log liest sich mit Nullen. Vor dieser Änderung stand jede dieser
+/// Zahlen nur als Satz in `summary` — `meta.rs` versprach, „das Audit-Log
+/// übernimmt die Zahlen unverändert“, und für vier Zähler stimmte das nicht.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataRecord {
     pub info: bool,
@@ -614,6 +624,21 @@ pub struct MetadataRecord {
     pub open_action: bool,
     pub additional_actions: usize,
     pub optional_content: bool,
+    /// Lesezeichen (`/Outlines`-Einträge), mit dem Baum entfernt.
+    #[serde(default)]
+    pub outlines_removed: usize,
+    /// `/A`, `/AA`, `/PA` und benannte `/Dest` an Annotationen und den von
+    /// ihnen erreichbaren Feldern.
+    #[serde(default)]
+    pub annotation_actions_removed: usize,
+    /// Klartexte (`/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`,
+    /// `/OverlayText`, `/NM`, `/DS`, `/MK`-Beschriftungen) an Annotationen
+    /// und erreichbaren Feldern — je Schlüssel einer.
+    #[serde(default)]
+    pub annotation_texts_cleared: usize,
+    /// Ebenennamen (`/OCG /Name`), die geleert wurden.
+    #[serde(default)]
+    pub optional_content_names_cleared: usize,
     /// Dieselbe Information in Klartext, für Menschen.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summary: Vec<String>,
@@ -636,6 +661,10 @@ impl From<&MetadataReport> for MetadataRecord {
             open_action: report.open_action_removed,
             additional_actions: report.additional_actions_removed,
             optional_content: report.optional_content_removed,
+            outlines_removed: report.outlines_removed,
+            annotation_actions_removed: report.annotation_actions_removed,
+            annotation_texts_cleared: report.annotation_texts_cleared,
+            optional_content_names_cleared: report.optional_content_names_cleared,
             summary: report.summary(),
         }
     }
@@ -1419,6 +1448,43 @@ mod tests {
         let old: AuditLog = serde_json::from_value(value).expect("altes Log bleibt lesbar");
         assert_eq!(old.patterns, PatternRecord::default());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Jeder Zähler des Berichts kommt unverändert im Log an — auch die
+    /// vier, die vorher nur als Satz in `summary` standen.
+    #[test]
+    fn every_metadata_counter_reaches_the_record() {
+        let report = MetadataReport {
+            outlines_removed: 3,
+            annotation_actions_removed: 4,
+            annotation_texts_cleared: 5,
+            optional_content_names_cleared: 6,
+            ..MetadataReport::default()
+        };
+        let record = MetadataRecord::from(&report);
+        assert_eq!(record.outlines_removed, 3);
+        assert_eq!(record.annotation_actions_removed, 4);
+        assert_eq!(record.annotation_texts_cleared, 5);
+        assert_eq!(record.optional_content_names_cleared, 6);
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["outlines_removed"], 3);
+        assert_eq!(json["annotation_actions_removed"], 4);
+        assert_eq!(json["annotation_texts_cleared"], 5);
+        assert_eq!(json["optional_content_names_cleared"], 6);
+
+        // Ein Log aus einer Fassung ohne die vier Felder bleibt lesbar.
+        let mut old = json.clone();
+        for key in [
+            "outlines_removed",
+            "annotation_actions_removed",
+            "annotation_texts_cleared",
+            "optional_content_names_cleared",
+        ] {
+            old.as_object_mut().unwrap().remove(key);
+        }
+        let parsed: MetadataRecord = serde_json::from_value(old).expect("altes Log bleibt lesbar");
+        assert_eq!(parsed.outlines_removed, 0);
+        assert_eq!(parsed.annotation_texts_cleared, 0);
     }
 
     fn tempdir() -> std::path::PathBuf {

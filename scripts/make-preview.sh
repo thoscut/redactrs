@@ -45,13 +45,19 @@ target_dir="${1:-$repo_root/docs}"
 # Pfad zu den gebauten Programmen unten muss dieselbe Variable lesen, sonst
 # baut das Skript an einen Ort und sucht an einem anderen (Abbruch mit 127).
 #
-# Ein relativer Wert (`CARGO_TARGET_DIR=target`) meint bei cargo das
-# Verzeichnis, in dem cargo laeuft - das ist unten `$repo_root`. Das Skript
-# wechselt danach in ein Wegwerfverzeichnis; ein relativer Pfad zeigte von
-# dort ins Leere. Deshalb wird er hier gegen `$repo_root` aufgeloest, bevor
-# irgendwo hin gewechselt wird.
+# Ein relativer Wert (`CARGO_TARGET_DIR=../target`) meint das, was er in der
+# Shell des AUFRUFERS meint: relativ zu dessen Arbeitsverzeichnis, `$PWD`
+# hier, bevor das Skript irgendwohin wechselt. Cargo selbst loeste ihn gegen
+# das Verzeichnis auf, in dem es laeuft (unten `$repo_root`), und das Skript
+# wechselt danach noch in ein Wegwerfverzeichnis - zwei weitere Bedeutungen
+# desselben Werts. Deshalb wird er genau einmal aufgeloest, gegen `$PWD`, und
+# absolut exportiert: cargo baut dann dorthin, wo der Aufrufer hinzeigt, und
+# das Skript sucht die Programme am selben Ort. (Eine fruehere Fassung nahm
+# `$repo_root`: `cd scripts && CARGO_TARGET_DIR=../target ./make-preview.sh`
+# baute damit nach `<repo>/../target` statt nach `<repo>/target`.)
 build_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
-case "$build_dir" in /*) ;; *) build_dir="$repo_root/$build_dir" ;; esac
+case "$build_dir" in /*) ;; *) build_dir="$PWD/$build_dir" ;; esac
+export CARGO_TARGET_DIR="$build_dir"
 
 # Aufloesung: die Seite wird mit BREITE Pixeln gerendert und danach auf den
 # beschriebenen Teil zugeschnitten; uebrig bleiben rund 770 Pixel Breite.

@@ -33,9 +33,170 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 Bereich: `git log v0.6.0..HEAD`.
 
-Vierter Durchgang, und diesmal fast nur an der **Doku** — mit demselben
-Maßstab wie am Code: jede Angabe hier stammt aus einem Lauf des gebauten
-Binaries, nicht aus dem Quelltext.
+Vier Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
+und Doku mit demselben Maßstab: jede Angabe hier stammt aus einem Lauf des
+gebauten Binaries, nicht aus dem Quelltext. Zuletzt (Runde 4) bekommt die
+Nachprüfung ein Budget, und die Befunde der Gegenprüfung der Runde 3 —
+am Code wie an der Doku — werden geschlossen.
+
+### Fix-Runde 4: was die Gegenprüfung der Runde 3 noch fand
+
+Fünf Gegenprüfer lasen die Korrekturen der Runde 3 mit eigenem Material
+gegen. Sieben Klassen blieben: der Textspiegel über einem geteilten Formular
+wurde nicht geleert; ein Bild auf einer Hex-Seite überlebte; ein `/Filter`
+als Verweis wurde nicht aufgelöst; Annotationstexte jenseits `/Annots`
+blieben; das Orakel der Nachprüfung entpackte ohne Budget, mit Kosten
+Begriffe × Bytes; die Nachprüfung verglich wörtlich, suchte aber gequetscht;
+und Doku, die mehr sagte als der Code. Diese Runde schließt sie.
+
+* **`--check-leaks` hat ein Budget — und sagt, was es nicht gesehen hat.**
+  Die Suche packte jeden Strom aus, den sie fand, ohne Grenze; die
+  Vorprüfung davor sah nur, was das Dictionary als Flate ausweist. Jetzt
+  läuft sie über `redact_pdf::leaks_many_within` mit demselben Budget wie
+  `--max-decompressed-mb` (Vorgabe 1024 MB) — dieselbe Einheit, die Summe
+  der entpackten Bytes, je Sicht der Suche (Rohsicht, Objektsicht) einmal.
+  Ein Strom, der das Restbudget sprengte, wird nicht entpackt und steht als
+  `NICHT GEPRÜFT: …` in der Ausgabe — auch unter
+  `--quiet` —, und der Lauf endet **mit Rückgabewert 3 auch ohne Fund**:
+  „Ergebnis: 1 Stelle(n) nicht geprüft — die Antwort ist unvollständig.“ Mit
+  Fund stehen beide Sätze da. Gemessen am gebauten Binary
+  (`check_leaks_names_what_the_budget_left_unchecked_and_returns_3`): ein
+  Strom ohne `/Filter`, dessen Bytes 4 MiB Nullen als Flate sind (4 kB auf
+  der Platte), mit `--max-decompressed-mb 1` → 3 und die Stelle; ohne
+  Schalter → 0. Die andere Tür bleibt zu: ein als Flate ausgewiesener Strom
+  über dem Budget fällt wie beim Schwärzen schon in der Vorprüfung — 1, nie 0
+  (`a_stream_over_the_budget_is_refused_before_the_search`). `--help` zu
+  `--check-leaks` und `--max-decompressed-mb`, README, `SECURITY.md`
+  (Grenzentabelle) nennen das Budget.
+* **Die Decke von 1 000 Begriffen war an drei weiteren Stellen ungebunden.**
+  README „Nachprüfung nach dem Export“ und zwei Sätze zur Oberfläche in
+  diesem Verlauf trugen die Zahl als Literal, und
+  `the_needle_ceiling_is_one_number_in_code_help_and_docs` las sie nicht.
+  Jetzt liest er auch diese drei, aus der Konstante formatiert; der
+  Gegenprüfer-Test `zc_g4_decke_doku.rs` ist darin aufgegangen. README-Satz
+  auf „1 500“ gesetzt: rot.
+* **Doku gegen Code, sieben Stellen.** Die README sagte „unter macOS tut der
+  Aufruf nichts“ — er setzt `setrlimit(RLIMIT_CORE, 0)` (`dumpable.rs`,
+  `SECURITY.md`, dieser Verlauf sagten es längst). „Unter Windows gibt es
+  kein Gegenstück“ (README, `SECURITY.md`, `dumpable.rs`, zweimal hier) war
+  die falsche Begründung für die richtige Aussage: WER kennt
+  `WerAddExcludedApplication`; dieses Programm ruft es nicht auf — die
+  Zusage lautet jetzt ehrlich „nicht umgesetzt“. `SECURITY.md` versprach
+  eine Bereichsprüfung für „Feldwerte“ — es ist genau eine, die
+  Seitennummer. Die Messung zur Seitennummer nannte „Debug/Release“ aus dem
+  Test — der läuft nur im Dev-Profil; der Release ist von Hand gemessen, und
+  das steht jetzt so. Der Satz „die Warnung zum geteilten Formular weist
+  darauf hin“ (Spiegel im Seitenstrom) versprach mehr, als die Warnung sagt —
+  sie nennt Seiten, keinen Spiegel; den Fall selbst schließt diese Runde
+  (Spiegel/Formulare, unten). „6,3 s bei 305 Seiten“ für den Export hat
+  keinen Beleg im Baum und ist so gekennzeichnet. „Drei Dinge … und zwar
+  immer“ in der Statuszeile der Oberfläche: die Rechteckzahl erscheint nur,
+  wenn sie größer als null ist.
+* **`scripts/make-preview.sh` löst ein relatives `CARGO_TARGET_DIR` gegen
+  das Verzeichnis des Aufrufers auf, nicht gegen das Repository.** Die
+  Fassung der Runde 3 nahm `$repo_root`: `cd scripts &&
+  CARGO_TARGET_DIR=../target ./make-preview.sh` baute damit nach
+  `<repo>/../target`. Jetzt wird der Wert einmal gegen `$PWD` aufgelöst und
+  absolut exportiert — cargo und das Skript meinen denselben Ort. Gemessen:
+  derselbe Aufruf baut nach `<repo>/target`, `git status docs/` bleibt leer.
+* **Ein Textspiegel über einem Formular blieb stehen — an zwei Stellen.**
+  Liegt der Spiegel *im* Formular und die Glyphen in einem inneren
+  (`/Span <</ActualText …>> BDC /Fm1 Do EMC`), wurde er gelesen und gemeldet,
+  aber nie geleert: das äußere Formular hatte keinen eigenen Plan und wurde
+  deshalb nicht neu geschrieben. Und wird dasselbe Formular von zwei Seiten
+  benutzt, aber nur auf der zweiten geschwärzt, verlor es dort seine Glyphen,
+  während der Spiegel auf der ersten Seite stehen blieb — mit Rückgabewert 0,
+  weil die Warnung zum geteilten Formular als „zu viel geschwärzt“ einsortiert
+  ist. Gemessen: `leaks` fand die IBAN in der Ausgabe an 8 Stellen. Beides ist
+  behoben. Der Bestand der Formulare, die neu geschrieben werden, umfasst jetzt
+  auch die, die einen Spiegel über einem getroffenen Formular tragen; und die
+  Seiten werden erst geschrieben, **nachdem** alle Formularpläne feststehen —
+  vorher liefen Seiten- und Formularschleife nacheinander, und was die zweite
+  entschied, erreichte die erste nicht mehr. Nach der Korrektur bleibt kein
+  Spiegel stehen (`leaks`: 0 Fundstellen); die „bekannte Grenze“, die der
+  Verlauf der Runde 3 hier noch nannte, gibt es nicht mehr.
+* **Und die Gegenrichtung: ein Formular, das erst ein inneres zeichnet, gab
+  eine falsche Warnung.** `/Fm1 Do (0044 …) Tj` unter einem deckungsgleichen
+  Spiegel meldete „27 Zeichen im Spiegel, 27 in den Glyphen“ — die Glyphen des
+  inneren Formulars standen in der falschen Reihenfolge. Die Glyphenfolge unter
+  einem Spiegel folgt jetzt dem Pfad der `Do`-Aufrufe, beliebig tief.
+* **Eine Annotation mit Text, aber ohne Erscheinungsstrom, war keine
+  Deckungslücke.** Sie endete mit Rückgabewert 3 („wurde nicht durchsucht und
+  kann deshalb nicht geschwärzt worden sein“) — obwohl derselbe Lauf ihren
+  Text mit den Metadaten entfernt und `--check-leaks` danach 0 meldete. Die
+  Warnung sagt jetzt, was wirklich geschieht: kein anteiliges Schwärzen, weil
+  es keine Glyphen gibt, sondern Entfernen als Ganzes. Sie zählt nicht mehr als
+  Lücke; Rückgabewert 0, und `leaks` an der Ausgabe ist leer
+  (`an_annotation_without_appearance_stream_is_no_longer_a_gap`). Stellvertreter
+  für den Rückgabewert 3 in `tests/incomplete.rs` ist jetzt ein XObject ohne
+  bekanntes `/Subtype` — ein Fall, der wirklich ungelesen bleibt.
+* **Das Leck-Orakel sucht alle Begriffe in einem Durchgang.** Bisher lief je
+  Begriff eine eigene Teilstringsuche über dieselben entpackten Bytes; die
+  Kosten waren Begriffe × Bytes. Jetzt trägt ein Automat (`aho-corasick`,
+  liegt über `regex` ohnehin im Graphen) alle Begriffe in allen Kodierungen —
+  UTF-8, UTF-16BE/LE, Hex groß und klein, Verkettung, ohne Leerraum — und
+  läuft einmal je Datenblock. Gemessen (Release, 64-MiB-Datei mit nicht
+  komprimierbarem Bildstrom): 1 000 Begriffe kosteten **308,7 s**, jetzt
+  **6,45 s** — ein Begriff 5,4 s. Die Fundstellen sind Zeichen für Zeichen
+  dieselben (`positions_agree_with_the_naive_search`).
+* **Und es hat ein Budget: `leaks_many_within`.** Das Orakel packte jeden
+  Strom aus, den es fand — die Grenze `--max-decompressed-mb` galt nur dem
+  Schwärzen. Jetzt bekommt jede Sicht dasselbe Budget, es wird **beim
+  Entpacken** eingehalten (`take`, nicht hinterher gemessen) und die
+  Vorprüfung des Laders läuft mit derselben Zahl, damit lopdf keinen
+  Objektstrom unbegrenzt auspackt. Ein Strom über dem Restbudget wird
+  übersprungen und in `unchecked` benannt (Objekt und Grund); seine gepackten
+  Bytes werden roh trotzdem durchsucht. Gemessen an 1 GiB Nullen (1 042 919
+  Byte gepackt, als Seiteninhalt und als `/ObjStm`) mit 16 MiB Budget: 28 ms
+  bzw. 26 ms, Speicherspitze 27 MB. Ohne die Grenze beim Entpacken: 345 MB
+  bzw. 882 MB.
+* **Filterketten: ein Verweis ist eine Schreibweise, kein Grund zur Absage.**
+  `/Filter 5 0 R`, `/DecodeParms` als Verweis und Werte *im*
+  Parameter-Dictionary (`/Columns 8 0 R`, `/Predictor 12 0 R`) wurden nicht
+  aufgelöst: die Datei galt als nicht zerlegbar (Rückgabewert 1) oder wurde
+  still ohne Prädiktor dekodiert. Alle drei Ebenen werden jetzt aufgelöst.
+  Dazu bekommen LZW, ASCII85 und RunLength dieselbe Größengrenze wie Flate
+  (LZW über `weezl`, die Bibliothek, die lopdf ohnehin mitbringt).
+* **Ein Bild auf einer ASCIIHex- oder RunLength-kodierten Seite wurde nicht
+  überschrieben.** Die Bildsuche las den Seiteninhalt über lopdf, das diese
+  beiden Filter nicht kennt: 0 geschwärzte Bilder, keine Warnung, und die
+  Pixel blieben unter dem Deckrechteck. Sie benutzt jetzt denselben Dekoder
+  wie der Interpreter.
+* **Klartext an Annotationen: die Bereinigung folgt jetzt dem Graphen.**
+  Geleert wurde nur der `/Annots`-Eintrag selbst; ein `/Popup`, die
+  `/Parent`-Kette (Radiogruppen, Felder mit mehreren Widgets), `/Kids` und
+  `/IRT` behielten ihre Texte. Jetzt läuft die Bereinigung über alles, was
+  eine Annotation erreichbar hält, mit Besuchsmenge gegen Zyklen. Neu in der
+  Liste: `/Opt` (Auswahltexte), `/OverlayText`, `/NM`, `/DS` und die
+  Beschriftungen im `/MK`; neu bei den Aktionen `/PA`. Ein Verweis *im*
+  `/Dest`-Feld muss auf eine Seite führen, sonst fällt das Ziel. **Nicht**
+  entfernt wird `/DA` — Pflichtschlüssel und Operatorfolge, kein Menschentext;
+  als benannte Lücke in `SECURITY.md`.
+* **Zwei Kleinigkeiten am selben Lauf.** Das Löschen eines Schlüssels nahm das
+  referenzierte Objekt mit — bei einer Datei, die `/Contents 4 0 R` mit einem
+  Lesezeichen teilt, verlor die Ausgabe damit ihre Seite; jetzt löscht es nur
+  den Schlüssel, und `prune_unreachable` räumt auf. Und die Lesezeichen wurden
+  nur 32 Ebenen tief gezählt (33 statt 42 gemeldet, entfernt wurden sie
+  trotzdem) — die Tiefengrenze ist weg, der Deckel ist die Besuchsmenge:
+  100 000 Ebenen in 370 ms.
+* **Das Audit-Log führt vier Zahlen, die es bisher nur als Fließtext kannte:**
+  `metadata.outlines_removed`, `annotation_actions_removed`,
+  `annotation_texts_cleared` und `optional_content_names_cleared`. Additiv mit
+  Vorgabewert 0, also ohne Schemabruch; ein Test am Binary vergleicht sie mit
+  dem, was der Lauf wirklich entfernt hat.
+* **Die Nachprüfung der Oberfläche entscheidet auf derselben Normalform, auf
+  der sie sucht.** Sie verglich wörtlich, die Suche vergleicht auch ohne
+  Leerraum: dieselbe IBAN als „DE89 3704 …“ geschwärzt und als „DE893704…“
+  abgewählt galt als Leck — ein Fehlalarm über eine Datei, die genau so
+  gewollt war. Ein Teilstring bleibt ein eigener Text und wird weiter
+  gemeldet. Die Nachprüfung läuft außerdem mit dem Entpackbudget des Ladens
+  und sagt, wie viele Stellen sie deshalb nicht geprüft hat.
+* **Und sie sagt es dort, wo es stehen bleibt.** Nicht gesuchte Texte jenseits
+  der Decke, eine unvollständige Antwort und ein im Hintergrund abgebrochener
+  Prüflauf standen nur in der Statuszeile, die die nächste Aktion überschreibt;
+  sie stehen jetzt auch in den Warnungen, jede mit dem Namen der Ausgabedatei
+  davor. Der Abbruchzweig hatte keinen Test — man konnte ihn streichen, und
+  alle 306 Tests blieben grün; ein Haken im Testbau erzwingt ihn jetzt.
 
 ### Fix-Runde 3: was die Gegenprüfung der letzten Runde noch fand
 
@@ -93,10 +254,7 @@ gilt, und ein Test bleibt ohne seine Korrektur grün.
   Stromreihenfolge, an der Stelle des `Do`, auch Formular im Formular:
   deckungsgleich bleibt still, ein lügender Spiegel wird gelesen, gemeldet
   **und** beim Schwärzen der Formularglyphen geleert. Die Warnung nennt den
-  Suchlauf nur, wenn er stattfand. Bekannte Grenze: ein Formular, das erst
-  auf einer späteren Seite getroffen wird, lässt den Spiegel auf der früheren
-  stehen — die Warnung zum geteilten Formular weist darauf hin. Tests in
-  `zb_spiegel_luegt.rs`; Mutation „Formen des Abschnitts leer“: rot, Mutation
+  Suchlauf nur, wenn er stattfand. Tests in `zb_spiegel_luegt.rs`; Mutation „Formen des Abschnitts leer“: rot, Mutation
   „Formen beim Leeren nicht mitzählen“: rot.
 * **`--check-leaks`, Sicht 7: kein quadratischer Rückfall mehr.** Schlug die
   Extraktion an *einer* Seite fehl, las der Rückfall jede Seite einzeln — und
@@ -127,9 +285,11 @@ gilt, und ein Test bleibt ohne seine Korrektur grün.
   „Seite 0“. Jede 1-basierte Seitenanzeige rechnet zusätzlich mit
   `saturating_add`, in der Kette wie in der Oberfläche. `"page": 99` in einem
   Einseiter bleibt, was es war: eine Warnung (`missing_page`), kein Fehler.
-  Gemessen (Debug/Release, `--apply-review` und `--manual-regions`): kein
-  Rückgabewert 101, keine Ausgabedatei
-  (`hostile_field_values_in_a_valid_review_file_end_with_a_message_not_a_panic`).
+  Gemessen im Test
+  (`hostile_field_values_in_a_valid_review_file_end_with_a_message_not_a_panic`,
+  Dev-Profil, `--apply-review` und `--manual-regions`) und im Release-Bau von
+  Hand: kein Rückgabewert 101, keine Ausgabedatei. Der Test selbst läuft nur
+  im Dev-Profil; die Release-Messung steht nicht im Baum.
 * **Die Nachprüfung der Oberfläche deckelt Begriffe, nicht Bytes.** Die Decke
   davor rechnete Begriffe × Dateibytes auf der Platte gegen 2 GiB — die
   falsche Einheit: gesucht wird in den *entpackten* Strömen. Gemessen ließ sie
@@ -194,7 +354,9 @@ gilt, und ein Test bleibt ohne seine Korrektur grün.
   Spiegel-Schlüssel (`/ActualText` muss den Glyphen gleichen, `/Alt` und `/E`
   dürfen abweichen) und den `/Alt` eines Bildes als blinden Fleck.
 * **Nicht in dieser Runde: der Export selbst in den Hintergrund.** Der Export
-  läuft weiter im Zeichentakt der Oberfläche (6,3 s bei 305 Seiten, gemessen);
+  läuft weiter im Zeichentakt der Oberfläche (6,3 s bei 305 Seiten — Messung
+  der Runde, nicht im Baum; der Messtest dort misst die Nachprüfung, nicht
+  den Export);
   nur die Nachprüfung danach ist im Hintergrund. Ein `PendingExport` mit
   gesperrter Bedienung, Fehlerkanal und verketteter Nachprüfung berührt
   dieselben Dateien, an denen diese Runde die Decke und die Doppelentscheidung
@@ -282,8 +444,9 @@ Gezählt wird das Attribut `#[allow(unsafe_code)]`, nicht das Schlüsselwort:
 ein `grep` nach `unsafe {` traf auch seine eigene Erklärung im Modulkommentar.
 
 Ausgeschrieben steht dort auch, **was der Schutz nicht leistet**: unter Windows
-gibt es kein Gegenstück (`MiniDumpWriteDump` liegt beim Aufrufer, nicht beim
-Ziel) — ausgerechnet die Plattform der Zielgruppe —, und unter macOS, BSD und
+ist nichts umgesetzt (das Mittel dort, `WerAddExcludedApplication`, wird nicht
+aufgerufen; ein Abbild aus einem fremden Prozess per `MiniDumpWriteDump`
+bliebe ohnehin) — ausgerechnet die Plattform der Zielgruppe —, und unter macOS, BSD und
 den übrigen Unix-Systemen gibt es nur das schwächere Mittel
 `setrlimit(RLIMIT_CORE, 0)`: eine Grenze, kein Verbot. Die Funktion liefert
 drei Antworten statt `true`/`false`; „hier gibt es kein Mittel“ ist keine
@@ -302,15 +465,17 @@ weder tippen lassen noch in Prozessliste und Shell-Historie schreiben. Für die
 Zielgruppe, die per Doppelklick arbeitet, war die Nachprüfung bis hierher gar
 nicht erreichbar.
 
-Drei Dinge stehen in der Zeile, die dabei entsteht, und zwar immer:
+Drei Dinge stehen in der Zeile, die dabei entsteht — die ersten beiden immer,
+das dritte, sobald es mindestens ein solches Rechteck gibt:
 
 * das Ergebnis — bei einem Fund zusätzlich ganz vorn in den Warnungen;
 * **derselbe Vorbehalt wie in der Kommandozeile**: geprüft ist *diese Liste*,
   nicht die Datei;
-* **die Zahl der Rechtecke ohne bekannten Text.** Ein selbst gezogenes
-  Rechteck hat keinen; darüber kann die Prüfung nichts sagen, und dort bleibt
-  es bei der Sichtprüfung. Verschwiegen wäre die neue Anzeige an einem
-  Dokument mit lauter Handregionen selbst eine falsche Entwarnung.
+* **die Zahl der Rechtecke ohne bekannten Text**, wenn sie größer als null
+  ist. Ein selbst gezogenes Rechteck hat keinen; darüber kann die Prüfung
+  nichts sagen, und dort bleibt es bei der Sichtprüfung. Verschwiegen wäre
+  die neue Anzeige an einem Dokument mit lauter Handregionen selbst eine
+  falsche Entwarnung.
 
 Gesucht werden höchstens 1 000 verschiedene Texte — dieselbe Decke wie bei
 `--check-leaks`, dieselbe Konstante (`redact_core::MAX_CHECK_NEEDLES`) und
@@ -424,10 +589,12 @@ eine IBAN im Speicher, dann Absturz):
 `prctl(PR_SET_DUMPABLE, 0)` als erste Anweisung beider Binärziele. Zwei
 Dinge, die dazugehören und nicht im Kleingedruckten stehen sollen:
 
-* **Unter Windows gibt es kein Gegenstück** — ein Prozess kann sich dort dem
-  Abbild nicht entziehen. Diese Absicherung schützt Linux und
-  macOS-artige Systeme, also nicht die Plattform, auf der die meisten Nutzer
-  dieses Werkzeugs sitzen.
+* **Unter Windows ist nichts umgesetzt** — das Mittel dort
+  (`WerAddExcludedApplication`) ruft das Programm nicht auf, und einem Abbild
+  aus einem fremden Prozess entzöge es sich ohnehin nicht. Diese Absicherung
+  schützt Linux (`prctl`) und, schwächer, macOS-artige Systeme
+  (`setrlimit(RLIMIT_CORE, 0)`), also nicht die Plattform, auf der die
+  meisten Nutzer dieses Werkzeugs sitzen.
 * Der Prozess ist danach auch für `ptrace` durch denselben Benutzer
   unerreichbar. Für ein Werkzeug, das Kontoauszüge im Speicher hält, ist das
   die richtige Richtung; wer mit `gdb` an einem Fehler arbeitet, braucht

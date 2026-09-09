@@ -93,7 +93,9 @@ fn assert_refused(name: &str, out: &Output, ausgabe: &Path, value: u64) {
     let err = stderr(out);
     assert_eq!(out.status.code(), Some(1), "{name}:\n{err}");
     assert!(
-        err.contains(&format!("\"page\": {value} ist keine Seitenzahl (höchstens {MAX})")),
+        err.contains(&format!(
+            "\"page\": {value} ist keine Seitenzahl (höchstens {MAX})"
+        )),
         "{name}: Meldung nennt Wert und Grenze nicht:\n{err}"
     );
     assert!(
@@ -107,12 +109,19 @@ fn assert_refused(name: &str, out: &Output, ausgabe: &Path, value: u64) {
 fn assert_accepted(name: &str, out: &Output, ausgabe: &Path, seite_1basiert: &str) {
     let err = stderr(out);
     assert_eq!(out.status.code(), Some(0), "{name}: falscher Alarm:\n{err}");
-    assert!(ausgabe.exists(), "{name}: keine Ausgabedatei:\n{}", stdout(out));
+    assert!(
+        ausgabe.exists(),
+        "{name}: keine Ausgabedatei:\n{}",
+        stdout(out)
+    );
     assert!(
         err.contains(&format!("(Seite {seite_1basiert};")),
         "{name}: die Warnung nennt die Seite nicht 1-basiert und ungekürzt:\n{err}"
     );
-    assert!(!err.contains("Seite 0;"), "{name}: Überlauf auf Seite 0:\n{err}");
+    assert!(
+        !err.contains("Seite 0;"),
+        "{name}: Überlauf auf Seite 0:\n{err}"
+    );
 }
 
 /// `Region.page`: genau an der Grenze, über alle drei Dateiwege.
@@ -126,7 +135,11 @@ fn the_page_limit_is_inclusive_on_every_file_path() {
         // Weg 1: --apply-review
         let mut v = original.clone();
         v["items"][0]["region"]["page"] = serde_json::json!(page);
-        let datei = write(&dir, &format!("apply-{page}.json"), v.to_string().as_bytes());
+        let datei = write(
+            &dir,
+            &format!("apply-{page}.json"),
+            v.to_string().as_bytes(),
+        );
         let ausgabe = dir.join(format!("apply-{page}.pdf"));
         let out = run(&[
             input.to_str().unwrap(),
@@ -151,7 +164,11 @@ fn the_page_limit_is_inclusive_on_every_file_path() {
             "rect": original["items"][0]["region"]["rect"],
             "source": { "manual": { "reason": "g3" } }
         }]);
-        let datei3 = write(&dir, &format!("list-{page}.json"), list.to_string().as_bytes());
+        let datei3 = write(
+            &dir,
+            &format!("list-{page}.json"),
+            list.to_string().as_bytes(),
+        );
         let ausgabe3 = dir.join(format!("manual-list-{page}.pdf"));
         let out3 = run(&[
             input.to_str().unwrap(),

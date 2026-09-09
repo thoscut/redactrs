@@ -213,13 +213,17 @@ fn gewoehnliche_parms_formen_werden_nicht_abgelehnt() {
     for (label, dict, content) in cases {
         let d = page(&[]);
         let s = stream(dict, content);
-        assert_eq!(decoded_content(&d.doc, &s).as_deref(), Some(PLAIN), "{label}");
+        assert_eq!(
+            decoded_content(&d.doc, &s).as_deref(),
+            Some(PLAIN),
+            "{label}"
+        );
         assert_end_to_end(label, d, s);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Befunde — rot am Stand 76bdcf9
+// Befunde — rot am Stand 76bdcf9, seit Fix-Runde 4 scharf
 // ---------------------------------------------------------------------------
 
 /// **Befund G1-C1 (klein).** `/Filter 5 0 R` — der Filtername als
@@ -229,7 +233,6 @@ fn gewoehnliche_parms_formen_werden_nicht_abgelehnt() {
 /// abgelehnt: Rückgabewert 1 für eine gültige Datei. Das Orakel sieht die
 /// IBAN (es versucht Flate an jedem Strom), der Schwärzer nicht.
 #[test]
-#[ignore = "Befund G1-C1: /Filter als Verweis wird nicht aufgelöst — falsche Ablehnung"]
 fn befund_filter_als_verweis_wird_abgelehnt() {
     let mut d = page(&[]);
     let name = d.add(Object::Name(b"FlateDecode".to_vec()));
@@ -246,7 +249,6 @@ fn befund_filter_als_verweis_wird_abgelehnt() {
 /// Ablehnung (Rückgabewert 1) einer gültigen Datei; das Orakel findet die
 /// IBAN dort ebenfalls nicht.
 #[test]
-#[ignore = "Befund G1-C2: Werte im DecodeParms-Dictionary als Verweis werden nicht aufgelöst"]
 fn befund_werte_im_parms_dictionary_als_verweis() {
     for key in ["Columns", "Predictor"] {
         let mut d = page(&[]);
@@ -274,7 +276,6 @@ fn befund_werte_im_parms_dictionary_als_verweis() {
 /// Bericht zählt 0 geschwärzte Bilder und warnt nicht. Auf derselben Seite
 /// ohne Filter wird das Bild überschrieben.
 #[test]
-#[ignore = "Befund G1-C3: Bild auf ASCIIHex-kodierter Seite wird nicht überschrieben"]
 fn befund_bild_auf_hex_kodierter_seite_bleibt_unveraendert() {
     const PIXELS: [u8; 4] = [0x80, 0x80, 0x80, 0x80];
     for encoded in [false, true] {
@@ -307,7 +308,9 @@ fn befund_bild_auf_hex_kodierter_seite_bleibt_unveraendert() {
                 0,
                 redact_core::Rect::new(72.0, 500.0, 272.0, 600.0),
                 None,
-                Source::Manual { reason: "Bild".into() },
+                Source::Manual {
+                    reason: "Bild".into(),
+                },
             ),
             Action::Blackout,
         );

@@ -22,7 +22,10 @@
 //! die sichere Richtung, und sie wird **gesagt**: liegt das Formular auf
 //! mehreren Seiten, meldet [`warn_about_shared_form`] die betroffenen. Sonst
 //! ändert sich eine Seite, die niemand ausgewählt hat, stillschweigend — in
-//! einer Datei, die danach weitergegeben wird.
+//! einer Datei, die danach weitergegeben wird. Und die Spiegel über dem
+//! Formular gehen auf **allen** diesen Seiten mit: die Seiten werden erst
+//! neu geschrieben, wenn alle Formularpläne feststehen (siehe
+//! [`PendingPage`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -375,8 +378,14 @@ impl PdfRedactor {
         let pages: Vec<ObjectId> = doc.get_pages().values().copied().collect();
         let mut form_plans: BTreeMap<ObjectId, BTreeMap<usize, Plan>> = BTreeMap::new();
         // Textspiegel in Form-XObjects: gefunden beim Scan der Seite, geleert
-        // erst beim einmaligen Neuschreiben des Formulars.
+        // erst beim einmaligen Neuschreiben des Formulars. Gesammelt von
+        // **jeder** Seite, auch der ohne Schwärzung — das Formular darunter
+        // kann von einer anderen Seite aus geschwärzt werden.
         let mut form_marked: BTreeMap<ObjectId, Vec<MarkedTextRecord>> = BTreeMap::new();
+        let mut form_marked_seen: BTreeSet<(ObjectId, usize)> = BTreeSet::new();
+        // Seiten, die neu zu schreiben sind — erst nach der Formularschleife,
+        // siehe [`PendingPage`].
+        let mut pending_pages: Vec<PendingPage> = Vec::new();
         // Welche Seiten benutzen welches Form-XObject. Ein Formular wird nur
         // **einmal** neu geschrieben; steht es auf mehreren Seiten, wirkt die
         // Schwärzung dort mit. Das muss gesagt werden — siehe
@@ -432,11 +441,36 @@ impl PdfRedactor {
             }
             // Vor dem `continue`: gerade die Seiten **ohne** Schwärzung sind
             // die, die von einem geteilten Formular unversehens getroffen
-            // werden.
+            // werden — samt den Spiegeln darüber, im Seitenstrom wie in den
+            // Formularen selbst.
             for form_id in scan.form_placements.keys() {
                 form_pages.entry(*form_id).or_default().insert(page_index);
             }
+            for record in &scan.marked {
+                if let StreamKey::Form(id) = record.stream {
+                    if form_marked_seen.insert((id, record.op_index)) {
+                        form_marked.entry(id).or_default().push(record.clone());
+                    }
+                }
+            }
+            // Spiegel im Seitenstrom über einem Formular: ob sie zu leeren
+            // sind, entscheidet sich erst, wenn alle Seiten gelesen sind.
+            let mut deferred: Vec<MarkedTextRecord> = scan
+                .marked
+                .iter()
+                .filter(|record| record.stream == StreamKey::Page && !record.forms.is_empty())
+                .cloned()
+                .collect();
             if page_redactions.is_empty() {
+                if !deferred.is_empty() {
+                    pending_pages.push(PendingPage {
+                        index: page_index,
+                        id: *page_id,
+                        plans: BTreeMap::new(),
+                        mirrors: MirrorFixes::default(),
+                        deferred,
+                    });
+                }
                 continue;
             }
             // Entartete Bereiche fliegen raus, ihr Index bleibt aber erhalten:
@@ -468,44 +502,34 @@ impl PdfRedactor {
             report.removed_glyphs += page_plans.values().map(Plan::hidden_count).sum::<usize>();
             add_per_redaction(&mut report, page_plans.values());
 
-            // Textspiegel in Formularen werden erst später fällig — dort sind
-            // die Pläne erst nach der letzten Seite vollständig.
-            for record in &scan.marked {
-                if let StreamKey::Form(id) = record.stream {
-                    let known = form_marked.entry(id).or_default();
-                    if !known.iter().any(|k| k.op_index == record.op_index) {
-                        known.push(record.clone());
-                    }
-                }
-            }
+            // Die Spiegel über den eigenen Glyphen dieser Seite (und über den
+            // bis hierher bekannten Formularplänen) sind jetzt entscheidbar.
             let mut mirrors =
                 mirrors_to_clear(&scan.marked, StreamKey::Page, &page_plans, &form_plans);
-            property_objects.append(&mut mirrors.objects);
             for warning in std::mem::take(&mut mirrors.warnings) {
                 push_warning(&mut report, warning);
             }
+            deferred.retain(|record| !mirrors.covers(record));
 
-            let inline = inline_images
-                .get(&InlineTarget::Page(*page_id))
-                .unwrap_or(&no_inline);
-            self.rewrite_page(
-                doc,
-                *page_id,
-                &page_plans,
-                inline,
-                &mirrors.inline,
-                &page_redactions,
-                &mut report,
-                &mut content_users,
-            )?;
             let mut lost = Vec::new();
             report.removed_annotations +=
                 remove_annotations(doc, page_index, *page_id, &rects, &mut lost)?;
             report.removed_annotation_details.append(&mut lost);
+            pending_pages.push(PendingPage {
+                index: page_index,
+                id: *page_id,
+                plans: page_plans,
+                mirrors,
+                deferred,
+            });
         }
 
         // Form-XObjects werden einmalig neu geschrieben — auch die, in denen
-        // nur ein Inline-Bild zu ersetzen ist und kein Zeichen entfällt.
+        // nur ein Inline-Bild zu ersetzen ist und kein Zeichen entfällt, und
+        // die, deren einziger Anteil ein Spiegel über einem **inneren**
+        // Formular ist, das Zeichen verliert (`/Span <</ActualText …>> BDC
+        // /Fm1 Do EMC` in `Fm0`, die Glyphen in `Fm1`; Befund G1-A1).
+        // `forms` ist transitiv geschlossen, ein Durchgang genügt.
         let form_ids: BTreeSet<ObjectId> = form_plans
             .keys()
             .copied()
@@ -513,6 +537,16 @@ impl PdfRedactor {
                 InlineTarget::Form(id) => Some(*id),
                 InlineTarget::Page(_) => None,
             }))
+            .chain(
+                form_marked
+                    .iter()
+                    .filter(|(_, records)| {
+                        records
+                            .iter()
+                            .any(|record| touches_form_plan(record, &form_plans))
+                    })
+                    .map(|(id, _)| *id),
+            )
             .collect();
         for form_id in form_ids {
             let plans = form_plans.get(&form_id).unwrap_or(&no_plans);
@@ -537,6 +571,47 @@ impl PdfRedactor {
                 push_warning(&mut report, warning);
             }
             rewrite_form(doc, form_id, plans, inline, &mirrors.inline)?;
+        }
+
+        // Jetzt erst die Seiten: die Formularpläne sind vollständig, also
+        // steht für jeden Spiegel über einem Formular fest, ob er weg muss —
+        // auch auf einer Seite, für die niemand eine Schwärzung angefordert
+        // hat (Befund G1-A2).
+        for pending in pending_pages {
+            let PendingPage {
+                index,
+                id: page_id,
+                plans,
+                mut mirrors,
+                deferred,
+            } = pending;
+            let mut late = mirrors_to_clear(&deferred, StreamKey::Page, &plans, &form_plans);
+            mirrors.inline.append(&mut late.inline);
+            mirrors.objects.append(&mut late.objects);
+            for warning in late.warnings {
+                push_warning(&mut report, warning);
+            }
+            property_objects.append(&mut mirrors.objects);
+            let page_redactions: Vec<&Redaction> = by_page
+                .get(&index)
+                .map(|list| list.iter().map(|(_, r)| *r).collect())
+                .unwrap_or_default();
+            if page_redactions.is_empty() && mirrors.inline.is_empty() {
+                continue;
+            }
+            let inline = inline_images
+                .get(&InlineTarget::Page(page_id))
+                .unwrap_or(&no_inline);
+            self.rewrite_page(
+                doc,
+                page_id,
+                &plans,
+                inline,
+                &mirrors.inline,
+                &page_redactions,
+                &mut report,
+                &mut content_users,
+            )?;
         }
 
         // Zum Schluss die Eigenschaftslisten, die als eigene Objekte in der
@@ -995,6 +1070,55 @@ struct MirrorFixes {
     warnings: Vec<String>,
 }
 
+impl MirrorFixes {
+    /// Ist der Spiegel dieses Abschnitts hiermit schon erledigt?
+    fn covers(&self, record: &MarkedTextRecord) -> bool {
+        self.inline.contains_key(&record.op_index)
+            || record
+                .property_id
+                .is_some_and(|id| self.objects.contains(&id))
+    }
+}
+
+/// Eine Seite, die neu zu schreiben ist — **nach** der Formularschleife.
+///
+/// Ein Spiegel im Seitenstrom über einem Formular ist erst entscheidbar, wenn
+/// alle Seiten gelesen sind: das Formular kann von einer späteren Seite aus
+/// Zeichen verlieren (Befund G1-A2: ein Formular auf Seite 1 und 2, unter
+/// einem Spiegel auf Seite 1, geschwärzt nur auf Seite 2 — die Glyphen
+/// verschwanden auf beiden Seiten, der Spiegel auf Seite 1 blieb mit dem
+/// Geheimnis stehen). Eine Seite zweimal neu zu schreiben ginge nicht: die
+/// Operationsindizes der Spiegel gelten nur für den unveränderten Strom.
+/// Deshalb wird beim Lesen nur gesammelt, was die Seite schon weiß, und
+/// geschrieben wird, wenn die Formularpläne vollständig sind.
+///
+/// Gespeichert wird nur, was je Seite klein ist: die Pläne der getroffenen
+/// Textoperationen, die schon entschiedenen Spiegel und die noch offenen
+/// Abschnitte über Formularen. Eine Seite ohne Schwärzung und ohne solchen
+/// Abschnitt steht gar nicht hier.
+struct PendingPage {
+    index: usize,
+    id: ObjectId,
+    plans: BTreeMap<usize, Plan>,
+    /// Beim Lesen der Seite schon entschieden.
+    mirrors: MirrorFixes,
+    /// Abschnitte über Formularen, die beim Lesen der Seite noch nicht berührt
+    /// waren — nach der Formularschleife neu befragt.
+    deferred: Vec<MarkedTextRecord>,
+}
+
+/// Verliert eines der Formulare im Geltungsbereich dieses Abschnitts Zeichen?
+fn touches_form_plan(
+    record: &MarkedTextRecord,
+    form_plans: &BTreeMap<ObjectId, BTreeMap<usize, Plan>>,
+) -> bool {
+    record.forms.iter().any(|(_, form)| {
+        form_plans
+            .get(form)
+            .is_some_and(|plans| plans.values().any(|plan| plan.hidden_count() > 0))
+    })
+}
+
 /// Entscheidet je Marked-Content-Abschnitt, ob sein Textspiegel weg muss.
 ///
 /// **Warum über den vorhandenen `Plan`-Mechanismus und nicht über einen eigenen
@@ -1022,9 +1146,11 @@ struct MirrorFixes {
 /// `/Span <</ActualText (IBAN …)>> BDC /Fm0 Do EMC` setzt seine Glyphen im
 /// Formular; wer nur `shows` fragte, ließe den Spiegel im Seitenstrom stehen,
 /// während die Glyphen im Formular verschwinden — gelesen, aber nicht
-/// geleert, und das wäre ein neues Leck. Bekannte Grenze: ein Formular, das
-/// erst eine spätere Seite trifft, lässt den Spiegel dieser Seite stehen;
-/// [`warn_about_shared_form`] meldet den Fall.
+/// geleert, und das wäre ein neues Leck. Damit das auch für ein Formular
+/// gilt, das erst eine **spätere** Seite trifft, werden die Seiten erst nach
+/// der Formularschleife geschrieben ([`PendingPage`]); und ein Formular,
+/// dessen Spiegel über einem inneren Formular steht, wird dafür selbst neu
+/// geschrieben, auch wenn es keinen eigenen Plan hat (Befund G1-A1).
 fn mirrors_to_clear(
     marked: &[MarkedTextRecord],
     stream: StreamKey,
@@ -1032,8 +1158,6 @@ fn mirrors_to_clear(
     form_plans: &BTreeMap<ObjectId, BTreeMap<usize, Plan>>,
 ) -> MirrorFixes {
     let mut fixes = MirrorFixes::default();
-    let loses_glyphs =
-        |plans: &BTreeMap<usize, Plan>| plans.values().any(|plan| plan.hidden_count() > 0);
     for record in marked {
         if record.stream != stream {
             continue;
@@ -1042,10 +1166,7 @@ fn mirrors_to_clear(
             .shows
             .iter()
             .any(|index| plans.get(index).is_some_and(|plan| plan.hidden_count() > 0))
-            || record
-                .forms
-                .iter()
-                .any(|(_, form)| form_plans.get(form).is_some_and(loses_glyphs));
+            || touches_form_plan(record, form_plans);
         if !touched {
             continue;
         }
@@ -2319,6 +2440,102 @@ mod tests {
                 assert_eq!(vereinigt, runs_of(a | b, width), "Form von {a:b} | {b:b}");
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Befund G2-7: eine Annotation ohne Erscheinungsstrom
+    // -----------------------------------------------------------------------
+
+    /// Eine Annotation mit Text unter `key`, ohne `/AP`, an der Seite.
+    fn fixture_with_bare_annotation(key: &str) -> Fixture {
+        let mut f = fixture();
+        f.set_content(&text_ops(&["Kontoinhaber Max Mustermann"]));
+        let mut annot = dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Text",
+            "Rect" => vec![72.into(), 600.into(), 300.into(), 620.into()],
+        };
+        annot.set(key, Object::string_literal(format!("Notiz: {SECRET}")));
+        let annot = f.doc.add_object(annot);
+        f.doc
+            .get_dictionary_mut(f.page_id)
+            .unwrap()
+            .set("Annots", vec![Object::Reference(annot)]);
+        f
+    }
+
+    /// Die Warnung sagt, was geschieht: nicht anteilig geschwärzt, sondern
+    /// mit den Metadaten als Ganzes entfernt — und genau das ist an der
+    /// Ausgabe messbar. Sie sagt nicht mehr „nicht durchsucht“, denn das las
+    /// `redact_pipeline::coverage` als Deckungslücke (Rückgabewert 3) für
+    /// eine Datei, in der nach `strip_metadata` nichts mehr steht.
+    #[test]
+    fn annotation_ohne_ap_wird_als_ganzes_entfernt_und_so_gemeldet() {
+        for key in ["Contents", "RC", "T", "Subj", "TU", "TM"] {
+            let mut f = fixture_with_bare_annotation(key);
+            let (report, bytes) = f.redact(&[]);
+            let about_annotation: Vec<&String> = report
+                .warnings
+                .iter()
+                .filter(|w| w.contains("Erscheinungsstrom (/AP)"))
+                .collect();
+            assert_eq!(about_annotation.len(), 1, "/{key}: {:?}", report.warnings);
+            assert!(
+                about_annotation[0].contains("wird mit den Metadaten als Ganzes entfernt"),
+                "/{key}: {}",
+                about_annotation[0]
+            );
+            assert!(
+                !report
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("nicht durchsucht")),
+                "/{key}: {:?}",
+                report.warnings
+            );
+            let found = crate::leaks(&bytes, SECRET);
+            assert!(found.is_empty(), "/{key}: {found:?}");
+        }
+    }
+
+    /// Gegenrichtung: dieselbe Annotation **mit** Erscheinungsstrom gibt
+    /// diese Warnung nicht — ihr Text wird gelesen wie Seitentext.
+    #[test]
+    fn annotation_mit_ap_bekommt_die_warnung_nicht() {
+        let mut f = fixture_with_bare_annotation("Contents");
+        let font_id = f.font_id;
+        let ap = f.doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 228.into(), 20.into()],
+                "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+            },
+            b"BT /F1 10 Tf 2 5 Td (Notiz) Tj ET".to_vec(),
+        ));
+        let annot_id = match f
+            .doc
+            .get_dictionary(f.page_id)
+            .unwrap()
+            .get(b"Annots")
+            .unwrap()
+        {
+            Object::Array(items) => items[0].as_reference().unwrap(),
+            other => panic!("{other:?}"),
+        };
+        f.doc
+            .get_dictionary_mut(annot_id)
+            .unwrap()
+            .set("AP", dictionary! { "N" => ap });
+        let (report, _) = f.redact(&[]);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Erscheinungsstrom (/AP)")),
+            "{:?}",
+            report.warnings
+        );
     }
 
     /// Die Läufe wachsen mit dem, was **getroffen** ist — nicht mit der Länge

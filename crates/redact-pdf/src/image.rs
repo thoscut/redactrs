@@ -352,9 +352,11 @@ pub fn page_has_images(doc: &Document, page_id: ObjectId) -> bool {
     // spart bei jeder bildlosen Seite das vollständige Parsen; entschieden
     // wird trotzdem am dekodierten Strom, damit ein `(BI)` in einer
     // Zeichenkette keinen Fehlalarm auslöst.
-    let Ok(data) = doc.get_page_content(page_id) else {
-        return false;
-    };
+    //
+    // Über [`crate::filters::page_content`], nicht `Document::get_page_content`:
+    // `lopdf` kennt weder `ASCIIHexDecode` noch `RunLengthDecode` und ließe
+    // eine so kodierte Seite als Rohbytes stehen — ohne ein einziges `BI`.
+    let data = crate::filters::page_content(doc, page_id);
     if !data.windows(2).any(|pair| pair == b"BI") {
         return false;
     }
@@ -580,9 +582,11 @@ fn scan_page_images(
     page_id: ObjectId,
     zones: &[Zone],
 ) -> Result<(Vec<Placement>, BTreeSet<ObjectId>)> {
-    let Ok(data) = doc.get_page_content(page_id) else {
-        return Ok((Vec::new(), BTreeSet::new()));
-    };
+    // Derselbe Dekoder wie beim Schwärzen des Textes (`content.rs`): auf einer
+    // `/ASCIIHexDecode`-kodierten Seite fand `Document::get_page_content`
+    // kein `Do`, das Bild unter der Schwärzung blieb unverändert, und der
+    // Bericht zählte 0 geschwärzte Bilder ohne Warnung (Befund G1-C3).
+    let data = crate::filters::page_content(doc, page_id);
     let operations = crate::ops::decode_content(&data);
     let resources = crate::content::page_resources(doc, page_id);
     let mut collector = Collector {

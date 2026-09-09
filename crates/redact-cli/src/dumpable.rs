@@ -47,13 +47,14 @@
 //! |---|---|---|
 //! | Linux | `prctl(PR_SET_DUMPABLE, 0)` | Der Kernel schreibt gar nichts, `root` eingeschlossen. |
 //! | macOS, BSD, übrige Unix | `setrlimit(RLIMIT_CORE, 0)` | Schwächer: eine Grenze, kein Verbot. Wer den Prozess mit angehobener Grenze startet, ändert daran nichts — sie wird hier gesetzt, nicht geerbt —, aber ein `core_pattern`, das an ein Programm weiterreicht, kann sie je nach System übergehen. |
-//! | Windows | **keins** | Ein Prozess kann sich dem Abbild nicht entziehen; `MiniDumpWriteDump` liegt beim Aufrufer, nicht beim Ziel. |
+//! | Windows | **nicht umgesetzt** | Ein Mittel gäbe es: `WerAddExcludedApplication` nimmt den Prozess aus der Windows-Fehlerberichterstattung (WER) und damit aus deren Abbildern. Dieses Programm ruft es nicht auf. Ein Abbild, das ein *anderer* Prozess zieht (`MiniDumpWriteDump`, ein Debugger), bliebe davon ohnehin unberührt. |
 //!
 //! Die Windows-Zeile ist die unangenehme: dort sitzt die Zielgruppe dieses
-//! Werkzeugs. Deshalb sagt [`CoreDumps::Unavailable`] das auch aus, statt
-//! Erfolg zu melden — eine Funktion, die auf drei Systemen `true` liefert und
-//! nur auf einem etwas tut, wäre genau die Sorte Zusage, gegen die dieses
-//! Projekt arbeitet. Das Restrisiko steht ausgeschrieben in `SECURITY.md`.
+//! Werkzeugs, und dort ist **nichts** umgesetzt. Deshalb sagt
+//! [`CoreDumps::Unavailable`] das auch aus, statt Erfolg zu melden — eine
+//! Funktion, die auf drei Systemen `true` liefert und nur auf einem etwas
+//! tut, wäre genau die Sorte Zusage, gegen die dieses Projekt arbeitet. Das
+//! Restrisiko steht ausgeschrieben in `SECURITY.md`.
 //!
 //! ## Die eine Ausnahme von `unsafe`
 //!
@@ -89,7 +90,8 @@
 /// Lauf eine Warnung zu drucken, die niemand befolgen kann — und unter `true`
 /// hieße es, Schutz zu behaupten, den es dort nicht gibt.
 ///
-/// Auf einem System ohne Mittel (Windows) liefert [`deny_core_dumps`] nur
+/// Auf einem System, auf dem nichts umgesetzt ist (Windows), liefert
+/// [`deny_core_dumps`] nur
 /// [`CoreDumps::Unavailable`]; `Disabled` und `Failed` werden dort nie gebaut,
 /// und `clippy -D warnings` hielte das für toten Code. Die beiden Zustände
 /// sind aber die Wahrheit über Linux und die übrigen Unix — ein Enum je System
@@ -101,10 +103,11 @@ pub enum CoreDumps {
     /// Abgeschaltet. Der Klartext des Dokuments landet bei einem Absturz
     /// nicht auf der Platte.
     Disabled,
-    /// Dieses System bietet kein Mittel dagegen. Zwei Fälle: Windows kennt
-    /// von vornherein keines, und ein Unix-Kern kann die Option abgelehnt
-    /// haben (`EINVAL`/`ENOSYS` — etwa unter einem Filter, der `prctl`
-    /// beschneidet).
+    /// Hier ist nichts abgeschaltet worden. Zwei Fälle: unter Windows ist
+    /// nichts umgesetzt (das Mittel dort, `WerAddExcludedApplication`, ruft
+    /// dieses Programm nicht auf), und ein Unix-Kern kann die Option
+    /// abgelehnt haben (`EINVAL`/`ENOSYS` — etwa unter einem Filter, der
+    /// `prctl` beschneidet).
     ///
     /// Getrennt von [`CoreDumps::Failed`], weil es zwei verschiedene
     /// Nachrichten sind: hier ist nichts kaputt, es gibt nur nichts zu
@@ -197,8 +200,8 @@ mod tests {
     /// * **übrige Unix** nur `!= Failed` — `setrlimit` kann unter einem
     ///   Syscall-Filter ehrlich `Unavailable` melden, und das ist kein
     ///   Fehler des Programms.
-    /// * **nicht Unix** (Windows) genau `Unavailable` — dort gibt es kein
-    ///   Mittel, und die Funktion darf das nicht als Erfolg ausgeben.
+    /// * **nicht Unix** (Windows) genau `Unavailable` — dort ist nichts
+    ///   umgesetzt, und die Funktion darf das nicht als Erfolg ausgeben.
     ///
     /// Eine frühere Fassung verlangte überall `Disabled`; der Windows-Job
     /// der CI war damit rot, obwohl die Funktion dort genau das tat, was
@@ -233,7 +236,7 @@ mod tests {
         assert_eq!(
             result,
             CoreDumps::Unavailable,
-            "auf einem System ohne Mittel darf die Funktion keinen Schutz behaupten"
+            "wo nichts umgesetzt ist, darf die Funktion keinen Schutz behaupten"
         );
     }
 }

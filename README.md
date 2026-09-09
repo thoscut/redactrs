@@ -286,7 +286,9 @@ redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
       --padding <PUNKT>       Rand um jede Schwärzung (Standard: 1.0)
       --allow-undecodable-images  nicht dekodierbare Bilder durchgehen lassen
                                   (UNSICHER — siehe unten)
-      --max-decompressed-mb <MB>  Budget für alle entpackten Streams (1024)
+      --max-decompressed-mb <MB>  Budget für alle entpackten Streams (1024);
+                                  bei --check-leaks auch das Budget der Suche
+                                  (darüber: NICHT GEPRÜFT, rc 3)
       --max-parsed-mb <MB>        davon für alles, woraus PDF-Syntax wird (16):
                                   geparste Streams UND der Rumpf der Datei
                                   (Objektköpfe, Dictionaries, xref)
@@ -296,7 +298,7 @@ redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
       --check-leaks <TEXT>    NACHPRÜFEN statt schwärzen: steht dieser Text
                               noch in der Datei? Mehrfach angebbar; „-“ liest
                               die Begriffe zeilenweise von stdin. Rückgabewert
-                              3 bei einem Fund (siehe Prüfen)
+                              3 bei Fund oder nicht geprüfter Stelle (siehe Prüfen)
       --gui                   grafische Oberfläche starten
       --list-patterns         eingebaute Muster auflisten
       --write-demo <PDF>      Beispieldatei erzeugen
@@ -1273,7 +1275,7 @@ nichts nach.
 | Wert | heißt |
 |---|---|
 | `0` | Keiner der Begriffe steht noch in der Datei. **Kein Freibrief** — siehe unten. |
-| `3` | Mindestens einer steht noch darin. Der Lauf ist gelungen, das *Ergebnis* nicht. |
+| `3` | Mindestens einer steht noch darin — **oder** eine Stelle konnte nicht geprüft werden (`NICHT GEPRÜFT: …`, siehe unten). Der Lauf ist gelungen, das *Ergebnis* nicht. |
 | `1` | Verarbeitungsfehler: die Datei ist keine PDF-Datei, nicht lesbar, zu groß oder verschlüsselt. |
 | `2` | Bedienfehler: kein Suchbegriff, mehr als eine Datei, oder ein Schalter, der nicht dazugehört. |
 
@@ -1335,6 +1337,19 @@ Lesen und Vorprüfen jeder fremden Datei. Eine **verschlüsselte** Datei wird
 abgelehnt statt durchsucht: darin stehen die Zeichenketten verschlüsselt, eine
 Bytesuche fände auch dann nichts, wenn das Geheimnis noch darin steht — und
 „nichts gefunden“ wäre hier die falscheste aller Antworten.
+
+**Die Suche hat ein Budget, und sie sagt, was nicht hineinpasste.** Mehr als
+`--max-decompressed-mb` (Vorgabe 1024 MB) packt sie in Summe nicht aus —
+dieselbe Einheit wie beim Schwärzen, je Sicht der Suche (Rohsicht,
+Objektsicht) einmal. Ein Strom, der das Restbudget sprengte, wird nicht
+entpackt; er ist weder Fund noch „nicht gefunden“: er steht als
+`NICHT GEPRÜFT: …` in der Ausgabe, und der Lauf endet **mit Rückgabewert `3`
+auch ohne Fund** — „Ergebnis: 1 Stelle(n) nicht geprüft — die Antwort ist
+unvollständig.“ Ein `--check-leaks … && versenden` verschickt so keine Datei,
+deren größter Strom nie aufgemacht wurde. Wer die Stelle prüfen will, hebt den
+Schalter. (Eine Datei, deren als Flate ausgewiesene Ströme *in Summe* über dem
+Budget liegen, kommt gar nicht so weit: die Vorprüfung lehnt sie wie beim
+Schwärzen mit Rückgabewert `1` ab, bevor irgendetwas ausgepackt wird.)
 
 **Höchstens 1 000 Begriffe je Aufruf.** Jeder Begriff kostet einen Vergleich
 über die ganze Datei; eine Liste in Millionenhöhe liefe Stunden und sähe von
@@ -2102,7 +2117,7 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   | Katalog | `/Outlines` — die Lesezeichen; jeder `/Title` ist frei wählbarer Text („Kontoauszug DE89 …“) |
   | jede Seite | `/Metadata`, `/PieceInfo`, `/StructParents`, `/AA` |
   | jede Seite | Annotationen vom Typ `/FileAttachment` — ein Dateianhang klebt nicht nur im `/Names`-Baum |
-  | jede verbliebene Annotation | die Aktionen `/A` und `/AA` (`/URI`, `/F`, `/JS` tragen Klartext) und ein benanntes `/Dest`; ein ausdrückliches Ziel (`[Seite /XYZ x y z]`) bleibt, auch hinter einem Verweis. Dazu die Klartexte `/Contents`, `/RC`, `/T`, `/Subj` und an einem Widget `/TU` (der Tooltip) und `/TM` (der Exportname) — was eine Annotation *zeichnet* (`/AP`), geht wie Seitentext durch die Schwärzung |
+  | jede verbliebene Annotation **und alles, was sie erreichbar hält** (`/Popup`, `/Parent`-Kette, `/Kids`, `/IRT`) | die Aktionen `/A`, `/AA`, `/PA` und ein benanntes `/Dest` (ein ausdrückliches Ziel bleibt, auch hinter einem Verweis — ein Verweis im Feld muss auf eine Seite führen); die Klartexte `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`, `/OverlayText`, `/NM`, `/DS` und die `/MK`-Beschriftungen. **Nicht** `/DA` (benannte Lücke, siehe `SECURITY.md`) — was eine Annotation *zeichnet* (`/AP`), geht wie Seitentext durch die Schwärzung |
 
   Preis: benannte Sprünge, Lesezeichen und Verweise ins Netz funktionieren
   danach nicht mehr, und aus einem Formular wird ein totes Blatt Papier. Das ist die sichere Richtung.
@@ -2138,11 +2153,13 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
 * **Kein Kernabzug: unter Linux.** Stürzt der Prozess ab, schriebe der Kernel
   sonst den ganzen Arbeitsspeicher weg — samt Klartext des Dokuments und
   eingegebenem Passwort. `redact-rs` schaltet das als erste Anweisung in `main`
-  ab. **Unter Windows gibt es dafür kein Gegenstück, unter macOS tut der Aufruf
-  nichts**; die Einschränkung gehört zur Zusage dazu und steht ausgeschrieben in
+  ab (`prctl(PR_SET_DUMPABLE, 0)`). **Unter macOS, BSD und den übrigen
+  Unix-Systemen setzt es stattdessen `setrlimit(RLIMIT_CORE, 0)` — eine Grenze,
+  kein Verbot. Unter Windows ist nichts umgesetzt**; die Einschränkung gehört
+  zur Zusage dazu und steht ausgeschrieben in
   [`SECURITY.md`](SECURITY.md#kein-kernabzug-dieses-prozesses). Dort steht auch
-  der Nebeneffekt: der Prozess ist danach für `ptrace` durch denselben Benutzer
-  unerreichbar.
+  der Nebeneffekt: der Prozess ist danach unter Linux für `ptrace` durch
+  denselben Benutzer unerreichbar.
 * Review-Datei und Audit-Log entstehen unter Unix mit Modus `0600` — **in
   beiden Programmen**. Sie gehen durch denselben Schreibpfad
   (`redact_pipeline::write_review_file` bzw. `AuditLog::write`, beide über

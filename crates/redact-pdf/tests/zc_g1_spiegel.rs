@@ -1,8 +1,10 @@
 //! Gegenprüfung G1 (Fix-Runde 3), Gebiet A: Textspiegel über Formularen.
 //!
-//! Grüne Tests belegen, was die Korrektur hält; die mit `#[ignore]`
-//! markierten Tests sind **Befunde** — sie sind rot am Stand `76bdcf9` und
-//! bleiben rot, bis die Ursache behoben ist (`cargo test … -- --ignored`).
+//! Grüne Tests belegen, was die Korrektur hält. Die als **Befunde**
+//! markierten Tests waren rot am Stand `76bdcf9` und sind seit Fix-Runde 4
+//! scharf: `redact::PendingPage` (Seiten werden nach der Formularschleife
+//! geschrieben), die erweiterte `form_ids`-Menge und der `Do`-Pfad in
+//! `MarkedTextRecord::forms`.
 //!
 //! Orakel ist [`redact_pdf::leaks`] auf der gespeicherten Datei, nie der
 //! Extraktor allein; die Extraktion liefert nur die Warnungen und die Läufe,
@@ -59,7 +61,10 @@ fn redactions_for(runs: &[TextRun], needle: &str, only_page: Option<usize>) -> V
 }
 
 fn mirror_warnings(warnings: &[String]) -> Vec<&String> {
-    warnings.iter().filter(|w| w.contains("Textspiegel")).collect()
+    warnings
+        .iter()
+        .filter(|w| w.contains("Textspiegel"))
+        .collect()
 }
 
 /// Form-XObject `name` mit `body`, in `resources` eingetragen. Die Ressourcen
@@ -99,7 +104,10 @@ fn text_form(body: &str) -> String {
 
 /// Weitere Seite mit eigenem Inhalt und den Ressourcen von Seite 1.
 fn add_page(d: &mut Doc, content: &[u8]) -> ObjectId {
-    let content_id = d.add(Object::Stream(Stream::new(dictionary! {}, content.to_vec())));
+    let content_id = d.add(Object::Stream(Stream::new(
+        dictionary! {},
+        content.to_vec(),
+    )));
     let resources = d.resources_id;
     let pages_id = d.pages_id;
     let page_id = d.add(Object::Dictionary(dictionary! {
@@ -179,7 +187,12 @@ fn formular_zweimal_platziert_einmal_im_spiegel() {
 fn formular_zweimal_platziert_ehrlich_bleibt_still() {
     let mut d = page(&[]);
     let r = d.resources_id;
-    add_form(&mut d, r, "Fm0", &text_form(&format!("(IBAN: {SECRET}) Tj")));
+    add_form(
+        &mut d,
+        r,
+        "Fm0",
+        &text_form(&format!("(IBAN: {SECRET}) Tj")),
+    );
     d.set_content(
         format!(
             "q 1 0 0 1 0 -100 cm /Fm0 Do Q\n/Span << /ActualText (IBAN: {SECRET}) >> BDC /Fm0 Do EMC\n"
@@ -303,8 +316,111 @@ fn gewoehnliche_getaggte_datei_bleibt_still() {
     assert!(report_warnings.is_empty(), "{report_warnings:?}");
 }
 
+/// Befund G1-A1 über Seitengrenzen: `Fm0` (Spiegel über `/Fm1 Do`) steht
+/// nur auf Seite 1, für die niemand eine Schwärzung anfordert; `Fm1` steht
+/// zusätzlich unmittelbar auf Seite 2 und wird dort geschwärzt. Der Spiegel
+/// in `Fm0` muss trotzdem weg — die Spiegel der Formulare werden von jeder
+/// Seite gesammelt, nicht nur von denen mit Schwärzung.
+#[test]
+fn spiegel_im_formular_auf_seite_ohne_schwaerzung_wird_geleert() {
+    let mut d = page(&[]);
+    let r = d.resources_id;
+    let (_, outer_resources) = add_form(
+        &mut d,
+        r,
+        "Fm0",
+        &format!("/Span << /ActualText (IBAN: {SECRET}) >> BDC /Fm1 Do EMC"),
+    );
+    let (inner, _) = add_form(
+        &mut d,
+        outer_resources,
+        "Fm1",
+        &text_form(&format!("(IBAN: {SECRET}) Tj")),
+    );
+    // `Fm1` auch unmittelbar erreichbar, für Seite 2.
+    let page_resources = d.doc.get_dictionary_mut(r).expect("Resources");
+    let mut xobjects = page_resources
+        .get(b"XObject")
+        .and_then(|o| o.as_dict())
+        .cloned()
+        .expect("XObject");
+    xobjects.set("Fm1", inner);
+    page_resources.set("XObject", xobjects);
+    d.set_content(b"/Fm0 Do\n");
+    add_page(&mut d, b"/Fm1 Do\n");
+    let bytes = d.finish();
+    let (runs, warnings) = analyse(&bytes);
+    assert!(warnings.is_empty(), "ehrlicher Spiegel: {warnings:?}");
+    let redactions = redactions_for(&runs, SECRET, Some(1));
+    assert_eq!(redactions.len(), 1, "nur Seite 2");
+    let (out, _) = pipeline(&bytes, &redactions);
+    let found = leaks(&out, SECRET);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// Befund G1-A2 mit einer Schwärzung **auch** auf der Spiegelseite: Seite 1
+/// verliert eigenen Text (und wird deshalb neu geschrieben), das Formular
+/// unter ihrem Spiegel wird aber erst von Seite 2 aus getroffen. Die Seite
+/// darf nicht mit dem Stand geschrieben werden, den sie beim Lesen kannte.
+#[test]
+fn spiegel_auf_geschwaerzter_seite_ueber_spaeter_getroffenem_formular() {
+    let mut d = page(&[]);
+    let r = d.resources_id;
+    add_form(
+        &mut d,
+        r,
+        "Fm0",
+        &text_form(&format!("(IBAN: {SECRET}) Tj")),
+    );
+    d.set_content(
+        format!(
+            "BT /F1 10 Tf 72 600 Td (Kontoinhaber Max Mustermann) Tj ET\n\
+             /Span << /ActualText (IBAN: {SECRET}) >> BDC /Fm0 Do EMC\n"
+        )
+        .as_bytes(),
+    );
+    add_page(&mut d, b"/Fm0 Do\n");
+    let bytes = d.finish();
+    let (runs, warnings) = analyse(&bytes);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut redactions = redactions_for(&runs, "Mustermann", Some(0));
+    redactions.extend(redactions_for(&runs, SECRET, Some(1)));
+    assert_eq!(redactions.len(), 2, "Name auf Seite 1, IBAN auf Seite 2");
+    let (out, _) = pipeline(&bytes, &redactions);
+    let found = leaks(&out, SECRET);
+    assert!(found.is_empty(), "{found:?}");
+    assert!(leaks(&out, "Mustermann").is_empty());
+}
+
+/// Befund G1-A3 über drei Ebenen: jedes Formular zeichnet erst das innere
+/// und dann eigenen Text; der Spiegel ist deckungsgleich, keine Warnung.
+#[test]
+fn drei_ebenen_inneres_formular_vor_eigenem_text_bleiben_still() {
+    let mut d = page(&[]);
+    let r = d.resources_id;
+    let (_, r0) = add_form(
+        &mut d,
+        r,
+        "Fm0",
+        "/Fm1 Do BT /F1 10 Tf 200 700 Td (0130 00) Tj ET",
+    );
+    let (_, r1) = add_form(
+        &mut d,
+        r0,
+        "Fm1",
+        "/Fm2 Do BT /F1 10 Tf 150 700 Td (0044 0532 ) Tj ET",
+    );
+    add_form(&mut d, r1, "Fm2", &text_form("(IBAN: DE89 3704 ) Tj"));
+    d.set_content(format!("/Span << /ActualText (IBAN: {SECRET}) >> BDC /Fm0 Do EMC\n").as_bytes());
+    let (_, warnings) = analyse(&d.finish());
+    assert!(
+        mirror_warnings(&warnings).is_empty(),
+        "ehrliche Datei: {warnings:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
-// Befunde — rot am Stand 76bdcf9
+// Befunde — rot am Stand 76bdcf9, behoben in Fix-Runde 4
 // ---------------------------------------------------------------------------
 
 /// **Befund G1-A1.** Ein Spiegel **im Formular** `Fm0` über `/Fm1 Do`, die
@@ -315,7 +431,6 @@ fn gewoehnliche_getaggte_datei_bleibt_still() {
 /// mit dem Geheimnis stehen. Gelesen, aber nicht geleert — das neue Leck,
 /// das die Doku zu `mirrors_to_clear` ausschließen wollte.
 #[test]
-#[ignore = "Befund G1-A1: Spiegel im Formular über innerem Formular wird nicht geleert"]
 fn befund_spiegel_im_formular_ueber_innerem_formular_bleibt_stehen() {
     let mut d = page(&[]);
     let r = d.resources_id;
@@ -342,11 +457,15 @@ fn befund_spiegel_im_formular_ueber_innerem_formular_bleibt_stehen() {
 /// einzige Warnung („wirkt deshalb auch auf die anderen Seiten“) steht in
 /// `redact_pipeline::coverage::NOT_A_COVERAGE_GAP`: Rückgabewert 0, Leck.
 #[test]
-#[ignore = "Befund G1-A2: Spiegel auf einer nicht geschwärzten Seite überlebt die Schwärzung des geteilten Formulars"]
 fn befund_geteiltes_formular_spiegel_auf_anderer_seite_bleibt_stehen() {
     let mut d = page(&[]);
     let r = d.resources_id;
-    add_form(&mut d, r, "Fm0", &text_form(&format!("(IBAN: {SECRET}) Tj")));
+    add_form(
+        &mut d,
+        r,
+        "Fm0",
+        &text_form(&format!("(IBAN: {SECRET}) Tj")),
+    );
     d.set_content(format!("/Span << /ActualText (IBAN: {SECRET}) >> BDC /Fm0 Do EMC\n").as_bytes());
     add_page(&mut d, b"/Fm0 Do\n");
     let bytes = d.finish();
@@ -368,7 +487,6 @@ fn befund_geteiltes_formular_spiegel_auf_anderer_seite_bleibt_stehen() {
 /// inneren Formulars (dokumentierte Grenze in `extract::mirror_runs`); die
 /// ehrliche Datei bekommt eine Spiegelwarnung und damit Rückgabewert 3.
 #[test]
-#[ignore = "Befund G1-A3: falsche Spiegelwarnung, wenn ein Formular sein inneres Formular vor dem eigenen Text zeichnet"]
 fn befund_inneres_formular_vor_eigenem_text_gibt_falsche_warnung() {
     let mut d = page(&[]);
     let r = d.resources_id;
