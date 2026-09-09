@@ -211,3 +211,6 @@ pub fn run(config: Config) -> Result<()> {
     )
     .map_err(|e| RedactError::Config(format!("Grafische Oberfläche nicht startbar: {e}")))
 }
+
+#[cfg(test)]
+mod zc_g5_tests;

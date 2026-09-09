@@ -124,6 +124,41 @@ pub fn leaks(pdf_bytes: &[u8], needle: &str) -> Vec<String> {
 /// vorher zehnmal bezahlt: gemessen an einer 792-kB-Datei 0,13 s für einen
 /// Begriff und 0,88 s für zehn. Hier fällt sie einmal an; nur der Vergleich
 /// selbst — der eigentliche Zweck — bleibt je Begriff.
+/// Ergebnis von [`leaks_many_within`]: die Fundstellen je Suchbegriff und die
+/// Stellen, die **nicht** durchsucht wurden, weil das Budget nicht reichte.
+///
+/// `unchecked` leer heißt: jede Sicht ist vollständig gelaufen. Ist es nicht
+/// leer, ist „nicht gefunden“ keine Aussage — der Aufrufer muss das sagen
+/// (Kommandozeile: Rückgabewert 3; Oberfläche: Satz in der Statuszeile).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LeakCheck {
+    /// Je Suchbegriff die Fundstellen, in der Reihenfolge der Eingabe.
+    pub findings: Vec<Vec<String>>,
+    /// Was nicht durchsucht wurde, je Stelle ein Satz (Objekt, Grund).
+    pub unchecked: Vec<String>,
+}
+
+/// [`leaks_many`] mit einem Budget für entpackte Bytes.
+///
+/// `max_decompressed_bytes` ist dieselbe Zahl wie `--max-decompressed-mb`
+/// der Kommandozeile (in Byte): mehr als das wird **je Strom** nicht entpackt,
+/// und ein Strom, der darüber liegt, steht in `unchecked` statt still als
+/// „nicht gefunden“ durchzugehen.
+///
+/// VERTRAG (Fix-Runde 4, Schritt 0): diese Fassung ist ein Platzhalter, der
+/// das Budget noch nicht anwendet. Agent B ersetzt den Rumpf.
+pub fn leaks_many_within(
+    pdf_bytes: &[u8],
+    needles: &[&str],
+    max_decompressed_bytes: u64,
+) -> LeakCheck {
+    let _ = max_decompressed_bytes;
+    LeakCheck {
+        findings: leaks_many(pdf_bytes, needles),
+        unchecked: Vec::new(),
+    }
+}
+
 pub fn leaks_many(pdf_bytes: &[u8], needles: &[&str]) -> Vec<Vec<String>> {
     let mut probe = Probe::new(needles);
     if probe.needles.is_empty() {
@@ -261,7 +296,11 @@ impl Probe {
 }
 
 /// Entfernt jeden Leerraum — beide Seiten eines Vergleichs werden so behandelt.
-fn squeeze(text: &str) -> String {
+///
+/// Öffentlich, damit die Oberfläche ihre Entscheidung „gesucht oder bewusst
+/// stehen gelassen“ auf **derselben** Normalform trifft, auf der hier
+/// gesucht wird (Befund G5-B1: „DE89 3704 …“ und „DE893704…“ sind ein Text).
+pub fn squeeze(text: &str) -> String {
     text.chars().filter(|c| !c.is_whitespace()).collect()
 }
 

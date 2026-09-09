@@ -40,7 +40,7 @@ pub mod ops;
 pub mod redact;
 pub mod testing;
 
-pub use audit_bytes::{leaks, leaks_many};
+pub use audit_bytes::{leaks, leaks_many, leaks_many_within, squeeze, LeakCheck};
 pub use content::{
     interpret, scan_page, ContentSink, GlyphEvent, GlyphItem, ImageEvent, MarkedTextRecord,
     PathEvent, ScanResult, ShowItem, ShowRecord, SinkContext, StreamKey, MIRROR_KEYS,
