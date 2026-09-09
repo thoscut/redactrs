@@ -214,3 +214,6 @@ pub fn run(config: Config) -> Result<()> {
 
 #[cfg(test)]
 mod zc_g5_tests;
+
+#[cfg(test)]
+mod ze_p5_tests;
