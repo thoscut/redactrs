@@ -1138,6 +1138,42 @@ fn zb_mess_nachpruefung_je_begriff_gegen_einen_durchgang() {
          (versprochen waren ≈ 2 s)",
         small.len() / 1024
     );
+
+    // Dieselbe Datei mit gepackten Strömen: auf der Platte ein Bruchteil, die
+    // Arbeit dieselbe — denn gesucht wird in den **entpackten** Bytes. Die
+    // alte Decke hätte an der gepackten Datei entsprechend mehr Begriffe
+    // zugelassen, bei gleichen Kosten je Begriff.
+    let mut doc = redact_pdf::load_from_bytes(&pdf).unwrap();
+    for (_, object) in doc.objects.iter_mut() {
+        if let lopdf::Object::Stream(stream) = object {
+            let _ = stream.compress();
+        }
+    }
+    let packed = redact_pdf::save_to_bytes(&doc).unwrap();
+    let needles: Vec<&str> = padded.iter().map(String::as_str).collect();
+    let time = |bytes: &[u8]| {
+        (0..3)
+            .map(|_| {
+                let t = Instant::now();
+                let hits = redact_pdf::leaks_many(bytes, &needles);
+                assert_eq!(hits.len(), needles.len());
+                t.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let plain_time = time(&pdf);
+    let packed_time = time(&packed);
+    let budget = 2u64 * 1024 * 1024 * 1024;
+    println!(
+        "gepackt: {} kB statt {} kB (Faktor {:.1}); {MAX_CHECK_NEEDLES} Begriffe: {packed_time:?} \
+         gepackt gegen {plain_time:?} ungepackt; die alte Decke ließ gepackt {} statt {} Begriffe zu",
+        packed.len() / 1024,
+        pdf.len() / 1024,
+        pdf.len() as f64 / packed.len() as f64,
+        budget / packed.len() as u64,
+        budget / pdf.len() as u64
+    );
 }
 
 /// Befund 2: 300 Seiten Kleinbilder — Bytes vorher (nie verworfen) und jetzt.
