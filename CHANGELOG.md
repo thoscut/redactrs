@@ -45,13 +45,108 @@ Runde schließt sie. Drei Klassen kehren wieder: eine Decke zählt die falsche
 Einheit, eine Zusicherung wird an die nächste Stelle mitgenommen, wo sie nicht
 gilt, und ein Test bleibt ohne seine Korrektur grün.
 
-<!-- FIX-RUNDE-3: hier folgen die Sätze der Agenten 1 (Spiegel /ActualText,
-     /Alt, /E über Form-XObjects; nachsichtige Extraktion statt Rückfall;
-     /DecodeParms je Filter), 2 (Objektspeicher aus den Konstanten gerechnet;
-     /TU und /TM an Annotationen; /Dest als Verweis), 3 (Seitenzahl aus
-     Review-JSON und --manual-regions gegen u32 geprüft, saturating_add) und
-     5 (Nachprüfung der Oberfläche in Begriffen gedeckelt; je Text eine
-     Entscheidung). Trägt der Orchestrator nach dem Merge ein. -->
+* **Lesezeichen und Annotationen tragen Klartext — und der ging bis 0.6.0
+  mit.** Nachgetragen: die Korrektur kam in der vorigen Fix-Runde, der Eintrag
+  dazu fehlte. Der `/Title` eines Lesezeichens („Kontoauszug DE89 …“), die
+  Aktionen `/A` und `/AA` einer Annotation (`/URI` mit `mailto:…?subject=DE89 …`,
+  `/F` bei `/GoToR` und `/Launch`, `/JS`), ein benanntes `/Dest` und die
+  Kommentartexte `/Contents`, `/RC`, `/T`, `/Subj` überlebten die Schwärzung
+  mit Rückgabewert 0 — gemessen, `--check-leaks` fand sie alle. Jetzt fällt
+  `/Outlines` ganz, und an jeder verbliebenen Annotation fallen Aktionen und
+  Klartexte; ein ausdrückliches Ziel (`[Seite /XYZ x y z]`, Zahlen und
+  Verweise, kein Text) bleibt. Die Zusammenfassung nennt es: „Lesezeichen
+  (/Outlines)“, „Aktionen oder benannte Ziele an Annotationen (/A, /AA,
+  /Dest)“, „Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU,
+  /TM)“. Preis: Gliederung und Verweise ins Netz oder in andere Dateien
+  funktionieren danach nicht mehr — die sichere Richtung, dieselbe wie bei
+  `/Names` und `/AcroForm`. Tests: `crates/redact-pdf/tests/zb_klartext_traeger.rs`
+  (samt einem zirkulären Lesezeichenbaum, der enden muss).
+* **Annotationen: `/TU` und `/TM` fielen nicht.** Beide stehen nur an
+  Formularfeldern (PDF 32000-1, 12.7.3.1): `/TU` ist der alternative Feldname,
+  den der Betrachter als **Tooltip** zeigt, `/TM` der Exportname — beide frei
+  wählbarer Text, den Formulargeneratoren mit der Beschriftung füllen
+  („Konto von Max Mustermann“). Gemessen: die IBAN im Tooltip überlebte
+  `strip_metadata`, und `leaks` fand sie in der geschriebenen Datei. Jetzt
+  fallen beide mit den übrigen Kommentartexten; `/T` ist an einem
+  Widget der Feldname, nicht der Verfasser. Dazu: ein `/Dest`, das als
+  Verweis geschrieben ist (`/Dest 12 0 R`), wird aufgelöst und über sein
+  **Feld** entschieden — ein ausdrückliches Ziel bleibt jetzt auch in dieser
+  Schreibweise, eine Zeichenkette dahinter fällt weiterhin. Vorher fiel jeder
+  Verweis, obwohl der Quelltext das Gegenteil versprach. Tests:
+  `zb_annotationstexte.rs`; Mutation `TU` aus dem Array genommen: rot.
+* **Textspiegel: drei Schlüssel, zwei Rollen.** `/ActualText`, `/Alt` und
+  `/E` werden weiterhin gelesen und mit den Glyphen geleert; als Widerspruch
+  **gemeldet** wird nur noch `/ActualText` — nach PDF 32000-1 (14.9.4) ist es
+  der *Ersatz* der Glyphen und muss ihnen gleichen, `/Alt` (14.9.3)
+  *beschreibt* und `/E` (14.9.5) *schreibt aus*, beide dürfen abweichen. Ein
+  `/Figure <</Alt …>> BDC /Im0 Do EMC` (die Standardform der
+  Barrierefreiheit) und ein `/E` über einer Abkürzung sind keine Befunde mehr
+  — vorher Rückgabewert 3 an einer gewöhnlichen getaggten Datei, also eine
+  Grenze, die gewöhnliche Dateien ablehnt. Ein `/ActualText` ohne Glyphen
+  darunter wird weiterhin gemeldet: das Werkzeug kann ihn nicht schwärzen,
+  also muss es das sagen.
+* **Textspiegel über einer Formulargrenze.** Bei
+  `/Span <</ActualText …>> BDC /Fm0 Do EMC` liegen die Glyphen im Formular,
+  der Spiegel im Seitenstrom; die Prüfung sah „0 Glyphen“, behauptete in der
+  Warnung einen Suchlauf, der nicht stattfand, und ließ den Spiegel beim
+  Schwärzen stehen. Jetzt zählen die Glyphen des Formulars zum Spiegel — in
+  Stromreihenfolge, an der Stelle des `Do`, auch Formular im Formular:
+  deckungsgleich bleibt still, ein lügender Spiegel wird gelesen, gemeldet
+  **und** beim Schwärzen der Formularglyphen geleert. Die Warnung nennt den
+  Suchlauf nur, wenn er stattfand. Bekannte Grenze: ein Formular, das erst
+  auf einer späteren Seite getroffen wird, lässt den Spiegel auf der früheren
+  stehen — die Warnung zum geteilten Formular weist darauf hin. Tests in
+  `zb_spiegel_luegt.rs`; Mutation „Formen des Abschnitts leer“: rot, Mutation
+  „Formen beim Leeren nicht mitzählen“: rot.
+* **`--check-leaks`, Sicht 7: kein quadratischer Rückfall mehr.** Schlug die
+  Extraktion an *einer* Seite fehl, las der Rückfall jede Seite einzeln — und
+  baute je Seite den Seitenbaum neu (quadratisch; „8,7 s je Seite“ im
+  Kommentar war die Zeit des ganzen Dokuments). `PdfExtractor::extract_lenient`
+  liest jetzt in **einem** Durchgang und überspringt nur die abgelehnte Seite,
+  mit ihrer Nummer in der Warnung. `extract_page` entfällt (API-Bruch in
+  `redact-pdf`; die unbedingte Seitenschleife lässt sich damit nicht mehr
+  schreiben). Gemessen mit zählendem Allokator: 3 200 Seiten fordern je Seite
+  1,02× so viel Speicher an wie 50 Seiten — vorher 3,58×
+  (`zb_rueckfall_linear.rs`).
+* **Filterketten: der `/DecodeParms`-Eintrag gehört zum Filter, nicht zur
+  Kette.** Der eigene Dekoder nimmt die vorderen Filter einer Kette selbst
+  und reicht den Rest an `lopdf` — bisher mit dem **ungekürzten**
+  `/DecodeParms`-Array, dessen Index dann nicht mehr zum Restfilter passte,
+  und ohne Verweise aufzulösen. `[/ASCIIHexDecode /FlateDecode]` mit
+  Prädiktor und ein `/DecodeParms 5 0 R` wurden still ohne Prädiktor dekodiert
+  — die Sicht sah Rauschen, nicht den Text. Jetzt wird der Eintrag des ersten
+  Restfilters aufgelöst (Liste, Eintrag, Verweise) und `lopdf` bekommt genau
+  diesen als einzelnes Dictionary — so, wie es ihn liest.
+* **Eine Seitennummer über 4 294 967 295 wird beim Lesen abgelehnt.** `lopdf`
+  nummeriert Seiten als `u32`; `redact_core::model::MAX_PAGE_INDEX` bindet
+  `Region.page` und `BlockedRegion.page` in Review-Dateien und hinter
+  `--manual-regions` daran (Rückgabewert 1, „… ist keine Seitenzahl“; eine Ausgabedatei
+  entsteht nicht). Vorher: `"page": 18446744073709551615` ließ den
+  Debug-Build mit Rückgabewert 101 abstürzen (`p + 1` im Audit-Log); der
+  Release-Build schrieb mit Rückgabewert 0 eine Ausgabe und warnte vor
+  „Seite 0“. Jede 1-basierte Seitenanzeige rechnet zusätzlich mit
+  `saturating_add`, in der Kette wie in der Oberfläche. `"page": 99` in einem
+  Einseiter bleibt, was es war: eine Warnung (`missing_page`), kein Fehler.
+  Gemessen (Debug/Release, `--apply-review` und `--manual-regions`): kein
+  Rückgabewert 101, keine Ausgabedatei
+  (`hostile_field_values_in_a_valid_review_file_end_with_a_message_not_a_panic`).
+* **Die Nachprüfung der Oberfläche deckelt Begriffe, nicht Bytes.** Die Decke
+  davor rechnete Begriffe × Dateibytes auf der Platte gegen 2 GiB — die
+  falsche Einheit: gesucht wird in den *entpackten* Strömen. Gemessen ließ sie
+  an derselben Datei, gepackt, 11 683 statt 1 916 Begriffe zu, bei gleichen
+  Kosten je Begriff (≈ 0,9 ms): rund 11 s statt der versprochenen 2 s. Jetzt
+  gilt dieselbe Zahl wie für `--check-leaks` (`redact_core::MAX_CHECK_NEEDLES`,
+  1 000); die Bytes deckelt weiterhin `--max-decompressed-mb`. Was über der
+  Decke liegt, nennt die Statuszeile mit der Zahl. — Ein Text in zwei
+  geschwärzten und einer abgewählten Zeile galt als Leck; jetzt fällt je Text
+  **eine** Entscheidung, gleich wie viele Zeilen ihn tragen (Mutation
+  `seen`-Menge entfernt: rot). — Seitenzahlen aus einer Review-Datei laufen in
+  den Anzeigen der Oberfläche nicht mehr über.
+* **`za_objektspeicher_gerechnet` rechnete mit Literalen.** „2·160 + 3·160“
+  stand als Zahl im Test; `OBJEKT_BYTES`/`ARRAY_BYTES` waren privat, und bei
+  155 im Code blieb der Test grün und druckte 800, wo der Code 775 rechnet.
+  Beide Konstanten sind jetzt `pub`, der Test rechnet aus ihnen; `OBJEKT_BYTES
+  = 155`: rot.
 
 * **Der Windows-Job der CI war rot — durch einen Test, nicht durch das
   Programm.** `the_process_is_no_longer_dumpable` verlangte auf jedem System

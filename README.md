@@ -1928,6 +1928,24 @@ Fokus (nach einem Druck auf Tabulator) ist dabei kein Textfeld; die Kürzel
 wirken dort weiter (`a_tab_press_does_not_kill_every_shortcut` in
 `crates/redact-gui/src/app.rs`).
 
+### Nachprüfung nach dem Export
+
+Nach jedem Export liest die Oberfläche die geschriebenen Bytes zurück und
+sucht darin mit `redact_pdf::leaks_many` die Texte, die sie gerade geschwärzt
+hat — dieselbe Prüfung wie [`--check-leaks`](#pruefen), nur ohne Tippen, weil
+die Oberfläche die Suchbegriffe schon kennt. Sie läuft im Hintergrund; das
+Ergebnis steht in der Statuszeile, ein Fund zusätzlich ganz vorn in den
+Warnungen.
+
+Gesucht werden höchstens 1 000 Begriffe je Nachprüfung — dieselbe Decke wie
+bei `--check-leaks` (`redact_core::MAX_CHECK_NEEDLES`). Was darüber liegt,
+wird gesagt und nicht verschwiegen: die Zeile nennt die Zahl der nicht
+gesuchten Texte. Geprüft ist *diese Liste*, nicht die Datei — ein selbst
+gezogenes Rechteck hat keinen bekannten Text, und die Zeile nennt die Zahl
+solcher Rechtecke. Je Text fällt **eine** Entscheidung: steht er in einer
+abgewählten Zeile, ist sein Verbleib gewollt und kein Leck, gleich wie viele
+geschwärzte Zeilen ihn sonst tragen.
+
 ### Trefferliste
 
 Neben der Miniaturspalte steht die Trefferliste. Ihre Überschrift nennt
@@ -2081,11 +2099,13 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   | jedes Formularfeld | die Werte `/V`, `/DV` und `/RV` — auch bei Widgets, die nur noch über `/Annots` erreichbar sind |
   | Katalog | `/OpenAction` und `/AA` — Aktionen, die beim Öffnen bzw. bei Ereignissen laufen und `/S /JavaScript` sein dürfen |
   | Katalog | `/OCProperties` — die Verwaltung optionaler Inhalte („Ebenen“) |
+  | Katalog | `/Outlines` — die Lesezeichen; jeder `/Title` ist frei wählbarer Text („Kontoauszug DE89 …“) |
   | jede Seite | `/Metadata`, `/PieceInfo`, `/StructParents`, `/AA` |
   | jede Seite | Annotationen vom Typ `/FileAttachment` — ein Dateianhang klebt nicht nur im `/Names`-Baum |
+  | jede verbliebene Annotation | die Aktionen `/A` und `/AA` (`/URI`, `/F`, `/JS` tragen Klartext) und ein benanntes `/Dest`; ein ausdrückliches Ziel (`[Seite /XYZ x y z]`) bleibt, auch hinter einem Verweis. Dazu die Klartexte `/Contents`, `/RC`, `/T`, `/Subj` und an einem Widget `/TU` (der Tooltip) und `/TM` (der Exportname) — was eine Annotation *zeichnet* (`/AP`), geht wie Seitentext durch die Schwärzung |
 
-  Preis: benannte Sprünge im Dokument funktionieren danach nicht mehr, und aus
-  einem Formular wird ein totes Blatt Papier. Das ist die sichere Richtung.
+  Preis: benannte Sprünge, Lesezeichen und Verweise ins Netz funktionieren
+  danach nicht mehr, und aus einem Formular wird ein totes Blatt Papier. Das ist die sichere Richtung.
   Objekte, die dadurch unerreichbar werden, werden zusätzlich aus der Datei
   geworfen (`prune_unreachable`) — `lopdf` schriebe sonst auch alles mit, was
   niemand mehr referenziert.

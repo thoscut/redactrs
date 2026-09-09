@@ -563,6 +563,15 @@ liefert endlos), dann muss die Länge unter der Grenze liegen, und gelesen wird
 danach trotzdem über einen begrenzten Leser — zwischen Frage und Antwort kann
 eine Datei wachsen.
 
+**Und nach der Größe der Wertebereich.** Feldwerte aus Review- und
+Regionsdateien werden nicht nur der Größe, sondern auch dem Wertebereich nach
+geprüft: eine Seitennummer ist höchstens `u32::MAX` (so nummeriert `lopdf`
+Seiten; `redact_core::model::MAX_PAGE_INDEX`); alles darüber beendet den Lauf
+mit Rückgabewert 1; eine Ausgabedatei entsteht nicht. Gemessen (Debug und
+Release, `--apply-review` und `--manual-regions`): kein Rückgabewert 101,
+keine Ausgabedatei. Jede 1-basierte Seitenanzeige rechnet zusätzlich
+sättigend — ein zweiter Zaun hinter dem ersten.
+
 Die Vorprüfung (`redact_pdf::document::prescan`) läuft über die **Rohbytes** der
 Datei, bevor `lopdf` sie zu sehen bekommt, und schließt die ausgepackten Streams
 und den Rumpf mit ein — siehe „Was `--max-parsed-mb` zählt“. Sie muss davor
@@ -1617,6 +1626,12 @@ Dokumente“). `--check-leaks` sieht ihn: der Text steht als Klartext im
 Seitenstrom, und die Rohsichten der Nachprüfung lesen den Strom, nicht die
 Struktur.
 
+Eine zweite benannte Grenze derselben Prüfung: ein Spiegel über einem
+**Formular**, das erst auf einer späteren Seite getroffen wird, bleibt auf der
+früheren Seite stehen — die Formularglyphen werden dort geleert, wo das
+Formular geschwärzt wird, der Spiegel im Seitenstrom davor nicht. Die Warnung
+zum geteilten Formular weist darauf hin; `--check-leaks` sieht auch ihn.
+
 ### `lopdf` steht auf 0.42 — RUSTSEC-2026-0187 ist behoben
 
 Hier stand bis einschließlich dieser Fassung ein Abschnitt „Warum `lopdf` noch
@@ -1733,7 +1748,8 @@ für eine reine Rohbyte-Suche unsichtbar, ebenso eine Zeichenkette in UTF-16BE
 oder als Hex-String. `pdftotext` taugt erst recht nicht als Nachweis; die
 Messung dazu steht im README unter „Prüfen, ob die Schwärzung gewirkt hat“.
 Verbindlich ist `redact_pdf::leaks` — und **genau die** Funktion steckt hinter
-`--check-leaks` und hinter der Nachprüfung der Oberfläche. Wer keine
+`--check-leaks` und (als `leaks_many`, dieselben Sichten) hinter der
+Nachprüfung der Oberfläche. Wer keine
 Rust-Toolchain hat, nimmt den Schalter; der Bibliotheksaufruf ist derselbe
 Maßstab, nur für den, der das Repository ohnehin gebaut hat.
 
