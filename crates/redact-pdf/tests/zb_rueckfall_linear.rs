@@ -30,6 +30,14 @@
 //! grün. An `extract_lenient` allein ist derselbe Unterschied 69 gegen 32,
 //! und bei 50 gegen 3 200 Seiten (Faktor 64) deutlich über 200 gegen 64.
 //!
+//! ## Gemessen (Debug, kumulativ angeforderte Bytes von `extract_lenient`)
+//!
+//! | Seiten | linear (dieser Stand) | `get_pages()` je Seite (Mutation) |
+//! |-------:|----------------------:|----------------------------------:|
+//! |     50 |                2,7 MB |                            2,8 MB |
+//! |  3 200 |              177,3 MB |                          649,7 MB |
+//! | Verh.  |         65,4 (1,02×)  |                    229,3 (3,58×)  |
+//!
 //! ## Warum eine eigene Datei mit einem einzigen Test
 //!
 //! Der Allokator zählt den ganzen Prozess; ein zweiter Test daneben zählte

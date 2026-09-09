@@ -82,10 +82,11 @@ pub fn selection_on_other_page(page: usize, kind: NudgeKind) -> String {
          eine andere. Zu ihr blättern, oder mit Esc die Auswahl aufheben (dann \
          blättern die Pfeiltasten wieder).",
         kind.refusal(),
-        // `saturating_add`, weil `page` aus fremder Hand kommt (Review- oder
-        // Regionsdatei): bei `usize::MAX` liefe die 1-basierte Anzeige im
-        // Debug-Build über und löste eine Panic aus — in dem Satz, der die
-        // Absage erklären soll.
+        // `saturating_add`, weil die Seitennummer aus fremder Hand kommt (Review-Datei,
+        // `--manual-regions`): bei `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build
+        // über und löste eine Panic aus; im Release-Build stünde „Seite 0" da. Die erste
+        // Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der Deserialisierung;
+        // diese hier gilt für jeden Aufrufer, der `Region` selbst baut.
         page.saturating_add(1)
     )
 }
@@ -104,8 +105,11 @@ pub fn selection_on_missing_page(page: usize, pages: usize, kind: NudgeKind) -> 
          Zeile mit Entf löschen oder die Seitenzahl in der Review-Datei berichtigen \
          — dort ist die erste Seite die 0.",
         kind.refusal(),
-        // `saturating_add` wie oben — hier erst recht: diese Zeile gibt es
-        // nur, weil die Seitenzahl aus einer Datei kam, die niemand geprüft hat.
+        // `saturating_add`, weil die Seitennummer aus fremder Hand kommt (Review-Datei,
+        // `--manual-regions`): bei `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build
+        // über und löste eine Panic aus; im Release-Build stünde „Seite 0" da. Die erste
+        // Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der Deserialisierung;
+        // diese hier gilt für jeden Aufrufer, der `Region` selbst baut.
         page.saturating_add(1),
         pages
     )
@@ -816,9 +820,11 @@ impl AnnotatedRegion {
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .unwrap_or("(ohne Text)");
-        // `saturating_add`, weil `page` aus fremder Hand kommt (Review- oder
-        // Regionsdatei): bei `usize::MAX` liefe die 1-basierte Anzeige im
-        // Debug-Build über und löste eine Panic aus — beim Malen der Liste.
+        // `saturating_add`, weil die Seitennummer aus fremder Hand kommt (Review-Datei,
+        // `--manual-regions`): bei `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build
+        // über und löste eine Panic aus; im Release-Build stünde „Seite 0" da. Die erste
+        // Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der Deserialisierung;
+        // diese hier gilt für jeden Aufrufer, der `Region` selbst baut.
         format!(
             "S.{} {}",
             self.region.page.saturating_add(1),

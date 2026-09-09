@@ -519,9 +519,11 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     let mut action = entry.action.clone();
 
     ui.label(RichText::new("Auswahl").strong());
-    // `saturating_add`, weil `page` aus fremder Hand kommt (Review- oder
-    // Regionsdatei): bei `usize::MAX` liefe die 1-basierte Anzeige im
-    // Debug-Build über und löste eine Panic aus — mitten im Zeichnen.
+    // `saturating_add`, weil die Seitennummer aus fremder Hand kommt (Review-Datei,
+    // `--manual-regions`): bei `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build
+    // über und löste eine Panic aus; im Release-Build stünde „Seite 0" da. Die erste
+    // Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der Deserialisierung;
+    // diese hier gilt für jeden Aufrufer, der `Region` selbst baut.
     ui.label(format!("Seite {}", page.saturating_add(1)));
     ui.label(description);
     ui.label(

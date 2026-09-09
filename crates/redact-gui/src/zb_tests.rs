@@ -1120,6 +1120,24 @@ fn zb_mess_nachpruefung_je_begriff_gegen_einen_durchgang() {
         bytes.len() / 1024,
         (ceiling.as_secs_f64() - one.as_secs_f64()) * 1000.0 / (MAX_CHECK_NEEDLES - 1) as f64
     );
+
+    // Die alte Decke (Begriffe × Dateibytes ≤ 2 GiB) ließ an 100 kB rund
+    // 20 000 Begriffe zu und versprach dafür „≈ 2 s“. Gemessen an einer
+    // Datei dieser Größe, einmal, weil ein Lauf reicht, um die Zusage zu
+    // prüfen.
+    let small = many_pages(30, 40, &self::terms(50));
+    let many: Vec<String> = self::terms(20_000);
+    let needles: Vec<&str> = many.iter().map(String::as_str).collect();
+    let allowed = (2u64 * 1024 * 1024 * 1024) / small.len() as u64;
+    let t = Instant::now();
+    let hits = redact_pdf::leaks_many(&small, &needles);
+    let elapsed = t.elapsed();
+    assert_eq!(hits.len(), needles.len());
+    println!(
+        "alte Decke: {} kB ließen {allowed} Begriffe zu; 20 000 Begriffe brauchen {elapsed:?} \
+         (versprochen waren ≈ 2 s)",
+        small.len() / 1024
+    );
 }
 
 /// Befund 2: 300 Seiten Kleinbilder — Bytes vorher (nie verworfen) und jetzt.
