@@ -217,3 +217,6 @@ mod zc_g5_tests;
 
 #[cfg(test)]
 mod ze_p5_tests;
+
+#[cfg(test)]
+mod zf_q4_tests;

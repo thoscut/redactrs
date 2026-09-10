@@ -178,8 +178,10 @@ fn rueckgabewert(abschnitt: &str) -> i32 {
 #[test]
 fn die_fundstellen_in_pruefung_txt_sind_die_des_gebauten_binaries() {
     let begriffe = begriffe_aus_dem_skript();
-    let pruefung = lf(&std::fs::read_to_string(repo_root().join("docs/pruefung.txt"))
-        .expect("docs/pruefung.txt lesbar"));
+    let pruefung = lf(
+        &std::fs::read_to_string(repo_root().join("docs/pruefung.txt"))
+            .expect("docs/pruefung.txt lesbar"),
+    );
     let vorher = abschnitt(&pruefung, "VORHER", "NACHHER");
     let nachher = abschnitt(&pruefung, "NACHHER", "DIE VIER SCHRITTE");
 
@@ -271,8 +273,10 @@ fn die_fundstellen_in_pruefung_txt_sind_die_des_gebauten_binaries() {
 /// Fassung sagt nichts über diese.
 #[test]
 fn pruefung_txt_stammt_von_dieser_fassung() {
-    let pruefung = lf(&std::fs::read_to_string(repo_root().join("docs/pruefung.txt"))
-        .expect("docs/pruefung.txt lesbar"));
+    let pruefung = lf(
+        &std::fs::read_to_string(repo_root().join("docs/pruefung.txt"))
+            .expect("docs/pruefung.txt lesbar"),
+    );
     let version = stdout(&run_in(&repo_root(), &["--version"]));
     let version = version.trim();
     assert!(!version.is_empty(), "--version schweigt");
