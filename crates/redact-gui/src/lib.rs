@@ -220,3 +220,6 @@ mod ze_p5_tests;
 
 #[cfg(test)]
 mod zf_q4_tests;
+
+#[cfg(test)]
+mod zg_r4_tests;
