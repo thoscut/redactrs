@@ -296,7 +296,13 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
     // keine Entwarnung werden lässt. Dieselbe Marke wie beim Schwärzen
     // (`report_warnings` in `main.rs`), damit ein Skript beide mit einem
     // `grep` findet.
-    let unchecked = check.unchecked.len();
+    // Gezählt werden **Stellen**, nicht Zeilen. Über `MAX_UNCHECKED` hinaus
+    // fasst `redact-pdf` viele Stellen zu einer Summenzeile zusammen; wer
+    // `check.unchecked.len()` schreibt, nennt dann eine **kleinere** Zahl als
+    // die Liste darüber (61 nicht entpackte Ströme kamen als „52 Stelle(n)“
+    // heraus, direkt unter der Zeile „… und 11 weitere“ — Befund R2-B der
+    // Gegenprüfung 6).
+    let unchecked = check.unchecked_places;
     for stelle in &check.unchecked {
         println!("  NICHT GEPRÜFT: {}", safe_text(stelle));
     }
@@ -359,10 +365,17 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
 /// Ursachen aufzählt, zählt sie vollständig auf — sonst schickt der Satz an
 /// zwei von drei Stellen an den falschen Schalter. Alle fünf Gründe stehen in
 /// `SECURITY.md`.
+///
+/// Fix-Runde 7 (Befund R2-B): die Zahl ist die der **Stellen**
+/// (`LeakCheck::unchecked_places`), nicht die der Zeilen. Sind es sehr viele,
+/// nennt die Liste darüber nicht jede einzeln — eine Summenzeile fasst den
+/// Rest zusammen —, und der Satz sagt das, statt „je Stelle mit ihrem Grund“
+/// zu behaupten, was dann nicht mehr stimmt.
 fn unvollstaendig(unchecked: usize) -> String {
     format!(
         "Ergebnis: {unchecked} Stelle(n) nicht geprüft — die Antwort ist unvollständig. \
-         Der Lauf hat sie oben als NICHT GEPRÜFT genannt, je Stelle mit ihrem Grund. \
+         Der Lauf hat sie oben als NICHT GEPRÜFT genannt, je Stelle mit ihrem Grund; \
+         sind es sehr viele, fasst eine Summenzeile den Rest zusammen. \
          Was an der Entpackgrenze hängt, holt ein höheres --max-decompressed-mb; \
          was an der Verschachtelungstiefe oder an einem unbekannten Filternamen \
          hängt, nicht."

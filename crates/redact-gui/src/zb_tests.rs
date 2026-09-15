@@ -726,8 +726,14 @@ fn zb5_ein_abgewaehlter_text_ist_eine_entscheidung_kein_leck() {
     assert_eq!(summary.outcome(1), HitOutcome::Disabled);
 
     let plan = app.state.plan_export_check(&summary);
-    assert_eq!(plan.needles, vec![other.to_string()], "{plan:?}");
-    assert_eq!(plan.kept, 1);
+    // Seit Fix-Runde 7 stehen **beide** Texte in `needles`; gedeckt ist nur
+    // der Fund der abgewählten Zeile.
+    assert_eq!(
+        plan.needles,
+        vec![same.to_string(), other.to_string()],
+        "{plan:?}"
+    );
+    assert_eq!(plan.kept_literal, vec![true, false], "{plan:?}");
 
     app.export_to(out.clone());
     app.wait_for_export_checks();
@@ -743,7 +749,7 @@ fn zb5_ein_abgewaehlter_text_ist_eine_entscheidung_kein_leck() {
     );
     assert!(
         status.contains(
-            "1 Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile: \
+            "1 Text(e) stehen wörtlich auch in einer abgewählten, gelöschten oder geschützten Zeile: \
              über sie sagt diese Prüfung nichts"
         ),
         "{status}"
@@ -796,8 +802,9 @@ fn zb5_zweimal_geschwaerzt_einmal_abgewaehlt_ist_kein_leck() {
     assert_eq!(summary.outcome(2), HitOutcome::Redacted);
 
     let plan = app.state.plan_export_check(&summary);
-    assert!(plan.needles.is_empty(), "{plan:?}");
-    assert_eq!(plan.kept, 1, "{plan:?}");
+    // Seit Fix-Runde 7 steht der Text in `needles` — gedeckt ist nur der
+    // **Fund**.
+    assert_eq!(plan.kept_literal, vec![true], "{plan:?}");
 
     app.export_to(out.clone());
     app.wait_for_export_checks();
@@ -806,10 +813,15 @@ fn zb5_zweimal_geschwaerzt_einmal_abgewaehlt_ist_kein_leck() {
         !status.contains("steht NOCH"),
         "die Entscheidung gilt als Leck: {status}"
     );
-    assert!(status.contains("Es wurde nichts gesucht."), "{status}");
+    // Gesucht wurde er (Fix-Runde 7), gefunden auch — die abgewählte Zeile
+    // steht ja noch da. Verschwunden ist damit keiner.
+    assert!(
+        status.contains("0 gesuchte Text(e) stehen nicht mehr in der Ausgabe."),
+        "{status}"
+    );
     assert!(
         status
-            .contains("1 Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile"),
+            .contains("1 Text(e) stehen wörtlich auch in einer abgewählten, gelöschten oder geschützten Zeile"),
         "{status}"
     );
 

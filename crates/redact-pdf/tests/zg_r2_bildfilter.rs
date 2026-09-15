@@ -14,12 +14,13 @@
 //! * `/DCTDecode` allein über Bytes, die weder Bild noch zlib noch Deflate
 //!   sind: stumm — das ist der benannte blinde Fleck („ein Strom hinter
 //!   `/DCTDecode`“, Modulkopf von `audit_bytes`).
-//! * **BEFUND_R2_A:** `[/DCTDecode /FlateDecode]` mit zwei Byte „JPEG“ vor
-//!   zlib-gepacktem Text: stumm — obwohl hinter dem Bildfilter kein Bild,
-//!   sondern ein **weiterer Filter** steht, den das Programm kennt und weder
-//!   anwendet noch meldet. Derselbe Bau mit einem fremden Namen an erster
-//!   Stelle wird gemeldet. Die Begründung der Ausnahme („dahinter liegen
-//!   Bilddaten“) gilt nur, wenn der Bildfilter das **letzte** Glied ist.
+//! * **BEFUND_R2_A (behoben, Fix-Runde 7):** `[/DCTDecode /FlateDecode]` mit
+//!   zwei Byte „JPEG“ vor zlib-gepacktem Text war stumm — obwohl hinter dem
+//!   Bildfilter kein Bild, sondern ein **weiterer Filter** stand, den das
+//!   Programm kennt und weder anwandte noch meldete. Die Begründung der
+//!   Ausnahme („dahinter liegen Bilddaten“) trägt nur, wenn der Bildfilter
+//!   das **letzte** Glied ist; genau darauf ist sie jetzt beschränkt
+//!   (`applied + 1 == total`).
 
 mod common;
 
@@ -192,16 +193,16 @@ fn r2_der_benannte_blinde_fleck_allein_bleibt_stumm() {
     assert!(check.unchecked.is_empty(), "{:#?}", check.unchecked);
 }
 
-/// **BEFUND_R2_A** — ein Bildfilter, der **nicht** das letzte Glied ist,
-/// deckt einen Packfilter dahinter zu.
+/// **BEFUND_R2_A, geschlossen** — ein Bildfilter, der **nicht** das letzte
+/// Glied ist, deckte einen Packfilter dahinter zu.
 ///
 /// `[/DCTDecode /FlateDecode]`, Strominhalt zwei Byte „JPEG“ (`FF D8`) vor
 /// zlib-gepacktem Text. Die Kette bleibt am ersten Glied stehen; das ist ein
 /// Bildfilter, also keine Meldung. Hinter ihm liegt aber kein Bild, sondern
 /// `/FlateDecode` — ein Filter, den das Programm kennt, hier weder anwendet
-/// noch nennt. Kein Fund, keine `unchecked`-Zeile: stumm. Derselbe Inhalt
-/// unter `[/R2Fremd /FlateDecode]` wird gemeldet — der Unterschied liegt
-/// allein am Namen des ersten Gliedes, und der Bildfilter-Name kauft so eine
+/// noch nannte. Kein Fund, keine `unchecked`-Zeile: stumm. Derselbe Inhalt
+/// unter `[/R2Fremd /FlateDecode]` wurde gemeldet — der Unterschied lag
+/// allein am Namen des ersten Gliedes, und der Bildfilter-Name kaufte so eine
 /// meldungsfreie Zone für beliebige Bytes.
 ///
 /// Die Begründung der Ausnahme („dahinter liegen Bilddaten … entpacken lässt
@@ -209,26 +210,25 @@ fn r2_der_benannte_blinde_fleck_allein_bleibt_stumm() {
 /// Glied ist: die Reihenfolge im `/Filter`-Array ist die Dekodierreihenfolge
 /// (PDF 32000-1, 7.4.1), und die Ausgabe eines Bildfilters sind Abtastwerte —
 /// kein Erzeuger hängt dahinter noch einen Filter. Eine Meldung an
-/// `[/DCTDecode /X]` träfe deshalb keine gewöhnliche Datei mit einem Foto.
+/// `[/DCTDecode /X]` trifft deshalb keine gewöhnliche Datei mit einem Foto.
 ///
-/// Vorschlag: die Ausnahme nur, wenn der Bildfilter das letzte Glied ist
-/// (`applied + 1 == total`); sonst „nur bis Filter N von M dekodiert“ wie bei
-/// jedem anderen Namen. Dann sind diese Zusicherungen umzudrehen (und
-/// `zf_q2_filterkette::q2_bildfilter_an_erster_stelle_schweigt_auch_mit_kette_dahinter`
-/// sowie die Tabelle in SECURITY.md anzupassen).
+/// Seit Fix-Runde 7 gilt die Ausnahme genau dort: `applied + 1 == total`.
 #[test]
-fn befund_r2_a_bildfilter_vor_einem_packfilter_verdeckt_gepackten_text() {
+fn befund_r2_a_bildfilter_vor_einem_packfilter_wird_gemeldet() {
     let mut raw = vec![0xff, 0xd8];
     raw.extend_from_slice(&zlib(&text()));
 
     let check = pruefe(&pdf(kette(&["DCTDecode", "FlateDecode"]), raw.clone()));
-    // BEFUND_R2_A: stumm.
+    // Entpackt ist weiterhin nichts — aber die Stelle steht jetzt in der Liste.
     assert!(check.findings[0].is_empty(), "{:#?}", check.findings[0]);
     assert!(
-        check.unchecked.is_empty(),
-        "BEFUND_R2_A geschlossen? Dann diese Zusicherung umdrehen: {:#?}",
+        check.unchecked.iter().any(|m| m.starts_with("Objekt 7 0 <Stream>:")
+            && m.contains("/DCTDecode ist ein Bildfilter")
+            && m.contains("(Glied 1 von 2)")),
+        "{:#?}",
         check.unchecked
     );
+    assert_eq!(check.unchecked_places, 1, "{:#?}", check.unchecked);
 
     // Gegenprobe: derselbe Inhalt, ein fremder Name an erster Stelle.
     let fremd = pruefe(&pdf(kette(&["R2Fremd", "FlateDecode"]), raw));
@@ -242,13 +242,52 @@ fn befund_r2_a_bildfilter_vor_einem_packfilter_verdeckt_gepackten_text() {
         fremd.unchecked
     );
 
-    // Und die Kette, die die Fix-Runde 6 ausdrücklich für richtig erklärt hat:
-    // `[/DCTDecode /ASCII85Decode]` über ASCII85-Text — ebenso stumm, obwohl
-    // `/ASCII85Decode` dahinter steht und ihn lesbar machte.
+    // Und die Kette, die die Fix-Runde 6 ausdrücklich für richtig erklärt
+    // hatte: `[/DCTDecode /ASCII85Decode]` über ASCII85-Text — ebenfalls ein
+    // Bildfilter mit einem Glied dahinter, also ebenfalls gemeldet.
     let check = pruefe(&pdf(kette(&["DCTDecode", "ASCII85Decode"]), a85(&text())));
-    assert!(check.findings[0].is_empty() && check.unchecked.is_empty());
-    // Zum Vergleich der Bildfilter am **Ende**: der Klartext davor wird
-    // gefunden — das ist die Distiller-Kette, auf die die Ausnahme zielt.
+    assert!(check.findings[0].is_empty(), "{:#?}", check.findings[0]);
+    assert!(
+        check
+            .unchecked
+            .iter()
+            .any(|m| m.contains("/DCTDecode ist ein Bildfilter")),
+        "{:#?}",
+        check.unchecked
+    );
+}
+
+/// Die Gegenrichtung zu BEFUND_R2_A — und der Grund, warum die Ausnahme
+/// überhaupt besteht: der Bildfilter am **Ende** der Kette schweigt weiter.
+///
+/// `[/ASCII85Decode /DCTDecode]` ist die gewöhnliche Ausgabe eines
+/// Distillers. Der Klartext davor wird gefunden, hinter `/DCTDecode` liegen
+/// Abtastwerte — der im Modulkopf von `audit_bytes` benannte blinde Fleck,
+/// und **keine** `NICHT GEPRÜFT`-Zeile. Dasselbe gilt für den Bildfilter
+/// allein und für seine Kurzform.
+#[test]
+fn r2_bildfilter_als_letztes_glied_schweigt_weiter() {
     let check = pruefe(&pdf(kette(&["ASCII85Decode", "DCTDecode"]), a85(&text())));
-    assert!(!check.findings[0].is_empty() && check.unchecked.is_empty());
+    assert!(!check.findings[0].is_empty(), "{:#?}", check.findings[0]);
+    assert!(check.unchecked.is_empty(), "{:#?}", check.unchecked);
+    assert_eq!(check.unchecked_places, 0);
+
+    for allein in ["DCTDecode", "DCT", "JPXDecode", "CCITTFaxDecode", "CCF", "JBIG2Decode"] {
+        let mut raw = vec![0xff, 0xd8];
+        raw.extend_from_slice(&zlib(&text()));
+        let check = pruefe(&pdf(name(allein), raw));
+        assert!(
+            check.unchecked.is_empty(),
+            "/{allein} allein ist der benannte blinde Fleck: {:#?}",
+            check.unchecked
+        );
+    }
+
+    // Auch mitten in der Kette, solange nichts dahinter steht, was das
+    // Programm anwenden könnte — hier ist der Bildfilter das letzte Glied.
+    let check = pruefe(&pdf(
+        kette(&["FlateDecode", "DCTDecode"]),
+        zlib(&jpeg_mit_kommentar(&text())),
+    ));
+    assert!(check.unchecked.is_empty(), "{:#?}", check.unchecked);
 }

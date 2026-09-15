@@ -8,9 +8,10 @@
 //!
 //! `cargo test -p redact-gui zg_r4_2`
 //!
-//! Tests mit `#[ignore = "Befund …"]` tragen die **richtige** Erwartung und
-//! sind bis zur Korrektur rot; der grüne Test daneben hält fest, was der Code
-//! heute wirklich tut.
+//! Die Befundtests der Gegenprüfung sind seit Fix-Runde 7 scharf (kein
+//! `#[ignore]` mehr); die Tests daneben halten die Gegenrichtung fest — was
+//! **nicht** passieren darf, wenn die Kennung einer Prüfung die Datei ist und
+//! nicht die Schreibweise ihres Pfades.
 
 use super::*;
 
@@ -145,68 +146,62 @@ fn zweimal_dieselbe_datei_unter_zwei_namen(
     (app, gate, first, second)
 }
 
-/// **So verhält es sich heute.** `start_export_check` vergleicht Pfade
-/// (`pending.out != out`), nicht Dateien: die ältere Prüfung bleibt am
-/// Leben, liest die **neuen** Bytes mit dem **alten** Plan (nur
-/// GEHEIM-EINS, und das ist in der neuen Datei geschwärzt) und meldet über
-/// den ersten Export eine Entwarnung — genau der Fall, den Befund Q4-6 für
-/// gleich geschriebene Pfade abgestellt hat.
+/// **Befund R4-4 (die richtige Erwartung, jetzt erfüllt):** ein zweiter
+/// Export in dieselbe Datei beendet die ältere Prüfung — auch wenn der Pfad
+/// anders geschrieben ist. Sonst urteilt die ältere über fremde Bytes (siehe
+/// Doc-Kommentar von `start_export_check`: „Beides ist falsch, und die
+/// gefährliche Richtung ist die Entwarnung“).
+///
+/// Bis Fix-Runde 6 verglich `start_export_check` Pfade (`pending.out !=
+/// out`), nicht Dateien: die ältere Prüfung blieb am Leben, las die **neuen**
+/// Bytes mit dem **alten** Plan (nur GEHEIM-EINS, und das ist in der neuen
+/// Datei geschwärzt) und meldete über den ersten Export eine Entwarnung.
 #[test]
-fn zg_r4_2_dieselbe_datei_unter_anderem_namen_haelt_die_alte_pruefung_am_leben_heute() {
-    let (mut app, gate, first, second) = zweimal_dieselbe_datei_unter_zwei_namen("symlink-heute");
+fn zg_r4_2_dieselbe_datei_unter_anderem_namen_beendet_die_alte_pruefung() {
+    let (mut app, gate, first, second) = zweimal_dieselbe_datei_unter_zwei_namen("symlink-soll");
     println!("erster Pfad:  {}", first.display());
     println!("zweiter Pfad: {}", second.display());
     println!(
         "laufende Prüfungen nach dem zweiten Export: {}",
         app.checks.len()
     );
-    assert_eq!(app.checks.len(), 2, "heute: beide laufen");
-
-    gate.release();
-    let (urteile, statuses) = collect_verdicts(&mut app);
-    for status in &statuses {
-        println!("Statuszeile: {status}");
-    }
-    println!("Warnungen: {:?}", app.state.warnings);
-    assert_eq!(urteile, 2, "heute: zwei Urteile über eine Datei");
-    // Die Datei leckt wirklich.
-    let bytes = std::fs::read(&first).unwrap();
-    assert!(!redact_pdf::leaks(&bytes, "GEHEIM-ZWEI").is_empty());
-    assert!(redact_pdf::leaks(&bytes, "GEHEIM-EINS").is_empty());
-    // Eines der beiden Urteile ist die Entwarnung über den ersten Export —
-    // die Zeile trägt den ersten Pfad und „stehen nicht mehr in der Ausgabe“.
-    let entwarnung = statuses.iter().any(|s| {
-        s.contains(&first.display().to_string()) && s.contains("stehen nicht mehr in der Ausgabe")
-    });
-    // Kommen beide Urteile in **einem** Abholen an, zeigt die Statuszeile nur
-    // das letzte — dann steht die Entwarnung nicht in `statuses`, aber sie
-    // wurde gefällt (zwei Urteile, eine Datei). Beides ist der Befund.
-    println!("Entwarnung über den ersten Export sichtbar: {entwarnung}");
-}
-
-/// **Befund R4 (die richtige Erwartung):** ein zweiter Export in dieselbe
-/// Datei beendet die ältere Prüfung — auch wenn der Pfad anders geschrieben
-/// ist. Sonst urteilt die ältere über fremde Bytes (siehe Doc-Kommentar von
-/// `start_export_check`: „Beides ist falsch, und die gefährliche Richtung ist
-/// die Entwarnung“).
-#[test]
-#[ignore = "Befund R4: die Kennung einer Prüfung ist der Pfad, nicht die Datei — Symlink/`..` halten die ältere Prüfung am Leben"]
-fn zg_r4_2_dieselbe_datei_unter_anderem_namen_muesste_die_alte_pruefung_beenden() {
-    let (mut app, gate, _, _) = zweimal_dieselbe_datei_unter_zwei_namen("symlink-soll");
     assert_eq!(
         app.checks.len(),
         1,
         "die ältere Prüfung urteilt über Bytes, die es nicht mehr gibt"
     );
     gate.release();
-    let (urteile, _) = collect_verdicts(&mut app);
+    let (urteile, statuses) = collect_verdicts(&mut app);
+    for status in &statuses {
+        println!("Statuszeile: {status}");
+    }
+    println!("Warnungen: {:?}", app.state.warnings);
     assert_eq!(urteile, 1, "ein Export, ein Urteil");
+    // Die Datei leckt wirklich — und genau das sagt das eine Urteil.
+    let bytes = std::fs::read(&first).unwrap();
+    assert!(!redact_pdf::leaks(&bytes, "GEHEIM-ZWEI").is_empty());
+    assert!(redact_pdf::leaks(&bytes, "GEHEIM-EINS").is_empty());
+    assert!(
+        !statuses
+            .iter()
+            .any(|s| s.contains("stehen nicht mehr in der Ausgabe")),
+        "eine Entwarnung über Bytes, die es nicht mehr gibt: {statuses:?}"
+    );
+    assert!(
+        app.state
+            .warnings
+            .iter()
+            .any(|w| w.contains("NOCH in der Ausgabe")),
+        "{:?}",
+        app.state.warnings
+    );
 }
 
-/// Dasselbe mit `..` statt Symlink: `ordner/../ordner/out.pdf` ist für den
-/// Vergleich ein anderer Pfad (nur `.` wird normalisiert, `..` nicht).
+/// Dasselbe mit `..` statt Symlink: `ordner/../ordner/out.pdf` ist für einen
+/// Vergleich Zeichen für Zeichen ein anderer Pfad (nur `.` wird
+/// normalisiert, `..` nicht) — und dieselbe Datei.
 #[test]
-fn zg_r4_2_ein_punkt_punkt_im_pfad_haelt_die_alte_pruefung_am_leben_heute() {
+fn zg_r4_2_ein_punkt_punkt_im_pfad_beendet_die_alte_pruefung() {
     let dir = tmp("dotdot");
     let real = dir.join("ordner");
     std::fs::create_dir_all(&real).unwrap();
@@ -224,7 +219,20 @@ fn zg_r4_2_ein_punkt_punkt_im_pfad_haelt_die_alte_pruefung_am_leben_heute() {
     gate.wait_until_arrived();
     app.export_to(second.clone());
     println!("laufende Prüfungen: {}", app.checks.len());
-    assert_eq!(app.checks.len(), 2, "heute: beide laufen");
+    assert_eq!(app.checks.len(), 1);
+    gate.release();
+    let (urteile, _) = collect_verdicts(&mut app);
+    assert_eq!(urteile, 1);
+
+    // **Die Gegenrichtung**: eine wirklich andere Datei im selben Ordner
+    // beendet nichts.
+    let gate = Arc::new(CheckGate::default());
+    app.hold_check = Some(gate.clone());
+    app.export_to(first.clone());
+    gate.wait_until_arrived();
+    app.export_to(real.join("zweite.pdf"));
+    println!("zwei Dateien: {}", app.checks.len());
+    assert_eq!(app.checks.len(), 2);
     gate.release();
     let (urteile, _) = collect_verdicts(&mut app);
     assert_eq!(urteile, 2);
@@ -252,15 +260,18 @@ fn zg_r4_2_a_b_a_und_dreimal_a() {
     gate.wait_until_arrived();
     app.export_to(b.clone());
     app.export_to(a.clone());
-    let outs: Vec<&Path> = app.checks.iter().map(|c| c.out.as_path()).collect();
-    println!("nach A, B, A: {outs:?}");
-    assert_eq!(outs, vec![b.as_path(), a.as_path()]);
+    // Die Kennung ist der aufgelöste Pfad — hier derselbe Ordner, also nur
+    // `canonicalize` über beide.
+    let echt = |path: &Path| std::fs::canonicalize(path).unwrap();
+    let keys: Vec<&Path> = app.checks.iter().map(|c| c.key.as_path()).collect();
+    println!("nach A, B, A: {keys:?}");
+    assert_eq!(keys, vec![echt(&b).as_path(), echt(&a).as_path()]);
 
     app.export_to(a.clone());
     app.export_to(a.clone());
-    let outs: Vec<&Path> = app.checks.iter().map(|c| c.out.as_path()).collect();
-    println!("nach A, B, A, A, A: {outs:?}");
-    assert_eq!(outs, vec![b.as_path(), a.as_path()]);
+    let keys: Vec<&Path> = app.checks.iter().map(|c| c.key.as_path()).collect();
+    println!("nach A, B, A, A, A: {keys:?}");
+    assert_eq!(keys, vec![echt(&b).as_path(), echt(&a).as_path()]);
     assert!(!ctx.has_requested_repaint(), "alle hängen noch am Haken");
 
     gate.release();
@@ -280,13 +291,17 @@ fn zg_r4_2_a_b_a_und_dreimal_a() {
 // Die Warnungen hängen am Dateinamen, die Prüfungen am Pfad
 // ===========================================================================
 
-/// **So verhält es sich heute.** `x/a.pdf` leckt, die Warnung steht. Dann
-/// ein sauberer Export nach `y/a.pdf` — ein anderer Ordner, dieselbe
-/// Datei**namen**: `note_export_warnings` streicht alles unter „a.pdf: “,
-/// also auch die Leckwarnung über `x/a.pdf`. Die Datei ist unverändert und
-/// leckt weiter; ihre Warnung ist weg.
+/// **Die Gegenrichtung zu Befund R4-5.** `x/a.pdf` leckt, die Warnung steht.
+/// Dann ein sauberer Export nach `y/a.pdf` — anderer Ordner, gleicher
+/// Datei**name**: bis Fix-Runde 6 strich `note_export_warnings` alles unter
+/// „a.pdf: “ und nahm die Leckwarnung über `x/a.pdf` mit, obwohl diese Datei
+/// unverändert weiterleckte.
+///
+/// Geprüft wird hier beides: die fremde Warnung bleibt — und die **eigene**
+/// verschwindet weiter, wenn dieselbe Datei sauber neu geschrieben wird
+/// (sonst wäre der Fehler nur auf die andere Seite gekippt).
 #[test]
-fn zg_r4_2_gleicher_name_anderer_ordner_loescht_die_leckwarnung_heute() {
+fn zg_r4_2_gleicher_name_anderer_ordner_behaelt_die_leckwarnung() {
     let dir = tmp("name");
     let x = dir.join("x");
     let y = dir.join("y");
@@ -321,21 +336,36 @@ fn zg_r4_2_gleicher_name_anderer_ordner_loescht_die_leckwarnung_heute() {
     let bytes = std::fs::read(x.join("a.pdf")).unwrap();
     assert!(!redact_pdf::leaks(&bytes, "GEHEIM-EINS").is_empty());
     assert!(
+        app.state
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("a.pdf: ") && w.contains("NOCH in der Ausgabe")),
+        "die Warnung über x/a.pdf ist weg — {:?}",
+        app.state.warnings
+    );
+
+    // Und die **eigene** Warnung geht mit dem nächsten Export derselben
+    // Datei: x/a.pdf noch einmal, diesmal sauber.
+    app.export_to(x.join("a.pdf"));
+    app.wait_for_export_checks();
+    println!("nach x/a.pdf (sauber): {:?}", app.state.warnings);
+    let bytes = std::fs::read(x.join("a.pdf")).unwrap();
+    assert!(redact_pdf::leaks(&bytes, "GEHEIM-EINS").is_empty());
+    assert!(
         !app.state
             .warnings
             .iter()
             .any(|w| w.contains("NOCH in der Ausgabe")),
-        "heute: die Warnung über x/a.pdf ist weg — {:?}",
+        "das geschlossene Leck nimmt seine Warnung mit — {:?}",
         app.state.warnings
     );
 }
 
-/// **Befund R4 (die richtige Erwartung):** die Warnung über eine Datei
-/// verschwindet nur, wenn **diese** Datei neu geschrieben wird oder das
-/// Dokument wechselt — nicht, weil eine andere Datei gleichen Namens in
-/// einem anderen Ordner geschrieben wurde.
+/// **Befund R4-5 (die richtige Erwartung, jetzt erfüllt):** die Warnung über
+/// eine Datei verschwindet nur, wenn **diese** Datei neu geschrieben wird
+/// oder das Dokument wechselt — nicht, weil eine andere Datei gleichen Namens
+/// in einem anderen Ordner geschrieben wurde.
 #[test]
-#[ignore = "Befund R4: Warnungen werden am Dateinamen gehalten, Prüfungen am Pfad — ein gleichnamiger Export in einen anderen Ordner löscht die Leckwarnung"]
 fn zg_r4_2_gleicher_name_anderer_ordner_muesste_die_leckwarnung_behalten() {
     let dir = tmp("name-soll");
     let x = dir.join("x");
@@ -419,6 +449,101 @@ fn zg_r4_1_die_warnung_ueber_nicht_gesuchte_texte_kommt_und_geht_mit_dem_export(
     app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
     println!("Dokumentwechsel: {:?}", app.state.warnings);
     assert_eq!(sagt_nichts(&app), 0);
+}
+
+// ===========================================================================
+// Was eine fallen gelassene Prüfung kostet (Messung)
+// ===========================================================================
+
+/// Ein Feld aus `/proc/self/status` (Linux) — `Threads:` zählt Threads,
+/// `VmHWM:` die Spitze des Arbeitsspeichers in kB.
+fn proc_status(field: &str) -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
+    status
+        .lines()
+        .find(|line| line.starts_with(field))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .expect(field)
+}
+
+/// **Messung zur Frage „gehört ein Abbruchsignal hin?“**
+///
+/// `start_export_check` lässt die ältere Prüfung **fallen** (`checks.retain`),
+/// bricht sie aber nicht ab: ihr Thread liest die Datei zu Ende, durchsucht
+/// sie, sein `send` findet niemanden, und sein [`RepaintOnDrop`] fordert am
+/// Ende trotzdem ein Neuzeichnen an. Bei N schnellen Exporten derselben Datei
+/// laufen also N−1 vollständige Suchen umsonst weiter.
+///
+/// Gemessen wird, was das kostet: die Dauer **einer** Nachprüfung, die Zahl
+/// der Threads unmittelbar nach fünf Exporten, die Zeit bis das letzte Urteil
+/// da ist, die Zeit bis auch die fallen gelassenen Threads aus sind, und die
+/// Spitze des Arbeitsspeichers (`VmHWM`) davor und danach.
+///
+/// `cargo test -p redact-gui --release zg_r4_2_mess -- --ignored --nocapture`
+#[test]
+#[ignore = "Messung: was eine fallen gelassene Nachprüfung kostet"]
+fn zg_r4_2_mess_was_eine_fallengelassene_pruefung_kostet() {
+    let dir = tmp("mess");
+    let out = dir.join("out.pdf");
+    let seiten = 300;
+    let pages: Vec<Vec<TextItem>> = (0..seiten)
+        .map(|p| {
+            vec![
+                TextItem::new(72.0, 700.0, 10.0, format!("Seite {p} GEHEIM-EINS")),
+                TextItem::new(72.0, 660.0, 10.0, format!("Seite {p} GEHEIM-ZWEI und mehr Text, damit die Seite etwas wiegt")),
+            ]
+        })
+        .collect();
+    let doc = build_pdf(&pages);
+    println!("Vorlage: {} Seiten, {} kB", seiten, doc.len() / 1024);
+    let mut app = app_with(&doc);
+    app.state
+        .regions
+        .push(text_region(0, ueber(700.0), "GEHEIM-EINS"));
+
+    // Eine Prüfung allein — so lange läuft auch jede fallen gelassene weiter.
+    let leer = proc_status("Threads:");
+    let t0 = Instant::now();
+    app.export_to(out.clone());
+    let export = t0.elapsed();
+    app.wait_for_export_checks();
+    let einzeln = t0.elapsed();
+    println!(
+        "Ausgabe: {} kB; ein Export {:?}, Export + Nachprüfung {:?}",
+        std::fs::metadata(&out).unwrap().len() / 1024,
+        export,
+        einzeln
+    );
+    println!("Statuszeile: {}", app.state.status);
+
+    // Fünf schnelle Exporte derselben Datei: vier Prüfungen fallen, laufen
+    // aber weiter.
+    let vorher = proc_status("VmHWM:");
+    let t0 = Instant::now();
+    for _ in 0..5 {
+        app.export_to(out.clone());
+    }
+    let gestartet = t0.elapsed();
+    let threads = proc_status("Threads:");
+    assert_eq!(app.checks.len(), 1, "vier sind fallen gelassen");
+    app.wait_for_export_checks();
+    let bis_urteil = t0.elapsed();
+    // Warten, bis auch die fallen gelassenen Threads aus sind.
+    while proc_status("Threads:") > leer {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let bis_alle_aus = t0.elapsed();
+    let nachher = proc_status("VmHWM:");
+    println!(
+        "fünf Exporte in {gestartet:?}; Threads danach: {threads} (Grundlast {leer})\n\
+         letztes Urteil nach {bis_urteil:?}; alle Threads aus nach {bis_alle_aus:?}\n\
+         VmHWM {} MB → {} MB (+{} MB)",
+        vorher / 1024,
+        nachher / 1024,
+        (nachher - vorher) / 1024
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 // ===========================================================================

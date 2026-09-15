@@ -381,6 +381,7 @@ const MAX_BINARY_NESTING_DEPTH: usize = 256;
 pub fn prescan(bytes: &[u8], limits: &Limits) -> Result<()> {
     let mut scan = Prescan {
         limits,
+        packed: 0,
         decompressed: 0,
         parsed: 0,
         objects: 0,
@@ -434,6 +435,13 @@ fn check_depth(depth: usize, limit: usize) -> Result<()> {
 
 struct Prescan<'a> {
     limits: &'a Limits,
+    /// Die **gepackte** Größe derselben Streams, die `decompressed` zählt —
+    /// so, wie sie in der Datei stehen.
+    ///
+    /// Sie entscheidet nichts, sie erklärt nur: aus beiden Zahlen ergibt sich,
+    /// ob die Datei sich beim Öffnen wirklich vervielfacht
+    /// ([`Prescan::charge`]).
+    packed: u64,
     decompressed: u64,
     parsed: u64,
     objects: u64,
@@ -629,7 +637,7 @@ impl Prescan<'_> {
         });
 
         if !decodable {
-            return self.charge(payload.len() as u64, false);
+            return self.charge(payload.len() as u64, payload.len() as u64, false);
         }
 
         let total_room = self
@@ -674,7 +682,7 @@ impl Prescan<'_> {
             .as_ref()
             .map(|(d, _)| d.as_slice())
             .unwrap_or(payload);
-        self.charge(data.len() as u64, !binary)?;
+        self.charge(payload.len() as u64, data.len() as u64, !binary)?;
 
         // **Jeder** auspackbare Stream wird durchlaufen, auch einer, der sich
         // als Bild ausgibt. Früher stand hier eine Ausnahme für
@@ -742,14 +750,38 @@ impl Prescan<'_> {
         Ok(Some((data, truncated)))
     }
 
-    fn charge(&mut self, size: u64, syntax: bool) -> Result<()> {
+    /// Verbucht einen Stream: `packed` seine Größe in der Datei, `size` die
+    /// nach dem Auspacken.
+    ///
+    /// **Die Meldung nennt die Ursache, die sie belegen kann.** Sie sprach
+    /// früher von einer Dekompressionsbombe — „eine kleine Datei, die sich
+    /// beim Öffnen vervielfacht“ —, auch wenn sich gar nichts vervielfacht
+    /// hatte: ein 2-MB-Strom **ohne** `/Filter` riss ein 1-MB-Budget mit dem
+    /// Faktor 1, und `leaks_many_within` reichte den Satz wörtlich weiter
+    /// (Befund R2-D, `tests/zg_r2_decke.rs`). Die Zahl stimmte, die Ursache
+    /// nicht, und sie schickte den Leser eine Bombe suchen, die es nicht gibt.
+    ///
+    /// Gebucht wird deshalb beides, und die Begründung hängt am Verhältnis:
+    /// mehr als das **Doppelte** heißt vervielfacht, alles darunter heißt
+    /// schlicht „zu viel Strominhalt“. Beide Zahlen stehen in der Meldung, so
+    /// dass der Leser das Verhältnis selbst nachrechnen kann.
+    fn charge(&mut self, packed: u64, size: u64, syntax: bool) -> Result<()> {
+        self.packed = self.packed.saturating_add(packed);
         self.decompressed = self.decompressed.saturating_add(size);
         if self.decompressed > self.limits.max_decompressed_bytes {
+            let ursache = if self.decompressed > self.packed.saturating_mul(2) {
+                "Das ist das Muster einer Dekompressionsbombe: eine kleine \
+                 Datei, die sich beim Öffnen vervielfacht."
+            } else {
+                "Beim Auspacken wächst dabei fast nichts — die Datei trägt \
+                 schlicht mehr Strominhalt, als das Budget zulässt."
+            };
             return Err(RedactError::Pdf(format!(
-                "entpackte Streams überschreiten das Budget von {} MB. \
-                 Das ist das Muster einer Dekompressionsbombe: eine kleine \
-                 Datei, die sich beim Öffnen vervielfacht.",
-                self.limits.max_decompressed_bytes / (1024 * 1024)
+                "entpackte Streams überschreiten das Budget von {} MB \
+                 ({} Byte gepackt, {} Byte entpackt). {ursache}",
+                self.limits.max_decompressed_bytes / (1024 * 1024),
+                self.packed,
+                self.decompressed
             )));
         }
         if syntax {

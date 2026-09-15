@@ -224,26 +224,26 @@ fn r2_zwei_summenzeilen_bei_gemischten_ursachen() {
 // 2. BEFUND_R2_B — die Zahl zählt Zeilen, nicht Stellen
 // ---------------------------------------------------------------------------
 
-/// **BEFUND_R2_B** — `unchecked.len()` ist die Zahl der **Meldungen**; die
-/// Kommandozeile gibt sie als Zahl der **Stellen** aus
+/// **BEFUND_R2_B, geschlossen** — `unchecked.len()` ist die Zahl der
+/// **Meldungen**; die Kommandozeile gab sie als Zahl der **Stellen** aus
 /// (`redact-cli/src/check.rs`: `let unchecked = check.unchecked.len();` →
 /// „{unchecked} Stelle(n) nicht geprüft“).
 ///
 /// Bei 61 übersprungenen Strömen sind das 50 Einzelzeilen + 1 Summenzeile
 /// + 1 Zeile „Sicht 7 nicht gelaufen“ = 52 — für 61 nicht geprüfte Ströme.
-/// Die Summenzeile darüber sagt „… und 11 weitere“, die Schlusszeile nennt
-/// 52: zwei Zahlen zu derselben Sache, und die zusammenfassende ist die
+/// Die Summenzeile darüber sagt „… und 11 weitere“, die Schlusszeile nannte
+/// 52: zwei Zahlen zu derselben Sache, und die zusammenfassende war die
 /// kleinere. Das ist die Fehlerklasse „eine Decke zählt die falsche Einheit“.
 ///
 /// Sicherheitswirkung: keine — `unchecked` ist nicht leer, der Rückgabewert
-/// bleibt 3. Es ist eine falsche Aussage der Oberfläche über den eigenen
+/// bleibt 3. Es war eine falsche Aussage der Oberfläche über den eigenen
 /// Umfang.
 ///
-/// Vorschlag: `LeakCheck` trägt die Zahl der Stellen selbst
-/// (`Budget::{skipped, noted}` aufsummiert), und die Kommandozeile gibt sie
-/// aus statt `unchecked.len()`.
+/// Seit Fix-Runde 7 trägt [`LeakCheck::unchecked_places`] die Zahl der
+/// Stellen selbst: 61 Ströme + die Zeile über Sicht 7 = **62**, und damit
+/// nie weniger als die Liste darüber nennt.
 #[test]
-fn befund_r2_b_die_schlusszahl_zaehlt_zeilen_nicht_stellen() {
+fn befund_r2_b_die_schlusszahl_zaehlt_stellen_nicht_zeilen() {
     let fuell = fuellung(256 * 1024);
     let streams: Vec<Stream> = (0..61).map(|_| ueber_budget(&fuell)).collect();
     let (bytes, _) = pdf(streams);
@@ -260,18 +260,43 @@ fn befund_r2_b_die_schlusszahl_zaehlt_zeilen_nicht_stellen() {
 
     assert_eq!((einzeln, weitere), (50, 11), "{:#?}", check.unchecked);
     assert_eq!(wahr, 61, "61 Ströme wurden nicht entpackt");
-    assert!(
-        (check.unchecked.len() as u64) < wahr,
-        "BEFUND_R2_B geschlossen? Dann diese Zusicherung umdrehen: {} Meldungen \
-         gegen {wahr} Stellen",
-        check.unchecked.len()
-    );
     assert_eq!(
         check.unchecked.len(),
         52,
         "50 Einzelzeilen + Summenzeile + Sicht 7: {:#?}",
         check.unchecked
     );
+    assert_eq!(
+        check.unchecked_places as u64,
+        wahr + 1,
+        "61 Ströme + die Zeile über Sicht 7: {:#?}",
+        check.unchecked
+    );
+    assert!(
+        check.unchecked_places >= check.unchecked.len(),
+        "die zusammenfassende Zahl darf nie kleiner sein als die Liste"
+    );
+}
+
+/// Die Zahl der Stellen ist auch dann richtig, wenn die Decke **nicht**
+/// greift — sonst wäre sie nur an einem Sonderfall geprüft.
+///
+/// Drei Ströme über dem Budget: drei Einzelzeilen, dazu die Zeile über
+/// Sicht 7 — vier Zeilen, vier Stellen. Und die Gegenrichtung: eine Datei,
+/// die ganz gelesen wurde, hat null Stellen und null Zeilen.
+#[test]
+fn r2_ohne_decke_zaehlen_stellen_und_zeilen_gleich() {
+    let fuell = fuellung(256 * 1024);
+    let streams: Vec<Stream> = (0..3).map(|_| ueber_budget(&fuell)).collect();
+    let (bytes, _) = pdf(streams);
+
+    let check = leaks_many_within(&bytes, &[SECRET], 64 * 1024);
+    assert_eq!(check.unchecked.len(), 4, "{:#?}", check.unchecked);
+    assert_eq!(check.unchecked_places, 4, "{:#?}", check.unchecked);
+
+    let voll = leaks_many_within(&bytes, &[SECRET], u64::MAX);
+    assert!(voll.unchecked.is_empty(), "{:#?}", voll.unchecked);
+    assert_eq!(voll.unchecked_places, 0);
 }
 
 /// Schreibt die Datei zu [`befund_r2_b_die_schlusszahl_zaehlt_zeilen_nicht_stellen`]
@@ -312,20 +337,20 @@ fn r2_schreibe_beispieldatei() {
 ///   seine Bytes sind vollständig durchsucht.
 /// * Die **Vorprüfung des Laders** (`document::prescan`) verbucht die Bytes
 ///   eines ungefilterten Stroms trotzdem gegen das Entpackbudget und lehnt
-///   die Datei ab — mit der Begründung „Das ist das Muster einer
-///   Dekompressionsbombe: eine kleine Datei, die sich beim Öffnen
+///   die Datei ab — bis Fix-Runde 6 mit der Begründung „Das ist das Muster
+///   einer Dekompressionsbombe: eine kleine Datei, die sich beim Öffnen
 ///   vervielfacht.“ Diese Datei ist 2 MB groß und enthält 2 MB Klartext: sie
-///   vervielfacht sich beim Öffnen um den Faktor 1. Die Zahl stimmt (das
+///   vervielfacht sich beim Öffnen um den Faktor 1. Die Zahl stimmte (das
 ///   Budget zählt die Summe der entpackten Bytes, und die ist hier gleich der
-///   rohen), die **Begründung** nicht — und `leaks_many_within` reicht sie
+///   rohen), die **Begründung** nicht — und `leaks_many_within` reichte sie
 ///   wörtlich weiter.
 ///
 /// Schwere: gering, keine Sicherheitswirkung — eine falsche Ursache in einer
-/// Fehlermeldung, die den Leser eine Bombe suchen lässt, die es nicht gibt.
-/// Vorschlag: die Bomben-Begründung nur nennen, wenn entpackt ≫ gepackt ist;
-/// sonst „die Summe der Stromdaten überschreitet das Budget“.
+/// Fehlermeldung, die den Leser eine Bombe suchen ließ, die es nicht gibt.
+/// Seit Fix-Runde 7 nennt die Meldung beide Zahlen und spricht von einer
+/// Bombe nur, wenn entpackt mehr als doppelt so groß ist wie gepackt.
 #[test]
-fn befund_r2_d_ungepackter_strom_heisst_dekompressionsbombe() {
+fn befund_r2_d_ungepackter_strom_heisst_nicht_mehr_dekompressionsbombe() {
     let text = fuellung(2 * 1024 * 1024);
     let (bytes, _) = pdf(vec![
         Stream::new(dictionary! {}, text).with_compression(false)
@@ -347,10 +372,44 @@ fn befund_r2_d_ungepackter_strom_heisst_dekompressionsbombe() {
         eng.unchecked
     );
     assert_eq!(eng.unchecked.len(), 1, "{:#?}", eng.unchecked);
+    assert_eq!(eng.unchecked_places, 1, "{:#?}", eng.unchecked);
     assert!(
-        eng.unchecked[0].contains("Muster einer Dekompressionsbombe")
-            && eng.unchecked[0].contains("eine kleine Datei, die sich beim Öffnen vervielfacht"),
-        "BEFUND_R2_D geschlossen? Dann diese Zusicherung umdrehen: {:#?}",
+        !eng.unchecked[0].contains("Dekompressionsbombe"),
+        "Faktor 1 ist keine Bombe: {:#?}",
         eng.unchecked
+    );
+    assert!(
+        eng.unchecked[0].contains("gepackt") && eng.unchecked[0].contains("entpackt"),
+        "die Meldung muss beide Zahlen nennen: {:#?}",
+        eng.unchecked
+    );
+}
+
+/// Die Gegenrichtung zu BEFUND_R2_D: eine **echte** Bombe heißt weiter so.
+///
+/// 8 MiB Nullen, wenige Kilobyte gepackt, Budget 1 MB: Faktor weit über 2,
+/// und die Meldung nennt das Muster beim Namen — samt beider Zahlen.
+#[test]
+fn r2_eine_echte_bombe_heisst_weiter_dekompressionsbombe() {
+    let (bytes, _) = pdf(vec![Stream::new(
+        dictionary! { "Filter" => Object::Name(b"FlateDecode".to_vec()) },
+        zlib(&vec![b'\n'; 8 * 1024 * 1024]),
+    )
+    .with_compression(false)]);
+
+    let eng = leaks_many_within(&bytes, &[SECRET], 1024 * 1024);
+    let meldung = eng
+        .unchecked
+        .iter()
+        .find(|l| l.contains("Vorprüfung des Laders"))
+        .unwrap_or_else(|| panic!("{:#?}", eng.unchecked));
+    assert!(
+        meldung.contains("Muster einer Dekompressionsbombe")
+            && meldung.contains("eine kleine Datei, die sich beim Öffnen vervielfacht"),
+        "{meldung}"
+    );
+    assert!(
+        meldung.contains("gepackt") && meldung.contains("entpackt"),
+        "{meldung}"
     );
 }

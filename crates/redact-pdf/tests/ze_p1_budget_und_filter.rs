@@ -361,11 +361,19 @@ fn peak_rss_bytes() -> Option<u64> {
     None
 }
 
+/// Byte in MB — 1024² Byte, wie überall in diesem Projekt (`Limits`,
+/// `--max-decompressed-mb`, die Meldungen des Laders). Die Messausgaben hier
+/// rechneten bis Fix-Runde 6 mit 1 000 000 und fielen dadurch um 4,9 % zu
+/// hoch aus.
+fn mb(bytes: u64) -> u64 {
+    bytes / MIB as u64
+}
+
 /// Was der Kindprozess über seine Speichermessung sagt — der Elternprozess
 /// liest daran ab, dass wirklich gemessen wurde.
 fn peak_note(peak: Option<u64>) -> String {
     match peak {
-        Some(bytes) => format!("VmHWM {} MB", bytes / 1_000_000),
+        Some(bytes) => format!("VmHWM {} MB", mb(bytes)),
         None => "ohne Speichermessung (kein /proc auf diesem Ziel)".to_string(),
     }
 }
@@ -512,9 +520,9 @@ fn bomben_im_kindprozess() {
     // auf jedem Ziel.
     if let Some(peak) = peak_rss_bytes() {
         assert!(
-            peak < 400_000_000,
+            peak < 400 * MIB as u64,
             "VmHWM {} MB — eine der Bomben wurde entpackt",
-            peak / 1_000_000
+            mb(peak)
         );
     }
 }

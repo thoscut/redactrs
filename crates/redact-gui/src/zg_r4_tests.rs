@@ -20,7 +20,7 @@ use redact_core::{MatchType, Rect, Region, Source};
 use redact_pdf::testing::{build_pdf, TextItem};
 use redact_pipeline::Config;
 
-use crate::state::{AnnotatedRegion, ExportCheck, ExportCheckPlan, HitOutcome};
+use crate::state::{AnnotatedRegion, ExportCheck, ExportCheckPlan, HitOutcome, MAX_STATUS_CHARS};
 use crate::AppState;
 
 // --------------------------------------------------------------- Hilfsmittel
@@ -142,11 +142,15 @@ fn zg_r4_1_jeder_weg_zu_kept_und_unsearched() {
         check.sentence(),
         check.warning()
     );
-    assert!(plan.needles.is_empty());
-    assert_eq!((check.kept, check.unsearched, check.checked), (1, 1, 0));
+    // Gesucht wird auch dieser Text (Fix-Runde 7); gefunden wird er, denn
+    // die abgewählte Zeile steht noch da — also keine Aussage.
+    assert_eq!(plan.needles, vec!["Betrag".to_string()]);
+    assert_eq!(plan.kept_literal, vec![true]);
+    assert_eq!((check.kept, check.unsearched, check.checked), (1, 1, 1));
+    assert_eq!(check.vanished(), 0);
     assert!(
         check.warning().is_some(),
-        "nicht gesucht — die Warnung muss bleiben"
+        "der Fund ist nicht zuzuordnen — die Warnung muss bleiben"
     );
 
     // (b) Negativliste: ein Mustertreffer, den ein Schutzeintrag derselben
@@ -166,7 +170,7 @@ fn zg_r4_1_jeder_weg_zu_kept_und_unsearched() {
         check.sentence(),
         check.warning()
     );
-    assert!(plan.needles.is_empty(), "{plan:?}");
+    assert_eq!(plan.kept_literal, vec![true], "{plan:?}");
     assert_eq!((check.kept, check.unsearched), (1, 1));
     assert!(check.warning().is_some());
 
@@ -187,7 +191,7 @@ fn zg_r4_1_jeder_weg_zu_kept_und_unsearched() {
         check.sentence(),
         check.warning()
     );
-    assert!(plan.needles.is_empty(), "{plan:?}");
+    assert_eq!(plan.kept_literal, vec![true], "{plan:?}");
     assert_eq!((check.kept, check.unsearched), (1, 1));
     assert!(check.warning().is_some());
 
@@ -242,7 +246,7 @@ fn zg_r4_1_jeder_weg_zu_kept_und_unsearched() {
         check.sentence(),
         check.warning()
     );
-    assert!(!check.found_leak(), "gar nicht gesucht");
+    assert!(!check.found_leak(), "der Fund ist nicht zuzuordnen");
     assert_eq!(check.unsearched, 1);
     let warning = check.warning().expect("die Warnung bleibt");
     assert!(warning.contains("sagt sie nichts"), "{warning}");
@@ -265,22 +269,31 @@ fn zg_r4_1_jeder_weg_zu_kept_und_unsearched() {
         check.warning()
     );
     assert!(check.unreadable.is_some());
-    assert_eq!((check.kept, check.unsearched), (1, 1));
+    // Unlesbar heißt: **keine** Aussage. Eine Zahl daneben behauptete eine.
+    assert_eq!((check.kept, check.unsearched, check.checked), (0, 0, 0));
+    assert_eq!(check.skipped, 1, "gesucht wurde nichts");
     let warning = check.warning().expect("unlesbar gehört in die Warnungen");
     assert!(warning.contains("zurücklesen"), "{warning}");
 
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// **Die Gegenrichtung.** Eine einzige abgewählte Zeile „Betrag“ nimmt der
-/// Nachprüfung jede Aussage über **alle** geschwärzten „Betrag“-Zeilen —
-/// auch wenn die Ausgabe danach mit der ungeschwärzten Vorlage überschrieben
-/// wird, steht dort kein Alarm, nur „sagt nichts“.
+/// **Die Gegenrichtung, und sie bleibt.** Eine einzige abgewählte Zeile
+/// „Betrag“ nimmt der Nachprüfung jede Aussage über **alle** geschwärzten
+/// „Betrag“-Zeilen — auch wenn die Ausgabe danach mit der ungeschwärzten
+/// Vorlage überschrieben wird, steht dort kein Alarm, nur „sagt nichts“.
 ///
-/// Und das Orakel könnte es unterscheiden: [`redact_pdf::leaks_many_within`]
-/// liefert je Begriff **alle** Fundstellen. Die Vorlage trägt vier, die
-/// gewollte Ausgabe eine (die abgewählte Zeile). Der Zähler steht in der
-/// Antwort — die Oberfläche fragt ihn nicht.
+/// Seit Fix-Runde 7 wird der Begriff **gesucht** (Befund R4-1); hier trifft
+/// er in **beiden** Dateien, und ein Treffer ist genau der zweideutige Fall.
+/// Was die Korrektur bringt, steht in
+/// `zg_r4_1_ein_text_der_nachweislich_weg_ist_bekommt_seine_entwarnung`: wo
+/// der Text **verschwunden** ist, gibt es die Entwarnung.
+///
+/// Und das Orakel könnte auch diesen Fall unterscheiden:
+/// [`redact_pdf::leaks_many_within`] liefert je Begriff **alle** Fundstellen.
+/// Die Vorlage trägt vier, die gewollte Ausgabe eine (die abgewählte Zeile) —
+/// aber je **Sicht** eine Fundstelle, nicht je Vorkommen (siehe Ausgabe
+/// unten). Der Zähler trennt die beiden Dateien also nicht.
 #[test]
 fn zg_r4_1_eine_abgewaehlte_zeile_nimmt_jede_nachpruefung() {
     let dir = tmp("betrag");
@@ -296,7 +309,8 @@ fn zg_r4_1_eine_abgewaehlte_zeile_nimmt_jede_nachpruefung() {
         check.sentence(),
         check.warning()
     );
-    assert!(plan.needles.is_empty());
+    assert_eq!(plan.needles, vec!["Betrag".to_string()]);
+    assert_eq!(plan.kept_literal, vec![true]);
     assert_eq!(check.unsearched, 1, "ein Text, drei Zeilen — eine Zahl");
 
     // Das Orakel an der gewollten Ausgabe: die abgewählte Zeile steht da —
@@ -352,16 +366,18 @@ fn zg_r4_1_eine_abgewaehlte_zeile_nimmt_jede_nachpruefung() {
 }
 
 /// Der andere Weg, eine Zeile stehen zu lassen: **löschen** statt abwählen
-/// (Entf, [`AppState::delete_selected`]). Dann ist der Text nicht mehr
-/// gedeckt, wird gesucht — und die bewusst stehen gelassene Zeile ist ein
-/// „Fund“: „darf so nicht weitergegeben werden“ über eine Datei, die genau
-/// so gewollt war (Befund 5 aus Fix-Runde 4, über den Umweg Löschen).
+/// (Entf, [`AppState::delete_selected`]). Bis Fix-Runde 6 war der Text damit
+/// nicht mehr gedeckt, und die bewusst stehen gelassene Zeile wurde zum
+/// „Fund“: „1 von 1 gesuchten Text(en) steht NOCH in der Ausgabe — diese
+/// Datei ist nicht geschwärzt und darf so nicht weitergegeben werden“ über
+/// eine Datei, die genau so gewollt war (Befund R4-2, Befund 5 aus
+/// Fix-Runde 4 über den Umweg Löschen).
 ///
-/// Beide Wege zusammen: wer eine Zeile behalten will, bekommt entweder eine
-/// Warnung, die nie verschwindet (abwählen), oder einen falschen Alarm
-/// (löschen). Einen Weg ohne beides gibt es nicht.
+/// Jetzt merkt sich der Zustand die gelöschten Treffer, und beide Wege enden
+/// gleich: kein Alarm, aber auch keine Entwarnung — der Fund ist von der
+/// stehen gelassenen Zeile nicht zu unterscheiden.
 #[test]
-fn zg_r4_1_loeschen_statt_abwaehlen_gibt_falschen_alarm() {
+fn zg_r4_1_loeschen_statt_abwaehlen_ist_kein_alarm_mehr() {
     let dir = tmp("loeschen");
     let out = dir.join("out.pdf");
     let mut state = state_with(&vier_betraege());
@@ -378,7 +394,7 @@ fn zg_r4_1_loeschen_statt_abwaehlen_gibt_falschen_alarm() {
         check.warning()
     );
     assert_eq!(plan.needles, vec!["Betrag".to_string()]);
-    assert_eq!(check.unsearched, 0);
+    assert_eq!(plan.kept_literal, vec![true], "gelöscht ist stehen gelassen");
     // Die vierte Zeile steht bewusst da — und ist der einzige Rest: der
     // Schriftdekoder sieht auf Seite 1 genau ein „Betrag“.
     let bytes = std::fs::read(&out).unwrap();
@@ -388,13 +404,117 @@ fn zg_r4_1_loeschen_statt_abwaehlen_gibt_falschen_alarm() {
     let seite: Vec<&String> = hits.iter().filter(|h| h.starts_with("Seite 1 ")).collect();
     assert_eq!(seite.len(), 1, "{hits:?}");
     assert!(
-        check.found_leak(),
-        "so verhält es sich heute: die gewollte Zeile ist ein Alarm — {}",
+        !check.found_leak(),
+        "die gewollte Zeile ist kein Alarm — {}",
         check.sentence()
     );
+    assert_eq!((check.kept, check.unsearched), (1, 1));
     assert!(check
-        .sentence()
-        .contains("darf so nicht weitergegeben werden"));
+        .warning()
+        .is_some_and(|w| w.contains("sagt sie nichts")));
+
+    // **Die Gegenrichtung.** Ein Rückgängig holt die Zeile zurück; sie ist
+    // dann wieder eine Schwärzung, und geht die daneben, ist es ein Leck.
+    assert!(state.undo());
+    assert_eq!(state.regions.len(), 4);
+    // Das Rechteck der vierten Zeile daneben schieben: sie gilt als
+    // geschwärzt und bleibt doch stehen.
+    assert!(state.set_region_rect(3, Rect::new(300.0, 20.0, 320.0, 40.0)));
+    let (plan, check) = export_and_check(&state, &dir.join("zurueck.pdf"));
+    println!(
+        "rückgängig: {}\n  Warnung: {:?}",
+        check.sentence(),
+        check.warning()
+    );
+    assert_eq!(plan.kept_literal, vec![false], "nichts mehr gelöscht");
+    assert!(check.found_leak(), "{}", check.sentence());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Was Löschen nicht deckt.** Ein gelöschter **Schutzeintrag** der
+/// Negativliste ist das Gegenteil einer stehen gelassenen Zeile: er hielt
+/// eine Schwärzung ab, und ohne ihn wird die Zeile geschwärzt. Seinen Text
+/// als „stehen gelassen“ zu merken, nähme der Nachprüfung genau die Zeile,
+/// die jetzt geschwärzt gehört.
+///
+/// Mutation (`!removed.is_blocking()` in `delete_selected` entfernt): der
+/// Fund wird zu „keine Aussage“, rot.
+#[test]
+fn zg_r4_1_ein_geloeschter_schutzeintrag_deckt_nichts() {
+    let dir = tmp("schutz-geloescht");
+    let out = dir.join("out.pdf");
+    let mut state = state_with(&vier_betraege());
+    // Ein Mustertreffer und der Schutzeintrag darüber, beide „Betrag“.
+    state.regions.push(pattern_region(0, over(0), "Betrag"));
+    state
+        .regions
+        .push(protecting_region(0, over(0), Some("Betrag")));
+    let summary = state.hit_summary();
+    assert_eq!(summary.outcome(0), HitOutcome::Blocked);
+    assert_eq!(summary.outcome(1), HitOutcome::Protecting);
+
+    // Der Schutzeintrag fliegt raus — der Treffer wird geschwärzt.
+    state.selected_region = Some(1);
+    assert!(state.delete_selected());
+    // Und das Rechteck geht daneben: die Zeile bleibt stehen.
+    assert!(state.set_region_rect(0, Rect::new(300.0, 20.0, 320.0, 40.0)));
+    let summary = state.hit_summary();
+    assert_eq!(summary.outcome(0), HitOutcome::Redacted);
+    let (plan, check) = export_and_check(&state, &out);
+    println!(
+        "Schutz gelöscht: {}\n  Warnung: {:?}",
+        check.sentence(),
+        check.warning()
+    );
+    assert_eq!(plan.needles, vec!["Betrag".to_string()]);
+    assert_eq!(
+        plan.kept_literal,
+        vec![false],
+        "ein gelöschter Schutzeintrag lässt nichts stehen"
+    );
+    assert!(check.found_leak(), "{}", check.sentence());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Eine neue Analyse vergisst die gelöschten Zeilen.** Die Löschung ist
+/// eine Aussage über **diese** Trefferliste; nach `analyze` steht der Treffer
+/// wieder da (mit neuer Kennung), und ihn weiter als stehen gelassen zu
+/// führen machte aus einem Leck „keine Aussage“.
+///
+/// Mutation (`deleted_hits.clear()` in `analyze` entfernt): rot.
+#[test]
+fn zg_r4_1_eine_neue_analyse_vergisst_die_geloeschten_zeilen() {
+    let dir = tmp("analyse");
+    let out = dir.join("out.pdf");
+    // Mit Muster, damit `analyze` überhaupt etwas findet.
+    let doc = build_pdf(&[vec![TextItem::new(
+        72.0,
+        700.0,
+        10.0,
+        "IBAN: DE89 3704 0044 0532 0130 00",
+    )]]);
+    let mut state = AppState::with_config(Config {
+        patterns: vec!["iban_de".to_string()],
+        ..Config::default()
+    });
+    state.load_bytes(&doc, None).expect("ladbar");
+    assert_eq!(state.analyze().expect("Analyse"), 1);
+    state.selected_region = Some(0);
+    assert!(state.delete_selected());
+    assert!(state.regions.is_empty());
+
+    // Noch einmal analysieren: der Treffer ist zurück — und sein Rechteck
+    // geht daneben, die IBAN bleibt stehen.
+    assert_eq!(state.analyze().expect("Analyse"), 1);
+    assert!(state.set_region_rect(0, Rect::new(300.0, 20.0, 320.0, 40.0)));
+    let (plan, check) = export_and_check(&state, &out);
+    println!(
+        "nach der zweiten Analyse: {}\n  Warnung: {:?}",
+        check.sentence(),
+        check.warning()
+    );
+    assert_eq!(plan.kept_literal, vec![false], "{plan:?}");
+    assert!(check.found_leak(), "{}", check.sentence());
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -431,10 +551,11 @@ impl Lage {
     }
 
     /// Kann [`ExportCheckPlan::run_within`] diese Lage liefern? Eine
-    /// unlesbare Datei hat keinen Fund, keine ungeprüfte Stelle und kein
-    /// Urteil am Fund (`checked == 0`).
+    /// unlesbare Datei hat keinen Fund, keine ungeprüfte Stelle, kein Urteil
+    /// am Fund und seit Fix-Runde 7 auch keinen nicht zuzuordnenden Fund
+    /// (`checked == 0`, `kept == 0`).
     fn reachable(self) -> bool {
-        !(self.unreadable && (self.fund || self.judged || self.unchecked))
+        !(self.unreadable && (self.fund || self.judged || self.unsearched || self.unchecked))
     }
 
     fn check(self) -> ExportCheck {
@@ -446,11 +567,13 @@ impl Lage {
             Vec::new()
         };
         // Ein sauber gesuchter Begriff kommt immer dazu, damit `checked` die
-        // Funde und Urteile trägt — so wie `run_within` es füllt.
+        // Funde, die Urteile **und** die nicht zuzuordnenden Funde trägt — so
+        // wie `run_within` es füllt: `checked` zählt alles, was gesucht wurde,
+        // und `vanished()` ist hier immer genau 1.
         let checked = if self.unreadable {
             0
         } else {
-            leaking.len() + judged + 1
+            leaking.len() + judged + unsearched + 1
         };
         ExportCheck {
             unreadable: self.unreadable.then(|| "Datei fehlt".to_string()),
@@ -525,9 +648,15 @@ fn pruefe_satz(lage: Lage, check: &ExportCheck) -> Vec<String> {
             "Entwarnung ≠ (gesucht und nichts gefunden)",
         );
         if entwarnung {
+            // **Verschwunden**, nicht gesucht (Befund R4-7): ein gefundener
+            // Text steht weiter in der Ausgabe, auch wenn er gedeckt ist.
             muss(
-                s.contains(&format!("{} gesuchte Text(e)", check.checked)),
-                "die Zahl der gesuchten Texte fehlt",
+                s.contains(&format!("{} gesuchte Text(e)", check.vanished())),
+                "die Entwarnung trägt die falsche Zahl",
+            );
+            muss(
+                check.vanished() == check.checked - check.kept - check.leaking.len(),
+                "vanished() rechnet anders als der Zustand",
             );
         }
     }
@@ -558,23 +687,21 @@ fn pruefe_satz(lage: Lage, check: &ExportCheck) -> Vec<String> {
             )) && s.contains(&format!("höchstens {} Begriffe", check.limit)),
             "Decke ohne Zahl oder Grenze im Satz",
         );
-        // Befund R4 (siehe `zg_r4_3_die_warnung_muesste_beide_gruende_nennen`):
-        // steht daneben `unsearched`, verdeckt es die Decke in der Warnung.
-        // Die vier Lagen sind hier ausgenommen, damit der Rest geprüft bleibt.
-        if check.unsearched == 0 {
-            muss(
-                w.as_deref()
-                    .is_some_and(|w| w.contains(&format!("{}", check.skipped))),
-                "die Zahl der Texte jenseits der Decke fehlt in der Warnung",
-            );
-        }
+        // Die Warnung nennt **beide** Gründe, auch wenn `unsearched`
+        // danebensteht (Befund R4-3).
+        muss(
+            w.as_deref().is_some_and(|w| {
+                w.contains(&format!("{}", check.skipped)) && w.contains(&format!("{}", check.limit))
+            }),
+            "die Zahl der Texte jenseits der Decke oder die Decke fehlt in der Warnung",
+        );
     }
     // Nicht gesucht (wörtlich gedeckt): kein Urteil, und die Warnung bleibt.
     if check.unsearched > 0 {
         muss(
             check.unreadable.is_some()
                 || s.contains(&format!(
-                    "{} Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile",
+                    "{} Text(e) stehen wörtlich auch in einer abgewählten, gelöschten oder geschützten Zeile",
                     check.unsearched
                 )),
             "unsearched ohne Zahl im Satz",
@@ -615,6 +742,25 @@ fn pruefe_satz(lage: Lage, check: &ExportCheck) -> Vec<String> {
                 );
             }
         }
+    }
+    // Die Statuszeile ist gedeckelt, und was sie nicht trägt, steht ganz in
+    // den Warnungen (Befund R4-6).
+    let status = check.status_line();
+    muss(
+        status.chars().count() <= MAX_STATUS_CHARS,
+        &format!("die Statuszeile ist {} Zeichen lang", status.chars().count()),
+    );
+    if s.chars().count() > MAX_STATUS_CHARS {
+        muss(
+            status.ends_with("… (ganzer Satz in den Warnungen)"),
+            "gekürzt ohne Hinweis",
+        );
+        muss(
+            w.as_deref() == Some(s.as_str()),
+            "gekürzt, aber der ganze Satz steht in keiner Warnung",
+        );
+    } else {
+        muss(status == s, "die Statuszeile weicht vom Satz ab");
     }
     // Nichts zu warnen ⇔ kein Fund, keine Lücke, nichts unlesbar.
     let ruhig = !check.found_leak()
@@ -657,7 +803,9 @@ fn zg_r4_3_alle_128_lagen_gegen_den_zustand() {
         laengste.0
     );
     println!("  {}", laengste.1);
-    assert_eq!(erreichbar, 128 - 7 * 8);
+    // 64 lesbare Lagen, dazu die 4 unlesbaren, in denen sonst nichts steht
+    // (nur `skipped` und Handregionen sind dort möglich).
+    assert_eq!(erreichbar, 64 + 4);
     assert!(
         fehler.is_empty(),
         "{} Lage(n) sagen etwas Falsches:\n{}",
@@ -668,14 +816,12 @@ fn zg_r4_3_alle_128_lagen_gegen_den_zustand() {
 
 /// Was die 128 Lagen gemeinsam festhalten, hier für den einen Fall
 /// einzeln — Fix-Runde 6 hat den Vorbehalt „über sie sagt diese Prüfung
-/// nichts“ **vor** die Decke gesetzt: sind beide da, nennt die Warnung
-/// nur noch den einen Grund. Die Zahl der Texte jenseits der Decke und die
-/// Decke selbst stehen nur in der Statuszeile, die die nächste Aktion
-/// überschreibt.
-///
-/// So verhält es sich heute; die richtige Erwartung steht daneben.
+/// nichts“ **vor** die Decke gesetzt, und [`ExportCheck::warning`] kehrte
+/// beim ersten Grund zurück: die Zahl der Texte jenseits der Decke und die
+/// Decke selbst standen nur noch in der Statuszeile, die die nächste Aktion
+/// überschreibt (Befund R4-3). Jetzt nennt die Warnung beide Gründe.
 #[test]
-fn zg_r4_3_unsearched_verdeckt_die_decke_in_der_warnung_heute() {
+fn zg_r4_3_die_warnung_nennt_beide_gruende_auch_im_lauf() {
     let check = ExportCheck {
         checked: 1,
         skipped: 5,
@@ -687,10 +833,17 @@ fn zg_r4_3_unsearched_verdeckt_die_decke_in_der_warnung_heute() {
     println!("Satz:    {}", check.sentence());
     let warning = check.warning().expect("unvollständig");
     println!("Warnung: {warning}");
-    assert!(warning.contains("über 1 Text(e) sagt sie nichts"));
-    assert!(!warning.contains('5'), "heute fehlt die Decke: {warning}");
-    // Und über den Lauf, nicht nur über den Bau: eine Decke von 1 mit zwei
-    // Begriffen und einer gedeckten Zeile.
+    // Beide Gründe: der Satz ist länger als die Statuszeile trägt, also steht
+    // er ganz in der Warnung — und nennt beide.
+    assert!(warning.contains("sagt diese Prüfung nichts"), "{warning}");
+    assert!(
+        warning.contains("5 weitere Text(e) wurden nicht gesucht")
+            && warning.contains("höchstens 1"),
+        "die Decke fehlt in der Warnung: {warning}"
+    );
+    assert_eq!(warning, check.sentence());
+    // Und über den Lauf, nicht nur über den Bau: eine Decke von 1 mit drei
+    // Begriffen, von denen der erste gedeckt ist.
     let dir = tmp("verdeckt");
     let out = dir.join("out.pdf");
     let mut state = state_with(&vier_betraege());
@@ -707,8 +860,37 @@ fn zg_r4_3_unsearched_verdeckt_die_decke_in_der_warnung_heute() {
         check.sentence(),
         check.warning()
     );
-    assert_eq!((check.checked, check.skipped, check.unsearched), (1, 1, 1));
-    assert!(!check.warning().unwrap().contains("höchstens"));
+    assert_eq!((check.checked, check.skipped, check.unsearched), (1, 2, 1));
+    let warning = check.warning().expect("unvollständig");
+    assert!(
+        warning.contains("2 weitere Text(e) wurden nicht gesucht")
+            && warning.contains("höchstens 1"),
+        "{warning}"
+    );
+    assert!(warning.contains("sagt diese Prüfung nichts"), "{warning}");
+    // Und die Gegenprobe zur Länge: **ein** Grund allein bekommt seinen
+    // eigenen, kurzen Satz — ohne die Entwarnung, die daneben steht.
+    let nur_decke = ExportCheck {
+        checked: 1,
+        skipped: 5,
+        limit: 1,
+        ..ExportCheck::default()
+    };
+    let warning = nur_decke.warning().expect("unvollständig");
+    println!("nur die Decke: {warning}");
+    assert!(warning.starts_with("Nachprüfung unvollständig — 5 Text(e) wurden nicht gesucht"));
+    assert!(!warning.contains("stehen nicht mehr in der Ausgabe"), "{warning}");
+    let nur_gedeckt = ExportCheck {
+        checked: 1,
+        kept: 1,
+        unsearched: 1,
+        limit: redact_core::MAX_CHECK_NEEDLES,
+        ..ExportCheck::default()
+    };
+    let warning = nur_gedeckt.warning().expect("unvollständig");
+    println!("nur gedeckt:   {warning}");
+    assert!(warning.starts_with("Nachprüfung unvollständig — über 1 Text(e) sagt sie nichts"));
+    assert!(!warning.contains("stehen nicht mehr in der Ausgabe"), "{warning}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -717,7 +899,6 @@ fn zg_r4_3_unsearched_verdeckt_die_decke_in_der_warnung_heute() {
 /// beide Gründe nennen — sonst fehlt in der Liste, die bleibt, die Zahl
 /// der gar nicht gesuchten Begriffe und die Decke, die sie erklärt.
 #[test]
-#[ignore = "Befund R4: die Warnung nennt bei unsearched > 0 die Decke (skipped) nicht mehr"]
 fn zg_r4_3_die_warnung_muesste_beide_gruende_nennen() {
     let check = ExportCheck {
         checked: 1,
@@ -738,14 +919,17 @@ fn zg_r4_3_die_warnung_muesste_beide_gruende_nennen() {
 // 2 — Die Kennung einer Prüfung ist ein `PathBuf`
 // ===========================================================================
 
-/// `start_export_check` beendet die ältere Prüfung **derselben Datei** —
-/// entschieden mit `pending.out != out`, also am Pfad Zeichen für Zeichen
-/// (nach Komponenten). Was für den Dateisystem dieselbe Datei ist, ist für
-/// diesen Vergleich eine andere Prüfung: `./a.pdf`, `x/../y/a.pdf`, ein
-/// Symlink. Die Gegenrichtung des Vergleichs steht in
-/// `zg_r4_app_tests::zg_r4_2_dieselbe_datei_unter_anderem_namen_haelt_die_alte_pruefung_am_leben`.
+/// **Warum die Kennung nicht der Pfad sein kann.** `start_export_check`
+/// beendet die ältere Prüfung derselben Datei; bis Fix-Runde 6 entschied das
+/// `pending.out != out`, also der Pfad Zeichen für Zeichen (nach
+/// Komponenten). Was für das Dateisystem dieselbe Datei ist, war für diesen
+/// Vergleich eine andere: `./a.pdf`, `x/../x/a.pdf`, ein Symlink (Befund
+/// R4-4). Dieser Test hält die Pfadsemantik fest, an der das hing; dass die
+/// Kennung jetzt `std::fs::canonicalize` ist, belegen
+/// `zg_r4_app_tests::zg_r4_2_dieselbe_datei_unter_anderem_namen_beendet_die_alte_pruefung`
+/// und der `..`-Zwilling daneben.
 #[test]
-fn zg_r4_2_pfadschreibweisen_sind_verschiedene_kennungen() {
+fn zg_r4_2_der_pfadvergleich_taugt_nicht_als_kennung() {
     let dir = tmp("pfade");
     let a = dir.join("a.pdf");
     std::fs::write(&a, b"x").unwrap();
@@ -783,19 +967,20 @@ fn zg_r4_2_pfadschreibweisen_sind_verschiedene_kennungen() {
 // 1b — Ist die ehrliche Aussage auch nützlich?
 // ===========================================================================
 
-/// **Der Preis der Ehrlichkeit.** Die Zeile, die „Betrag“ trägt, wird
-/// abgewählt; das Rechteck der geschwärzten Zeile daneben ist so groß, dass
-/// es **beide** Vorkommen entfernt. Danach steht „Betrag“ **nachweislich
-/// nirgends** mehr in der Ausgabe — und die Oberfläche sagt trotzdem „über
-/// sie sagt diese Prüfung nichts“, mit einer Warnung, die bleibt.
+/// **Der Preis der Ehrlichkeit — und wo er nicht zu zahlen ist.** Die Zeile,
+/// die „Betrag“ trägt, wird abgewählt; das Rechteck der geschwärzten Zeile
+/// daneben ist so groß, dass es **beide** Vorkommen entfernt. Danach steht
+/// „Betrag“ **nachweislich nirgends** mehr in der Ausgabe.
 ///
-/// Die Entwarnung wäre umsonst zu haben: derselbe Plan, nur mit dem Begriff
-/// in `needles` statt in `kept`, liefert „steht nicht mehr in der Ausgabe“
-/// und **keine** Warnung. Nicht gefunden ist eine Aussage, und zwar eine
-/// sichere — nur der **Fund** ist zweideutig. `plan_export_check` wirft beides
-/// zusammen weg, weil es vor der Suche entscheidet.
+/// Bis Fix-Runde 6 sagte die Oberfläche trotzdem „über sie sagt diese
+/// Prüfung nichts“ und trug eine Warnung ein, die nur durch Wiedereinschalten
+/// der Schwärzung verschwand: [`AppState::plan_export_check`] entschied
+/// **vor** der Suche und warf mit dem zweideutigen Fund auch die sichere
+/// Aussage „nicht gefunden“ weg (Befund R4-1). Jetzt wird gesucht, und der
+/// Satz ist derselbe wie für jeden anderen verschwundenen Text — Zeichen für
+/// Zeichen, hier nachgerechnet gegen einen Plan ohne jede Deckung.
 #[test]
-fn zg_r4_1_ein_text_der_nachweislich_weg_ist_bleibt_trotzdem_ungeprueft() {
+fn zg_r4_1_ein_text_der_nachweislich_weg_ist_bekommt_seine_entwarnung() {
     let dir = tmp("nuetzlich");
     let out = dir.join("out.pdf");
     // Zwei Zeilen, beide „Betrag“ — mehr gibt es in dieser Vorlage nicht.
@@ -826,32 +1011,37 @@ fn zg_r4_1_ein_text_der_nachweislich_weg_ist_bleibt_trotzdem_ungeprueft() {
     assert!(rest.is_empty(), "„Betrag“ steht noch da: {rest:?}");
 
     let plan = state.plan_export_check(&summary);
+    assert_eq!(plan.kept_literal, vec![true], "gedeckt ist er trotzdem");
     let check = plan.run(&out);
-    println!("heute:   {}", check.sentence());
+    println!("Satz:    {}", check.sentence());
     println!("Warnung: {:?}", check.warning());
-    assert_eq!((check.kept, check.unsearched, check.checked), (1, 1, 0));
+    assert_eq!((check.kept, check.unsearched, check.checked), (0, 0, 1));
+    assert_eq!(check.vanished(), 1);
     assert!(
-        check.warning().is_some(),
-        "die Warnung bleibt, obwohl nichts mehr da ist"
+        check
+            .sentence()
+            .contains("1 gesuchte Text(e) stehen nicht mehr in der Ausgabe"),
+        "{}",
+        check.sentence()
+    );
+    assert!(
+        check.warning().is_none(),
+        "nicht gefunden ist eine Aussage: {:?}",
+        check.warning()
     );
 
-    // Derselbe Begriff, nur gesucht statt übersprungen: eine sichere
-    // Entwarnung, umsonst.
+    // Derselbe Begriff ohne jede Deckung: dasselbe Urteil, Zeichen für
+    // Zeichen. Die Deckung kostet hier nichts mehr.
     let gesucht = ExportCheckPlan {
         needles: vec!["Betrag".to_string()],
         kept_forms: vec![true],
+        kept_literal: vec![false],
         ..ExportCheckPlan::default()
     }
     .run(&out);
-    println!("gesucht: {}", gesucht.sentence());
-    println!("Warnung: {:?}", gesucht.warning());
-    assert!(!gesucht.found_leak(), "nichts gefunden");
-    assert_eq!(gesucht.checked, 1);
-    assert!(
-        gesucht.warning().is_none(),
-        "nicht gefunden ist eine Aussage: {:?}",
-        gesucht.warning()
-    );
+    println!("ungedeckt: {}", gesucht.sentence());
+    assert_eq!(gesucht.sentence(), check.sentence());
+    assert_eq!(gesucht.warning(), check.warning());
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -859,14 +1049,16 @@ fn zg_r4_1_ein_text_der_nachweislich_weg_ist_bleibt_trotzdem_ungeprueft() {
 // 3b — Wo der Satz sich selbst widerspricht
 // ===========================================================================
 
-/// **Die Entwarnung zählt einen Text mit, den das Orakel gefunden hat.**
-/// `checked` ist die Zahl der **gesuchten** Schreibweisen, nicht die der
-/// verschwundenen. Trifft der einzige gesuchte Begriff (nur ohne Leerraum,
-/// gedeckt von einer abgewählten Zeile), sagt derselbe Satz beides: „1
-/// gesuchte Text(e) stehen nicht mehr in der Ausgabe“ **und** „1 Text(e)
-/// decken sich mit einer abgewählten … Zeile“ — über **denselben** Text.
+/// **Die Entwarnung zählt keinen Text mehr mit, den das Orakel gefunden
+/// hat.** `checked` ist die Zahl der **gesuchten** Schreibweisen, nicht die
+/// der verschwundenen. Trifft der einzige gesuchte Begriff (nur ohne
+/// Leerraum, gedeckt von einer abgewählten Zeile), sagte derselbe Satz bis
+/// Fix-Runde 6 beides: „1 gesuchte Text(e) stehen nicht mehr in der Ausgabe“
+/// **und** „1 Text(e) decken sich mit einer abgewählten … Zeile“ — über
+/// **denselben** Text (Befund R4-7). Jetzt steht im Kopf
+/// [`ExportCheck::vanished`], also `checked - kept - leaking`.
 #[test]
-fn zg_r4_3_die_entwarnung_zaehlt_den_gefundenen_text_mit() {
+fn zg_r4_3_die_entwarnung_zaehlt_den_gefundenen_text_nicht_mit() {
     const PLAIN: &str = "DE89370400440532013000";
     const SPACED: &str = "DE89 3704 0044 0532 0130 00";
     let dir = tmp("doppelt");
@@ -898,10 +1090,15 @@ fn zg_r4_3_die_entwarnung_zaehlt_den_gefundenen_text_mit() {
         (1, 1, 0, 0)
     );
     let s = check.sentence();
+    assert_eq!(check.vanished(), 0, "verschwunden ist nichts");
     assert!(
-        s.contains("1 gesuchte Text(e) stehen nicht mehr in der Ausgabe")
+        s.contains("0 gesuchte Text(e) stehen nicht mehr in der Ausgabe")
             && s.contains("1 Text(e) decken sich"),
         "{s}"
+    );
+    assert!(
+        !s.contains("1 gesuchte Text(e) stehen nicht mehr"),
+        "derselbe Text stünde zweimal da: {s}"
     );
     // Und das Orakel hat den Begriff sehr wohl gefunden — nur nicht wörtlich.
     let bytes = std::fs::read(&out).unwrap();
@@ -916,13 +1113,18 @@ fn zg_r4_3_die_entwarnung_zaehlt_den_gefundenen_text_mit() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// **Zwei Kopfaussagen, die einander ausschließen.** Mit einer Decke von 0
-/// ([`ExportCheckPlan::run_within`] ist `pub`) steht im selben Satz „2
+/// **Zwei Kopfaussagen, die einander ausschlossen.** Mit einer Decke von 0
+/// ([`ExportCheckPlan::run_within`] ist `pub`) stand im selben Satz „2
 /// weitere Text(e) wurden nicht gesucht“ und „keine geschwärzte Zeile mit
 /// bekanntem Text“ — es gab zwei, sie lagen nur über der Decke. Auch
-/// „**weitere**“ ist falsch: es gab keine ersten.
+/// „**weitere**“ war falsch: es gab keine ersten (Befund R4-8).
+///
+/// Die Oberfläche erreicht diese Lage nicht (die Decke ist
+/// [`redact_core::MAX_CHECK_NEEDLES`]), `run_within` ist aber öffentlich —
+/// und ein Satz, der sich widerspricht, ist auch dann falsch, wenn ihn heute
+/// niemand zu sehen bekommt.
 #[test]
-fn zg_r4_3_bei_der_decke_null_widerspricht_sich_der_satz() {
+fn zg_r4_3_bei_der_decke_null_widerspricht_sich_der_satz_nicht_mehr() {
     let dir = tmp("decke-null");
     let out = dir.join("out.pdf");
     let mut state = state_with(&vier_betraege());
@@ -934,23 +1136,41 @@ fn zg_r4_3_bei_der_decke_null_widerspricht_sich_der_satz() {
     let s = check.sentence();
     println!("Satz: {s}");
     assert_eq!((check.checked, check.skipped), (0, 2));
-    assert!(s.contains("2 weitere Text(e) wurden nicht gesucht"), "{s}");
+    assert!(s.contains("2 Text(e) wurden nicht gesucht"), "{s}");
     assert!(
-        s.contains("eine geschwärzte Zeile mit bekanntem Text"),
-        "derselbe Satz sagt beides: {s}"
+        !s.contains("weitere"),
+        "„weitere“ ohne erste: {s}"
     );
+    assert!(
+        s.contains("Es wurde nichts gesucht."),
+        "der Kopf muss sagen, dass nichts gesucht wurde: {s}"
+    );
+    assert!(
+        !s.contains("keine geschwärzte Zeile mit bekanntem Text"),
+        "es gab zwei: {s}"
+    );
+    // Die Gegenrichtung: mit Decke sind es „weitere“, weil es erste gibt.
+    let mit = state.plan_export_check(&summary).run_within(&out, 1);
+    let s = mit.sentence();
+    println!("Decke 1: {s}");
+    assert_eq!((mit.checked, mit.skipped), (1, 1));
+    assert!(s.contains("1 weitere Text(e) wurden nicht gesucht"), "{s}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// **Die 804 sind wieder da.** Fix-Runde 6 hat *eine* ungeprüfte Stelle
-/// gekürzt (804 → 411 Zeichen, `zf_q4_3_…`). Gekürzt ist damit ein
+/// **Die Zeile als Ganzes ist gedeckelt.** Fix-Runde 6 hat *eine* ungeprüfte
+/// Stelle gekürzt (804 → 411 Zeichen, `zf_q4_3_…`). Gekürzt war damit ein
 /// **Bestandteil**, nicht die Zeile: die anderen Teilsätze sind unberührt,
-/// und sie treten zusammen auf. Gemessen mit den **echten** Stellen aus
+/// und sie treten zusammen auf — gemessen mit den **echten** Stellen aus
 /// einem Lauf über 60 zu große Ströme, dazu Fund, Decke, wörtlich gedeckte
-/// Texte, ein Urteil am Fund und Handregionen — jede Achse einzeln in
+/// Texte, ein Urteil am Fund und Handregionen: **981 Zeichen** (Befund R4-6).
+///
+/// Jetzt trägt die Statuszeile höchstens [`MAX_STATUS_CHARS`] Zeichen
+/// ([`ExportCheck::status_line`]), der ganze Satz steht in der Warnung, und
+/// der Fund führt — er kann also nicht wegfallen. Jede Achse einzeln in
 /// `zg_r4_3_alle_128_lagen_gegen_den_zustand` belegt.
 #[test]
-fn zg_r4_3_die_laengste_statuszeile_ist_wieder_ueber_804_zeichen() {
+fn zg_r4_3_die_statuszeile_ist_als_ganzes_gedeckelt() {
     let dir = tmp("laenge");
     let out = dir.join("viele.pdf");
     // 60 gepackte Ströme, jeder für sich zu groß für das Budget.
@@ -1007,10 +1227,35 @@ fn zg_r4_3_die_laengste_statuszeile_ist_wieder_ueber_804_zeichen() {
     };
     let s = voll.sentence();
     let n = s.chars().count();
-    println!("die volle Statuszeile ({n} Zeichen):\n{s}");
+    println!("der ganze Satz ({n} Zeichen):\n{s}");
     assert!(
         n > 804,
-        "die Zeile ist kürzer als die 804, die Fix-Runde 6 abstellen wollte ({n})"
+        "die Lage trifft die gemessenen 981 Zeichen nicht mehr ({n})"
     );
+    let status = voll.status_line();
+    let gekuerzt = status.chars().count();
+    println!("die Statuszeile ({gekuerzt} Zeichen):\n{status}");
+    assert!(
+        gekuerzt <= MAX_STATUS_CHARS,
+        "die Statuszeile ist {gekuerzt} Zeichen lang"
+    );
+    assert!(status.ends_with("… (ganzer Satz in den Warnungen)"), "{status}");
+    // Der Fund führt — und steht deshalb auch in der gekürzten Zeile.
+    assert!(
+        status.starts_with("Nachprüfung: 1 von 3 gesuchten Text(en) steht NOCH in der Ausgabe"),
+        "{status}"
+    );
+    // Und der ganze Satz steht wirklich in den Warnungen.
+    assert_eq!(voll.warning().as_deref(), Some(s.as_str()));
+
+    // Die Gegenrichtung: ein kurzer Satz wird nicht angefasst.
+    let kurz = ExportCheck {
+        checked: 2,
+        limit: redact_core::MAX_CHECK_NEEDLES,
+        ..ExportCheck::default()
+    };
+    println!("kurz: {}", kurz.status_line());
+    assert_eq!(kurz.status_line(), kurz.sentence());
+    assert!(kurz.sentence().chars().count() <= MAX_STATUS_CHARS);
     std::fs::remove_dir_all(&dir).ok();
 }

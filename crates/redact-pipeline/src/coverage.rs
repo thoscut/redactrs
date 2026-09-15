@@ -201,72 +201,107 @@ mod tests {
     use super::*;
 
     /// Der Wortlaut, mit dem `redact-pdf` und [`crate::audit::Effects`] ihre
-    /// Warnungen heute erzeugen.
+    /// Warnungen heute erzeugen — als **Schablone**, nicht als Abschrift.
     ///
-    /// Die Texte sind Kopien — dieses Crate kann sie nicht aufrufen, ohne die
-    /// PDFs zu bauen, die sie auslösen. Das tut `redact-cli/tests/incomplete.rs`
-    /// für einen Fall stellvertretend, und zwar am ganzen Weg bis zum
-    /// Rückgabewert. Kopien in einem Test sind hier vertretbar, weil sie **die
-    /// Einordnung** festhalten und nicht die Meldung selbst: läuft der Wortlaut
-    /// in `redact-pdf` weg, fällt dieser Test hier nicht auf — aber der dort.
-    const WORTLAUT: &[(bool, &str)] = &[
+    /// # Warum eine Schablone und keine Kopie
+    ///
+    /// Hier standen bis zur Fix-Runde 7 ausgeschriebene Kopien, zeichengleich
+    /// mit `redact-pdf` und **durch nichts gesichert**: die Gegenprüfung
+    /// änderte `100000` in `200000` und kein Test wurde rot. Er konnte es auch
+    /// nicht — [`is_coverage_gap`] antwortet für jede nicht gelistete Warnung
+    /// `true`, also auch für eine verstümmelte Kopie. Geprüft wurde damit die
+    /// Voreinstellung und nicht die Einordnung.
+    ///
+    /// Jeder Eintrag ist deshalb jetzt:
+    ///
+    /// 1. **die Zeichenkette, wie sie im Quelltext steht** — mit ihren
+    ///    `{}`-Stellen. Die festen Teile dazwischen (die *Marken*) müssen
+    ///    wörtlich in `redact-pdf` bzw. [`crate::audit`] vorkommen; läuft der
+    ///    Wortlaut dort weg, fällt es **hier** auf.
+    /// 2. **die Werte der `{}`-Stellen**, aus denen der Satz gebaut wird, den
+    ///    [`is_coverage_gap`] dann einsortiert. Eine Stelle in GROSSBUCHSTABEN
+    ///    (`{MAX_FORM_DEPTH}`) ist keine Einsetzung, sondern eine **Konstante**:
+    ///    ihr Wert wird aus dem Quelltext gelesen. Damit ist keine Zahl hier
+    ///    mehr abgeschrieben.
+    ///
+    /// `redact-cli/tests/incomplete.rs` prüft einen Fall stellvertretend am
+    /// ganzen Weg bis zum Rückgabewert.
+    ///
+    /// Mutationsnachweis: ein Wort einer Marke geändert → `jede_schablone_
+    /// steht_so_in_redact_pdf` rot; `{MAX_MIRROR_FORM_PLACEMENTS}` durch
+    /// `100000` ersetzt → derselbe Test rot (die Marke „mehr als 100000
+    /// Zuordnungen“ steht so nirgends).
+    const WORTLAUT: &[(bool, &str, &[&str])] = &[
         // ---------------------------------------------- Deckungslücken
         (
             true,
-            "Unter den Textspiegeln dieser Seite stehen mehr als 100000 Zuordnungen \
-             zwischen einem Spiegel und einer Formularplatzierung; ab dort wurden die \
-             Glyphen den Spiegeln nicht mehr zugeordnet. Der Vergleich zwischen Spiegel \
-             und Glyphen ist für die letzten Abschnitte deshalb unvollständig.",
+            "Unter den Textspiegeln dieser Seite stehen mehr als \
+             {MAX_MIRROR_FORM_PLACEMENTS} Zuordnungen zwischen einem Spiegel und \
+             einer Formularplatzierung; ab dort wurden die Glyphen den Spiegeln \
+             nicht mehr zugeordnet. Der Vergleich zwischen Spiegel und Glyphen ist \
+             für die letzten Abschnitte deshalb unvollständig.",
+            &[],
         ),
         (
             true,
-            "Der Erscheinungsstrom einer Annotation (Objekt 12 0) ließ sich nicht \
+            "Der Erscheinungsstrom einer Annotation (Objekt {} {}) ließ sich nicht \
              dekodieren; sein Text wurde nicht durchsucht und kann deshalb nicht \
              geschwärzt worden sein.",
+            &["12", "0"],
         ),
         (
             true,
-            "Form-XObject „Fm0“ ist tiefer als 8 Ebenen verschachtelt; ab dort wurde \
-             nicht weitergelesen. Text in den tieferen Ebenen wurde nicht durchsucht \
-             und kann deshalb nicht geschwärzt worden sein.",
-        ),
-        (
-            true,
-            "XObject „Fm0“ hat kein bekanntes /Subtype (weder /Form noch /Image); sein \
-             Inhalt wurde nicht durchsucht. Steht dort Text, blieb er ungeschwärzt.",
-        ),
-        (
-            true,
-            "Form-XObject „Fm0“ ließ sich nicht dekodieren (unbekannter oder defekter \
-             Filter); sein Text wurde nicht durchsucht und kann deshalb nicht \
-             geschwärzt worden sein.",
-        ),
-        (
-            true,
-            "Kachelmuster „P0“ liegt tiefer als 8 Ebenen verschachtelt; sein Text wurde \
+            "Form-XObject „{}“ ist tiefer als {MAX_FORM_DEPTH} Ebenen verschachtelt; \
+             ab dort wurde nicht weitergelesen. Text in den tieferen Ebenen wurde \
              nicht durchsucht und kann deshalb nicht geschwärzt worden sein.",
+            &["Fm0"],
         ),
         (
             true,
-            "Kachelmuster „P0“ enthält Text. Er wird an der Stelle der ersten Kachel \
-             gesucht und beim Schwärzen aus dem Muster entfernt — die übrigen Kacheln \
-             werden dabei nicht einzeln vermessen. Bitte das Ergebnis dort prüfen.",
+            "XObject „{label}“ hat kein bekanntes /Subtype (weder /Form noch \
+             /Image); sein Inhalt wurde nicht durchsucht. Steht dort Text, blieb er \
+             ungeschwärzt.",
+            &["Fm0"],
         ),
         (
             true,
-            "Font „ABCDEF+Arial“ hat kein /ToUnicode; sein Text lässt sich nicht \
-             dekodieren. Muster können darin nicht erkannt werden — diese Seite wurde \
-             möglicherweise nicht vollständig geschwärzt.",
+            "Form-XObject „{label}“ ließ sich nicht dekodieren (unbekannter oder \
+             defekter Filter); sein Text wurde nicht durchsucht und kann deshalb \
+             nicht geschwärzt worden sein.",
+            &["Fm0"],
         ),
         (
             true,
-            "Bild /Im0 auf Seite 1 lässt sich nicht dekodieren (Filter: JPXDecode). Die \
-             Schwärzung läge nur darüber; die Pixel blieben in der Datei.",
+            "Kachelmuster „{label}“ liegt tiefer als {MAX_FORM_DEPTH} Ebenen \
+             verschachtelt; sein Text wurde nicht durchsucht und kann deshalb nicht \
+             geschwärzt worden sein.",
+            &["P0"],
         ),
         (
             true,
-            "Bild /Im0 auf Seite 1 ist kein eigenständiges Objekt und kann nicht \
-             ersetzt werden.",
+            "Kachelmuster „{label}“ enthält Text. Er wird an der Stelle der ersten \
+             Kachel gesucht und beim Schwärzen aus dem Muster entfernt — die übrigen \
+             Kacheln werden dabei nicht einzeln vermessen. Bitte das Ergebnis dort \
+             prüfen.",
+            &["P0"],
+        ),
+        (
+            true,
+            "Font „{name}“ hat kein /ToUnicode; sein Text lässt sich nicht \
+             dekodieren. Muster können darin nicht erkannt werden — diese Seite \
+             wurde möglicherweise nicht vollständig geschwärzt.",
+            &["ABCDEF+Arial"],
+        ),
+        (
+            true,
+            "{} lässt sich nicht dekodieren ({reason}). Die Schwärzung läge nur \
+             darüber; die Pixel blieben in der Datei.",
+            &["Bild /Im0 auf Seite 1", "Filter: JPXDecode"],
+        ),
+        (
+            true,
+            "{} ist kein eigenständiges Objekt und kann nicht ersetzt werden.",
+            &["Bild /Im0 auf Seite 1"],
         ),
         // ------------------------------------------ keine Deckungslücken
         (
@@ -276,76 +311,263 @@ mod tests {
              Dieser Text hat keine Glyphen und wird deshalb nicht anteilig \
              geschwärzt; er wird mit den Metadaten als Ganzes entfernt \
              (strip_metadata, in der Verarbeitungskette immer).",
+            &[],
         ),
         (
             false,
-            "1 von 3 Seite(n) enthalten Rasterbilder. Geschwärzte Bereiche werden im \
-             Bild selbst überschrieben; gelesen wird der Bildinhalt aber nicht — Text \
-             *in* einem Bild (Scan, Foto) findet die Analyse ohne OCR nicht.",
+            "{with_images} von {} Seite(n) enthalten Rasterbilder. Geschwärzte \
+             Bereiche werden im Bild selbst überschrieben; gelesen wird der \
+             Bildinhalt aber nicht — Text *in* einem Bild (Scan, Foto) findet die \
+             Analyse ohne OCR nicht.",
+            &["1", "3"],
         ),
         (
             false,
-            "2 Bild(er) überschrieben: die Bildpunkte im Schwärzungsbereich sind \
+            "{} Bild(er) überschrieben: die Bildpunkte im Schwärzungsbereich sind \
              wirklich weg. Das Bild wird dafür neu kodiert — außerhalb des Bereichs \
              bleibt jeder Bildpunkt unverändert (verlustfrei), die Datei ist danach \
              aber nicht mehr bitgleich und wird meist deutlich größer (aus JPEG wird \
              ein Flate-Bild).",
+            &["2"],
         ),
         (
             false,
-            "Bild /Im0 steckt in einem Form-XObject, das mehrere Seiten benutzen. Es \
+            "Bild /{} steckt in einem Form-XObject, das mehrere Seiten benutzen. Es \
              wurde überschrieben — die Schwärzung wirkt deshalb auch auf die anderen \
              Seiten.",
+            &["Im0"],
         ),
         (
             false,
-            "Die Eingabedatei besteht aus mehreren inkrementellen Revisionen (/Prev). \
-             Frühere Fassungen können Text enthalten, den eine spätere Revision nur \
-             überschrieben hat — etwa eine bereits in einem anderen Werkzeug \
-             vorgenommene Schwärzung. Die Ausgabe wird als eine einzige Revision ohne \
-             Vorgeschichte geschrieben; prüfen Sie das Ergebnis trotzdem.",
+            "Die Eingabedatei besteht aus mehreren inkrementellen Revisionen \
+             (/Prev). Frühere Fassungen können Text enthalten, den eine spätere \
+             Revision nur überschrieben hat — etwa eine bereits in einem anderen \
+             Werkzeug vorgenommene Schwärzung. Die Ausgabe wird als eine einzige \
+             Revision ohne Vorgeschichte geschrieben; prüfen Sie das Ergebnis \
+             trotzdem.",
+            &[],
         ),
         (
             false,
-            "Die Eigenschaftsliste einer Marked-Content-Auszeichnung enthielt neben dem \
-             Textspiegel indirekte Verweise (5 0 R). Eine Liste, die inline im Strom \
-             steht, darf keine enthalten (PDF 32000-1, 14.6.2); sie sind deshalb mit \
-             entfallen. Bitte prüfen, ob die Datei dadurch anders aussieht.",
+            "Die Eigenschaftsliste einer Marked-Content-Auszeichnung enthielt neben \
+             dem Textspiegel indirekte Verweise ({}). Eine Liste, die inline im \
+             Strom steht, darf keine enthalten (PDF 32000-1, 14.6.2); sie sind \
+             deshalb mit entfallen. Bitte prüfen, ob die Datei dadurch anders \
+             aussieht.",
+            &["5 0 R"],
         ),
         (
             false,
-            "1 von 3 Schwärzung(en) haben ein Deck-Rechteck gezeichnet, aber kein \
-             einziges Zeichen aus dem Content-Stream entfernt. Wo gar kein Text steht \
-             (Grafik, Rasterbild), ist das richtig; treffen die Koordinaten dagegen \
-             daneben, bleibt der Text darunter lesbar und per Copy-&-Paste zu holen.",
+            "{} von {total} Schwärzung(en) haben ein Deck-Rechteck gezeichnet, aber \
+             kein einziges Zeichen aus dem Content-Stream entfernt. Wo gar kein Text \
+             steht (Grafik, Rasterbild), ist das richtig; treffen die Koordinaten \
+             dagegen daneben, bleibt der Text darunter lesbar und per \
+             Copy-&-Paste zu holen.",
+            &["1", "3"],
         ),
         (
             false,
-            "1 von 3 Schwärzungen haben nach --padding=-100 ein leeres Rechteck und \
-             konnten nichts entfernen. Der Text steht unverändert in der Ausgabe. Ein \
-             negatives Padding verkleinert jeden Bereich.",
+            "{} von {total} Schwärzungen haben nach --padding={} ein leeres Rechteck \
+             und konnten nichts entfernen. Der Text steht unverändert in der \
+             Ausgabe. Ein negatives Padding verkleinert jeden Bereich.",
+            &["1", "3", "-100"],
         ),
         (
             false,
-            "1 von 3 Schwärzung(en) liegen auf einer Seite, die es in diesem Dokument \
-             nicht gibt (Seite 27; das Dokument hat 3 Seite(n)). Dort wurde nichts \
-             entfernt und nichts überdeckt — der Text steht unverändert in der Ausgabe.",
+            "{} von {total} Schwärzung(en) liegen auf einer Seite, die es in diesem \
+             Dokument nicht gibt (Seite {list}; das Dokument hat {} Seite(n)). Dort \
+             wurde nichts entfernt und nichts überdeckt — der Text steht unverändert \
+             in der Ausgabe. Häufigste Ursache ist die Zählweise: in JSON ist die \
+             erste Seite „page“: 0, die letzte also {}.",
+            &["1", "3", "27", "3", "2"],
         ),
         (
             false,
-            "1 von 3 Schwärzung(en) liegen vollständig neben der Seite, auf der sie \
-             stehen sollen (Seite 1). Dort kann kein Zeichen liegen und kein \
-             Deck-Rechteck sichtbar werden — der Text der Seite steht unverändert in \
-             der Ausgabe. Häufigste Ursache sind Koordinaten aus einer Review- oder \
-             Regionsdatei, die zu einem anders großen Blatt gehören.",
+            "{} von {total} Schwärzung(en) liegen vollständig neben der Seite, auf \
+             der sie stehen sollen (Seite {list}). Dort kann kein Zeichen liegen und \
+             kein Deck-Rechteck sichtbar werden — der Text der Seite steht \
+             unverändert in der Ausgabe. Häufigste Ursache sind Koordinaten aus \
+             einer Review- oder Regionsdatei, die zu einem anders großen Blatt \
+             gehören.",
+            &["1", "3", "1"],
         ),
     ];
 
+    /// Die Wurzel des Repositorys.
+    fn wurzel() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// Der Quelltext, der die Warnungen **erzeugt**: `redact-pdf` und die
+    /// übrige Verarbeitungskette — ohne diese Datei, die sie nur einsortiert.
+    ///
+    /// Zeilenfortsetzungen im Zeichenkettenliteral (`\` am Zeilenende) werden
+    /// aufgelöst, danach wird jeder Leerraum zu einem Leerzeichen: so steht
+    /// der Wortlaut da, wie ihn `format!` erzeugt.
+    fn quelltext() -> String {
+        fn sammle(verzeichnis: &std::path::Path, aus: &mut String) {
+            let Ok(eintraege) = std::fs::read_dir(verzeichnis) else {
+                return;
+            };
+            for eintrag in eintraege.flatten() {
+                let pfad = eintrag.path();
+                if pfad.is_dir() {
+                    sammle(&pfad, aus);
+                } else if pfad.extension().is_some_and(|e| e == "rs")
+                    && pfad.file_name().is_some_and(|n| n != "coverage.rs")
+                {
+                    aus.push_str(&std::fs::read_to_string(&pfad).unwrap_or_default());
+                    aus.push('\n');
+                }
+            }
+        }
+        let mut roh = String::new();
+        sammle(&wurzel().join("crates/redact-pdf/src"), &mut roh);
+        sammle(&wurzel().join("crates/redact-pipeline/src"), &mut roh);
+        assert!(
+            roh.len() > 100_000,
+            "der Quelltext von redact-pdf wurde nicht gefunden ({} Byte)",
+            roh.len()
+        );
+        // `… \`<Zeilenumbruch><Einrückung>` ist eine Fortsetzung, kein Leerraum.
+        let mut ohne_fortsetzung = String::with_capacity(roh.len());
+        let mut zeichen = roh.chars().peekable();
+        while let Some(c) = zeichen.next() {
+            if c == '\\' && zeichen.peek() == Some(&'\n') {
+                zeichen.next();
+                while zeichen.peek().is_some_and(|z| *z == ' ' || *z == '\t') {
+                    zeichen.next();
+                }
+                continue;
+            }
+            ohne_fortsetzung.push(c);
+        }
+        ohne_fortsetzung
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Eine Schablone zerlegt: die festen **Marken** und die Namen der
+    /// `{}`-Stellen dazwischen.
+    fn zerlege(schablone: &str) -> (Vec<String>, Vec<String>) {
+        let geglaettet = schablone.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut marken = Vec::new();
+        let mut stellen = Vec::new();
+        let mut rest = geglaettet.as_str();
+        while let Some(auf) = rest.find('{') {
+            let zu = auf
+                + rest[auf..]
+                    .find('}')
+                    .expect("`{` ohne `}` in der Schablone");
+            marken.push(rest[..auf].to_string());
+            stellen.push(rest[auf + 1..zu].to_string());
+            rest = &rest[zu + 1..];
+        }
+        marken.push(rest.to_string());
+        (marken, stellen)
+    }
+
+    /// Ist diese `{}`-Stelle eine **Konstante** (GROSSBUCHSTABEN) und keine
+    /// Einsetzung? `{}` — die leere Stelle — ist keine.
+    fn ist_konstante(stelle: &str) -> bool {
+        !stelle.is_empty() && stelle.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+    }
+
+    /// Der Wert einer Konstanten aus dem Quelltext: `const NAME: usize = 8;`
+    /// oder `= 100_000;`.
+    fn konstante(quelle: &str, name: &str) -> String {
+        let muster = format!("const {name}: usize = ");
+        let ab = quelle
+            .find(&muster)
+            .unwrap_or_else(|| panic!("`{muster}…` steht nicht im Quelltext von redact-pdf"))
+            + muster.len();
+        let wert: String = quelle[ab..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '_')
+            .filter(|c| *c != '_')
+            .collect();
+        assert!(!wert.is_empty(), "`{muster}` steht ohne Zahl im Quelltext");
+        wert
+    }
+
+    /// **Die Bindung.** Jede Marke jeder Schablone steht wörtlich im
+    /// Quelltext, der die Warnung erzeugt.
+    ///
+    /// Damit ist die Kopie keine mehr: wer die Meldung in `redact-pdf`
+    /// umschreibt, wird hier rot — und wer sie hier verstümmelt, ebenso.
+    #[test]
+    fn jede_schablone_steht_so_in_redact_pdf() {
+        let quelle = quelltext();
+        let mut fehlend: Vec<String> = Vec::new();
+        for (_, schablone, _) in WORTLAUT {
+            let (marken, _) = zerlege(schablone);
+            assert!(
+                marken.iter().any(|m| m.trim().chars().count() >= 30),
+                "Schablone ohne belastbare Marke: {schablone}"
+            );
+            for marke in &marken {
+                let marke = marke.trim();
+                // Ganz kurze Stücke zwischen zwei `{}` binden nichts und
+                // kämen überall vor.
+                if marke.chars().count() < 10 {
+                    continue;
+                }
+                if !quelle.contains(marke) {
+                    fehlend.push(format!("„{marke}“"));
+                }
+            }
+        }
+        // Die Ausnahmeliste besteht selbst aus Marken — auch sie muss den
+        // Wortlaut treffen, sonst fällt eine Ausnahme still aus.
+        for (marke, _) in NOT_A_COVERAGE_GAP {
+            // Diese eine wird in *dieser* Datei erzeugt (`crate::DETECTION_NOTICE`).
+            if *marke == crate::DETECTION_NOTICE {
+                continue;
+            }
+            if !quelle.contains(*marke) {
+                fehlend.push(format!("Ausnahme „{marke}“"));
+            }
+        }
+        assert!(
+            fehlend.is_empty(),
+            "{} Marke(n) stehen so nicht mehr im Quelltext von redact-pdf — die \
+             Einordnung hier gilt einem Wortlaut, den es nicht gibt:\n{}",
+            fehlend.len(),
+            fehlend.join("\n")
+        );
+    }
+
+    /// Jede Warnung ist so einsortiert, wie sie gemeint ist — gebaut aus der
+    /// Schablone, mit den Konstanten aus dem Quelltext.
     #[test]
     fn every_known_warning_is_sorted_the_way_it_is_meant() {
-        for (lücke, text) in WORTLAUT {
+        let quelle = quelltext();
+        for (lücke, schablone, werte) in WORTLAUT {
+            let (marken, stellen) = zerlege(schablone);
+            let frei = stellen.iter().filter(|s| !ist_konstante(s)).count();
             assert_eq!(
-                is_coverage_gap(text),
+                frei,
+                werte.len(),
+                "{frei} einzusetzende Stelle(n), aber {} Wert(e): {schablone}",
+                werte.len()
+            );
+            let mut text = String::new();
+            let mut naechster = 0usize;
+            for (i, marke) in marken.iter().enumerate() {
+                text.push_str(marke);
+                let Some(stelle) = stellen.get(i) else {
+                    continue;
+                };
+                if ist_konstante(stelle) {
+                    text.push_str(&konstante(&quelle, stelle));
+                } else {
+                    text.push_str(werte[naechster]);
+                    naechster += 1;
+                }
+            }
+            assert_eq!(
+                is_coverage_gap(&text),
                 *lücke,
                 "falsch einsortiert (erwartet Deckungslücke = {lücke}): {text}"
             );

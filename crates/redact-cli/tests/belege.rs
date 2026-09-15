@@ -490,8 +490,173 @@ mod messwerte {
     pub const SPIEGEL_BOMBE_MB: u64 = 2_306;
     pub const SPIEGEL_BOMBE_S: &str = "41,7";
     pub const SPIEGEL_FAKTOR: &str = "8 400";
-    pub const ZUORDNUNGEN: &str = "100 000";
     pub const ZUORDNUNGEN_MB: &str = "16";
+
+    // --- Fix-Runde 7 -----------------------------------------------------
+    //
+    // Was die Gegenprüfung der Runde 6 zählte
+    // (`scratchpad/runde6/gegen/r5/ergebnis.tsv`): 76 Stellen der Doku
+    // einzeln mutiert, 18 rot, 58 grün.
+    pub const GEGEN6_STELLEN: usize = 76;
+    pub const GEGEN6_ROT: usize = 18;
+    pub const GEGEN6_GRUEN: usize = 58;
+
+    /// Die Spiegel-Bombe **am gebauten Binary** (Fix-Runde 7). Die 0,56 s /
+    /// 38 MB der Tabelle in `zf_q3_kombinatorik.rs` sind der *Testprozess*
+    /// (nur `PdfExtractor`); das Binary tut mehr und wird anders übersetzt.
+    /// Gemessen mit `--check-leaks` über dieselbe Datei, je drei Läufe,
+    /// Spitze über `getrusage(RUSAGE_CHILDREN).ru_maxrss`.
+    pub const SPIEGEL_BOMBE_OBJEKTE: usize = 9;
+    pub const SPIEGEL_RELEASE_S: &str = "0,15–0,18";
+    pub const SPIEGEL_RELEASE_KB: u64 = 40_668;
+    pub const SPIEGEL_DEBUG_S: &str = "1,58–1,68";
+    pub const SPIEGEL_DEBUG_KB: u64 = 53_016;
+    pub const SPIEGEL_TESTPROZESS_S: &str = "0,56";
+    pub const SPIEGEL_TESTPROZESS_MB: &str = "38";
+    pub const SPIEGEL_OHNE_SPIEGEL_S: &str = "0,15";
+
+    // --- Zählungen in den Einträgen der Runde 6 --------------------------
+    //
+    // Sie zählen, was der Eintrag darunter aufzählt. Eine Zahl, die niemand
+    // nachzählt, ist genau die Klasse, an der die Gegenprüfung 58-mal
+    // vorbeikam.
+    /// Zahlen der Runde 5, die sich in **einem** Lauf mutieren ließen.
+    pub const GEGEN5_UNGEBUNDEN: usize = 17;
+    /// Ungebundene „1 000“, die die Runde 5 geschlossen hatte …
+    pub const GEGEN5_GESCHLOSSEN: usize = 2;
+    /// … und neue Zahlen, die sie dabei ungebunden anlegte.
+    pub const GEGEN5_NEU: usize = 7;
+    pub const LECKS_ANNOTATIONSNACHBARN: usize = 4;
+    pub const FUNDORTE_EIGENSCHAFTSLISTE: usize = 4;
+    pub const FALSCHE_ALARME_6: usize = 2;
+    pub const BEIWERK_DICTIONARIES: usize = 3;
+    pub const NUTZLAST_ZAEHLER: usize = 4;
+    pub const SAETZE_OBERFLAECHE_6: usize = 3;
+    pub const SCHWERE_BEFUNDE_6: usize = 3;
+
+    // --- Was die Gegenprüfung der Runde 6 fand (Einleitung der Runde 7) ---
+    pub const STILLE_LECKS_7: usize = 4;
+    pub const FALSCHE_ZAHLEN_7: usize = 6;
+    pub const WIDERLEGTE_SAETZE: usize = 2;
+    pub const GRAFIKUMGEBUNGEN: usize = 2;
+    pub const KLARTEXTTRAEGER_BEIWERK: usize = 6;
+    pub const DIENSTVERWEIGERUNGEN_7: usize = 2;
+    pub const BEFUNDE_OBERFLAECHE_7: usize = 8;
+    /// Die Decke je Seite statt je Dokument (`runde6/gegen/r1/mess_paare.txt`):
+    /// 1 000 Seiten × (100 Klammern × 999 `Do`).
+    pub const DECKE_SEITEN: &str = "1 000";
+    pub const DECKE_DATEI_BYTES: u64 = 224_752;
+    pub const DECKE_SPITZE_KB: u64 = 6_438_680;
+    /// Die Proben der Plattformregel (`runde6/gegen/r5/plattform.tsv`).
+    pub const PLATTFORM_PROBEN: usize = 9;
+    pub const PLATTFORM_FEHLALARM: usize = 1;
+    pub const PLATTFORM_LUECKEN: usize = 6;
+    pub const PLATTFORM_ALTLASTEN: usize = 9;
+    pub const PLATTFORM_MKFIFO: usize = 6;
+    pub const PLATTFORM_UNIX_API: usize = 2;
+    /// Der Lauf, der „52 Stelle(n)“ unter mehr Zeilen schrieb
+    /// (`redact-pdf/tests/zg_r2_decke.rs`).
+    pub const STELLEN_GEMELDET: usize = 52;
+    pub const STELLEN_EINZELN: usize = 50;
+    pub const STELLEN_WEITERE: usize = 7;
+    pub const STELLEN_STROEME: usize = 57;
+    pub const ZUSAGEN_ZU_VIEL: usize = 3;
+    pub const GRUENDE_ALT: usize = 3;
+    pub const GRUENDE_AM_BINARY: usize = 3;
+    pub const KODIERUNGEN_UMLAUT: usize = 10;
+    pub const KODIERUNGEN_JENSEITS: usize = 7;
+    pub const KODIERUNGSFAMILIEN: usize = 4;
+    pub const FAELLE_ALT: usize = 2;
+    pub const FAELLE_NEU: usize = 3;
+
+    // --- Das Movie-Leck ---------------------------------------------------
+    pub const MOVIE_SCHWAERZUNGEN: usize = 1;
+    pub const MOVIE_FUNDSTELLEN: usize = 6;
+    pub const LESEZEICHEN_GEMELDET: usize = 1;
+
+    // --- Kosten der ehrlichen Zählung (Fix-Runde 6) -----------------------
+    pub const ANNOTATIONEN: &str = "200 000";
+    pub const ANNOT_NACHHER_MS: &str = "767–791";
+    pub const ANNOT_VORHER_MS: &str = "746";
+
+    // --- Die gekürzte Statuszeile ----------------------------------------
+    pub const SATZ_VORHER_ZEICHEN: usize = 804;
+    pub const SATZ_NACHHER_ZEICHEN: usize = 411;
+
+    // --- Der Klon der Rohbytes vor dem ersten Filter ----------------------
+    pub const KLON_STROM_MIB: usize = 64;
+    pub const KLON_BUDGET_MIB: usize = 512;
+    pub const KLON_VORHER_MB: &str = "205";
+    pub const KLON_NACHHER_MB: &str = "138";
+    pub const KLON_SCHWAERZEN_MB: &str = "621";
+    /// Dieselbe Datei am **gebauten Binary** (`--check-leaks`,
+    /// `--max-decompressed-mb 512`), `getrusage(RUSAGE_CHILDREN).ru_maxrss`.
+    pub const KLON_BINARY_KB: u64 = 325_388;
+
+    // --- Die widerlegte Kostenzahl „1 000 Begriffe 65,7 s“ ----------------
+    pub const ALTE_KOSTENZAHL_S: &str = "65,7";
+    pub const MUSTER_JE_BEGRIFF_ALT: usize = 6;
+    pub const DURCHGANG_MB: usize = 268;
+    pub const MEMMEM_GB_S: &str = "9,9";
+    pub const MEMMEM_JE_BEGRIFF_S: &str = "0,163";
+    pub const HEUTE_1_S: &str = "5,01";
+    pub const HEUTE_1000_S: &str = "5,99";
+}
+
+/// Die ausgeschriebene Zahl, wie die Doku kleine Zahlen schreibt.
+///
+/// Ohne sie stünde „vier“ in der Doku und `4` im Test — zwei Schreibweisen
+/// derselben Zahl, und genau daran kam die Gegenprüfung vorbei
+/// („`siebenmal` zu `achtmal`“, grün).
+fn zahlwort(n: usize) -> &'static str {
+    match n {
+        1 => "ein",
+        2 => "zwei",
+        3 => "drei",
+        4 => "vier",
+        5 => "fünf",
+        6 => "sechs",
+        7 => "sieben",
+        8 => "acht",
+        9 => "neun",
+        10 => "zehn",
+        11 => "elf",
+        12 => "zwölf",
+        17 => "siebzehn",
+        _ => panic!("für {n} gibt es hier kein Zahlwort"),
+    }
+}
+
+/// Dasselbe Zahlwort am Satzanfang.
+fn zahlwort_gross(n: usize) -> String {
+    let w = zahlwort(n);
+    let mut zeichen = w.chars();
+    match zeichen.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + zeichen.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Der Wert einer `usize`-Konstanten aus einer Quelldatei des Baums —
+/// `const NAME: usize = 100_000;`.
+///
+/// Damit steht eine Decke, die die Doku nennt, **einmal** im Baum: im Code.
+fn konstante_aus(datei: &str, name: &str) -> usize {
+    let text = lf(&std::fs::read_to_string(repo_root().join(datei))
+        .unwrap_or_else(|e| panic!("{datei} lesbar: {e}")));
+    let muster = format!("const {name}: usize = ");
+    let ab = text
+        .find(&muster)
+        .unwrap_or_else(|| panic!("`{muster}…` steht nicht mehr in {datei}"))
+        + muster.len();
+    let ziffern: String = text[ab..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '_')
+        .filter(|c| *c != '_')
+        .collect();
+    ziffern
+        .parse()
+        .unwrap_or_else(|_| panic!("`{muster}` steht ohne Zahl in {datei}"))
 }
 
 /// „1 000“ statt „1000“ — Leerzeichen als Tausendertrenner, wie die Doku es
@@ -563,11 +728,13 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         format!(
             "nachgemessen {} MB für 1 000 Begriffe (bis zu {} Muster",
             m::AUTOMAT_1K_MB,
-            // Neun Byte-Kodierungen **und** der dekodierte Text je Begriff —
-            // die Zahl kommt aus der Liste, nicht aus der Doku.
+            // **Höchstens** zehn Byte-Kodierungen (neun ohne Umlaut, die
+            // zehnte ist Latin-1/PDFDoc), dazu der dekodierte Text und die
+            // Fassung ohne Leerraum: zwölf Muster je Begriff. Die Doku sagte
+            // bis zur Fix-Runde 7 „10 000“ und ließ die beiden Fassungen aus,
+            // die sie im selben Satz aufzählt.
             mit_tausendertrenner(
-                (redact_core::MAX_CHECK_NEEDLES * (BYTE_KODIERUNGEN_ASCII_ERWARTET.len() + 1))
-                    as u64
+                (redact_core::MAX_CHECK_NEEDLES * (m::KODIERUNGEN_UMLAUT + 2)) as u64
             ),
         ),
     );
@@ -779,13 +946,13 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     );
 
     // --- Die Spiegel-Formular-Liste ohne Decke (Fix-Runde 6) --------------
+    let zuordnungen = mit_tausendertrenner(zuordnungsdecke() as u64);
     satz(
         "SECURITY.md",
         format!(
-            "höchstens {} Zuordnungen zwischen einem Textspiegel und einer \
+            "höchstens {zuordnungen} Zuordnungen zwischen einem Textspiegel und einer \
              Formularplatzierung beim Aufbau der Liste und ebenso viele beim \
              Aufklappen, zusammen rund {} MB",
-            m::ZUORDNUNGEN,
             m::ZUORDNUNGEN_MB
         ),
     );
@@ -860,7 +1027,665 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // =====================================================================
+    // Fix-Runde 6 — jeder Messsatz des Blocks, nicht nur seine Kopfzeile
+    // =====================================================================
+    //
+    // Die Gegenprüfung mutierte 76 Stellen einzeln: 18 rot, 58 grün. Grün
+    // blieb alles, was nicht wörtlich in einem dieser Sätze stand — auch
+    // `0,56 s`, `38 MB`, `6 Fundstellen`, `804 → 411 Zeichen`. Deshalb steht
+    // hier jetzt **jeder** Satz des Blocks, der eine Zahl trägt; welche Zahl
+    // wo fehlt, sagt `jede_zahl_der_letzten_runden_ist_gebunden`.
+
+    // --- Die Einleitung zählt, was sie aufzählt --------------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Dazu {} Klartextlecks an Nachbarn von Annotationen, {} Fundorte statt \
+             einem bei der direkten Eigenschaftsliste, {} falsche Alarme",
+            zahlwort(m::LECKS_ANNOTATIONSNACHBARN),
+            zahlwort(m::FUNDORTE_EIGENSCHAFTSLISTE),
+            zahlwort(m::FALSCHE_ALARME_6)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "{} Messwerte in README, `SECURITY.md` und `CHANGELOG.md` ließen sich in \
+             einem Lauf mutieren, ohne dass ein Test rot wurde",
+            zahlwort(m::GEGEN5_UNGEBUNDEN)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Die Gegenprüfung mutierte {} Zahlen und Sätze in einem Lauf",
+            zahlwort(m::GEGEN5_UNGEBUNDEN)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "hatte {} ungebundene „{}“ geschlossen und dabei {} neue Zahlen \
+             ungebunden angelegt",
+            zahlwort(m::GEGEN5_GESCHLOSSEN),
+            mit_tausendertrenner(redact_core::MAX_CHECK_NEEDLES as u64),
+            zahlwort(m::GEGEN5_NEU)
+        ),
+    );
+
+    // --- `--help` widersprach sich selbst --------------------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "{} Absätze über dem Block „{} Fälle“ stand im selben Hilfetext weiter \
+             „Rückgabewert: `0`, wenn keiner der Begriffe gefunden wurde, `{}`, wenn \
+             mindestens einer noch dasteht“ — die {} Fälle",
+            zahlwort_gross(m::FAELLE_NEU),
+            zahlwort_gross(m::FAELLE_NEU),
+            RC_LECK,
+            zahlwort(m::FAELLE_ALT)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "ein Lauf über eine Datei mit einem Objekt auf Ebene {} sagt „nicht \
+             gefunden“ und endet mit {RC_LECK}",
+            objektsichttiefe() + 1
+        ),
+    );
+
+    // --- Die fünf Gründe für „nicht geprüft“ -----------------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "zählte {} Gründe für „nicht geprüft“ auf, das Orakel kennt {}**",
+            zahlwort(m::GRUENDE_ALT),
+            zahlwort(GRUENDE.len())
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Alle {} stehen jetzt mit ihrem Wortlaut in einer Tabelle; ein Test hält \
+             jeden gegen den Quelltext des Orakels, {} davon zusätzlich gegen einen \
+             Lauf des gebauten Binaries",
+            zahlwort(GRUENDE.len()),
+            zahlwort(m::GRUENDE_AM_BINARY)
+        ),
+    );
+
+    // --- Die Kodierungen --------------------------------------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "{} Namen für {} Muster. Gesucht wird in **{}** Byte-Kodierungen ({} mit \
+             Umlaut, {} jenseits von Latin-1)",
+            zahlwort(m::KODIERUNGSFAMILIEN),
+            zahlwort(BYTE_KODIERUNGEN_ASCII_ERWARTET.len()),
+            zahlwort(BYTE_KODIERUNGEN_ASCII_ERWARTET.len()),
+            zahlwort(m::KODIERUNGEN_UMLAUT),
+            zahlwort(m::KODIERUNGEN_JENSEITS)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Und „{} Muster ({} Begriffe × {} Kodierungen)“ hat nie gestimmt: so viele \
+             **Kodierungen** gibt es nicht. Nach `Probe::new` sind es {} Muster je \
+             Begriff ({} Bytefassungen und der dekodierte Text), {} mit einer Fassung \
+             ohne Leerraum und {} mit Umlaut **und** Leerraum",
+            mit_tausendertrenner(
+                (redact_core::MAX_CHECK_NEEDLES * (m::KODIERUNGEN_UMLAUT + 2)) as u64
+            ),
+            mit_tausendertrenner(redact_core::MAX_CHECK_NEEDLES as u64),
+            m::KODIERUNGEN_UMLAUT + 2,
+            BYTE_KODIERUNGEN_ASCII_ERWARTET.len() + 1,
+            zahlwort(BYTE_KODIERUNGEN_ASCII_ERWARTET.len()),
+            BYTE_KODIERUNGEN_ASCII_ERWARTET.len() + 2,
+            m::KODIERUNGEN_UMLAUT + 2
+        ),
+    );
+
+    // --- Drei Zusagen, die zu viel versprachen ---------------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "während `MAX_NAMED_PLACES = {}` höchstens {} nennt und den Rest zählt",
+            benannte_stellen(),
+            zahlwort(benannte_stellen())
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "derselbe Messwert stand im Fließtext als „{} kB ≈ {} GiB“ (durch 1024²) \
+             und in der Tabelle als „{} MB“ (durch 1000)",
+            mit_tausendertrenner(m::BOMBE_PRUEFEN_KB),
+            kb_in_gib(m::BOMBE_PRUEFEN_KB),
+            mit_tausendertrenner((m::BOMBE_PRUEFEN_KB as f64 / 1000.0).round() as u64)
+        ),
+    );
+
+    // --- Die Spiegel-Bombe, jetzt am gebauten Binary ---------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "eine Datei von {} kB mit **{}** Objekten belegte {} MB und lief {} s",
+            m::SPIEGEL_BOMBE_KB,
+            zahlwort(m::SPIEGEL_BOMBE_OBJEKTE),
+            mit_tausendertrenner(m::SPIEGEL_BOMBE_MB),
+            m::SPIEGEL_BOMBE_S
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "dieselbe Datei am gebauten Binary **{} s und {} MB** (Release, \
+             Rückgabewert {RC_LECK}); im Testprozess, der nur den Extraktor fährt, \
+             {} s und {} MB; ohne `/ActualText` brauchte sie immer {} s",
+            m::SPIEGEL_RELEASE_S,
+            kb_in_mb(m::SPIEGEL_RELEASE_KB),
+            m::SPIEGEL_TESTPROZESS_S,
+            m::SPIEGEL_TESTPROZESS_MB,
+            m::SPIEGEL_OHNE_SPIEGEL_S
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "höchstens {zuordnungen} beim Aufbau und {zuordnungen} beim Aufklappen, je \
+             Seiten-Scan (zusammen rund {} MB)",
+            m::ZUORDNUNGEN_MB
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Genau {zuordnungen} Aufklappungen gingen auf und lieferten trotzdem \
+             Rückgabewert {RC_LECK} (`decke_{}.pdf` 0, `decke_{}.pdf` {RC_LECK})",
+            zuordnungsdecke() - 1,
+            zuordnungsdecke()
+        ),
+    );
+
+    // --- Der Textspiegel im Ressourcenverzeichnis ------------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "blieb stehen — an {} Orten.**",
+            zahlwort(m::FUNDORTE_EIGENSCHAFTSLISTE)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Alle {} werden jetzt an ihrem Fundort bereinigt",
+            zahlwort(m::FUNDORTE_EIGENSCHAFTSLISTE)
+        ),
+    );
+
+    // --- Der unbekannte Filter an erster Stelle --------------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "`/Filter /FooDecode` kam als „nicht gefunden“ mit Rückgabewert 0 zurück, \
+             dieselbe Datei als `/Filter [/FlateDecode /FooDecode]` mit {RC_LECK}"
+        ),
+    );
+    satz(
+        "SECURITY.md",
+        format!(
+            "`/DCTDecode` kostete dadurch {} MB, seit der Fix-Runde 6 sind es {} MB",
+            m::KLON_VORHER_MB,
+            m::KLON_NACHHER_MB
+        ),
+    );
+    satz(
+        "SECURITY.md",
+        format!("kommt auf {} MB", m::KLON_SCHWAERZEN_MB),
+    );
+    satz(
+        "SECURITY.md",
+        format!(
+            "dass {} − {} = {} genau der {}-MiB-Strom ist, verrät die Einheit",
+            m::KLON_VORHER_MB,
+            m::KLON_NACHHER_MB,
+            m::KLON_VORHER_MB.parse::<u64>().expect("Zahl")
+                - m::KLON_NACHHER_MB.parse::<u64>().expect("Zahl"),
+            m::KLON_STROM_MIB
+        ),
+    );
+    satz(
+        "SECURITY.md",
+        format!(
+            "liegt die Spitze über derselben Datei bei {} kB = {} MB",
+            mit_tausendertrenner(m::KLON_BINARY_KB),
+            kb_in_mb(m::KLON_BINARY_KB)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "gemessen im Testprozess ({}-MiB-Strom, `/DCTDecode`, Budget {} MiB) \
+             **{} MB vorher, {} MB nachher**",
+            m::KLON_STROM_MIB,
+            m::KLON_BUDGET_MIB,
+            m::KLON_VORHER_MB,
+            m::KLON_NACHHER_MB
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Die alte Kostenzahl „{} Begriffe {} s“ ist widerlegt und durch eine \
+             nachstellbare Rechnung ersetzt: {} Muster je Begriff über {} MB je \
+             Durchgang, `memmem` {} GB/s → {} s je Begriff, rund **{} s für {} \
+             Begriffe als untere Schranke**; heute {} s (1 Begriff) gegen {} s \
+             ({})",
+            mit_tausendertrenner(redact_core::MAX_CHECK_NEEDLES as u64),
+            m::ALTE_KOSTENZAHL_S,
+            m::MUSTER_JE_BEGRIFF_ALT,
+            m::DURCHGANG_MB,
+            m::MEMMEM_GB_S,
+            m::MEMMEM_JE_BEGRIFF_S,
+            untere_schranke_s(),
+            mit_tausendertrenner(redact_core::MAX_CHECK_NEEDLES as u64),
+            m::HEUTE_1_S,
+            m::HEUTE_1000_S,
+            mit_tausendertrenner(redact_core::MAX_CHECK_NEEDLES as u64)
+        ),
+    );
+
+    // --- Vier Klartextlecks an Annotationsnachbarn -----------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "alle {} Beiwerk-Dictionaries fallen jetzt als Ganzes",
+            zahlwort(m::BEIWERK_DICTIONARIES)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "endete mit „Schwärzungen: {}“ und Rückgabewert 0, während \
+             `--check-leaks` an der Ausgabe **{} Fundstellen** fand — jetzt 0",
+            m::MOVIE_SCHWAERZUNGEN,
+            m::MOVIE_FUNDSTELLEN
+        ),
+    );
+
+    // --- Die Zahlen im Audit-Log -----------------------------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "nicht nur für die {} Nutzlast-Zähler",
+            zahlwort(m::NUTZLAST_ZAEHLER)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "„{} Lesezeichen entfernt“ über einen `/Title 4 0 R`",
+            m::LESEZEICHEN_GEMELDET
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "({} Annotationen mit `/Contents` als Verweis): {} ms statt {} ms",
+            m::ANNOTATIONEN,
+            m::ANNOT_NACHHER_MS,
+            m::ANNOT_VORHER_MS
+        ),
+    );
+
+    // --- Die Oberfläche ---------------------------------------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "**{} weitere Sätze der Oberfläche.**",
+            zahlwort_gross(m::SAETZE_OBERFLAECHE_6)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "nannte die bleibende Warnung die Decke von {} Begriffen als Grund",
+            mit_tausendertrenner(redact_core::MAX_CHECK_NEEDLES as u64)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "({} → {} Zeichen bei {} Stellen)",
+            m::SATZ_VORHER_ZEICHEN,
+            m::SATZ_NACHHER_ZEICHEN,
+            zahlwort(benannte_stellen())
+        ),
+    );
+
+    // --- Nachträge: die Sätze, die der Vollständigkeitstest fand ---------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "**{} schwere Befunde** blieben",
+            zahlwort_gross(m::SCHWERE_BEFUNDE_6)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "der das Leck-Orakel stumm machte („nicht gefunden“, Rückgabewert {RC_SAUBER}, \
+             über einen Strom, den keine Sicht gelesen hatte)"
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "„bis zu {} Stellen beim Namen“ aus `MAX_NAMED_PLACES` im Quelltext der \
+             Oberfläche",
+            zahlwort(benannte_stellen())
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!("Der Absatz nennt jetzt die Bedingung für `{RC_SAUBER}`"),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "`/Filter /FooDecode` allein kam als „nicht gefunden“ mit Rückgabewert \
+             {RC_SAUBER} zurück, `/Filter [/FlateDecode /FooDecode]` mit {RC_LECK}"
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "was gemessen ist: {} Ketten, {} mit Meldung und Rückgabewert {RC_LECK}, {} \
+             (Bildfilter allein und am Kettenende) ohne Meldung und mit {RC_SAUBER}",
+            zahlwort(filterketten()),
+            zahlwort(filterketten_mit_meldung()),
+            zahlwort(filterketten() - filterketten_mit_meldung())
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "**{} Zusagen, die zu viel versprachen.**",
+            zahlwort_gross(m::ZUSAGEN_ZU_VIEL)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!("ohne Warnung und mit Rückgabewert {RC_SAUBER}. Betroffen waren die Seite"),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "**{} Klartextlecks an Annotationsnachbarn.**",
+            zahlwort_gross(m::LECKS_ANNOTATIONSNACHBARN)
+        ),
+    );
+
+    // =====================================================================
+    // Fix-Runde 7
+    // =====================================================================
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "**{} stille Lecks** blieben: ein Form-XObject ohne eigenes `/Resources`, \
+             dasselbe Formular unter {} Grafikumgebungen, ein `/Filter`-Wert, der gar \
+             kein Name ist, und {} Klartextträger am Beiwerk einer Annotation. Dazu {} \
+             Dienstverweigerungen",
+            zahlwort_gross(m::STILLE_LECKS_7),
+            zahlwort(m::GRAFIKUMGEBUNGEN),
+            zahlwort(m::KLARTEXTTRAEGER_BEIWERK),
+            zahlwort(m::DIENSTVERWEIGERUNGEN_7)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "die je Seite statt je Dokument zählt ({} Seiten aus einer Datei von {} \
+             Byte belegten beim Schwärzen {} MB) —, {} Befunde an der Oberfläche und \
+             die Erkenntnis, dass von {} einzeln mutierten Zahlen der Doku weiter {} \
+             grün blieben",
+            m::DECKE_SEITEN,
+            mit_tausendertrenner(m::DECKE_DATEI_BYTES),
+            mit_tausendertrenner(kb_in_mb(m::DECKE_SPITZE_KB)),
+            zahlwort(m::BEFUNDE_OBERFLAECHE_7),
+            m::GEGEN6_STELLEN,
+            m::GEGEN6_GRUEN
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "die Gegenprüfung mutierte danach {} Stellen einzeln: {} wurden rot, **{} \
+             blieben grün**",
+            m::GEGEN6_STELLEN,
+            m::GEGEN6_ROT,
+            m::GEGEN6_GRUEN
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "**{} Zahlen in der Doku waren falsch, alle nachgemessen.** „{} s und {} \
+             MB“ für die entschärfte Spiegel-Bombe stammten aus dem **Testprozess**",
+            zahlwort_gross(m::FALSCHE_ZAHLEN_7),
+            m::SPIEGEL_TESTPROZESS_S,
+            m::SPIEGEL_TESTPROZESS_MB
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Über einer Tabelle mit {} Filterketten stand „{} Ketten“",
+            zahlwort(filterketten()),
+            zahlwort(filterketten() - 1)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Dazu {} Sätze, die der Befund derselben Runde widerlegt hatte",
+            zahlwort(m::WIDERLEGTE_SAETZE)
+        ),
+    );
+    // Und die Begründung in SECURITY.md rechnet die Zahl vor, statt sie zu
+    // behaupten — hier stand „51 Zeilen“, die Decke **eines** Zählers.
+    satz(
+        "SECURITY.md",
+        format!(
+            "denn `LeakCheck::unchecked` darf bis zu **{}** Zeilen tragen",
+            ungepruefte_zeilen()
+        ),
+    );
+    satz(
+        "SECURITY.md",
+        format!(
+            "die Decke `MAX_UNCHECKED = {}` einzeln genannter Stellen plus Summenzeile gilt je **Zähler**, und davon gibt es {} (zu große Ströme der Rohsicht, dieselben der Objektsicht, Stellen aus anderem Grund), dazu die Zeile über Sicht 7: {} × {} + 1",
+            konstante_aus("crates/redact-pdf/src/audit_bytes.rs", "MAX_UNCHECKED"),
+            zahlwort(3),
+            3,
+            konstante_aus("crates/redact-pdf/src/audit_bytes.rs", "MAX_UNCHECKED") + 1
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "am gebauten Binary sind es {} s und {} MB (Release) bzw. {} s und {} MB \
+             (Debug), beide mit Rückgabewert {RC_LECK}",
+            m::SPIEGEL_RELEASE_S,
+            kb_in_mb(m::SPIEGEL_RELEASE_KB),
+            m::SPIEGEL_DEBUG_S,
+            kb_in_mb(m::SPIEGEL_DEBUG_KB)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Dieselbe Datei hat **{}** Objekte, nicht elf.",
+            zahlwort(m::SPIEGEL_BOMBE_OBJEKTE)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Die README versprach „bis zu {} Muster“ für {} Begriffe und zählte im \
+             selben Satz elf auf — `Probe::new` legt bis zu zwölf je Begriff an, also \
+             {}.",
+            mit_tausendertrenner(
+                (redact_core::MAX_CHECK_NEEDLES * (BYTE_KODIERUNGEN_ASCII_ERWARTET.len() + 1))
+                    as u64
+            ),
+            mit_tausendertrenner(redact_core::MAX_CHECK_NEEDLES as u64),
+            mit_tausendertrenner(
+                (redact_core::MAX_CHECK_NEEDLES * (m::KODIERUNGEN_UMLAUT + 2)) as u64
+            )
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "begründete die Decke von {} genannten Stellen mit „{} Zeilen“, während der \
+             Quelltext daneben {} ausrechnet",
+            zahlwort(benannte_stellen()),
+            // Die alte Begründung nahm die Decke **eines** Zählers samt
+            // Summenzeile für die ganze Liste.
+            konstante_aus("crates/redact-pdf/src/audit_bytes.rs", "MAX_UNCHECKED") + 1,
+            ungepruefte_zeilen()
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "die Gegenprüfung änderte in der Kopie `{}` in `{}`, und kein Test wurde rot",
+            zuordnungsdecke(),
+            zuordnungsdecke() * 2
+        ),
+    );
+
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "{} Proben, einzeln an den Baum gehängt: {} Fehlalarm",
+            zahlwort_gross(m::PLATTFORM_PROBEN),
+            zahlwort(m::PLATTFORM_FEHLALARM)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "und {} Lücken — ein fremdes `.ok()` acht Zeilen weiter genügte als Ausweg",
+            zahlwort(m::PLATTFORM_LUECKEN)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "{} Stellen im Baum verletzen die geschärfte Regel und stehen namentlich \
+             als Altlast darin: {}mal `mkfifo`, {}mal ein `std::os::unix`-API **ohne** \
+             `cfg`",
+            zahlwort_gross(m::PLATTFORM_ALTLASTEN),
+            zahlwort(m::PLATTFORM_MKFIFO),
+            zahlwort(m::PLATTFORM_UNIX_API)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "„{} Stelle(n) nicht geprüft“ stand unter {} einzeln genannten Zeilen, \
+             einer Summenzeile „{} weitere“ und einer über {} Ströme",
+            m::STELLEN_GEMELDET,
+            m::STELLEN_EINZELN,
+            m::STELLEN_WEITERE,
+            m::STELLEN_STROEME
+        ),
+    );
+
     aus
+}
+
+/// Wie viele Zeilen `LeakCheck::unchecked` höchstens trägt: die Decke je
+/// Zähler plus Summenzeile, dreimal, plus die Zeile über die letzte Sicht.
+/// Die Doku sagte dafür „51“ und meinte die Decke **eines** Zählers.
+fn ungepruefte_zeilen() -> usize {
+    let decke = konstante_aus("crates/redact-pdf/src/audit_bytes.rs", "MAX_UNCHECKED");
+    3 * (decke + 1) + 1
+}
+
+/// Der Rückgabewert, mit dem `--check-leaks` einen Fund oder eine ungeprüfte
+/// Stelle meldet.
+const RC_LECK: i32 = 3;
+
+/// Der Rückgabewert eines Laufs ohne Fund und ohne ungeprüfte Stelle.
+const RC_SAUBER: i32 = 0;
+
+/// Die Filterketten, über die `SECURITY.md` eine Zusage macht — gezählt an
+/// der Tabelle dort, nicht abgeschrieben. Jede Zeile fährt
+/// `zg_r5_filterketten::jede_zeile_der_filterkettentabelle_stammt_aus_einem_lauf`
+/// durch das gebaute Binary.
+fn filterkettentabelle() -> Vec<String> {
+    let security = lf(&std::fs::read_to_string(repo_root().join("SECURITY.md")).expect("SECURITY"));
+    let kopf = "| Filterkette | Meldung | Rückgabewert |";
+    let zeilen: Vec<String> = security
+        .lines()
+        .map(str::trim)
+        .skip_while(|z| *z != kopf)
+        .skip(2) // Kopfzeile und Trennzeile
+        .take_while(|z| z.starts_with("| `"))
+        .map(str::to_string)
+        .collect();
+    assert!(
+        zeilen.len() >= 5,
+        "die Filterkettentabelle in SECURITY.md hat nur {} Zeilen",
+        zeilen.len()
+    );
+    zeilen
+}
+
+fn filterketten() -> usize {
+    filterkettentabelle().len()
+}
+
+fn filterketten_mit_meldung() -> usize {
+    filterkettentabelle()
+        .iter()
+        .filter(|z| !z.ends_with("| keine | 0 |"))
+        .count()
+}
+
+/// Die Decke der Spiegel-Formular-Zuordnungen — aus dem Quelltext, nicht
+/// abgeschrieben.
+fn zuordnungsdecke() -> usize {
+    konstante_aus(
+        "crates/redact-pdf/src/content.rs",
+        "MAX_MIRROR_FORM_PLACEMENTS",
+    )
+}
+
+/// Wie tief die Objektsicht des Orakels geht.
+fn objektsichttiefe() -> usize {
+    konstante_aus("crates/redact-pdf/src/audit_bytes.rs", "MAX_DEPTH")
+}
+
+/// Wie viele ungeprüfte Stellen die Statuszeile beim Namen nennt.
+fn benannte_stellen() -> usize {
+    konstante_aus("crates/redact-gui/src/state.rs", "MAX_NAMED_PLACES")
+}
+
+/// Die untere Schranke der alten Kostenrechnung: 1 000 Begriffe × die
+/// gemessene Zeit je Begriff. Eine dritte Zahl gibt es nicht.
+fn untere_schranke_s() -> String {
+    let je_begriff: f64 = messwerte::MEMMEM_JE_BEGRIFF_S
+        .replace(',', ".")
+        .parse()
+        .expect("Zahl mit Komma");
+    format!("{:.0}", je_begriff * redact_core::MAX_CHECK_NEEDLES as f64)
 }
 
 /// **Die Bindung.** Jeder Satz aus [`messsaetze`] steht genau so in seiner
@@ -888,8 +1713,9 @@ fn die_zahlen_der_doku_sind_gebunden() {
             "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun", "zehn", "elf",
             "zwölf", "einmal",
         ];
+        let klein = satz.to_lowercase();
         assert!(
-            satz.chars().any(|c| c.is_ascii_digit()) || ZAHLWORTE.iter().any(|w| satz.contains(w)),
+            satz.chars().any(|c| c.is_ascii_digit()) || ZAHLWORTE.iter().any(|w| klein.contains(w)),
             "„{satz}“ trägt keine Zahl und bindet nichts"
         );
         // „--help“ ist keine Datei, sondern der Hilfetext des gebauten
@@ -1002,6 +1828,293 @@ fn die_abgeleiteten_zahlen_stimmen() {
              `MAX_NAMED_PLACES = {genannte}`"
         )),
         "SECURITY.md nennt die Decke der benannten Stellen nicht"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E1 — und **jede** Zahl des Blocks, nicht nur die, an die jemand dachte
+// ---------------------------------------------------------------------------
+//
+// Die Gegenprüfung der Fix-Runde 6 hat 76 Stellen der Doku einzeln mutiert:
+// 18 rot, 58 grün. Der Test darüber (`die_zahlen_der_doku_sind_gebunden`)
+// prüft, dass jeder Satz **seiner Liste** in der Doku steht — er sagt nichts
+// darüber, ob die Liste vollständig ist. Grün blieben deshalb `0,56 s`,
+// `38 MB`, `0,15 s`, `6 Fundstellen`, `767–791 ms`, `804 → 411 Zeichen`,
+// `elf Objekte`, `16 MB` und zwei Dutzend weitere.
+//
+// Dieser Test dreht die Frage um: er liest den **Block** der beiden letzten
+// Fix-Runden aus `CHANGELOG.md`, markiert, was die gebundenen Sätze davon
+// abdecken, und verlangt, dass danach **keine** Zahl übrig bleibt. Was keine
+// Messzahl ist, steht mit Begründung in [`KEINE_MESSZAHL`] — eine Zeile Arbeit
+// an der richtigen Stelle statt einer stillen Lücke an der falschen.
+
+/// Stellen des Blocks, die eine Zahl tragen und **keine Messzahl** sind —
+/// Wortlaut und Begründung.
+///
+/// Im Zweifel ist es eine Messzahl: wer hier etwas einträgt, nimmt es aus der
+/// Bindung heraus und muss sagen, warum das keine Aussage über das Programm
+/// ist.
+const KEINE_MESSZAHL: &[(&str, &str)] = &[
+    (
+        "Fix-Runde 6: was die Gegenprüfung der Runde 5 noch fand",
+        "Überschrift; die Nummer benennt einen Abschnitt dieser Datei",
+    ),
+    (
+        "Fix-Runde 7: was die Gegenprüfung der Runde 6 noch fand",
+        "Überschrift; die Nummer benennt einen Abschnitt dieser Datei",
+    ),
+    (
+        "Fünf Gegenprüfer lasen die Korrekturen der Runde 5 mit eigenem Material gegen.",
+        "eine Angabe über den Ablauf der Runde, nicht über das Programm",
+    ),
+    (
+        "Fünf Gegenprüfer lasen die Korrekturen der Runde 6 mit eigenem Material gegen.",
+        "eine Angabe über den Ablauf der Runde, nicht über das Programm",
+    ),
+    (
+        "die die Runde 5 hinzugefügt hatte",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "obwohl die Runde 5 UTF-16LE eingebaut hatte",
+        "Verweis auf einen Abschnitt dieser Datei; UTF-16LE ist ein Name",
+    ),
+    (
+        "die die Runde 5 gerade abgeschafft hatte",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "dieselbe Klasse wie der ASCII85-Fall der Runde 5",
+        "ASCII85 ist ein Filtername; die Runde benennt einen Abschnitt",
+    ),
+    (
+        "Die Runde 5 hatte",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "Die Fix-Runde 6 hat die Messzahlen der Doku an einen Testdatensatz gebunden",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "den die Fix-Runde 6 neu zusagte",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "war zu viel versprochen — siehe Fix-Runde 7.)",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "jetzt fährt `zg_r5_filterketten` jede Zeile durch das Binary",
+        "der Name einer Testdatei, keine gemessene Größe",
+    ),
+    (
+        "obwohl dasselbe Dokument MB als 1024² Byte festlegt",
+        "die Definition der Einheit, keine gemessene Größe",
+    ),
+    (
+        "<!-- FIX-RUNDE-7:",
+        "der Platzhalter, in den der Orchestrator die Sätze der übrigen Agenten \
+         einträgt; er nennt keine Messung",
+    ),
+    (
+        "„UTF-8, Latin-1/PDFDoc, UTF-16BE und als Hex-String“",
+        "Namen von Kodierungen, keine gemessenen Größen",
+    ),
+    (
+        "**UTF-16LE fehlte in beiden Kodierungslisten.**",
+        "UTF-16LE ist der Name einer Kodierung, keine gemessene Größe",
+    ),
+    (
+        "(der vierte in `zf_q5_unbekannter_filter.rs`; der fünfte gehört der Oberfläche",
+        "der Name einer Testdatei, keine gemessene Größe",
+    ),
+    (
+        "`setrlimit(RLIMIT_CORE, 0)`",
+        "der Aufruf mit seinem Argument, keine gemessene Größe",
+    ),
+    (
+        "(durch 1024²)",
+        "die Definition der Einheit: MB heißt in diesem Projekt 1024² Byte",
+    ),
+    (
+        "MB heißt in diesem Projekt 1024² Byte",
+        "die Definition der Einheit",
+    ),
+    (
+        "`/Title 4 0 R`",
+        "eine Objektnummer im Beispiel, keine gemessene Größe",
+    ),
+    (
+        "Jetzt steht jede Messzahl **einmal** im Testdatensatz",
+        "„einmal“ ist hier keine Zahl, sondern die Zusage, dass es keine zweite \
+         Abschrift gibt",
+    ),
+    (
+        "läuft einmal je Strom statt je Platzierung",
+        "„einmal“ beschreibt die Häufigkeit eines Durchlaufs, keine Messung",
+    ),
+];
+
+/// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
+///
+/// Von der Überschrift der jüngsten Fix-Runde bis zur Überschrift der
+/// drittjüngsten — also genau das, was diese und die vorige Runde geschrieben
+/// haben.
+fn changelog_block() -> String {
+    let text = lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG"));
+    let ueberschriften: Vec<usize> = text
+        .match_indices("\n### Fix-Runde ")
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        ueberschriften.len() >= 3,
+        "weniger als drei Fix-Runden im CHANGELOG — der Block lässt sich nicht \
+         schneiden"
+    );
+    glatt(&text[ueberschriften[0]..ueberschriften[2]])
+}
+
+/// Markiert jedes Vorkommen von `muster` in `block` als gedeckt.
+fn decke(block: &str, gedeckt: &mut [bool], muster: &str) -> bool {
+    let mut gefunden = false;
+    for (i, _) in block.match_indices(muster) {
+        gefunden = true;
+        for b in gedeckt.iter_mut().take(i + muster.len()).skip(i) {
+            *b = true;
+        }
+    }
+    gefunden
+}
+
+/// Der Kern eines Wortes — ohne führende und abschließende Satz- und
+/// Auszeichnungszeichen, als Byte-Bereich im Wort.
+fn kern(wort: &str) -> (usize, usize) {
+    let von = wort
+        .char_indices()
+        .find(|(_, c)| c.is_alphanumeric())
+        .map_or(0, |(i, _)| i);
+    let bis = wort
+        .char_indices()
+        .rfind(|(_, c)| c.is_alphanumeric())
+        .map_or(wort.len(), |(i, c)| i + c.len_utf8());
+    (von, bis.max(von))
+}
+
+/// Trägt dieses Wort eine Zahl — als Ziffer oder ausgeschrieben?
+fn traegt_zahl(wort: &str) -> bool {
+    // Kardinalzahlen und ihre `…mal`-Formen. **Nicht** die Ordnungszahlen
+    // („der vierte“): die stehen hier für einen Platz in einer Liste und nicht
+    // für eine Messung.
+    const ZAHLWORTE: [&str; 23] = [
+        "zwei",
+        "drei",
+        "vier",
+        "fünf",
+        "sechs",
+        "sieben",
+        "acht",
+        "neun",
+        "zehn",
+        "elf",
+        "zwölf",
+        "siebzehn",
+        "zweimal",
+        "dreimal",
+        "viermal",
+        "fünfmal",
+        "sechsmal",
+        "siebenmal",
+        "achtmal",
+        "neunmal",
+        "zehnmal",
+        "elfmal",
+        "zwölfmal",
+    ];
+    let kern: String = wort
+        .chars()
+        .filter(|c| !"*`„“»«().,;:—–!?[]…\u{202f}".contains(*c))
+        .collect();
+    if kern.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    let klein = kern.to_lowercase();
+    ZAHLWORTE.contains(&klein.as_str())
+}
+
+/// **Die Bindung, andersherum.** Keine Zahl im Block der beiden letzten
+/// Fix-Runden steht ungebunden da.
+///
+/// Mutationsnachweis: jede Zahl des Blocks einzeln geändert (Lauf:
+/// `scratchpad/runde7/e/zahlen.sh`) — jede macht diesen Test oder
+/// `die_zahlen_der_doku_sind_gebunden` rot.
+#[test]
+fn jede_zahl_der_letzten_runden_ist_gebunden() {
+    let block = changelog_block();
+    let mut gedeckt = vec![false; block.len()];
+
+    for (datei, satz) in messsaetze() {
+        if datei == "CHANGELOG.md" {
+            decke(&block, &mut gedeckt, &satz);
+        }
+    }
+    let mut ungenutzt: Vec<&str> = Vec::new();
+    for (wortlaut, grund) in KEINE_MESSZAHL {
+        assert!(
+            grund.len() > 15,
+            "„{wortlaut}“ steht ohne belastbare Begründung in KEINE_MESSZAHL"
+        );
+        if !decke(&block, &mut gedeckt, &glatt(wortlaut)) {
+            ungenutzt.push(wortlaut);
+        }
+    }
+
+    let mut zahlen = 0usize;
+    let mut offen: Vec<String> = Vec::new();
+    let mut pos = 0usize;
+    for wort in block.split(' ') {
+        let von = pos;
+        pos += wort.len() + 1;
+        if !traegt_zahl(wort) {
+            continue;
+        }
+        zahlen += 1;
+        // Nicht das ganze Wort, sondern sein **Kern**: `Latin-1);` und `3.`
+        // tragen Satzzeichen, die zu keinem gebundenen Satz gehören müssen.
+        let (kern_von, kern_bis) = kern(wort);
+        if gedeckt[von + kern_von..von + kern_bis].iter().all(|b| *b) {
+            continue;
+        }
+        let links = block[..von]
+            .char_indices()
+            .rev()
+            .nth(60)
+            .map_or(0, |(i, _)| i);
+        let rechts = block[von..]
+            .char_indices()
+            .nth(60)
+            .map_or(block.len(), |(i, _)| von + i);
+        offen.push(format!("„{wort}“ in: …{}…", &block[links..rechts]));
+    }
+
+    assert!(
+        zahlen >= 100,
+        "nur {zahlen} Zahl(en) im Block gefunden — der Schnitt greift nicht mehr"
+    );
+    assert!(
+        offen.is_empty(),
+        "{} Zahl(en) im Block der beiden letzten Fix-Runden sind an nichts \
+         gebunden — wer sie ändert, ändert eine Zusage, und kein Test merkt es. \
+         Entweder gehört ein Satz nach `messsaetze`, oder die Stelle ist keine \
+         Messzahl und gehört mit Begründung nach `KEINE_MESSZAHL`:\n{}",
+        offen.len(),
+        offen.join("\n")
+    );
+    assert!(
+        ungenutzt.is_empty(),
+        "{} Eintrag/Einträge in KEINE_MESSZAHL kommen im Block nicht (mehr) vor — \
+         eine Ausnahme ohne Fall deckt beim nächsten Mal etwas anderes:\n{}",
+        ungenutzt.len(),
+        ungenutzt.join("\n")
     );
 }
 
@@ -1202,8 +2315,23 @@ fn in_neun_byte_kodierungen_wird_gesucht_und_so_steht_es_in_der_doku() {
             "{wo} zählt die Kodierungen nicht auf, in denen wirklich gesucht wird"
         );
         assert!(
-            text.contains("zehn mit Umlaut und sieben mit einem Zeichen jenseits von Latin-1"),
-            "{wo} nennt die beiden anderen Fälle nicht"
+            text.contains(&format!(
+                "{} sind es für einen Begriff aus reinem ASCII mit Buchstaben — dort \
+                 fällt Latin-1 mit UTF-8 zusammen —, {} mit Umlaut und {} mit einem \
+                 Zeichen jenseits von Latin-1",
+                zahlwort_gross(gefunden[0].1),
+                zahlwort(gefunden[1].1),
+                zahlwort(gefunden[2].1)
+            )),
+            "{wo} nennt die drei Fälle nicht mit den Zahlen aus dem Lauf"
+        );
+        assert!(
+            text.contains(&format!(
+                "ist der Hex-String in Groß- und in Kleinschreibung dieselbe Bytefolge, \
+                 dort sind es {}",
+                zahlwort(gefunden[3].1)
+            )),
+            "{wo} nennt die Zahl für die IBAN nicht"
         );
         assert!(
             text.contains("Fassungen, die auf dieselben Bytes fallen, werden nur einmal gesucht"),
@@ -1290,12 +2418,167 @@ fn die_fuenf_gruende_fuer_nicht_geprueft_stehen_in_security_md() {
             "SECURITY.md nennt zu „{name}“ nicht den Wortlaut „{wortlaut}“"
         );
     }
+    let readme = glatt(&lf(
+        &std::fs::read_to_string(repo_root().join("README.md")).expect("README lesbar")
+    ));
     assert!(
         security.contains("Fünf Gründe gibt es dafür")
-            || glatt(&lf(
-                &std::fs::read_to_string(repo_root().join("README.md")).expect("README lesbar")
-            ))
-            .contains("Fünf Gründe gibt es dafür"),
+            || readme.contains("Fünf Gründe gibt es dafür"),
         "die README nennt die Zahl der Gründe nicht"
+    );
+    // Und die Rückgabewert-Tabelle nennt dieselbe Zahl: sie war bis zur
+    // Fix-Runde 7 an nichts gebunden.
+    assert!(
+        readme.contains(&format!(
+            "(`NICHT GEPRÜFT: …`, {} mögliche Gründe, siehe unten)",
+            zahlwort(GRUENDE.len())
+        )),
+        "die Rückgabewert-Tabelle der README nennt nicht {} mögliche Gründe",
+        GRUENDE.len()
+    );
+}
+
+// ===========================================================================
+// Die Spiegel-Bombe der Fix-Runde 6 — am gebauten Binary, nicht im Testprozess
+// ===========================================================================
+//
+// Die Tabelle in `redact-pdf/tests/zf_q3_kombinatorik.rs` misst `analyse()`:
+// laden und `PdfExtractor::extract_with_warnings`. Das ist **ein Teil** des
+// Programms, und die Zahlen daraus (0,56 s / 38 MB) sind die des
+// Testprozesses. Das gebaute Binary tut mehr — Muster, Schwärzung,
+// Zusammenfassung —, und die Doku darf nur sagen, was es gemessen hat.
+//
+// Deshalb baut dieser Block dieselbe Datei noch einmal (Nachbau von
+// `nested_brackets(6000, 6000, false)`) und fährt sie durch das Binary. Die
+// Zeit und der Spitzenspeicher stehen als aufgezeichnete Messung in
+// [`messwerte`]; **hier** gebunden sind die Eigenschaften, die nicht von der
+// Maschine abhängen: die Größe der Datei, die Zahl ihrer Objekte und der
+// Rückgabewert des Laufs.
+
+/// Nachbau von `redact-pdf/tests/zf_q3_kombinatorik.rs::nested_brackets(b, d,
+/// false)`: `b` verschachtelte `/Span <</ActualText (Ai)>> BDC`-Klammern über
+/// `d` Platzierungen desselben Form-XObjects.
+fn spiegel_bombe(klammern: usize, dos: usize) -> Vec<u8> {
+    use lopdf::{dictionary, Document, Object, Stream};
+
+    let mut doc = Document::with_version("1.5");
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+        "Encoding" => "WinAnsiEncoding",
+    });
+    let resources_id = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let content_id = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+    let pages_id = doc.new_object_id();
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => content_id,
+        "Resources" => resources_id,
+        "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![Object::Reference(page_id)],
+            "Count" => 1_i64,
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+
+    let form_resources = doc.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let form_id = doc.add_object(Object::Stream(
+        Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 600.into(), 800.into()],
+                "Resources" => form_resources,
+            },
+            b"BT /F1 10 Tf 72 600 Td (A) Tj ET\n".to_vec(),
+        )
+        .with_compression(false),
+    ));
+    doc.get_dictionary_mut(resources_id)
+        .expect("Ressourcen")
+        .set("XObject", dictionary! { "Fm1" => form_id });
+
+    let mut raw = b"BT\n/F1 10 Tf\n72 700 Td\n(Kontoinhaber Max Mustermann) Tj\nET\n".to_vec();
+    for i in 0..klammern {
+        raw.extend_from_slice(format!("/Span <</ActualText (A{i})>> BDC\n").as_bytes());
+    }
+    raw.extend_from_slice("/Fm1 Do\n".repeat(dos).as_bytes());
+    for _ in 0..klammern {
+        raw.extend_from_slice(b"EMC\n");
+    }
+    doc.objects
+        .insert(content_id, Object::Stream(Stream::new(dictionary! {}, raw)));
+
+    let mut buffer = Vec::new();
+    doc.save_to(&mut buffer).expect("speicherbar");
+    buffer
+}
+
+/// Die Datei ist so groß und hat so viele Objekte, wie die Doku sagt — und der
+/// Lauf des **Binaries** endet, wie die Doku sagt.
+///
+/// Zeit und Spitzenspeicher stehen als aufgezeichnete Messung in [`messwerte`]
+/// (eine geteilte Maschine ist kein Messgerät); hier steht, was nicht von ihr
+/// abhängt. Die Doku sagte bis zur Fix-Runde 7 „elf Objekte“ und schrieb die
+/// Zahlen des Testprozesses als die des Binaries.
+///
+/// Mutationsnachweis: `SPIEGEL_BOMBE_OBJEKTE` auf 11 → rot;
+/// `SPIEGEL_BOMBE_KB` auf „277“ → rot.
+#[test]
+fn die_spiegel_bombe_am_binary() {
+    let bytes = spiegel_bombe(6000, 6000);
+    let objekte = redact_pdf::load_from_bytes(&bytes)
+        .expect("ladbar")
+        .objects
+        .len();
+    println!("Datei {} B, {objekte} Objekte", bytes.len());
+    assert_eq!(
+        objekte,
+        messwerte::SPIEGEL_BOMBE_OBJEKTE,
+        "die Datei hat {objekte} Objekte, die Doku sagt {}",
+        messwerte::SPIEGEL_BOMBE_OBJEKTE
+    );
+    assert_eq!(
+        ((bytes.len() + 500) / 1000).to_string(),
+        messwerte::SPIEGEL_BOMBE_KB,
+        "die Datei ist {} Byte groß, die Doku sagt {} kB",
+        bytes.len(),
+        messwerte::SPIEGEL_BOMBE_KB
+    );
+
+    let dir = workdir("spiegel");
+    std::fs::write(dir.join("spiegel.pdf"), &bytes).expect("schreibbar");
+    // Der Pfad bleibt stehen (und wird gemeldet): dieselbe Datei wird für die
+    // aufgezeichnete Messung durch das **Release**-Binary gefahren, und ein
+    // Beleg, den man nicht nachfahren kann, ist keiner.
+    println!("Datei liegt unter {}", dir.join("spiegel.pdf").display());
+    let start = std::time::Instant::now();
+    let out = run_in(&dir, &["spiegel.pdf", "-o", "aus.pdf"]);
+    let text = stdout(&out);
+    println!(
+        "rc={:?} nach {:?}\n{text}{}",
+        out.status.code(),
+        start.elapsed(),
+        stderr(&out)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(RC_LECK),
+        "die Doku nennt für diesen Lauf Rückgabewert {RC_LECK}:\n{text}"
     );
 }

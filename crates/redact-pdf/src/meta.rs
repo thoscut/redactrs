@@ -50,7 +50,12 @@
 //!   Formulardatensatz als XML) fällt mit dem `/AcroForm`-Dictionary,
 //! * `/OpenAction` und `/AA` — Aktionen, die beim Öffnen bzw. bei Ereignissen
 //!   laufen. Beide dürfen `/S /JavaScript` mit beliebigem Quelltext sein,
-//! * `/OCProperties` — die Verwaltung optionaler Inhalte („Ebenen“).
+//! * `/OCProperties` — die Verwaltung optionaler Inhalte („Ebenen“),
+//! * `/AF` — die zugeordneten Dateien (PDF 2.0, 14.13). So hängt eine
+//!   ZUGFeRD-/Factur-X-Rechnung ihre XML-Fassung an: **zusätzlich** zum
+//!   `/Names`-Baum, und der eine Halter allein zu entfernen nahm die Datei
+//!   nicht mit. Gemessen (vor dieser Änderung): `--check-leaks` fand die
+//!   IBAN nach dem Schwärzen an drei Stellen, Rückgabewert 3.
 //!
 //! Aus **jedem verbliebenen `/OCG`**:
 //!
@@ -72,8 +77,25 @@
 //! Aus **jeder Seite**:
 //!
 //! * `/Metadata` (seitenweites XMP), `/PieceInfo`, `/StructParents`, `/AA`,
+//!   `/AF`,
 //! * Annotationen vom Typ `/FileAttachment` — ein Dateianhang hängt nicht nur
-//!   im `/Names`-Baum, er kann auch direkt an einer Seite kleben.
+//!   im `/Names`-Baum, er kann auch direkt an einer Seite kleben. Aus
+//!   `/Annots` gestrichen zu werden genügt ihm nicht: sein `/Popup` hält ihn
+//!   über `/Parent` am Leben (so schreibt Acrobat jeden Kommentar), eine
+//!   Antwort über `/IRT` genauso. Deshalb fallen `/FS` und `/AF` am Objekt
+//!   selbst. Gemessen (vor dieser Änderung): eine Datei mit der IBAN in der
+//!   eingebetteten Datei endete mit „2 Kommentartexte“ und Rückgabewert 0,
+//!   während `--check-leaks` an der Ausgabe drei Fundstellen fand.
+//!
+//! Aus **jedem übrigen Objekt**:
+//!
+//! * `/Metadata` und `/PieceInfo` — beide hängen nicht nur am Katalog und an
+//!   den Seiten: XMP klebt an jedem **Bild-XObject**, das ein Layout-Programm
+//!   platziert hat (mit `dc:description`, Kamerabesitzer, Aufnahmeort), und
+//!   `/PieceInfo` (Tabelle 95) an jedem **Form-XObject**, das ein
+//!   Zeichenprogramm geschrieben hat. Ein Strom ist immer ein eigenes Objekt;
+//!   ein Durchgang durch die Objekte erreicht sie alle,
+//! * `/AF` — aus demselben Grund.
 //!
 //! Aus **jeder verbliebenen Annotation** — und aus allem, was sie erreichbar
 //! hält: ihrem `/Popup`, der `/Parent`-Kette nach oben (das Feld einer
@@ -118,12 +140,17 @@
 //!   Dictionary, auch an einem, das kein Träger ist (ein `/StructElem` hinter
 //!   `/IRT`). Beides ist frei wählbarer Text, der gewöhnlich genau das
 //!   spiegelt, was gerade aus dem Strom verschwunden ist.
-//! * das Beiwerk `/Movie`, `/Measure` und `/RichMediaContent` — als Ganzes,
-//!   siehe [`ANNOTATION_PLATE_KEYS`]. Gemessen (vor dieser Änderung): der
-//!   Dateiname in `/Movie /F`, die Einheitenbeschriftung in
-//!   `/Measure /X[0] /U` und eine eingebettete Datei unter
-//!   `/RichMediaContent /Assets` überlebten alle drei mit Rückgabewert 0
-//!   („Metadaten: nichts zu entfernen“), während `--check-leaks` sie fand.
+//! * das Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`, `/3DD`, `/3DV`
+//!   und `/RO` — als Ganzes, siehe [`ANNOTATION_PLATE_KEYS`]. Gemessen (vor
+//!   dieser Änderung): der Dateiname in `/Movie /F`, die
+//!   Einheitenbeschriftung in `/Measure /X[0] /U`, eine eingebettete Datei
+//!   unter `/RichMediaContent /Assets`, der JavaScript-Strom unter
+//!   `/3DD /OnInstantiate`, der Ansichtsname `/3DV /XN` und der Text im
+//!   Form-XObject `/RO` einer Redact-Annotation überlebten alle mit
+//!   Rückgabewert 0 („Metadaten: nichts zu entfernen“), während
+//!   `--check-leaks` sie fand,
+//! * die Dateiverweise `/AF` und `/FS` ([`FILE_SPEC_KEYS`]) — beide zeigen
+//!   auf ein Filespec mit Dateinamen und eingebetteter Datei.
 //!
 //! **Benannte Lücke:** `/DA` (Default Appearance) bleibt. Es ist bei FreeText
 //! und Widgets Pflicht und eine Operatorfolge (`/Helv 12 Tf 0 g`), keine
@@ -163,7 +190,8 @@ use lopdf::{Dictionary, Document, Object, ObjectId, StringFormat};
 ///   `piece_info_removed`, `struct_tree_removed`, `names_removed`,
 ///   `acroform_removed`, `open_action_removed`,
 ///   `additional_actions_removed`, `optional_content_removed`,
-///   `file_attachments_removed`, `annotation_actions_removed`,
+///   `file_attachments_removed`, `file_specs_removed`,
+///   `annotation_actions_removed`,
 ///   `annotation_texts_cleared`, `field_values_cleared`,
 ///   `optional_content_names_cleared`. Der Schlüssel steht so in der
 ///   Ausgabe: nicht mehr da. Ein Schlüssel mit dem Wert `null` zählt nicht
@@ -186,11 +214,12 @@ use lopdf::{Dictionary, Document, Object, ObjectId, StringFormat};
 /// Der Maßstab ist `--check-leaks` an der geschriebenen Datei: keine Zahl
 /// hier darf eine Entfernung melden, die dort noch zu finden ist. Der Satz
 /// gilt für **jede** Zahl, nicht nur für die vier Nutzlast-Zähler. Die
-/// Gegenrichtung ist er nicht: eine Zahl darf zu klein sein. Bei
-/// `optional_content_names_cleared` ist sie es sogar planmäßig — der Name
-/// wird *ersetzt*, danach räumt dieser Lauf nicht mehr auf, und ein
-/// `/Name 12 0 R` gilt deshalb als nicht entfernt, obwohl
-/// [`crate::document::save_to_bytes`] ihn beim Schreiben mitnimmt.
+/// Gegenrichtung ist er nicht: eine Zahl darf zu klein sein — eine
+/// `/FileAttachment`-Annotation ohne Datei etwa zählt nicht mit.
+///
+/// Gemessen wird am **aufgelösten** Objekt: hinter `/Contents 4 0 R` kann
+/// Objekt 4 selbst nur `5 0 R` sein. Fällt dann 4 und hält ein zweiter
+/// Verweis die Zeichenkette 5, ist nichts entfernt (siehe [`Chains`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MetadataReport {
     pub info_removed: bool,
@@ -215,8 +244,25 @@ pub struct MetadataReport {
     /// die von einer Seite oder vom Formularbaum aus erreichbar sind — ohne
     /// Tiefengrenze.
     pub field_values_cleared: usize,
-    /// Annotationen vom Typ `/FileAttachment`.
+    /// Dateianhänge: `/FileAttachment`-Annotationen, die aus der Seite
+    /// gestrichen wurden **und** deren Datei (`/FS`, `/AF`) danach nicht mehr
+    /// in der Datei steht — je Annotation einer.
+    ///
+    /// Aus `/Annots` gestrichen werden sie alle; gezählt wird nur, wessen
+    /// Nutzlast wirklich fiel. Ein Anhang, dessen Filespec ein zweiter
+    /// Verweis am Leben hält, zählt nicht (`--check-leaks` findet ihn), und
+    /// eine `/FileAttachment`-Annotation ohne Datei zählt nicht mit — sie
+    /// trug nichts.
     pub file_attachments_removed: usize,
+    /// Dateiverweise, die **nicht** an einer Seitenannotation hingen: `/AF`
+    /// (zugeordnete Datei, PDF 2.0, 14.13) am Katalog, an einer Seite, an
+    /// einem XObject oder an einem Träger, und ein `/FS` an einem Träger,
+    /// den keine Seite in `/Annots` führte.
+    ///
+    /// `/AF` ist der Weg, auf dem eine ZUGFeRD-/Factur-X-Rechnung ihre
+    /// XML-Fassung anhängt: `/Names /EmbeddedFiles` zu entfernen nahm ihr
+    /// bisher nur den einen von zwei Haltern.
+    pub file_specs_removed: usize,
     pub open_action_removed: bool,
     /// `/AA`-Dictionaries aus Katalog und Seiten.
     pub additional_actions_removed: usize,
@@ -241,8 +287,9 @@ pub struct MetadataReport {
     /// Klartexte an Annotationen und erreichbaren Feldern — je Schlüssel
     /// einer: `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`,
     /// `/OverlayText`, `/NM`, `/DS` sowie `/CA`, `/RC`, `/AC` in `/MK`,
-    /// dazu `/Alt` und `/ActualText` an jedem erreichten Dictionary und die
-    /// Beiwerk-Dictionaries `/Movie`, `/Measure` und `/RichMediaContent`.
+    /// dazu `/Alt` und `/ActualText` an jedem erreichten Dictionary und das
+    /// Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`, `/3DD`, `/3DV`
+    /// und `/RO`.
     pub annotation_texts_cleared: usize,
 }
 
@@ -297,6 +344,11 @@ impl MetadataReport {
             "Dateianhang-Annotationen",
         );
         count(
+            self.file_specs_removed,
+            "Dateiverweis (/AF, /FS)",
+            "Dateiverweise (/AF, /FS)",
+        );
+        count(
             self.additional_actions_removed,
             "Ereignisaktion (/AA)",
             "Ereignisaktionen (/AA)",
@@ -318,8 +370,8 @@ impl MetadataReport {
         );
         count(
             self.annotation_texts_cleared,
-            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent)",
-            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent)",
+            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO)",
+            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO)",
         );
         out
     }
@@ -343,7 +395,12 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     let mut open_action = Tally::default();
     let mut additional_actions = Tally::default();
     let mut optional_content = Tally::default();
-    let mut attachments = Tally::default();
+    let mut file_specs = Tally::default();
+    let mut attachments: Vec<Tally> = Vec::new();
+
+    // Die Verweisketten des geladenen Dokuments — vor jeder Änderung, danach
+    // sind sie nicht mehr zu sehen (siehe [`Chains`]).
+    let chains = Chains::of(doc);
 
     // --- Trailer /Info ---
     info.book(doc.trailer.remove(b"Info"));
@@ -423,7 +480,7 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     let mut visited: BTreeSet<ObjectId> = BTreeSet::new();
     let mut cleaned = Cleaned::default();
     for page_id in &page_ids {
-        attachments += remove_file_attachments(doc, *page_id);
+        attachments.extend(remove_file_attachments(doc, *page_id));
         if let Ok(page) = doc.get_dictionary_mut(*page_id) {
             take(page, b"PieceInfo", &mut piece_info);
             page.remove(b"StructParents");
@@ -444,6 +501,12 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
         // Schlüssel ist gerade gefallen.
         cleaned.values += clean_carriers(doc, &mut fields, &mut visited).values;
     }
+
+    // --- Metadaten an jedem übrigen Objekt -------------------------------
+    //
+    // XMP und `/PieceInfo` hängen nicht nur am Katalog und an den Seiten,
+    // und `/AF` ist der zweite Halter jeder eingebetteten Datei.
+    clear_object_metadata(doc, &mut xmp, &mut piece_info, &mut file_specs);
 
     // --- Lesezeichen ----------------------------------------------------
     //
@@ -468,28 +531,46 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     // Fall, den dieses Modul bis Aufgabe #57 offen gelassen hat.
     let ocg_names = clear_optional_content_names(doc);
 
+    // Stand ein Ebenenname als eigenes Objekt hinter `/Name 12 0 R`, hält
+    // ihn nach dem Ersetzen niemand mehr: ein zweiter Aufräumlauf nimmt ihn
+    // mit — und macht die Entfernung damit zählbar. Ohne ihn meldete der
+    // Bericht 0, die Zusammenfassung blieb leer, und die Konsole sagte
+    // „Metadaten: nichts zu entfernen“ über eine Datei, aus der gerade ein
+    // Ebenenname entfernt wurde. Gelaufen wird er nur in diesem Fall; ein
+    // Name, der direkt im `/OCG` stand, ist ohnehin sofort weg.
+    if !ocg_names.refs.is_empty() {
+        crate::document::prune_unreachable(doc);
+    }
+
     // --- Jetzt erst zählen ----------------------------------------------
     //
     // Bis hierher stand nur fest, was *vorhatte* zu verschwinden. Was ein
     // zweiter Halter weiterhin erreichbar macht, steht noch in der Datei und
     // darf nicht als entfernt gemeldet werden.
-    report.info_removed = info.settled(doc) > 0;
-    report.xmp_removed = xmp.settled(doc) > 0;
-    report.piece_info_removed = piece_info.settled(doc);
-    report.struct_tree_removed = struct_tree.settled(doc) > 0;
-    report.names_removed = names.settled(doc);
-    report.acroform_removed = acroform.settled(doc) > 0;
-    report.open_action_removed = open_action.settled(doc) > 0;
-    report.additional_actions_removed = additional_actions.settled(doc);
-    report.optional_content_removed = optional_content.settled(doc) > 0;
-    report.file_attachments_removed = attachments.settled(doc);
-    report.annotation_actions_removed = cleaned.actions.settled(doc);
-    report.annotation_texts_cleared = cleaned.texts.settled(doc);
-    report.field_values_cleared = cleaned.values.settled(doc);
+    report.info_removed = info.settled(doc, &chains) > 0;
+    report.xmp_removed = xmp.settled(doc, &chains) > 0;
+    report.piece_info_removed = piece_info.settled(doc, &chains);
+    report.struct_tree_removed = struct_tree.settled(doc, &chains) > 0;
+    report.names_removed = names.settled(doc, &chains);
+    report.acroform_removed = acroform.settled(doc, &chains) > 0;
+    report.open_action_removed = open_action.settled(doc, &chains) > 0;
+    report.additional_actions_removed = additional_actions.settled(doc, &chains);
+    report.optional_content_removed = optional_content.settled(doc, &chains) > 0;
+    // Ein Dateianhang zählt, wenn seine Datei nach dem Aufräumen fehlt —
+    // je Annotation einer, auch wenn sie `/FS` und `/AF` zugleich trug.
+    report.file_attachments_removed = attachments
+        .iter()
+        .filter(|one| one.settled(doc, &chains) > 0)
+        .count();
+    file_specs += cleaned.files;
+    report.file_specs_removed = file_specs.settled(doc, &chains);
+    report.annotation_actions_removed = cleaned.actions.settled(doc, &chains);
+    report.annotation_texts_cleared = cleaned.texts.settled(doc, &chains);
+    report.field_values_cleared = cleaned.values.settled(doc, &chains);
     // Die Ebenennamen sind *ersetzt*, nicht gelöscht, und danach wird nicht
     // mehr aufgeräumt: ein `/Name 12 0 R`, den noch jemand hält, steht weiter
     // in der Datei und zählt deshalb nicht (`settled` sieht das Objekt).
-    report.optional_content_names_cleared = ocg_names.settled(doc);
+    report.optional_content_names_cleared = ocg_names.settled(doc, &chains);
     report.embedded_files_removed = embedded_files.removed(doc);
     report.javascript_removed = javascript.removed(doc);
     report.xfa_removed = xfa.removed(doc) > 0;
@@ -499,7 +580,7 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     report.outlines_removed = outline_items
         .iter()
         .filter(|id| match outlines_cleared.get(*id) {
-            Some(cleared) => cleared.alive(doc) == 0,
+            Some(cleared) => cleared.alive(doc, &chains) == 0,
             None => !doc.objects.contains_key(*id),
         })
         .count();
@@ -853,8 +934,8 @@ const ANNOTATION_LINK_KEYS: [&[u8]; 4] = [b"Popup", b"Parent", b"Kids", b"IRT"];
 /// Erscheinungsbild führt“ liest.
 const ALTERNATE_TEXT_KEYS: [&[u8]; 2] = [b"Alt", b"ActualText"];
 
-/// Beiwerk-Dictionaries einer Annotation, die eigenen Klartext führen und
-/// nichts zeichnen — sie fallen als Ganzes.
+/// Beiwerk einer Annotation, das eigenen Klartext führt und nichts zeichnet —
+/// es fällt als Ganzes.
 ///
 /// * `/Movie` (12.5.6.17, Tabelle 293/294): `/F` ist der Dateiname des Films
 ///   und Pflichtschlüssel — „Kontoauszug DE89 ….mov“ ist ein Dateiname, wie
@@ -872,7 +953,46 @@ const ALTERNATE_TEXT_KEYS: [&[u8]; 2] = [b"Alt", b"ActualText"];
 ///   der dritte Weg, auf dem eine **eingebettete Datei** in einer PDF-Datei
 ///   steckt — neben `/Names /EmbeddedFiles` und der
 ///   `/FileAttachment`-Annotation, die beide schon fallen.
-const ANNOTATION_PLATE_KEYS: [&[u8]; 3] = [b"Movie", b"Measure", b"RichMediaContent"];
+/// * `/3DD` und `/3DV` (13.6.2, Tabelle 298): der Strom des 3D-Modells trägt
+///   unter `/OnInstantiate` einen **JavaScript-Strom** (Tabelle 300), die
+///   Ansicht unter `/XN` ihren frei wählbaren Anzeigenamen (Tabelle 304).
+///   Gezeichnet wird vor dem Aktivieren nur das `/AP`; das Modell selbst ist
+///   dieselbe Sorte Nutzlast wie ein Film.
+/// * `/RO` (12.5.6.23, Tabelle 195): das Form-XObject, das eine
+///   Redact-Annotation über die Stelle legt, **nachdem** die Schwärzung
+///   angewendet wurde. Vorher zeichnet es nichts, und kein Lauf liest es:
+///   `crate::content` liest das `/AP` einer Annotation, nicht ihr `/RO` —
+///   der Text darin ginge durch jede Schwärzung und jede Zählung hindurch.
+///
+/// **Was das kostet und was es nicht kostet:** die Annotation bleibt stehen
+/// und verliert einen Pflichtschlüssel — eine Movie-Annotation ohne `/Movie`
+/// ist ein Torso, und poppler sagt das an ihr („Syntax Error: Bad Annot
+/// Movie“). Das ist der Preis, *nicht* das Ziel: nur das Beiwerk ganz zu
+/// nehmen statt das eine Textfeld darin hinterlässt keinen Torso **im
+/// Beiwerk** (ein `/Movie` ohne `/F`, ein `/Measure` ohne `/R`) und lässt
+/// keines der gleichartigen Nebenfelder stehen. Gezeichnet wird von alldem
+/// nichts, kein Betrachter bricht daran ab, und der Seitentext bleibt
+/// unverändert (Beleg:
+/// `zg_r3_beiwerk::movie_annotation_ohne_movie_laedt_und_behaelt_den_seitentext`).
+const ANNOTATION_PLATE_KEYS: [&[u8]; 6] = [
+    b"Movie",
+    b"Measure",
+    b"RichMediaContent",
+    b"3DD",
+    b"3DV",
+    b"RO",
+];
+
+/// Dateiverweise an einem Träger: `/AF` (zugeordnete Datei, PDF 2.0, 14.13 —
+/// der Weg, auf dem eine ZUGFeRD-/Factur-X-Rechnung ihre XML-Fassung anhängt)
+/// und `/FS` (die Datei einer `/FileAttachment`-Annotation, Tabelle 184).
+///
+/// Beide zeigen auf ein Filespec-Dictionary mit Dateinamen (`/F`, `/UF`,
+/// `/Desc`) und der eingebetteten Datei selbst (`/EF`). Der `/Names`-Baum zu
+/// entfernen genügt nicht: `/AF` ist ein zweiter, gleichwertiger Halter, und
+/// eine Annotation, die ihr `/Popup` oder eine `/IRT`-Antwort am Leben hält,
+/// nimmt ihr `/FS` mit über das Aufräumen.
+const FILE_SPEC_KEYS: [&[u8]; 2] = [b"AF", b"FS"];
 
 /// Ist dieses Dictionary eine Annotation oder ein Formularfeld?
 ///
@@ -912,16 +1032,21 @@ struct Cleaned {
     texts: Tally,
     /// Feldwerte `/V`, `/DV`, `/RV`.
     values: Tally,
+    /// Dateiverweise ([`FILE_SPEC_KEYS`]).
+    files: Tally,
 }
 
 impl Cleaned {
     fn any(&self) -> bool {
-        self.actions.any() || self.texts.any() || self.values.any()
+        self.actions.any() || self.texts.any() || self.values.any() || self.files.any()
     }
 
     /// Wie viele der gebuchten Verweise stehen noch in der Datei?
-    fn alive(&self, doc: &Document) -> usize {
-        self.actions.alive(doc) + self.texts.alive(doc) + self.values.alive(doc)
+    fn alive(&self, doc: &Document, chains: &Chains) -> usize {
+        self.actions.alive(doc, chains)
+            + self.texts.alive(doc, chains)
+            + self.values.alive(doc, chains)
+            + self.files.alive(doc, chains)
     }
 }
 
@@ -930,6 +1055,7 @@ impl std::ops::AddAssign for Cleaned {
         self.actions += other.actions;
         self.texts += other.texts;
         self.values += other.values;
+        self.files += other.files;
     }
 }
 
@@ -960,6 +1086,9 @@ fn clean_carrier(dict: &mut Dictionary, keep_dest: bool) -> Cleaned {
         take(dict, key, &mut cleaned.texts);
     }
     clear_alternates(dict, &mut cleaned.texts);
+    for key in FILE_SPEC_KEYS {
+        take(dict, key, &mut cleaned.files);
+    }
     for key in FIELD_VALUE_KEYS {
         take(dict, key, &mut cleaned.values);
     }
@@ -1086,16 +1215,67 @@ impl Tally {
 
     /// Wie viele der gebuchten Entfernungen sind nach dem Aufräumen wirklich
     /// welche?
-    fn settled(&self, doc: &Document) -> usize {
-        self.direct + self.refs.len() - self.alive(doc)
+    fn settled(&self, doc: &Document, chains: &Chains) -> usize {
+        self.direct + self.refs.len() - self.alive(doc, chains)
     }
 
     /// Wie viele der gebuchten Verweise stehen noch in der Datei?
-    fn alive(&self, doc: &Document) -> usize {
+    ///
+    /// Gefragt wird nach dem **Ziel** der Kette, nicht nach der gebuchten Id:
+    /// hinter `/Contents 4 0 R` kann Objekt 4 selbst nur `5 0 R` sein, und
+    /// der Text steht in 5. Fällt 4 und bleibt 5, ist nichts entfernt
+    /// (siehe [`Chains`]).
+    fn alive(&self, doc: &Document, chains: &Chains) -> usize {
         self.refs
             .iter()
-            .filter(|id| doc.objects.contains_key(id))
+            .filter(|id| doc.objects.contains_key(&chains.target(**id)))
             .count()
+    }
+}
+
+/// Verweisketten des **geladenen** Dokuments: welches Objekt steht am Ende
+/// einer Kette aus Objekten, die selbst nichts als ein Verweis sind?
+///
+/// `4 0 obj 5 0 R endobj` ist eine solche Kette. Ein Zähler, der sich die
+/// erste Id merkt, misst dann das falsche Objekt: fällt 4 (niemand hält es)
+/// und hält ein zweiter Verweis die Zeichenkette 5, meldet der Bericht eine
+/// Entfernung, die `--check-leaks` unverändert findet — genau das, was
+/// [`MetadataReport`] ausschließt.
+///
+/// Gebaut wird die Karte **vor** jeder Änderung: danach ist Objekt 4
+/// vielleicht weggeräumt, und die Kette nicht mehr zu sehen. Kosten: ein
+/// Durchgang durch `doc.objects` und ein Eintrag je Objekt, das nur ein
+/// Verweis ist — in gewöhnlichen Dateien keiner.
+#[derive(Debug, Clone, Default)]
+struct Chains(BTreeMap<ObjectId, ObjectId>);
+
+impl Chains {
+    fn of(doc: &Document) -> Self {
+        let mut map: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
+        for (id, object) in &doc.objects {
+            if !matches!(object, Object::Reference(_)) {
+                continue;
+            }
+            // Der Kette folgen, bis ein Objekt kein Verweis mehr ist; die
+            // Besuchsmenge endet einen Ring (`4 0 obj 5 0 R`, `5 0 obj 4 0 R`).
+            let mut seen: BTreeSet<ObjectId> = BTreeSet::from([*id]);
+            let mut at = *id;
+            while let Some(Object::Reference(next)) = doc.objects.get(&at) {
+                if !seen.insert(*next) {
+                    break;
+                }
+                at = *next;
+            }
+            if at != *id {
+                map.insert(*id, at);
+            }
+        }
+        Self(map)
+    }
+
+    /// Das Objekt am Ende der Kette — oder die Id selbst, wenn sie keine ist.
+    fn target(&self, id: ObjectId) -> ObjectId {
+        self.0.get(&id).copied().unwrap_or(id)
     }
 }
 
@@ -1223,8 +1403,20 @@ fn subtree_ids(doc: &Document, root: &Object) -> BTreeSet<ObjectId> {
     seen
 }
 
-/// Entfernt Annotationen vom Typ `/FileAttachment` aus einer Seite.
-fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> Tally {
+/// Entfernt Annotationen vom Typ `/FileAttachment` aus einer Seite — und
+/// nimmt jeder von ihnen ihre Datei.
+///
+/// Aus `/Annots` zu streichen genügt nicht: das `/Popup` einer Annotation
+/// (die Form, in der Acrobat jeden Kommentar schreibt) hält sie über
+/// `/Parent` am Leben, eine Antwort über `/IRT` genauso — samt `/FS`,
+/// Filespec und eingebetteter Datei. Deshalb fallen [`FILE_SPEC_KEYS`] am
+/// Objekt selbst; was danach niemand mehr hält, räumt `prune_unreachable`
+/// weg.
+///
+/// Rückgabe: je gefundenem Anhang eine Buchung. Gezählt wird er erst nach
+/// dem Aufräumen und nur, wenn seine Datei dann wirklich fehlt — hält sie
+/// ein zweiter Verweis, steht sie weiter in der Datei.
+fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> Vec<Tally> {
     let Some(items) = doc
         .get_dictionary(page_id)
         .ok()
@@ -1233,29 +1425,94 @@ fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> Tally {
         .and_then(|o| o.as_array().ok())
         .cloned()
     else {
-        return Tally::default();
+        return Vec::new();
     };
 
     let mut kept = Vec::with_capacity(items.len());
-    let mut removed = Tally::default();
+    let mut removed: Vec<Tally> = Vec::new();
     for item in items {
-        let is_attachment = resolve(doc, &item)
-            .and_then(|o| o.as_dict().ok())
-            .map(|d| matches!(d.get(b"Subtype"), Ok(Object::Name(n)) if n == b"FileAttachment"))
-            .unwrap_or(false);
-        if is_attachment {
-            removed.book(Some(item));
-        } else {
+        // Die Id hinter dem Eintrag steht nur am unveränderten Dokument
+        // fest; danach wird geschrieben.
+        let target = match doc.dereference(&item) {
+            Ok((resolved, Object::Dictionary(dict)))
+                if matches!(dict.get(b"Subtype"), Ok(Object::Name(n)) if n == b"FileAttachment") =>
+            {
+                Some(resolved)
+            }
+            _ => None,
+        };
+        let Some(resolved) = target else {
             kept.push(item);
+            continue;
+        };
+        let mut one = Tally::default();
+        match resolved {
+            // Ein eigenes Objekt: es überlebt, wenn ein `/Popup` oder ein
+            // `/IRT` darauf zeigt — die Datei darf es nicht mitnehmen.
+            Some(id) => {
+                if let Ok(dict) = doc.get_dictionary_mut(id) {
+                    for key in FILE_SPEC_KEYS {
+                        take(dict, key, &mut one);
+                    }
+                }
+            }
+            // Direkt im Array: das Dictionary fällt mit dem Eintrag, seine
+            // Dateiverweise werden trotzdem gebucht — ob das Filespec
+            // dahinter wirklich fällt, entscheidet erst das Aufräumen.
+            None => {
+                if let Ok(dict) = item.as_dict() {
+                    for key in FILE_SPEC_KEYS {
+                        one.book(value_of(dict, key).cloned());
+                    }
+                }
+            }
         }
+        removed.push(one);
     }
 
-    if removed.any() {
+    if !removed.is_empty() {
         if let Ok(page) = doc.get_dictionary_mut(page_id) {
             page.set("Annots", Object::Array(kept));
         }
     }
     removed
+}
+
+/// Nimmt **jedem** Objekt der Datei seine Metadaten-Anhängsel: den
+/// XMP-Strom `/Metadata`, die Privatdaten `/PieceInfo` und die zugeordnete
+/// Datei `/AF`.
+///
+/// Katalog und Seiten sind hier schon durch; gemeint ist der Rest — ein
+/// **Bild-XObject** mit XMP (so exportiert ein Layout-Programm platzierte
+/// Fotos samt `dc:description`, Kamerabesitzer und Aufnahmeort), ein
+/// **Form-XObject** mit `/PieceInfo` (Tabelle 95: die Privatdaten des
+/// Zeichenprogramms) und jedes Objekt mit `/AF`. Ein Strom ist immer ein
+/// eigenes Objekt; ein Durchgang durch `doc.objects` erreicht sie alle.
+///
+/// Dass diese drei Schlüssel nichts zeichnen und nirgends Pflicht sind,
+/// macht das Entfernen gefahrlos: `/Metadata` (14.3.2) und `/PieceInfo`
+/// (14.5) sind Beiwerk, `/AF` (14.13) ein zweiter Halter für eine Datei, die
+/// ohnehin fallen soll.
+fn clear_object_metadata(
+    doc: &mut Document,
+    xmp: &mut Tally,
+    piece_info: &mut Tally,
+    files: &mut Tally,
+) {
+    let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
+    for id in ids {
+        let Some(object) = doc.objects.get_mut(&id) else {
+            continue;
+        };
+        let dict = match object {
+            Object::Dictionary(dict) => dict,
+            Object::Stream(stream) => &mut stream.dict,
+            _ => continue,
+        };
+        take(dict, b"Metadata", xmp);
+        take(dict, b"PieceInfo", piece_info);
+        take(dict, b"AF", files);
+    }
 }
 
 #[cfg(test)]

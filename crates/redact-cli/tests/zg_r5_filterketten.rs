@@ -9,9 +9,13 @@
 //!
 //! Der dort genannte Beleg
 //! (`zf_q5_unbekannter_filter::die_zusage_ueber_unbekannte_filter_gilt_an_jeder_stelle_der_kette`)
-//! fährt aber nur **fünf** Ketten: die sechste Zeile,
-//! `[/DCTDecode /ASCII85Decode]` — der Bildfilter **am Anfang** —, ist genau
-//! der Fall, den die Verschärfung neu zusagt, und war an keinen Lauf gebunden.
+//! fuhr aber nur **fünf** Ketten: die sechste Zeile,
+//! `[/DCTDecode /ASCII85Decode]` — der Bildfilter **am Anfang** —, war an
+//! keinen Lauf gebunden. Und genau dort stimmte die Zusage nicht: hinter dem
+//! Bildfilter geht die Kette weiter, gelesen hat das Orakel dort nichts, und
+//! trotzdem schwieg es. Seit der Fix-Runde 7 ist der blinde Fleck auf das
+//! **letzte** Glied beschränkt.
+//!
 //! Dieser Test bindet alle sechs Zeilen: er baut jede Kette, fährt sie durch
 //! das gebaute Binary und verlangt, dass Meldung und Rückgabewert genau so
 //! herauskommen, wie die Tabelle sie abdruckt — und dass die Tabelle sie noch
@@ -190,15 +194,21 @@ const TABELLE: [Zeile; 6] = [
         tabelle: "| `[/FlateDecode /DCTDecode]` | keine | 0 |",
         rc: 0,
     },
-    // Die sechste Zeile: der Bildfilter **am Anfang** der Kette. Genau der
-    // Fall, den die Fix-Runde 6 neu zusagt — und der einzige, den der in
-    // `SECURITY.md` genannte Beleg nicht fährt.
+    // Die sechste Zeile: der Bildfilter **am Anfang** der Kette. Sie war der
+    // einzige Fall, den der in `SECURITY.md` genannte Beleg nicht fuhr — und
+    // genau dort stimmte die Zusage nicht: bis zur Fix-Runde 7 schwieg das
+    // Orakel auch hier, obwohl es hinter dem Bildfilter nichts gelesen hatte.
+    // Seit der Fix-Runde 7 ist der blinde Fleck auf das **letzte** Glied
+    // beschränkt; geht die Kette dahinter weiter, steht die Stelle in der
+    // `NICHT GEPRÜFT`-Liste.
     Zeile {
         kette: "[/DCTDecode /ASCII85Decode]",
         gepackt: false,
-        meldung: "",
-        tabelle: "| `[/DCTDecode /ASCII85Decode]` | keine | 0 |",
-        rc: 0,
+        meldung: "/DCTDecode ist ein Bildfilter und wird nicht dekodiert, aber die Kette geht dahinter weiter (Glied 1 von 2)",
+        tabelle: "| `[/DCTDecode /ASCII85Decode]` | `gar nicht dekodiert — /DCTDecode ist \
+                  ein Bildfilter und wird nicht dekodiert, aber die Kette geht dahinter \
+                  weiter (Glied 1 von 2)` | 3 |",
+        rc: 3,
     },
 ];
 
@@ -261,10 +271,29 @@ fn die_tabelle_in_security_md_druckt_genau_diese_sechs_ketten() {
             "SECURITY.md druckt die Zeile nicht mehr: {erwartet}"
         );
     }
+    let ohne_meldung = TABELLE.iter().filter(|z| z.meldung.is_empty()).count();
+    assert_eq!(
+        ohne_meldung, 2,
+        "nur ein Bildfilter **am Kettenende** ist ein stiller blinder Fleck"
+    );
     assert_eq!(
         security.matches("| keine | 0 |").count(),
-        3,
-        "die Tabelle nennt nicht mehr genau drei Ketten ohne Meldung"
+        ohne_meldung,
+        "die Tabelle nennt nicht mehr genau {ohne_meldung} Ketten ohne Meldung"
+    );
+
+    // Und der Satz **über** der Tabelle nennt ihre Zahl. Bis zur Fix-Runde 7
+    // stand dort „fünf Ketten“ über sechs Zeilen, und der genannte Beleg fuhr
+    // nur fünf davon.
+    let wort = match TABELLE.len() {
+        5 => "fünf",
+        6 => "sechs",
+        7 => "sieben",
+        n => panic!("für {n} Ketten gibt es hier kein Zahlwort"),
+    };
+    assert!(
+        security.contains(&format!("Am gebauten Binary nachgemessen, {wort} Ketten")),
+        "SECURITY.md nennt über der Tabelle nicht {wort} Ketten"
     );
 }
 

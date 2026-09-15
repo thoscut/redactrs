@@ -405,6 +405,14 @@ Fix-Runde 6 sind es 138 MB, so viel wie ohne `/Filter`. Und ein Strom mit
 kommt auf 621 MB: der Rückfall auf rohes Deflate ist die Nachbildung von
 `lopdf`, und das Budget deckelt das Entpackte, nicht den Prozess.
 
+**Diese drei Zahlen zählen MB als 10⁶ Byte** — so gibt sie die Messung in
+`crates/redact-pdf/tests/zf_q2_teildekoder.rs` aus, anders als der Rest dieses
+Dokuments; dass 205 − 138 = 67 genau der 64-MiB-Strom ist, verrät die Einheit.
+Gemessen ist außerdem der **Testprozess**, also `leaks_many_within` allein. Am
+gebauten Binary liegt die Spitze über derselben Datei bei 325 388 kB = 318 MB
+(1024²) — mit und ohne `/DCTDecode` gleich —, weil es die Datei zusätzlich lädt
+und durch die Schwärzung schickt.
+
 ### Was `--max-parsed-mb` zählt — zwei Klassen, nicht eine
 
 Das Parse-Budget verbucht **beides**, was `lopdf` zu `Object`-Werten macht:
@@ -1124,10 +1132,14 @@ bei rund 2 MB Seiteninhalt, also weit vor dem 16-MB-Budget:
 | 1 044 000 Zeichen | 2,099 MB | Exit 1 (Glyphengrenze), 421 MB |
 
 **Eine pfadlastige Seite umgeht diese Deckelung** — das Glyphenbudget zählt
-Zeichen, und `re`/`l`/`c` setzen keine. Ein Loch ist das nicht: aus einem Pfad
-bleibt nichts liegen (der Seiten-Scan hält Textoperationen, Marked Content und
-Formularplatzierungen, keine Pfaddaten), der Spitzenbedarf ist also der des
-`Operation`-Vektors und wird von `--max-parsed-mb` gedeckelt.
+Zeichen, und `re`/`l`/`c` setzen keine. Aus einem Pfad bleibt zwar nichts liegen
+(der Seiten-Scan hält Textoperationen, Marked Content und Formularplatzierungen,
+keine Pfaddaten). Der Spitzenbedarf ist deshalb aber **nicht** der des
+`Operation`-Vektors allein: was der Scan an Marked Content und
+Formularplatzierungen hält, wuchs bis zur Fix-Runde 6 als Produkt und war von
+`--max-parsed-mb` nicht gedeckelt (nächster Absatz). Für die Pfaddaten selbst
+gilt der Satz — sie stehen im `Operation`-Vektor und darauf zählt
+`--max-parsed-mb`.
 
 Was der Seiten-Scan an **Marked Content und Formularplatzierungen** hält, ist
 seit dieser Fassung zusätzlich je Seiten-Scan gedeckelt: höchstens 100 000
@@ -1906,9 +1918,16 @@ danebengegangen war.)
 Sie nennt außerdem jede ungeprüfte Stelle mit **ihrem eigenen** Grund und nimmt
 keine Ursache an — in der Statuszeile höchstens drei beim Namen, der Rest
 gezählt („… und N weitere“); `MAX_NAMED_PLACES = 3` in
-`crates/redact-gui/src/state.rs`, denn 51 Zeilen in einer Statuszeile liest
-niemand. Die Kommandozeile schreibt jede Stelle als eigene
-`NICHT GEPRÜFT:`-Zeile.
+`crates/redact-gui/src/state.rs`, denn `LeakCheck::unchecked` darf bis zu
+**154** Zeilen tragen, und so viele liest in einer Statuszeile niemand. Die 154
+sind abgeleitet, nicht gemessen: die Decke `MAX_UNCHECKED = 50` einzeln
+genannter Stellen plus Summenzeile gilt je **Zähler**, und davon gibt es drei
+(zu große Ströme der Rohsicht, dieselben der Objektsicht, Stellen aus anderem
+Grund), dazu die Zeile über Sicht 7: 3 × 51 + 1. Gemessen wurden 52 Zeilen aus
+60 zu großen Strömen
+(`zf_q4_tests::zf_q4_3_die_zahl_der_ungepruefeten_stellen_sprengt_die_zusage`).
+Die Kommandozeile schreibt jede Stelle als eigene `NICHT GEPRÜFT:`-Zeile und
+zählt im Ergebnissatz **Stellen**, nicht Zeilen.
 
 **Fünf Gründe gibt es, nicht drei** — so viele kennt
 `redact_pdf::leaks_many_within` heute. Bis zur Fix-Runde 6 zählte dieser
@@ -1936,16 +1955,21 @@ ist, nicht schwärzen. Festgehalten in
 `ze_p2_seitenschleife::halb_dekodierter_strom_wird_nie_seiteninhalt`.
 
 **Was ein sauberer Lauf nicht ausschließt.** Text hinter einem Bildfilter
-(`/DCTDecode`, `/JPXDecode`, `/CCITTFaxDecode`, `/JBIG2Decode`) — **gleich, an
-welcher Stelle der Filterkette er steht**: ein benannter blinder Fleck und
-**keine** `NICHT GEPRÜFT`-Zeile — sonst käme jede Datei mit einem Foto als
-unvollständig geprüft zurück. Ein Filtername, den das Programm gar nicht kennt, steht sehr
+(`/DCTDecode`, `/JPXDecode`, `/CCITTFaxDecode`, `/JBIG2Decode`) — **am Ende der
+Filterkette**: ein benannter blinder Fleck und **keine** `NICHT
+GEPRÜFT`-Zeile, sonst käme jede Datei mit einem Foto als unvollständig geprüft
+zurück. Geht die Kette hinter dem Bildfilter **weiter**, ist das etwas anderes:
+dort hat keine Sicht gelesen, und seit der Fix-Runde 7 steht die Stelle in der
+`NICHT GEPRÜFT`-Liste (Rückgabewert 3). Bis dahin schwieg der Lauf auch da. Ein Filtername, den das Programm gar nicht kennt, steht sehr
 wohl darin — **an jeder Stelle der Kette**, auch als erstes Glied. Bis zur
 Fix-Runde 6 galt das nur, wenn vorher schon ein Filter gelaufen war:
 `/Filter /FooDecode` allein kam als „nicht gefunden“ mit Rückgabewert 0 zurück,
 `/Filter [/FlateDecode /FooDecode]` mit 3 — dieselbe unlesbare Stelle, und die
-Meldung hing allein an der Position. Am gebauten Binary nachgemessen, fünf
-Ketten (`zf_q5_unbekannter_filter::die_zusage_ueber_unbekannte_filter_gilt_an_jeder_stelle_der_kette`):
+Meldung hing allein an der Position. Am gebauten Binary nachgemessen, sechs
+Ketten — jede Zeile aus einem Lauf
+(`zg_r5_filterketten::jede_zeile_der_filterkettentabelle_stammt_aus_einem_lauf`;
+die ersten fünf zusätzlich in
+`zf_q5_unbekannter_filter::die_zusage_ueber_unbekannte_filter_gilt_an_jeder_stelle_der_kette`):
 
 | Filterkette | Meldung | Rückgabewert |
 |---|---|---|
@@ -1954,7 +1978,7 @@ Ketten (`zf_q5_unbekannter_filter::die_zusage_ueber_unbekannte_filter_gilt_an_je
 | `[/FlateDecode /FooDecode]` | `nur bis Filter 1 von 2 dekodiert — /FooDecode ist hier kein bekannter Filter` | 3 |
 | `/DCTDecode` | keine | 0 |
 | `[/FlateDecode /DCTDecode]` | keine | 0 |
-| `[/DCTDecode /ASCII85Decode]` | keine | 0 |
+| `[/DCTDecode /ASCII85Decode]` | `gar nicht dekodiert — /DCTDecode ist ein Bildfilter und wird nicht dekodiert, aber die Kette geht dahinter weiter (Glied 1 von 2)` | 3 |
 
 Ebenso benannt: ein Textspiegel in einer direkt in
 `/Resources /Properties` stehenden Eigenschaftsliste bleibt im

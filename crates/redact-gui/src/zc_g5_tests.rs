@@ -259,7 +259,7 @@ fn g5b_dieselbe_iban_ohne_leerraum_abgewaehlt_ist_kein_leck() {
     // eine abgewählte Zeile dieselbe Normalform trägt.
     assert_eq!(plan.needles, vec![spaced.clone()], "{plan:?}");
     assert_eq!(plan.kept_forms, vec![true], "{plan:?}");
-    assert_eq!(plan.kept, 0, "{plan:?}");
+    assert_eq!(plan.kept_literal, vec![false], "{plan:?}");
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
     // Getroffen hat nur die Fassung ohne Leerraum — das kann die abgewählte
@@ -303,7 +303,7 @@ fn g5b_teilstring_eines_abgewaehlten_textes_gilt_als_leck() {
     app.state.export(&out, None).expect("Export");
     let plan = app.state.plan_export_check(&summary);
     assert_eq!(plan.needles, vec!["DE89".to_string()]);
-    assert_eq!(plan.kept, 0);
+    assert_eq!(plan.kept_literal, vec![false]);
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
     assert_eq!(check.leaking, vec!["DE89".to_string()]);
@@ -344,14 +344,13 @@ fn g5b_ein_abgewaehlter_text_auf_seite_2_macht_das_leck_auf_seite_1_unpruefbar()
     app.state.export(&out, None).expect("Export");
 
     let plan = app.state.plan_export_check(&summary);
-    assert!(plan.needles.is_empty(), "{plan:?}");
-    assert_eq!(plan.kept, 1);
+    assert_eq!(plan.kept_literal, vec![true], "{plan:?}");
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
     assert!(!check.found_leak());
     assert_eq!(check.unsearched, 1, "{check:?}");
     assert!(check.sentence().contains(
-        "1 Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile: über sie \
+        "1 Text(e) stehen wörtlich auch in einer abgewählten, gelöschten oder geschützten Zeile: über sie \
          sagt diese Prüfung nichts — ob dort eine Schwärzung danebenging, bleibt offen."
     ));
     let warning = check
@@ -369,8 +368,13 @@ fn g5b_ein_abgewaehlter_text_auf_seite_2_macht_das_leck_auf_seite_1_unpruefbar()
 }
 
 /// Leerer und nur-Leerraum-Text zählt als „ohne Text“; 1 000 gleiche Texte
-/// sind ein Begriff (die Decke greift nicht); `kept` zählt je Text, nicht je
-/// Zeile. Mutation `seen` weg: 1 000 Begriffe statt 1, und `kept` 3 statt 1.
+/// sind ein Begriff (die Decke greift nicht); je Text fällt **eine**
+/// Entscheidung, nicht je Zeile. Mutation `seen` weg: 1 000 Begriffe statt 2.
+///
+/// Der zweite Text steht in der Vorlage **nicht** — seit Fix-Runde 7 wird er
+/// trotzdem gesucht (drei seiner Zeilen sind abgewählt), und weil er nirgends
+/// steht, ist das eine Entwarnung und keine Warnung: `kept` bleibt 0
+/// (Befund R4-1).
 #[test]
 fn g5b_leerer_text_und_tausend_gleiche() {
     let out = tmp("b-gleich").join("out.pdf");
@@ -409,21 +413,25 @@ fn g5b_leerer_text_und_tausend_gleiche() {
     assert_eq!(plan.without_text, 2, "{plan:?}");
     assert_eq!(
         plan.needles,
-        vec!["Musterbank".to_string()],
+        vec!["Musterbank".to_string(), "Zweiter".to_string()],
         "{}",
         plan.needles.len()
     );
-    assert_eq!(plan.kept, 1, "{plan:?}");
+    assert_eq!(plan.kept_literal, vec![false, true], "{plan:?}");
     let check = plan.run(&out);
-    assert_eq!(check.checked, 1);
+    assert_eq!(check.checked, 2);
     assert_eq!(check.skipped, 0);
     assert_eq!(check.leaking, vec!["Musterbank".to_string()]);
+    // „Zweiter“ steht nirgends — gedeckt oder nicht, das ist eine Aussage.
+    assert_eq!((check.kept, check.unsearched), (0, 0), "{check:?}");
+    assert_eq!(check.vanished(), 1);
     let s = check.sentence();
     assert!(s.contains("2 Rechteck(e) ohne bekannten Text"), "{s}");
     assert!(
-        s.contains("1 Text(e) stehen wörtlich auch in einer abgewählten"),
-        "{s}"
+        !s.contains("stehen wörtlich auch in einer abgewählten"),
+        "kein Vorbehalt über einen Text, der nicht da ist: {s}"
     );
+    assert!(s.starts_with("Nachprüfung: 1 von 2 gesuchten Text(en) steht NOCH"), "{s}");
 }
 
 // ===========================================================================

@@ -1362,7 +1362,10 @@ Objektsicht) einmal. Ein Strom, der das Restbudget sprengte, wird nicht
 entpackt; er ist weder Fund noch „nicht gefunden“: er steht als
 `NICHT GEPRÜFT: …` in der Ausgabe, und der Lauf endet **mit Rückgabewert `3`
 auch ohne Fund** — „Ergebnis: 1 Stelle(n) nicht geprüft — die Antwort ist
-unvollständig.“ Ein `--check-leaks … && versenden` verschickt so keine Datei,
+unvollständig.“ Gezählt werden **Stellen**, nicht Zeilen: sind es sehr viele,
+nennt die Liste die ersten einzeln und fasst den Rest in einer Summenzeile
+zusammen, die Zahl im Ergebnissatz bleibt aber die volle.
+Ein `--check-leaks … && versenden` verschickt so keine Datei,
 deren größter Strom nie aufgemacht wurde. Wer die Stelle prüfen will, hebt den
 Schalter. (Eine Datei, deren als Flate ausgewiesene Ströme *in Summe* über dem
 Budget liegen, kommt gar nicht so weit: die Vorprüfung lehnt sie wie beim
@@ -1373,9 +1376,10 @@ trägt ein Automat alle Begriffe in allen Kodierungen und läuft **einmal** je
 Datenblock — 1 000 Begriffe kosten kaum mehr als einer (nachgemessen an einer
 64-MiB-Datei: 5,20 s für einen, 6,27 s für 1 000, Verhältnis 1,21). Die Decke
 gilt dem Speicher: der Automat wächst linear mit der Liste, nachgemessen
-1,0 MB für 1 000 Begriffe (bis zu 10 000 Muster: neun Byte-Kodierungen und der
-dekodierte Text je Begriff, dazu die Fassung ohne Leerraum, wo der Begriff
-welchen trägt), 7,1 MB für 10 000, 68 MB für
+1,0 MB für 1 000 Begriffe (bis zu 12 000 Muster: bis zu zehn Byte-Kodierungen
+und der dekodierte Text je Begriff, dazu die Fassung ohne Leerraum, wo der
+Begriff welchen trägt — neun Kodierungen sind es ohne Umlaut, zehn mit),
+7,1 MB für 10 000, 68 MB für
 100 000 und **675 MB** für eine Million — dazu 25 s allein für seinen Bau,
 bevor ein Byte der Datei gelesen ist. Und jeder Begriff bekommt eine eigene
 Zeile im Bericht. Der 1 001. Begriff endet deshalb mit Rückgabewert
@@ -2153,7 +2157,7 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   | Katalog | `/Outlines` — die Lesezeichen; jeder `/Title` ist frei wählbarer Text („Kontoauszug DE89 …“) |
   | jede Seite | `/Metadata`, `/PieceInfo`, `/StructParents`, `/AA` |
   | jede Seite | Annotationen vom Typ `/FileAttachment` — ein Dateianhang klebt nicht nur im `/Names`-Baum |
-  | jede verbliebene Annotation **und alles, was sie erreichbar hält** (`/Popup`, `/Parent`-Kette, `/Kids`, `/IRT`) | die Aktionen `/A`, `/AA`, `/PA` und ein benanntes `/Dest` (ein ausdrückliches Ziel bleibt, auch hinter einem Verweis — ein Verweis im Feld muss auf eine Seite führen); die Klartexte `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`, `/OverlayText`, `/NM`, `/DS` und die `/MK`-Beschriftungen. dazu die Beiwerk-Dictionaries `/Movie`, `/Measure` und `/RichMediaContent` als Ganzes (Filmdateiname, Maßangaben, eingebettete Medien-Dateien; Preis: ein Film und eine Vermessung sind danach nur noch Bild) und `/Alt`/`/ActualText` an jedem erreichten Dictionary. **Nicht** `/DA` (benannte Lücke, siehe `SECURITY.md`) — was eine Annotation *zeichnet* (`/AP`), geht wie Seitentext durch die Schwärzung |
+  | jede verbliebene Annotation **und alles, was sie erreichbar hält** (`/Popup`, `/Parent`-Kette, `/Kids`, `/IRT`) | die Aktionen `/A`, `/AA`, `/PA` und ein benanntes `/Dest` (ein ausdrückliches Ziel bleibt, auch hinter einem Verweis — ein Verweis im Feld muss auf eine Seite führen); die Klartexte `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`, `/OverlayText`, `/NM`, `/DS` und die `/MK`-Beschriftungen; dazu die Beiwerk-Dictionaries `/Movie`, `/Measure` und `/RichMediaContent` als Ganzes (Filmdateiname, Maßangaben, eingebettete Medien-Dateien; Preis: ein Film und eine Vermessung sind danach nur noch Bild) und `/Alt`/`/ActualText` an jedem erreichten Dictionary. **Nicht** `/DA` (benannte Lücke, siehe `SECURITY.md`) — was eine Annotation *zeichnet* (`/AP`), geht wie Seitentext durch die Schwärzung |
 
   Preis: benannte Sprünge, Lesezeichen und Verweise ins Netz funktionieren
   danach nicht mehr, und aus einem Formular wird ein totes Blatt Papier. Das ist die sichere Richtung.

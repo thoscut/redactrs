@@ -435,3 +435,133 @@ fn die_gruende_der_ausgabe_stehen_in_security_md() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---------------------------------------------------------------------------
+// E5 der Fix-Runde 7 — die Zahl im Ergebnissatz zählt Stellen, nicht Zeilen
+// ---------------------------------------------------------------------------
+
+/// Eine Datei mit `n` getarnten zlib-Strömen, jeder so groß, dass ihn ein
+/// kleines Budget nicht entpackt.
+///
+/// Ohne `/Filter`: die Vorprüfung des Laders zählt die **Rohbytes** (wenige
+/// Kilobyte je Strom) und lässt die Datei durch; die Rohsicht der Nachprüfung
+/// bläst jeden auf und lehnt ihn am Budget ab. Damit stehen `n` Stellen in
+/// `unchecked` — mehr, als die gedeckelte Liste einzeln nennen kann.
+fn pdf_mit_vielen_zu_grossen_stroemen(n: u32, megabytes: usize) -> Vec<u8> {
+    use lopdf::{dictionary, Stream};
+
+    let mut objekte: Vec<(u32, Vec<u8>)> = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, b"<< /Length 5 >>\nstream\nBT ET\nendstream".to_vec()),
+    ];
+    for i in 0..n {
+        let mut stream = Stream::new(dictionary! {}, vec![b'A'; megabytes * 1024 * 1024]);
+        stream.compress().expect("komprimierbar");
+        let mut blob = format!("<< /Length {} >>\nstream\n", stream.content.len()).into_bytes();
+        blob.extend_from_slice(&stream.content);
+        blob.extend_from_slice(b"\nendstream");
+        objekte.push((5 + i, blob));
+    }
+    assemble(&objekte)
+}
+
+/// **Befund R2-B der Gegenprüfung 6.** Der Ergebnissatz nannte die Zahl der
+/// **Zeilen** (`LeakCheck::unchecked.len()`) und stand damit unter einer
+/// Liste, die von mehr Stellen sprach als er: über der Decke
+/// `MAX_UNCHECKED = 50` fasst `redact-pdf` den Rest in eine Summenzeile
+/// („… und N weitere“), und die Zeilenzahl ist dann **kleiner** als die Zahl
+/// der Stellen.
+///
+/// Gemessen wird der Widerspruch selbst, nicht eine feste Zahl: die Zahl im
+/// Satz muss mindestens so groß sein wie die Zahl der genannten Zeilen **plus**
+/// der Rest, den die Summenzeile zählt.
+///
+/// Mutation (nachgewiesen): in `check::report` `check.unchecked_places` zurück
+/// auf `check.unchecked.len()` → dieser Test ist rot.
+#[test]
+fn die_zahl_im_ergebnissatz_zaehlt_stellen_nicht_zeilen() {
+    let dir = workdir("stellen");
+    let stroeme = 57u32;
+    std::fs::write(
+        dir.join("viele.pdf"),
+        pdf_mit_vielen_zu_grossen_stroemen(stroeme, 2),
+    )
+    .unwrap();
+
+    let out = run_in(
+        &dir,
+        &[
+            "viele.pdf",
+            "--check-leaks",
+            "GEHEIM",
+            "--max-decompressed-mb",
+            "1",
+        ],
+        None,
+    );
+    let text = stdout(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "ungeprüfte Stellen müssen 3 ergeben:\n{text}"
+    );
+
+    let zeilen: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|z| z.starts_with("NICHT GEPRÜFT:"))
+        .collect();
+    assert!(
+        zeilen.len() > 10,
+        "nur {} NICHT-GEPRÜFT-Zeile(n) — die Datei löst die Decke nicht aus:\n{text}",
+        zeilen.len()
+    );
+    // Die Summenzeile: „… und N weitere Ströme nicht entpackt“.
+    let weitere: usize = zeilen
+        .iter()
+        .find_map(|z| {
+            let ab = z.find("… und ")? + "… und ".len();
+            z[ab..].split_whitespace().next()?.parse::<usize>().ok()
+        })
+        .unwrap_or_else(|| panic!("keine Summenzeile in der Liste:\n{text}"));
+    assert!(weitere > 0, "die Summenzeile zählt nichts:\n{text}");
+
+    println!(
+        "{} NICHT-GEPRÜFT-Zeile(n), Summenzeile zählt {weitere} weitere",
+        zeilen.len()
+    );
+    let gemeldet: usize = text
+        .lines()
+        .find_map(|z| {
+            let rest = z.trim().strip_prefix("Ergebnis: ")?;
+            let zahl = rest.strip_suffix(rest.split_once(" Stelle(n) nicht geprüft")?.1)?;
+            zahl.trim_end_matches(" Stelle(n) nicht geprüft")
+                .trim()
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("kein Ergebnissatz mit Zahl:\n{text}"));
+
+    // Die Zeilen, die eine einzelne Stelle nennen, sind alle außer der
+    // Summenzeile; dazu kommen die `weitere`, die sie zusammenfasst.
+    let mindestens = zeilen.len() - 1 + weitere;
+    assert!(
+        gemeldet >= mindestens,
+        "der Satz sagt „{gemeldet} Stelle(n) nicht geprüft“, die Liste darüber nennt \
+         {} Zeile(n) und zählt {weitere} weitere — die Zahl ist kleiner als das, was \
+         über ihr steht:\n{text}",
+        zeilen.len()
+    );
+    assert!(
+        gemeldet > zeilen.len(),
+        "der Satz zählt weiter Zeilen ({gemeldet}) statt Stellen:\n{text}"
+    );
+    println!("Ergebnissatz nennt {gemeldet} Stelle(n)");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -33,12 +33,93 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 Bereich: `git log v0.6.0..HEAD`.
 
-Sechs Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
+Sieben Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
 und Doku mit demselben Maßstab: jede Angabe hier stammt aus einem Lauf des
-gebauten Binaries, nicht aus dem Quelltext. Zuletzt (Runde 6) hört das Orakel
-auch dort auf zu schweigen, wo schon das **erste** Glied einer Filterkette
-unbekannt ist, eine getaggte Seite kann den Rechner nicht mehr belegen — und
-jede Messzahl dieser Datei steht in einem Test.
+gebauten Binaries, nicht aus dem Quelltext. Zuletzt (Runde 7) fallen vier
+stille Lecks am Rand des Formularwesens, zwei Wege, auf denen eine kleine Datei
+den Rechner belegen konnte, sind gedeckelt — und **jede** Zahl der beiden
+jüngsten Abschnitte dieser Datei ist an einen Lauf, eine Konstante oder eine
+aufgezeichnete Messung gebunden, nicht nur die, an die jemand dachte.
+
+### Fix-Runde 7: was die Gegenprüfung der Runde 6 noch fand
+
+Fünf Gegenprüfer lasen die Korrekturen der Runde 6 mit eigenem Material gegen.
+**Vier stille Lecks** blieben: ein Form-XObject ohne eigenes `/Resources`,
+dasselbe Formular unter zwei Grafikumgebungen, ein `/Filter`-Wert, der gar kein
+Name ist, und sechs Klartextträger am Beiwerk einer Annotation. Dazu zwei
+Dienstverweigerungen — `BDC`-Klammern × Textoperationen ohne jede Decke, und eine
+Decke, die je Seite statt je Dokument zählt (1 000 Seiten aus einer Datei von
+224 752 Byte belegten beim Schwärzen 6 288 MB) —, acht Befunde an der Oberfläche
+und die Erkenntnis, dass von 76 einzeln mutierten Zahlen der Doku weiter 58 grün
+blieben.
+
+* **Jetzt ist jede Zahl gebunden, nicht nur die, an die jemand dachte.** Die
+  Fix-Runde 6 hat die Messzahlen der Doku an einen Testdatensatz gebunden — und
+  die Gegenprüfung mutierte danach 76 Stellen einzeln: 18 wurden rot, **58
+  blieben grün**. Der Test prüfte nämlich, dass jeder Satz **seiner Liste** in
+  der Doku steht, und sagte nichts darüber, ob die Liste vollständig ist.
+  `jede_zahl_der_letzten_runden_ist_gebunden` dreht die Frage um: er schneidet
+  den Block der beiden jüngsten Fix-Runden aus dieser Datei, markiert, was die
+  gebundenen Sätze davon abdecken, und verlangt, dass **keine** Zahl übrig
+  bleibt. Was keine Messzahl ist — die Nummer einer Runde, ein Dateiname, die
+  Nummer einer Norm —, steht mit Begründung in einer Ausnahmeliste, wie bei den
+  Warnungen in `coverage.rs`. Dazu kommen Zahlen aus dem Code statt aus der
+  Abschrift: die Decke der Spiegel-Zuordnungen, die Tiefe der Objektsicht, die
+  Zahl der benannten Stellen und die Zahl der Filterketten stehen nur noch an
+  je einer Stelle.
+* **Sechs Zahlen in der Doku waren falsch, alle nachgemessen.** „0,56 s und
+  38 MB“ für die entschärfte Spiegel-Bombe stammten aus dem **Testprozess**, der
+  nur den Extraktor fährt, nicht aus einem Lauf des Binaries; am gebauten Binary
+  sind es 0,15–0,18 s und 40 MB (Release) bzw. 1,58–1,68 s und 52 MB (Debug),
+  beide mit Rückgabewert 3. Dieselbe Datei hat **neun** Objekte, nicht elf. Die README
+  versprach „bis zu 10 000 Muster“ für 1 000 Begriffe und zählte im selben Satz
+  elf auf — `Probe::new` legt bis zu zwölf je Begriff an, also 12 000.
+  `SECURITY.md` begründete die Decke von drei genannten Stellen mit „51 Zeilen“,
+  während der Quelltext daneben 154 ausrechnet. Über einer Tabelle mit sechs
+  Filterketten stand „fünf Ketten“, und die sechste — der Bildfilter **am
+  Anfang** der Kette, gerade der Fall, den die Fix-Runde 6 neu zusagte — hing an
+  keinem Lauf; jetzt fährt `zg_r5_filterketten` jede Zeile durch das Binary —
+  und dieser Lauf widerlegte die Zusage sofort (siehe den Eintrag zum Bildfilter
+  am Kettenanfang). Und
+  der Spitzenspeicher des Orakels stand in Dezimal-MB, obwohl dasselbe Dokument
+  MB als 1024² Byte festlegt. Dazu zwei Sätze, die der Befund derselben Runde
+  widerlegt hatte und die trotzdem stehen geblieben waren: der Spitzenbedarf
+  einer pfadlastigen Seite sei „der des `Operation`-Vektors und von
+  `--max-parsed-mb` gedeckelt“, und eine Aufzählung im Metadaten-Abschnitt, die
+  nach einem Punkt kleingeschrieben weiterlief.
+* **Die Kopie der Deckenwarnung in `redact-pipeline` hing an nichts.**
+  `coverage.rs` hält den Wortlaut jeder Warnung noch einmal, um ihre Einordnung
+  festzuhalten — die Gegenprüfung änderte in der Kopie `100000` in `200000`, und
+  kein Test wurde rot. Er konnte es auch nicht: `is_coverage_gap` antwortet für
+  jede **nicht** gelistete Warnung „Deckungslücke“, also auch für eine
+  verstümmelte Kopie. Aus den Kopien sind Schablonen geworden: die festen Teile
+  müssen wörtlich im Quelltext von `redact-pdf` stehen, und eine Zahl wie
+  `MAX_FORM_DEPTH` wird von dort gelesen statt abgeschrieben. Die Kopien selbst
+  hielten der Prüfung stand; neu ist, dass es jemand prüft.
+* **Die Regel gegen Plattformzusagen hielt nur halb.** Neun Proben, einzeln an
+  den Baum gehängt: ein Fehlalarm (`"/proc/self/status"` in einem
+  **Blockkommentar**) und sechs Lücken — ein fremdes `.ok()` acht Zeilen weiter
+  genügte als Ausweg, `Path::new("/proc")` ohne Schrägstrich fiel durch,
+  ebenso `"C:\Windows\…"`, `"/etc/localtime"`, ein `std::os::unix`-API ohne
+  `cfg` und `Command::new("mkfifo")`. Der Ausweg zählt jetzt nur in **derselben
+  Anweisung**, Kommentare sind wirklich ausgenommen, und ein fremdes Programm
+  ist eine Einrichtung des Systems: `#[cfg(unix)]` sagt nichts über den `PATH`,
+  und auf einem schlanken Unix-Bild ohne `util-linux` panickt ein Test, statt
+  sich mit einem Hinweis zu begnügen. Neun Stellen im Baum verletzen die
+  geschärfte Regel und stehen namentlich als Altlast darin: sechsmal `mkfifo`,
+  zweimal ein `std::os::unix`-API **ohne** `cfg` in einem `#[cfg(test)]`-Modul
+  der Oberfläche — das bricht nicht erst zur Laufzeit, sondern schon den
+  Windows-Bau, und der dortige CI-Job fährt `cargo clippy --workspace
+  --all-targets` und `cargo test --workspace` — und einmal ein
+  `/proc/self/status` mit `.expect(…)`, ebendort und **neu**: genau der
+  Laufzeitfehler, an dem der Windows-Job schon zweimal rot war.
+* **`--check-leaks` zählte Zeilen, nicht Stellen.** „52 Stelle(n) nicht geprüft“
+  stand unter 50 einzeln genannten Zeilen, einer Summenzeile „7 weitere“ und
+  einer über 57 Ströme — die Zahl war kleiner als das, was darüber stand. Gezählt
+  wird jetzt `LeakCheck::unchecked_places`, und der Satz sagt, dass eine
+  Summenzeile den Rest zusammenfasst, wenn es sehr viele sind.
+
+<!-- FIX-RUNDE-7: Sätze der Agenten A (Spiegel, Decken), B (Orakel, Filter, Lader), C (Metadaten), D (Oberfläche) — trägt der Orchestrator ein -->
 
 ### Fix-Runde 6: was die Gegenprüfung der Runde 5 noch fand
 
@@ -56,12 +137,10 @@ letzten Runde gebunden war**: siebzehn Messwerte in README, `SECURITY.md` und
 wurde.
 
 * **Die Messzahlen der Doku sind gebunden.** Die Gegenprüfung mutierte
-  siebzehn Zahlen und Sätze in einem Lauf — `5,20 s` zu `9,99 s`, `675 MB` zu
-  `42 MB`, `2 172 628 kB ≈ 2,1 GiB` zu `42 kB ≈ 0,1 GiB`, `24 MB, 0,02 s,
-  Exit 1` zu `77 MB, 9,02 s, Exit 3`, `siebenmal` zu einer anderen Zahl, den
-  ganzen Gründe-Satz — und **kein einziger Test wurde rot**. Die Runde 5 hatte
-  zwei ungebundene „1 000“ geschlossen und dabei sieben neue Zahlen ungebunden
-  angelegt. Jetzt steht jede Messzahl **einmal** im Testdatensatz
+  siebzehn Zahlen und Sätze in einem Lauf — jede Zeitangabe, jede MB-Zahl,
+  jede ausgeschriebene Zahl, den ganzen Gründe-Satz — und **kein einziger Test
+  wurde rot**. Die Runde 5 hatte zwei ungebundene „1 000“ geschlossen und dabei
+  sieben neue Zahlen ungebunden angelegt. Jetzt steht jede Messzahl **einmal** im Testdatensatz
   (`belege.rs`, `messwerte`), und der Satz der Doku wird daraus gebaut: wer die
   Zahl in der Doku ändert, findet den Satz nicht mehr; wer sie im Test ändert,
   ebenso. Was sich ableiten lässt, wird abgeleitet und nicht abgeschrieben —
@@ -95,9 +174,10 @@ wurde.
   in **neun** Byte-Kodierungen (zehn mit Umlaut, sieben jenseits von
   Latin-1); die Zahl kommt jetzt aus einem Lauf, der jede Fassung in eine
   Datei legt und die gemeldeten Namen zählt. Und „12 000 Muster (1 000
-  Begriffe × 12 Kodierungen)“ hat nie gestimmt: nach `Probe::new` sind es 10
-  je Begriff (neun Bytefassungen und der dekodierte Text), 11 mit einer
-  Fassung ohne Leerraum. Die alte Messung selbst bleibt gültig — gemessen
+  Begriffe × 12 Kodierungen)“ hat nie gestimmt: so viele **Kodierungen** gibt
+  es nicht. Nach `Probe::new` sind es 10 Muster je Begriff (neun Bytefassungen
+  und der dekodierte Text), 11 mit einer Fassung ohne Leerraum und 12 mit
+  Umlaut **und** Leerraum. Die alte Messung selbst bleibt gültig — gemessen
   wurde die Zahl der Einzelsuchen, nicht die der Kodierungen.
 * **Die Zusage über unbekannte Filternamen gilt jetzt wirklich.**
   `SECURITY.md` versprach: „Ein Filtername, den das Programm gar nicht kennt,
@@ -106,7 +186,7 @@ wurde.
   mit Rückgabewert 0 zurück, `/Filter [/FlateDecode /FooDecode]` mit 3 —
   dieselbe unlesbare Stelle, und die Meldung hing allein an der Position. Der
   Code meldet sie jetzt an jeder Stelle der Kette; die Doku sagt dazu, was
-  gemessen ist: fünf Ketten, drei mit Meldung und Rückgabewert 3, zwei
+  gemessen ist: sechs Ketten, vier mit Meldung und Rückgabewert 3, zwei
   (Bildfilter allein und am Kettenende) ohne Meldung und mit 0 — sonst käme
   jede Datei mit einem Foto als unvollständig geprüft zurück.
 * **Drei Zusagen, die zu viel versprachen.** Der Satz zu `ptrace` stand
@@ -122,12 +202,13 @@ wurde.
 
 * **Eine getaggte Seite konnte den Rechner blockieren.** Verschachtelte
   `BDC`-Klammern mit Textspiegel über denselben `Do` ließen die Zuordnung
-  Spiegel→Formular als Produkt wachsen: eine Datei von 276 kB mit **elf**
+  Spiegel→Formular als Produkt wachsen: eine Datei von 276 kB mit **neun**
   Objekten belegte 2 306 MB und lief 41,7 s, ohne Warnung und ohne dass irgendeine
   Decke griff — die Liste entstand vor der ersten gezählten Zeichenoperation.
   Der Aufbau ist jetzt gedeckelt und läuft einmal je Strom statt je Platzierung:
-  dieselbe Datei **0,56 s und 38 MB** (gemessen, Debug); ohne `/ActualText`
-  brauchte sie immer 0,15 s. Die Decke unter den Textspiegeln zählt jetzt
+  dieselbe Datei am gebauten Binary **0,15–0,18 s und 40 MB** (Release,
+  Rückgabewert 3); im Testprozess, der nur den Extraktor fährt, 0,56 s und
+  38 MB; ohne `/ActualText` brauchte sie immer 0,15 s. Die Decke unter den Textspiegeln zählt jetzt
   **Zuordnungen zwischen einem Spiegel und einer Formularplatzierung**:
   höchstens 100 000 beim Aufbau und 100 000 beim Aufklappen, je Seiten-Scan
   (zusammen rund 16 MB). Wird sie erreicht **und dabei etwas weggelassen**, sagt
@@ -148,12 +229,13 @@ wurde.
   war.** `/Filter /FooDecode` kam als „nicht gefunden“ mit Rückgabewert 0 zurück,
   dieselbe Datei als `/Filter [/FlateDecode /FooDecode]` mit 3 — die Meldung hing
   allein an der Position. Jetzt entscheidet der Filter, an dem die Kette stehen
-  blieb: ein Bildfilter bleibt der benannte blinde Fleck (an jeder Stelle), jeder
-  andere unbekannte Name steht in der `NICHT GEPRÜFT`-Liste, auch als erstes
-  Glied. Das Orakel klonte außerdem die Rohbytes eines Stroms, bevor es den
+  blieb: ein Bildfilter bleibt der benannte blinde Fleck, jeder andere
+  unbekannte Name steht in der `NICHT GEPRÜFT`-Liste, auch als erstes Glied.
+  (Dass der Bildfilter das **an jeder Stelle** der Kette tat, war zu viel
+  versprochen — siehe Fix-Runde 7.) Das Orakel klonte außerdem die Rohbytes eines Stroms, bevor es den
   ersten Filter kannte, und warf den Klon bei einem unbekannten Filter wieder weg:
-  gemessen (64-MiB-Strom, `/DCTDecode`, Budget 512 MiB) **205 MB vorher, 138 MB
-  nachher**. Die alte Kostenzahl „1 000 Begriffe 65,7 s“ ist widerlegt und durch
+  gemessen im Testprozess (64-MiB-Strom, `/DCTDecode`, Budget 512 MiB)
+  **205 MB vorher, 138 MB nachher**, dort in Dezimal-MB gezählt. Die alte Kostenzahl „1 000 Begriffe 65,7 s“ ist widerlegt und durch
   eine nachstellbare Rechnung ersetzt: 6 Muster je Begriff über 268 MB je
   Durchgang, `memmem` 9,9 GB/s → 0,163 s je Begriff, rund **163 s für 1 000
   Begriffe als untere Schranke**; heute 5,01 s (1 Begriff) gegen 5,99 s (1 000).

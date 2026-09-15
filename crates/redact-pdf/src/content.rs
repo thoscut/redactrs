@@ -209,23 +209,27 @@ const MAX_CACHED_FONT_ENTRIES: usize = 400_000;
 /// in zwanzig Verzeichnissen kostet einmal.
 const MAX_FONT_ENTRIES_PER_SCAN: usize = 1_000_000;
 
-/// Wie viele **Zuordnungen zwischen einem Textspiegel und einer
-/// Formularplatzierung** ein Seiten-Scan insgesamt führen darf.
+/// Wie viele **Zuordnungen zwischen einem Textspiegel und dem, was unter ihm
+/// steht**, ein Seiten-Scan insgesamt führen darf.
 ///
-/// Gezählt wird `Σ|record.forms|` — an **beiden** Stellen, an denen diese
-/// Paare entstehen, und zwar je Stelle einmal:
+/// Gezählt wird `Σ|record.forms|` bzw. `Σ|record.shows|` — an **drei**
+/// Stellen, an denen diese Zuordnungen entstehen, und zwar je Stelle einmal:
 ///
 /// * beim **Aufbau** in [`scan_marked_text`]: jede Spiegel-Klammer nimmt jedes
 ///   `Do` in ihrem Bereich auf. `B` verschachtelte `BDC`-Klammern über `D`
 ///   Platzierungen ergeben `B × D` Paare — aus einer Datei, die dafür keinen
 ///   Inhalt mitbringen muss;
+/// * ebenda für die **Textoperationen**: dieselbe Produktstruktur, nur die
+///   andere Liste (`B × S`). Sie stand bis Fix-Runde 7 unter keiner Schranke —
+///   6 000 Klammern über 6 000 `Tj` aus 263 kB ergaben 36 Mio. Zuordnungen,
+///   und der Extraktor lief darüber 31,1 s (Debug, eigener Prozess);
 /// * beim **Aufklappen** in [`ScanResult::close_forms`]: zeichnet ein Formular
 ///   im Bereich seinerseits Formulare, kommt jede dieser Platzierungen dazu.
 ///
-/// Zwei Zähler, eine Zahl: die beiden messen verschiedene Arbeit (Klammern ×
-/// `Do` des Stroms gegen den Baum der Formulare darunter), und keine soll die
-/// andere aufbrauchen. Zusammen tragen sie höchstens 200 000 Paare, also rund
-/// 16 MB.
+/// Drei Zähler, eine Zahl: sie messen verschiedene Arbeit (Klammern × `Do`,
+/// Klammern × `Tj`, und der Baum der Formulare darunter), und keiner soll den
+/// anderen aufbrauchen. Zusammen tragen sie höchstens 300 000 Zuordnungen,
+/// also rund 24 MB.
 ///
 /// Bis Fix-Runde 6 zählte nur die zweite Stelle, und ihre Zahl war lokal in
 /// der Schließung. Der Aufbau lief ganz ohne Schranke und vor der ersten
@@ -268,11 +272,21 @@ const MAX_FONT_ENTRIES_PER_SCAN: usize = 1_000_000;
 /// dagegen auf und bleiben still (Befund Q3-1b).
 ///
 /// **Die Decke gilt je Seiten-Scan**, wie jede andere in [`Budget`]: über ein
-/// Dokument summiert sich also Seitenzahl × 200 000 Paare. Dokumentweit zu
-/// zählen hieße, dieselbe Seite je nach ihren Nachbarn zu warnen oder nicht —
-/// die Meldung wäre nicht mehr eine Aussage über diese Seite. Die Kosten
-/// bleiben trotzdem gedeckelt, weil jede Seite ihren eigenen Inhalt
-/// mitbringen muss.
+/// Dokument summiert sich also Seitenzahl × 300 000 Zuordnungen. Dokumentweit
+/// zu zählen hieße, dieselbe Seite je nach ihren Nachbarn zu warnen oder
+/// nicht — die Meldung wäre nicht mehr eine Aussage über diese Seite, und
+/// [`scan_page`] ist öffentlich und seitenweise.
+///
+/// Die frühere Begründung dafür — „die Kosten bleiben gedeckelt, weil jede
+/// Seite ihren eigenen Inhalt mitbringen muss“ — war **falsch**: `/Contents`
+/// darf auf denselben Strom zeigen wie die Nachbarseite (PDF 32000-1,
+/// Tabelle 30), und 1 000 Seiten an einem Strom von 9 kB zahlten jede die
+/// volle Decke. Was daraus wurde, entschied nicht der Scan, sondern der
+/// Redaktor, der die Spiegel jeder Seite bis zum Ende festhielt: gemessen
+/// 224 752 Byte Eingabe, 6 439 MB Spitze (Debug). Gedeckelt wird das jetzt
+/// dort, wo es anfällt — `crate::redact::MAX_DEFERRED_MIRRORS`; der Scan bleibt
+/// seitenweise. Beleg:
+/// `zg_r1_decke::jede_seite_zahlt_die_volle_decke_aus_einem_geteilten_strom`.
 const MAX_MIRROR_FORM_PLACEMENTS: usize = 100_000;
 
 /// Schriften eines Ressourcenverzeichnisses: Ressourcenname → Metriken.
@@ -635,18 +649,28 @@ struct Budget {
     /// Vervielfachung: eine Schrift mit tausend Glyphprozeduren, tausendmal
     /// gesetzt. Was danach doch untersucht wird, zahlt regulär vom Konto.
     looked_at_type3: HashSet<(StreamKey, Vec<u8>)>,
-    /// Ströme, deren Textspiegel schon eingesammelt sind — siehe
-    /// [`scan_marked_text`].
+    /// Ströme, deren Textspiegel schon eingesammelt sind — je Strom **und
+    /// Ressourcenumgebung**, siehe [`scan_marked_text`].
     ///
-    /// Der Durchlauf ist rein syntaktisch: er hängt an den Operationen dieses
-    /// Stroms und liefert bei jeder Platzierung dieselben Abschnitte. Die
-    /// Senke wirft sie ohnehin weg ([`ScanResult::marked`] entdoppelt über
-    /// `(Strom, Operationsindex)`) — nur bezahlt hat sie bis Fix-Runde 6
-    /// niemand, und die Decke [`MAX_MIRROR_FORM_PLACEMENTS`] hätte sie
-    /// mitgezählt: ein zwanzigmal platziertes Formular mit fünftausend
-    /// Spiegel-Paaren hätte sie erreicht, obwohl der Datensatz am Ende
-    /// fünftausend Paare führt.
-    scanned_marked: HashSet<StreamKey>,
+    /// Die Klammerstruktur ist rein syntaktisch und bei jeder Platzierung
+    /// dieselbe; die Senke wirft die Wiederholung ohnehin weg
+    /// ([`ScanResult::marked`] entdoppelt über `(Strom, Operationsindex)`) —
+    /// nur bezahlt hat sie bis Fix-Runde 6 niemand, und die Decke
+    /// [`MAX_MIRROR_FORM_PLACEMENTS`] hätte sie mitgezählt: ein zwanzigmal
+    /// platziertes Formular mit fünftausend Spiegel-Paaren hätte sie erreicht,
+    /// obwohl der Datensatz am Ende fünftausend Paare führt.
+    ///
+    /// **Rein syntaktisch ist der Durchlauf aber nicht.** `/Span /MC0 BDC`
+    /// nennt die Eigenschaftsliste beim Ressourcennamen, und `/Fm0 Do`
+    /// ebenso; beide lösen sich in den Ressourcen der **Platzierung** auf. Ein
+    /// Form-XObject ohne eigenes `/Resources` erbt die des Aufrufers (PDF
+    /// 32000-1, 8.10.1) und sieht unter zwei Platzierungen zwei verschiedene
+    /// `/Properties`. Der Schlüssel trägt deshalb den Eigentümer der
+    /// wirksamen Ressourcen mit: dasselbe Formular unter zwei Umgebungen wird
+    /// zweimal abgelaufen, dasselbe Formular zwanzigmal unter derselben
+    /// Umgebung weiterhin einmal. Bis Fix-Runde 6 stand hier nur der Strom —
+    /// der zweite Spiegel blieb dann mit seinem Klartext stehen (Befund R1-2).
+    scanned_marked: HashSet<(StreamKey, Option<ObjectId>)>,
     /// Verbleibende Spiegel-Formular-Paare, die [`scan_marked_text`] noch
     /// **aufnehmen** darf — die Decke ist [`MAX_MIRROR_FORM_PLACEMENTS`].
     ///
@@ -663,8 +687,21 @@ struct Budget {
     /// [`MAX_MIRROR_FORM_PLACEMENTS`] Paare bei; zusammen also höchstens das
     /// Doppelte, rund 16 MB.
     mirror_expansions: usize,
-    /// Wurde an einer der beiden Decken etwas weggelassen?
+    /// Verbleibende Spiegel-Text-Zuordnungen, die [`scan_marked_text`] noch
+    /// aufnehmen darf — die Decke ist ebenfalls
+    /// [`MAX_MIRROR_FORM_PLACEMENTS`].
+    ///
+    /// Dieselbe Produktstruktur wie beim Aufbau der Formularliste, nur die
+    /// andere Liste: `B` verschachtelte Klammern über `S` Textoperationen
+    /// ergeben `B × S` Einträge in [`MarkedTextRecord::shows`]. Bis
+    /// Fix-Runde 7 stand davor keine Schranke — gemessen 6 000 × 6 000 aus
+    /// einer Datei von 263 kB: 36 Mio. Zuordnungen, `scan_page` 0,72 s /
+    /// 315 MB, der **Extraktor** 31,1 s, der Redaktor 588 MB.
+    mirror_shows: usize,
+    /// Wurde an einer der beiden Formular-Decken etwas weggelassen?
     mirror_forms_cut: bool,
+    /// Wurde an der Text-Decke etwas weggelassen?
+    mirror_shows_cut: bool,
     /// Begründung, sobald etwas aufgebraucht ist.
     exceeded: Option<String>,
 }
@@ -688,7 +725,9 @@ impl Default for Budget {
             scanned_marked: HashSet::new(),
             mirror_pairs: MAX_MIRROR_FORM_PLACEMENTS,
             mirror_expansions: MAX_MIRROR_FORM_PLACEMENTS,
+            mirror_shows: MAX_MIRROR_FORM_PLACEMENTS,
             mirror_forms_cut: false,
+            mirror_shows_cut: false,
             exceeded: None,
         }
     }
@@ -981,9 +1020,10 @@ impl Budget {
         self.looked_at_type3.insert((stream, font.to_vec()))
     }
 
-    /// `true` beim **ersten** Spiegel-Durchlauf über diesen Strom.
-    fn first_marked_scan(&mut self, stream: StreamKey) -> bool {
-        self.scanned_marked.insert(stream)
+    /// `true` beim **ersten** Spiegel-Durchlauf über diesen Strom in dieser
+    /// Ressourcenumgebung — siehe [`Budget::scanned_marked`].
+    fn first_marked_scan(&mut self, stream: StreamKey, owner: Option<ObjectId>) -> bool {
+        self.scanned_marked.insert((stream, owner))
     }
 
     /// Bucht bis zu `want` Spiegel-Formular-Paare beim **Aufbau** der Liste
@@ -998,6 +1038,24 @@ impl Budget {
         self.mirror_pairs -= granted;
         if granted < want {
             self.mirror_forms_cut = true;
+        }
+        granted
+    }
+
+    /// Bucht bis zu `want` Spiegel-Text-Zuordnungen beim Aufbau von
+    /// [`MarkedTextRecord::shows`] und liefert, wie viele bewilligt sind.
+    ///
+    /// Eigener Zähler und eigene Flagge: es ist eine eigene Liste mit eigener
+    /// Folge. Fällt hier etwas weg, fehlen einem Spiegel **Glyphen** — die
+    /// Schwärzung sieht dann nicht mehr, ob er berührt ist, und der Vergleich
+    /// in `crate::extract` vergleicht gegen zu wenig. Beides muss dastehen,
+    /// und beides steht in einer eigenen Warnung (siehe
+    /// [`ScanResult::close_forms`]).
+    fn mirror_shows(&mut self, want: usize) -> usize {
+        let granted = want.min(self.mirror_shows);
+        self.mirror_shows -= granted;
+        if granted < want {
+            self.mirror_shows_cut = true;
         }
         granted
     }
@@ -1018,9 +1076,14 @@ impl Budget {
         }
     }
 
-    /// Ist an der Decke wirklich etwas weggefallen?
+    /// Ist an einer der Formular-Decken wirklich etwas weggefallen?
     fn mirror_forms_cut(&self) -> bool {
         self.mirror_forms_cut
+    }
+
+    /// Ist an der Text-Decke wirklich etwas weggefallen?
+    fn mirror_shows_cut(&self) -> bool {
+        self.mirror_shows_cut
     }
 
     /// Verbucht eine Operation. `false` heißt: sofort aussteigen.
@@ -1251,9 +1314,24 @@ pub struct MarkedTextRecord {
     /// Steht hier ein Name und `property_id` ist `None`, dann steht der
     /// Klartext des Spiegels **im Ressourcenverzeichnis** — die Operation neu
     /// zu schreiben genügt dann nicht, das Verzeichnis muss mit
-    /// ([`property_list_home`]). Bis Fix-Runde 6 blieb er dort stehen; `leaks`
-    /// fand ihn, ohne Warnung, mit Rückgabewert 0 (Register #34, Befund Q3-5).
+    /// ([`property_list_homes`]). Bis Fix-Runde 6 blieb er dort stehen;
+    /// `leaks` fand ihn, ohne Warnung, mit Rückgabewert 0 (Register #34,
+    /// Befund Q3-5).
     pub property_name: Option<Vec<u8>>,
+    /// Das Objekt, dessen `/Resources` beim Lesen dieses Abschnitts **galten**:
+    /// die Seite, oder das Form-XObject bzw. der Musterstrom, der ein eigenes
+    /// `/Resources` mitbringt.
+    ///
+    /// Nicht dasselbe wie `stream`. Ein Form-XObject ohne eigenes
+    /// `/Resources` erbt die des Aufrufers (PDF 32000-1, 8.10.1); dann steht
+    /// hier die **platzierende Seite**, in deren `/Properties` sich
+    /// `property_name` aufgelöst hat. Wer stattdessen ab dem Formular suchte,
+    /// fand nichts und ließ den Klartext im Verzeichnis der Seite stehen —
+    /// ohne Warnung, mit Rückgabewert 0 (Befund R1-1).
+    ///
+    /// `None` nur aus [`interpret`]: dort gibt es keinen Seitenkontext, und
+    /// keine seiner Senken liest Spiegel.
+    pub property_owner: Option<ObjectId>,
     /// Indizes der Textoperationen im Geltungsbereich (siehe
     /// [`scan_marked_text`]).
     pub shows: Vec<usize>,
@@ -1372,6 +1450,17 @@ impl ScanResult {
                  einer Formularplatzierung; ab dort wurden die Glyphen den Spiegeln \
                  nicht mehr zugeordnet. Der Vergleich zwischen Spiegel und Glyphen ist \
                  für die letzten Abschnitte deshalb unvollständig."
+            ));
+        }
+        if budget.mirror_shows_cut() {
+            self.warn(format!(
+                "Unter den Textspiegeln dieser Seite stehen mehr als \
+                 {MAX_MIRROR_FORM_PLACEMENTS} Zuordnungen zwischen einem Spiegel und \
+                 einer Textoperation; ab dort wurden die Textoperationen den Spiegeln \
+                 nicht mehr zugeordnet. Für die letzten Abschnitte ist deshalb weder \
+                 der Vergleich zwischen Spiegel und Glyphen vollständig noch die \
+                 Frage entscheidbar, ob eine Schwärzung sie berührt — ein Spiegel \
+                 darüber kann stehen bleiben."
             ));
         }
     }
@@ -1934,6 +2023,7 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
         StreamKey::Page,
         resources.as_ref(),
         true,
+        Some(page_id),
         None,
         Matrix::IDENTITY,
         &mut budget,
@@ -2089,12 +2179,16 @@ pub fn interpret(
 ) -> Result<()> {
     let mut budget = Budget::default();
     budget.credit(None, operations.len());
+    // Ohne Seitenkontext: `interpret` bekommt die Ressourcen fertig gemischt
+    // und kennt die Seite nicht. Keine seiner Senken liest Textspiegel, und
+    // `property_owner` bleibt entsprechend leer.
     scan_with_budget(
         doc,
         operations,
         stream,
         resources,
         true,
+        None,
         None,
         initial_ctm,
         &mut budget,
@@ -2124,6 +2218,7 @@ fn scan_with_budget(
     stream: StreamKey,
     resources: Option<&Dictionary>,
     own_resources: bool,
+    owner: Option<ObjectId>,
     fonts: Option<&FontMap>,
     initial_ctm: Matrix,
     budget: &mut Budget,
@@ -2145,6 +2240,7 @@ fn scan_with_budget(
         stream,
         resources,
         own_resources,
+        owner,
         fonts,
         initial_ctm,
         0,
@@ -2342,7 +2438,7 @@ fn scan_annotations(
             if !seen.insert(id) {
                 continue;
             }
-            scan_appearance(doc, id, rect, page_resources, budget, sink);
+            scan_appearance(doc, id, page_id, rect, page_resources, budget, sink);
         }
     }
 }
@@ -2401,9 +2497,11 @@ fn appearance_streams(doc: &Document, value: &Object, selected: Option<&[u8]>) -
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_appearance(
     doc: &Document,
     id: ObjectId,
+    page_id: ObjectId,
     rect: Option<Rect>,
     page_resources: Option<&Dictionary>,
     budget: &mut Budget,
@@ -2483,6 +2581,7 @@ fn scan_appearance(
         // Die Ressourcen der Seite hat der Seitenstrom schon angeboten.
         _ => (page_resources.map(|d| Rc::new(d.clone())), false, None),
     };
+    let owner = if own_resources { id } else { page_id };
 
     scan_with_budget(
         doc,
@@ -2490,6 +2589,7 @@ fn scan_appearance(
         StreamKey::Form(id),
         resources.as_deref(),
         own_resources,
+        Some(owner),
         fonts,
         appearance_matrix(&matrix, bbox, rect),
         budget,
@@ -2595,11 +2695,13 @@ fn merge_resources(target: &mut Dictionary, source: &Dictionary) {
 ///   — kein Rumpf, kein Aufwandskonto; ob das Formular lesbar ist, entscheidet
 ///   [`load_xobject`] an derselben Stelle, und ein unlesbares hat keine
 ///   Glyphen, die hier fehlen könnten.
+#[allow(clippy::too_many_arguments)]
 fn scan_marked_text(
     doc: &Document,
     operations: &[Operation],
     stream: StreamKey,
     resources: Option<&Dictionary>,
+    owner: Option<ObjectId>,
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
@@ -2683,9 +2785,15 @@ fn scan_marked_text(
             list.partition_point(|index| *index < range.end),
         )
     };
-    let in_range = |range: &std::ops::Range<usize>| -> Vec<usize> {
+    // Dieselbe Decke, dieselbe Bauart wie unten bei `forms_in`: `B`
+    // verschachtelte Klammern über `S` Textoperationen ergeben `B × S`
+    // Einträge, und auch die entstehen alle hier — vor jeder Schleife, die das
+    // Aufwandskonto belastet. Bis Fix-Runde 7 stand davor nichts (gemessen:
+    // 6 000 × 6 000 aus 263 kB = 36 Mio. Zuordnungen, Extraktor 31,1 s).
+    let in_range = |budget: &mut Budget, range: &std::ops::Range<usize>| -> Vec<usize> {
         let (from, to) = slice_in(&shows, range);
-        shows[from..to].to_vec()
+        let granted = budget.mirror_shows(to - from);
+        shows[from..from + granted].to_vec()
     };
     let do_indices: Vec<usize> = dos.iter().map(|(index, _)| *index).collect();
     // Die Decke zählt hier mit: `B` verschachtelte Klammern über `D`
@@ -2715,7 +2823,8 @@ fn scan_marked_text(
             properties,
             property_id,
             property_name,
-            shows: in_range(&range),
+            property_owner: owner,
+            shows: in_range(budget, &range),
             forms: forms_in(budget, &range),
         });
     }
@@ -2731,7 +2840,8 @@ fn scan_marked_text(
             properties,
             property_id,
             property_name,
-            shows: in_range(&range),
+            property_owner: owner,
+            shows: in_range(budget, &range),
             forms: forms_in(budget, &range),
         });
     }
@@ -2844,29 +2954,33 @@ fn dict_at<'a>(doc: &'a Document, object: ObjectId, path: &[Vec<u8>]) -> Option<
     Some(dict)
 }
 
-/// Wo die über `/Resources /Properties /<name>` benannte Eigenschaftsliste von
-/// `owner` wirklich steht — für den Fall, dass sie **kein eigenes Objekt** ist.
+/// **Alle** Stellen, an denen die über `/Resources /Properties /<name>`
+/// erreichbare Eigenschaftsliste von `owner` in der Datei steht — für den
+/// Fall, dass sie **kein eigenes Objekt** ist.
 ///
-/// `None` heißt: es gibt nichts im Dokument zu bereinigen (die Liste ist ein
-/// eigenes Objekt, oder der Name löst sich gar nicht auf).
+/// Leer heißt: es gibt nichts im Dokument zu bereinigen (die Liste ist überall
+/// ein eigenes Objekt, oder der Name löst sich gar nicht auf).
 ///
-/// Gesucht wird von innen nach außen, genau in der Reihenfolge, in der
-/// [`merge_resources`] die Verzeichnisse übereinanderlegt: das innerste, das
-/// den Namen führt, ist das wirksame. Ein `/Properties`, das als **Verweis**
-/// steht, beendet die Suche in jedem Fall — es überschreibt beim Mischen das
-/// geerbte Verzeichnis als Ganzes.
+/// Gesucht wird die ganze Kette von innen nach außen, in der Reihenfolge, in
+/// der [`merge_resources`] die Verzeichnisse übereinanderlegt. Das innerste,
+/// das den Namen führt, ist das **wirksame** — aber nicht das einzige, in dem
+/// der Klartext steht. Steht `/Properties /MC0` zugleich in den
+/// Seitenressourcen und noch einmal im `/Pages`-Knoten darüber, dann trägt die
+/// überschattete äußere Kopie dieselbe Zeichenkette; sie nur deshalb stehen zu
+/// lassen, weil kein Betrachter sie benutzt, hieße das Geheimnis in der Datei
+/// zu lassen. `leaks` sucht Bytes, nicht Wirksamkeit — und fand sie bis
+/// Fix-Runde 7 ohne Warnung (Befund R1-5). Geräumt wird deshalb **jeder**
+/// Fundort der Kette.
 ///
 /// **Geteilte Verzeichnisse.** Trifft der Weg ein `/Properties`- oder
 /// `/Resources`-Objekt, das mehrere Seiten oder Formulare benutzen, wirkt die
 /// Bereinigung auf alle. Das ist dieselbe Richtung, in die schon eine geteilte
 /// Liste mit eigener Objekt-Id wirkt (siehe `crate::redact::mirrors_to_clear`):
 /// ein Spiegel, der zu viel verliert, kostet die Vorlesefunktion; einer, der
-/// stehen bleibt, kostet das Geheimnis.
-pub(crate) fn property_list_home(
-    doc: &Document,
-    owner: ObjectId,
-    name: &[u8],
-) -> Option<MirrorHome> {
+/// stehen bleibt, kostet das Geheimnis. Dieselbe Abwägung gilt für die
+/// überschattete Kopie.
+pub(crate) fn property_list_homes(doc: &Document, owner: ObjectId, name: &[u8]) -> Vec<MirrorHome> {
+    let mut out = Vec::new();
     for (object, prefix) in resource_homes(doc, owner) {
         let Some(resources) = dict_at(doc, object, &prefix) else {
             continue;
@@ -2874,34 +2988,32 @@ pub(crate) fn property_list_home(
         match resources.get(b"Properties") {
             // Eigenes `/Properties`-Objekt: die Liste steht darin.
             Ok(Object::Reference(properties)) => {
-                return match doc.get_dictionary(*properties).map(|d| d.get(name)) {
-                    Ok(Ok(Object::Dictionary(_))) => Some(MirrorHome {
+                // Ein Verweis auf die Liste selbst: sie ist ein eigenes Objekt
+                // und wird dort bereinigt (`property_id`). Nicht vorhanden:
+                // hier nichts zu tun.
+                if let Ok(Ok(Object::Dictionary(_))) =
+                    doc.get_dictionary(*properties).map(|d| d.get(name))
+                {
+                    out.push(MirrorHome {
                         object: *properties,
                         path: vec![name.to_vec()],
-                    }),
-                    // Ein Verweis: die Liste ist ein eigenes Objekt und wird
-                    // dort bereinigt. Nicht vorhanden: nichts zu tun.
-                    _ => None,
-                };
+                    });
+                }
             }
             // Direkt im Verzeichnis: dann steht die Liste im Objekt, das
             // dieses Verzeichnis trägt.
-            Ok(Object::Dictionary(properties)) => match properties.get(name) {
-                Ok(Object::Dictionary(_)) => {
+            Ok(Object::Dictionary(properties)) => {
+                if let Ok(Object::Dictionary(_)) = properties.get(name) {
                     let mut path = prefix;
                     path.push(b"Properties".to_vec());
                     path.push(name.to_vec());
-                    return Some(MirrorHome { object, path });
+                    out.push(MirrorHome { object, path });
                 }
-                Ok(_) => return None,
-                // Dieses Verzeichnis führt den Namen nicht — beim Mischen
-                // käme er vom nächsten nach außen.
-                Err(_) => continue,
-            },
+            }
             _ => continue,
         }
     }
-    None
+    out
 }
 
 /// Steht in dieser Liste überhaupt ein nicht leerer Textspiegel?
@@ -2976,6 +3088,11 @@ fn scan_operations(
     // Mal durchzugehen wäre genau die Vervielfachung, gegen die
     // [`DeclarationKey`] steht.
     own_resources: bool,
+    // Wem `resources` gehört: die Seite, oder der Strom, der sie selbst
+    // mitbringt. Läuft mit `own_resources` mit und steht am Ende in
+    // [`MarkedTextRecord::property_owner`] — dort wird aus ihm der Fundort
+    // einer Eigenschaftsliste, die kein eigenes Objekt ist.
+    owner: Option<ObjectId>,
     fonts: &FontMap,
     initial_ctm: Matrix,
     depth: usize,
@@ -2991,11 +3108,11 @@ fn scan_operations(
     // kommt erst danach. Dass einmal genügt, liegt an ihm selbst: er ist rein
     // syntaktisch (siehe [`scan_marked_text`]) und liefert jedes Mal dieselben
     // Abschnitte, die die Senke dann verwirft.
-    if budget.first_marked_scan(stream) {
+    if budget.first_marked_scan(stream, owner) {
         if !budget.operation() {
             return;
         }
-        scan_marked_text(doc, operations, stream, resources, budget, sink);
+        scan_marked_text(doc, operations, stream, resources, owner, budget, sink);
     }
     // Einmal je Verzeichnis, nicht einmal je Platzierung und nicht einmal je
     // Strom: ein zwanzigmal gezeichnetes Formular bietet zwanzigmal dieselben
@@ -3267,6 +3384,7 @@ fn scan_operations(
                     scan_tiling_pattern(
                         doc,
                         resources,
+                        owner,
                         fonts,
                         pattern,
                         initial_ctm,
@@ -3334,6 +3452,7 @@ fn scan_operations(
                 scan_soft_mask(
                     doc,
                     resources,
+                    owner,
                     fonts,
                     &op.operands,
                     &state,
@@ -3419,12 +3538,16 @@ fn scan_operations(
                                 (Some(own), Some(own_fonts)) => (Some(&**own), true, &**own_fonts),
                                 _ => (resources, false, fonts),
                             };
+                        // Ohne eigenes `/Resources` bleibt der Aufrufer der
+                        // Eigentümer — die Namen lösen sich dort auf.
+                        let form_owner = if form_own { Some(form_id) } else { owner };
                         scan_operations(
                             doc,
                             form.operations(),
                             StreamKey::Form(form_id),
                             form_resources,
                             form_own,
+                            form_owner,
                             form_fonts,
                             form_matrix.mul(&state.ctm),
                             depth + 1,
@@ -3488,6 +3611,7 @@ fn ext_gstate_dict(
 fn scan_soft_mask(
     doc: &Document,
     resources: Option<&Dictionary>,
+    owner: Option<ObjectId>,
     fonts: &FontMap,
     operands: &[Object],
     state: &GraphicsState,
@@ -3584,6 +3708,7 @@ fn scan_soft_mask(
         (Some(own), Some(own_fonts)) => (Some(&**own), true, &**own_fonts),
         _ => (resources, false, fonts),
     };
+    let group_owner = if group_own { Some(group_id) } else { owner };
     // Die Maske ist ein platzierter Strom wie ein Formular; sie muss auch so
     // gezählt werden, sonst hielte die Ressourcenprüfung sie für ungezeichnet.
     sink.form(group_id);
@@ -3593,6 +3718,7 @@ fn scan_soft_mask(
         StreamKey::Form(group_id),
         group_resources,
         group_own,
+        group_owner,
         group_fonts,
         matrix.mul(&state.ctm),
         depth + 1,
@@ -3782,6 +3908,7 @@ fn load_xobject(
 fn scan_tiling_pattern(
     doc: &Document,
     resources: Option<&Dictionary>,
+    owner: Option<ObjectId>,
     fonts: &FontMap,
     name: &[u8],
     base_ctm: Matrix,
@@ -3886,12 +4013,14 @@ fn scan_tiling_pattern(
         (Some(own), Some(own_fonts)) => (Some(&**own), true, &**own_fonts),
         _ => (resources, false, fonts),
     };
+    let pattern_owner = if pattern_own { Some(id) } else { owner };
     scan_operations(
         doc,
         pattern.operations(),
         StreamKey::Form(id),
         pattern_resources,
         pattern_own,
+        pattern_owner,
         pattern_fonts,
         matrix.mul(&base_ctm),
         depth + 1,
@@ -4558,6 +4687,7 @@ endcmap"
             &doc,
             &ops(src),
             StreamKey::Page,
+            None,
             None,
             &mut Budget::default(),
             &mut result,

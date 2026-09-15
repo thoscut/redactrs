@@ -353,11 +353,23 @@ fn peak_rss_bytes() -> Option<u64> {
     None
 }
 
+/// Byte in MB — und MB heißt in diesem Projekt **1024²** Byte, auch in einer
+/// Messausgabe.
+///
+/// Bis Fix-Runde 6 rechneten die Messausgaben hier `/ 1_000_000`, während
+/// jede Grenze (`--max-decompressed-mb`, `Limits`, die Fehlermeldungen des
+/// Laders) mit 1024² rechnet. Beide Zahlen standen als „MB“ nebeneinander;
+/// die gemessenen Werte fielen dadurch um 4,9 % zu hoch aus (205 statt 196,
+/// 138 statt 135, 621 statt 592).
+fn mb(bytes: u64) -> u64 {
+    bytes / MIB
+}
+
 /// Was der Kindprozess über seine Speichermessung sagt — der Elternprozess
 /// liest daran ab, dass wirklich gemessen wurde.
 fn peak_note(peak: Option<u64>) -> String {
     match peak {
-        Some(bytes) => format!("VmHWM {} MB", bytes / 1_000_000),
+        Some(bytes) => format!("VmHWM {} MB", mb(bytes)),
         None => "ohne Speichermessung (kein /proc auf diesem Ziel)".to_string(),
     }
 }
@@ -516,9 +528,9 @@ fn bombe_im_kindprozess() {
         );
         if let Some(peak) = peak {
             assert!(
-                peak < 100_000_000,
+                peak < 100 * MIB,
                 "objstm={objstm}: VmHWM {} MB — die Bombe wurde entpackt",
-                peak / 1_000_000
+                mb(peak)
             );
         }
         assert!(
@@ -674,7 +686,7 @@ fn zd_mess_die_alte_suche_je_muster() {
         "{} Muster je Begriff, {} Blöcke, zusammen {} MB je Durchgang",
         muster.len(),
         bloecke.len(),
-        bytes / 1_000_000
+        mb(bytes)
     );
 
     let started = Instant::now();

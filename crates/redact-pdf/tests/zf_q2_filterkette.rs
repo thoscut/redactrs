@@ -202,28 +202,36 @@ fn q2_dieselbe_kette_umgestellt_wird_gemeldet() {
     );
 }
 
-/// Ein Bildfilter an **erster** Stelle, mit einer Kette dahinter: die Ausnahme
-/// hängt am Filter, an dem die Kette stehen blieb — nicht an seiner Position.
+/// Ein Bildfilter an **erster** Stelle, mit einer Kette dahinter: **gemeldet**
+/// (Befund R2-A, Fix-Runde 7 — diese Zusicherung ist umgedreht).
 ///
 /// Ein Prüfer maß `[/DCTDecode /ASCII85Decode]`: 0 Funde, 0 `unchecked`,
-/// Rückgabewert 0. Das bleibt so, und zwar richtig: hinter `/DCTDecode` liegen
-/// Bilddaten, und was dahinter noch in der Kette steht, ändert daran nichts —
-/// entpacken lässt sich davon ohnehin nichts. Eine `NICHT GEPRÜFT`-Zeile hier
-/// wäre dieselbe Zeile wie bei `/DCTDecode` allein, nur an einer Kette; sie
-/// käme an jeder zweiten Datei mit einem Foto (die Reihenfolge im
-/// `/Filter`-Array ist die Dekodierreihenfolge, PDF 32000-1, 7.4.1 — eine
-/// Distiller-Datei schreibt `[/ASCII85Decode /DCTDecode]`, aber niemand
-/// verbietet die andere).
+/// Rückgabewert 0. Fix-Runde 6 erklärte das für richtig: hinter `/DCTDecode`
+/// lägen Bilddaten, und was dahinter noch in der Kette stehe, ändere daran
+/// nichts. Die Begründung trägt aber nur, wenn der Bildfilter das **letzte**
+/// Glied ist. Die Reihenfolge im `/Filter`-Array ist die Dekodierreihenfolge
+/// (PDF 32000-1, 7.4.1), und die Ausgabe eines Bildfilters sind Abtastwerte —
+/// kein Erzeuger hängt dahinter noch einen Filter. Steht doch einer dahinter,
+/// liegt dort kein Bild, sondern ein Glied, das niemand angewandt hat: bei
+/// `[/DCTDecode /FlateDecode]` sogar eines, das dieses Programm **kennt**.
+/// Schweigen verkaufte den Bildfilternamen als meldungsfreie Zone für
+/// beliebige Bytes (`tests/zg_r2_bildfilter.rs`).
+///
+/// Die Distiller-Kette `[/ASCII85Decode /DCTDecode]` — der Fall, auf den die
+/// Ausnahme zielt — schweigt weiter: [`q2_bildfilter_am_kettenende_meldet_nichts_und_findet_den_anfang`]
+/// hält das für alle sechs Bildfilternamen fest.
 #[test]
-fn q2_bildfilter_an_erster_stelle_schweigt_auch_mit_kette_dahinter() {
+fn q2_bildfilter_an_erster_stelle_wird_mit_kette_dahinter_gemeldet() {
     let check = pruefe(&pdf(
         dictionary! { "Filter" => kette(&["DCTDecode", "ASCII85Decode"]) },
         ascii85_encode(&nutzlast()),
     ));
-    assert_eq!(
-        check.unchecked,
-        Vec::<String>::new(),
-        "der benannte blinde Fleck bleibt still, auch als erstes Glied einer Kette"
+    assert!(
+        check.unchecked.iter().any(|m| m
+            .contains("/DCTDecode ist ein Bildfilter und wird nicht dekodiert")
+            && m.contains("(Glied 1 von 2)")),
+        "ein Bildfilter mit einem Glied dahinter wird gemeldet: {:#?}",
+        check.unchecked
     );
     assert!(
         check.findings[0].is_empty(),
@@ -231,14 +239,18 @@ fn q2_bildfilter_an_erster_stelle_schweigt_auch_mit_kette_dahinter() {
         check.findings[0]
     );
     // Die Gegenprobe an derselben Kette: derselbe Bau, nur mit einem Namen,
-    // den niemand kennt, an erster Stelle — der wird gemeldet.
+    // den niemand kennt, an erster Stelle — derselbe Satzbau, anderer Grund.
     let fremd = pruefe(&pdf(
         dictionary! { "Filter" => kette(&["Q2Phantasie", "ASCII85Decode"]) },
         ascii85_encode(&nutzlast()),
     ));
     assert!(
-        !fremd.unchecked.is_empty(),
-        "der Unterschied liegt am Namen, nicht an der Kette"
+        fremd
+            .unchecked
+            .iter()
+            .any(|m| m.contains("/Q2Phantasie ist hier kein bekannter Filter")),
+        "{:#?}",
+        fremd.unchecked
     );
 }
 

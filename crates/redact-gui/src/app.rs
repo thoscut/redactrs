@@ -655,11 +655,13 @@ struct PendingCheck {
     /// hinterlässt: nach einem zweiten Export wäre ein nackter Satz sonst
     /// keiner Datei mehr zuzuordnen (Befund G5-A4).
     file: String,
-    /// Der ganze Pfad der geprüften Ausgabe — die **Kennung** dieser
-    /// Prüfung. Zwei Dateien gleichen Namens in verschiedenen Ordnern sind
-    /// zwei Prüfungen; ein zweiter Export **derselben** Datei macht die
-    /// ältere gegenstandslos ([`RedactApp::start_export_check`]).
-    out: PathBuf,
+    /// Die **Kennung** dieser Prüfung und ihrer Warnungen: der aufgelöste
+    /// Pfad der Ausgabe ([`file_key`]). Zwei Dateien gleichen Namens in
+    /// verschiedenen Ordnern sind zwei Prüfungen; ein zweiter Export
+    /// **derselben** Datei macht die ältere gegenstandslos
+    /// ([`RedactApp::start_export_check`]) — gleich, wie ihr Pfad geschrieben
+    /// ist.
+    key: PathBuf,
     result: Receiver<ExportCheck>,
 }
 
@@ -668,6 +670,50 @@ fn file_name_of(path: &std::path::Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Die Kennung einer Ausgabedatei: der **aufgelöste** Pfad.
+///
+/// Gemeint ist die Datei, nicht ihre Schreibweise. `./a.pdf` und `a.pdf`,
+/// `ordner/../ordner/out.pdf` und `ordner/out.pdf`, ein Symlink und sein Ziel
+/// sind für einen Vergleich Zeichen für Zeichen verschieden und für das
+/// Dateisystem dasselbe. Daran hingen zwei Fehler (Befunde R4-4 und R4-5):
+/// die ältere Nachprüfung lief weiter und bewertete die **neuen** Bytes mit
+/// dem **alten** Plan — in der gefährlichen Richtung eine Entwarnung unter dem
+/// Präfix des ersten Exports —, und die Warnungen einer Datei wurden am
+/// bloßen **Dateinamen** gehalten, sodass ein sauberer Export nach
+/// `y/a.pdf` die Leckwarnung über `x/a.pdf` mitnahm.
+///
+/// [`std::fs::canonicalize`] fragt dafür das Dateisystem (es löst `.`, `..`
+/// und Symlinks auf und verlangt, dass es die Datei gibt). Schlägt es fehl —
+/// die Datei wurde inzwischen gelöscht, ein Verzeichnis darüber ist nicht
+/// lesbar —, gilt der Pfad selbst: dann ist die Kennung wieder so grob wie
+/// vorher, aber nie falsch verschmolzen.
+fn file_key(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Streicht das **erste** Vorkommen dieses Satzes aus der Liste.
+///
+/// Zwei Ausgabedateien gleichen Namens in verschiedenen Ordnern schreiben
+/// denselben Text („a.pdf: …“); jede hält ihren eigenen Eintrag
+/// ([`WarnedFile`]), und gestrichen wird genau einer.
+fn remove_first(list: &mut Vec<String>, entry: &str) {
+    if let Some(at) = list.iter().position(|held| held == entry) {
+        list.remove(at);
+    }
+}
+
+/// Die Warnungen **einer** Ausgabedatei.
+///
+/// Gehalten wird am aufgelösten Pfad ([`file_key`]), angezeigt wird der
+/// Dateiname: der Pfad ist die Kennung, der Name ist der Text. Bis
+/// Fix-Runde 6 war beides dasselbe — und ein Export nach `y/a.pdf` strich die
+/// Warnungen von `x/a.pdf` (Befund R4-5).
+struct WarnedFile {
+    key: PathBuf,
+    /// Die Sätze dieser Datei, wörtlich wie in [`AppState::warnings`].
+    entries: Vec<String>,
 }
 
 /// Fordert beim Fallenlassen ein Neuzeichnen an — auch auf dem Weg einer
@@ -771,7 +817,7 @@ pub struct RedactApp {
     /// Ausgabedateien, deren Warnungen gerade gehalten werden — jüngste
     /// zuletzt. Siehe [`RedactApp::note_export_warnings`] und
     /// [`MAX_WARNED_FILES`].
-    warned_files: Vec<String>,
+    warned_files: Vec<WarnedFile>,
     /// Der egui-Kontext des letzten Bildes — damit ein Thread, der fertig ist,
     /// ein Neuzeichnen anstoßen kann, auch wenn die Oberfläche gerade ruht.
     /// `None`, solange noch kein Bild gezeichnet wurde (Tests ohne Bildschirm).
@@ -1117,7 +1163,10 @@ impl RedactApp {
         match self.state.export(&out, Some(&audit)) {
             Ok(outcome) => {
                 self.error = None;
-                self.note_export_warnings(&file_name_of(&out), &outcome.warnings);
+                // Erst jetzt gibt es die Datei — vorher könnte `file_key`
+                // sie nicht auflösen.
+                let key = file_key(&out);
+                self.note_export_warnings(&key, &file_name_of(&out), &outcome.warnings);
                 let prefix = export_status(
                     outcome.drawn_rects,
                     outcome.removed_glyphs,
@@ -1131,7 +1180,7 @@ impl RedactApp {
                 // ohne Konsole und ohne getippte Geheimnisse. Siehe
                 // [`AppState::plan_export_check`].
                 let plan = self.state.plan_export_check(&summary);
-                self.start_export_check(prefix, plan, out);
+                self.start_export_check(prefix, plan, out, key);
             }
             Err(e) => self.report(Err(e)),
         }
@@ -1163,32 +1212,63 @@ impl RedactApp {
     /// schon in der Liste — sie kamen beim Laden und gehören nicht der Datei,
     /// die gerade geschrieben wurde. Sie werden hier übergangen, sonst stünden
     /// sie nach jedem Export ein zweites Mal da.
-    fn note_export_warnings(&mut self, file: &str, warnings: &[String]) {
-        self.forget_warnings_of(file);
+    fn note_export_warnings(&mut self, key: &std::path::Path, file: &str, warnings: &[String]) {
+        self.forget_warnings_of(key);
         for warning in warnings {
             if self.state.extract_warnings.contains(warning) {
                 continue;
             }
-            self.state.warnings.push(format!("{file}: {warning}"));
+            let entry = format!("{file}: {warning}");
+            self.state.warnings.push(entry.clone());
+            self.hold_warning(key, entry);
         }
-        self.remember_warnings_of(file);
+        // Auch ohne Warnung ist diese Datei die jüngste — sonst fiele sie als
+        // älteste heraus, während ihr Urteil noch unterwegs ist.
+        self.remember_warnings_of(key);
     }
 
-    /// Nimmt eine Ausgabedatei in die gehaltenen auf; die älteste fällt
-    /// heraus, wenn es mehr als [`MAX_WARNED_FILES`] werden.
-    fn remember_warnings_of(&mut self, file: &str) {
-        self.warned_files.retain(|held| held != file);
-        self.warned_files.push(file.to_string());
+    /// Nimmt eine Ausgabedatei in die gehaltenen auf (als jüngste); die
+    /// älteste fällt samt ihren Warnungen heraus, wenn es mehr als
+    /// [`MAX_WARNED_FILES`] werden.
+    fn remember_warnings_of(&mut self, key: &std::path::Path) -> &mut WarnedFile {
+        match self.warned_files.iter().position(|held| held.key == key) {
+            Some(at) => {
+                let held = self.warned_files.remove(at);
+                self.warned_files.push(held);
+            }
+            None => self.warned_files.push(WarnedFile {
+                key: key.to_path_buf(),
+                entries: Vec::new(),
+            }),
+        }
         while self.warned_files.len() > MAX_WARNED_FILES {
             let oldest = self.warned_files.remove(0);
-            self.forget_warnings_of(&oldest);
+            for entry in &oldest.entries {
+                remove_first(&mut self.state.warnings, entry);
+            }
         }
+        self.warned_files.last_mut().expect("gerade eingetragen")
+    }
+
+    /// Hängt einen Satz an die Warnungen dieser Ausgabedatei (nur die
+    /// Buchhaltung — in der Anzeige steht er schon).
+    fn hold_warning(&mut self, key: &std::path::Path, entry: String) {
+        self.remember_warnings_of(key).entries.push(entry);
     }
 
     /// Streicht die Warnungen einer Ausgabedatei aus der Liste.
-    fn forget_warnings_of(&mut self, file: &str) {
-        let prefix = format!("{file}: ");
-        self.state.warnings.retain(|w| !w.starts_with(&prefix));
+    ///
+    /// Gestrichen wird, was **diese** Datei eingetragen hat, nicht was so
+    /// aussieht: der Schlüssel ist ihr aufgelöster Pfad ([`file_key`]), der
+    /// Text trägt nur den Dateinamen.
+    fn forget_warnings_of(&mut self, key: &std::path::Path) {
+        let Some(at) = self.warned_files.iter().position(|held| held.key == key) else {
+            return;
+        };
+        let held = self.warned_files.remove(at);
+        for entry in &held.entries {
+            remove_first(&mut self.state.warnings, entry);
+        }
     }
 
     /// Lässt die Nachprüfung auf einem eigenen Thread laufen.
@@ -1223,10 +1303,17 @@ impl RedactApp {
     /// nichts: Die Warnungen der ersten Ausgabe hat `note_export_warnings`
     /// bereits durch die der zweiten ersetzt, denn sie hängen am selben
     /// Dateinamen.
-    fn start_export_check(&mut self, prefix: String, plan: ExportCheckPlan, out: PathBuf) {
+    fn start_export_check(
+        &mut self,
+        prefix: String,
+        plan: ExportCheckPlan,
+        out: PathBuf,
+        key: PathBuf,
+    ) {
         // Dieselbe Datei, ältere Prüfung: sie urteilt sonst über Bytes, die
-        // es nicht mehr gibt.
-        self.checks.retain(|pending| pending.out != out);
+        // es nicht mehr gibt. Verglichen wird die **Datei** ([`file_key`]),
+        // nicht die Schreibweise des Pfades.
+        self.checks.retain(|pending| pending.key != key);
         let (sender, receiver) = std::sync::mpsc::channel();
         let repaint = RepaintOnDrop(self.ui_ctx.clone());
         let file = file_name_of(&out);
@@ -1269,11 +1356,11 @@ impl RedactApp {
                 self.checks.push(PendingCheck {
                     prefix,
                     file,
-                    out,
+                    key,
                     result: receiver,
                 });
             }
-            Err(_) => self.finish_export_check(&prefix, &file, plan.run(&out)),
+            Err(_) => self.finish_export_check(&prefix, &file, &key, plan.run(&out)),
         }
     }
 
@@ -1285,28 +1372,38 @@ impl RedactApp {
         self.checks
             .retain(|pending| match pending.result.try_recv() {
                 Ok(check) => {
-                    done.push((pending.prefix.clone(), pending.file.clone(), Some(check)));
+                    done.push((
+                        pending.prefix.clone(),
+                        pending.file.clone(),
+                        pending.key.clone(),
+                        Some(check),
+                    ));
                     false
                 }
                 Err(TryRecvError::Empty) => true,
                 // Der Thread ist ohne Ergebnis verschwunden (Panik). Schweigen
                 // wäre eine Entwarnung, die keine ist.
                 Err(TryRecvError::Disconnected) => {
-                    done.push((pending.prefix.clone(), pending.file.clone(), None));
+                    done.push((
+                        pending.prefix.clone(),
+                        pending.file.clone(),
+                        pending.key.clone(),
+                        None,
+                    ));
                     false
                 }
             });
         let count = done.len();
-        for (prefix, file, check) in done {
+        for (prefix, file, key, check) in done {
             match check {
-                Some(check) => self.finish_export_check(&prefix, &file, check),
+                Some(check) => self.finish_export_check(&prefix, &file, &key, check),
                 None => {
                     let sentence = "Nachprüfung: abgebrochen (interner Fehler) — es wurde \
                                     nichts nachgeprüft.";
                     // Auch in die Warnungen: die Statuszeile überschreibt
                     // die nächste Aktion, und ein Export ohne Nachprüfung
                     // darf nicht so aussehen wie einer mit.
-                    self.note_check_warning(&file, sentence);
+                    self.note_check_warning(&key, &file, sentence);
                     self.state.status = format!("{prefix}  ·  {sentence}");
                 }
             }
@@ -1320,24 +1417,35 @@ impl RedactApp {
     /// Fund, eine unvollständige Antwort (mit dem Grund je Stelle), nicht gesuchte
     /// Texte jenseits der Decke — mit dem Dateinamen davor. Die Statuszeile
     /// ist flüchtig; die Warnungen bleiben, bis das nächste Dokument kommt.
-    fn finish_export_check(&mut self, prefix: &str, file: &str, check: ExportCheck) {
+    fn finish_export_check(
+        &mut self,
+        prefix: &str,
+        file: &str,
+        key: &std::path::Path,
+        check: ExportCheck,
+    ) {
         if let Some(warning) = check.warning() {
             // Ganz nach vorn: die Statuszeile zeigt nur die **erste**
             // Warnung, und keine andere ist wichtiger als diese.
-            self.note_check_warning(file, &warning);
+            self.note_check_warning(key, file, &warning);
         }
-        self.state.status = format!("{prefix}  ·  {}", check.sentence());
+        // Die Statuszeile trägt den **gedeckelten** Satz
+        // ([`ExportCheck::status_line`]); die ganze Fassung steht in der
+        // Warnung, die gerade eingetragen wurde.
+        self.state.status = format!("{prefix}  ·  {}", check.status_line());
     }
 
     /// Das Urteil einer Nachprüfung in die Warnungen — ganz nach vorn, mit
     /// dem Dateinamen davor, und je Datei nur einmal (zwei Exporte derselben
     /// Datei kurz hintereinander tragen dasselbe Urteil).
-    fn note_check_warning(&mut self, file: &str, warning: &str) {
+    fn note_check_warning(&mut self, key: &std::path::Path, file: &str, warning: &str) {
         let entry = format!("{file}: {warning}");
-        if !self.state.warnings.contains(&entry) {
-            self.state.warnings.insert(0, entry);
+        let held = self.remember_warnings_of(key);
+        if held.entries.iter().any(|kept| kept == &entry) {
+            return;
         }
-        self.remember_warnings_of(file);
+        held.entries.push(entry.clone());
+        self.state.warnings.insert(0, entry);
     }
 
     /// Läuft gerade eine Nachprüfung?
@@ -2366,6 +2474,14 @@ mod rev8_tests;
 #[cfg(test)]
 #[path = "zb_tests.rs"]
 mod zb_tests;
+
+// Gegenprüfung R4, Teil 2: der Prüf-Thread selbst — `start_export_check`,
+// der Haken `CheckGate`, die Warnungsliste über mehrere Ausgabedateien.
+// Kindmodul von `app` aus demselben Grund wie `zb_tests`: `export_to`,
+// `checks`, `hold_check` und `ui_ctx` sind privat.
+#[cfg(test)]
+#[path = "zg_r4_app_tests.rs"]
+mod zg_r4_app_tests;
 
 #[cfg(test)]
 mod tests {

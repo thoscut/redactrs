@@ -55,11 +55,16 @@ fn names_tree(doc: &mut Document, key: &str, name: &str, value: ObjectId) -> Obj
 // A) Ein zweiter Halter — der Bericht darf nichts melden
 // ---------------------------------------------------------------------------
 
-/// Ein Dateianhang, dessen Stream-Objekt zusätzlich als **zugeordnete Datei**
-/// (`/AF`, PDF 2.0, 14.13) an der Seite hängt. `/Names` fällt, der Stream
-/// bleibt — und mit ihm der Klartext.
+/// Ein Dateianhang, dessen Filespec zusätzlich an einem Schlüssel der Seite
+/// hängt, den dieser Lauf nicht anfasst. `/Names` fällt, der Stream bleibt —
+/// und mit ihm der Klartext.
 ///
 /// Erwartung laut `MetadataReport`: `embedded_files_removed == 0`.
+///
+/// (Der zweite Halter war bis Fix-Runde 7 ein `/AF` an der Seite — der
+/// ZUGFeRD-Weg. Der fällt jetzt selbst, siehe
+/// `zg_r3_beiwerk::zugeordnete_datei_an_seite_und_annotation_bleibt`; als
+/// *Halter* taugt er deshalb nicht mehr.)
 #[test]
 fn ein_anhang_mit_zweitem_halter_wird_nicht_als_entfernt_gemeldet() {
     let mut d: Doc = page(&["Rechnung 4711"]);
@@ -71,8 +76,8 @@ fn ein_anhang_mit_zweitem_halter_wird_nicht_als_entfernt_gemeldet() {
     }));
     let names = names_tree(&mut d.doc, "EmbeddedFiles", "anhang.txt", filespec);
     d.catalog_set("Names", Object::Reference(names));
-    // Der zweite Halter: die Seite ordnet sich dieselbe Datei zu.
-    d.page_dict_set("AF", Object::Array(vec![Object::Reference(filespec)]));
+    // Der zweite Halter: irgendetwas außerhalb des Metadatenlaufs.
+    d.page_dict_set("Zusatz", Object::Reference(filespec));
 
     let bytes = d.finish();
     assert!(
@@ -98,8 +103,9 @@ fn ein_anhang_mit_zweitem_halter_wird_nicht_als_entfernt_gemeldet() {
     );
 }
 
-/// Ein `/JavaScript`-Eintrag, dessen Quelltext als Stream zugleich an der
-/// Seite hängt (`/AF`). Der Name fällt mit `/Names`, der Quelltext bleibt.
+/// Ein `/JavaScript`-Eintrag, dessen Quelltext als Stream zugleich an einem
+/// Schlüssel der Seite hängt. Der Name fällt mit `/Names`, der Quelltext
+/// bleibt.
 #[test]
 fn ein_javascript_mit_zweitem_halter_wird_nicht_als_entfernt_gemeldet() {
     let mut d: Doc = page(&["Rechnung 4711"]);
@@ -113,12 +119,7 @@ fn ein_javascript_mit_zweitem_halter_wird_nicht_als_entfernt_gemeldet() {
     }));
     let names = names_tree(&mut d.doc, "JavaScript", "start", action);
     d.catalog_set("Names", Object::Reference(names));
-    let filespec = d.add(Object::Dictionary(dictionary! {
-        "Type" => "Filespec",
-        "F" => Object::string_literal("start.js"),
-        "EF" => dictionary! { "F" => Object::Reference(js) },
-    }));
-    d.page_dict_set("AF", Object::Array(vec![Object::Reference(filespec)]));
+    d.page_dict_set("Zusatz", Object::Reference(js));
 
     let bytes = d.finish();
     assert!(
@@ -161,12 +162,7 @@ fn ein_geteilter_xfa_strom_wird_nicht_als_entfernt_gemeldet() {
         ]),
     }));
     d.catalog_set("AcroForm", Object::Reference(acroform));
-    let filespec = d.add(Object::Dictionary(dictionary! {
-        "Type" => "Filespec",
-        "F" => Object::string_literal("daten.xml"),
-        "EF" => dictionary! { "F" => Object::Reference(dataset) },
-    }));
-    d.page_dict_set("AF", Object::Array(vec![Object::Reference(filespec)]));
+    d.page_dict_set("Zusatz", Object::Reference(dataset));
 
     let bytes = d.finish();
     let (report, out) = strip(&bytes);

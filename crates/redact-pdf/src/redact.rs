@@ -35,7 +35,8 @@ use redact_core::conflict::RectGrid;
 use redact_core::{Rect, RedactError, Redaction, Result};
 
 use crate::content::{
-    property_list_home, MarkedTextRecord, MirrorHome, ShowItem, ShowRecord, StreamKey, MIRROR_KEYS,
+    property_list_homes, MarkedTextRecord, MirrorHome, ShowItem, ShowRecord, StreamKey,
+    MIRROR_KEYS,
 };
 use crate::image::InlineTarget;
 use crate::matrix::Matrix;
@@ -397,6 +398,10 @@ impl PdfRedactor {
         // deshalb nicht im Strom, sondern im Objekt bereinigt werden.
         let mut property_objects: BTreeSet<ObjectId> = BTreeSet::new();
         let mut property_homes: BTreeSet<MirrorHome> = BTreeSet::new();
+        // Dokumentweites Konto für [`PendingPage::deferred`] — siehe
+        // [`MAX_DEFERRED_MIRRORS`].
+        let mut deferred_left = MAX_DEFERRED_MIRRORS;
+        let mut deferred_dropped = 0usize;
         let no_inline: BTreeMap<usize, Operation> = BTreeMap::new();
         let no_plans: BTreeMap<usize, Plan> = BTreeMap::new();
         let no_marked: Vec<MarkedTextRecord> = Vec::new();
@@ -458,21 +463,30 @@ impl PdfRedactor {
             }
             // Spiegel im Seitenstrom über einem Formular: ob sie zu leeren
             // sind, entscheidet sich erst, wenn alle Seiten gelesen sind.
-            let mut deferred: Vec<MarkedTextRecord> = scan
+            // Gehalten wird dabei nur, was die späte Frage braucht — siehe
+            // [`DeferredMirror`].
+            let open: Vec<&MarkedTextRecord> = scan
                 .marked
                 .iter()
                 .filter(|record| record.stream == StreamKey::Page && !record.forms.is_empty())
-                .cloned()
                 .collect();
             if page_redactions.is_empty() {
-                if !deferred.is_empty() {
-                    pending_pages.push(PendingPage {
-                        index: page_index,
-                        id: *page_id,
-                        plans: BTreeMap::new(),
-                        mirrors: MirrorFixes::default(),
-                        deferred,
-                    });
+                if !open.is_empty() {
+                    let deferred = open
+                        .into_iter()
+                        .map(|record| DeferredMirror::new(doc, *page_id, record))
+                        .collect();
+                    let (deferred, dropped) = take_deferred(&mut deferred_left, deferred);
+                    deferred_dropped += dropped;
+                    if !deferred.is_empty() {
+                        pending_pages.push(PendingPage {
+                            index: page_index,
+                            id: *page_id,
+                            plans: BTreeMap::new(),
+                            mirrors: MirrorFixes::default(),
+                            deferred,
+                        });
+                    }
                 }
                 continue;
             }
@@ -518,7 +532,13 @@ impl PdfRedactor {
             for warning in std::mem::take(&mut mirrors.warnings) {
                 push_warning(&mut report, warning);
             }
-            deferred.retain(|record| !mirrors.covers(record));
+            let deferred = open
+                .into_iter()
+                .filter(|record| !mirrors.covers(record))
+                .map(|record| DeferredMirror::new(doc, *page_id, record))
+                .collect();
+            let (deferred, dropped) = take_deferred(&mut deferred_left, deferred);
+            deferred_dropped += dropped;
 
             let mut lost = Vec::new();
             report.removed_annotations +=
@@ -531,6 +551,20 @@ impl PdfRedactor {
                 mirrors,
                 deferred,
             });
+        }
+
+        if deferred_dropped > 0 {
+            push_warning(
+                &mut report,
+                format!(
+                    "Dieses Dokument stellt mehr als {MAX_DEFERRED_MIRRORS} Textspiegel \
+                     über Form-XObjects zurück; {deferred_dropped} davon wurden nicht mehr \
+                     mitgeführt. Ob eine Schwärzung sie berührt, entscheidet sich erst \
+                     nach dem Neuschreiben der Formulare — für diese Abschnitte wurde die \
+                     Frage nicht mehr gestellt. Verliert eines der Formulare darunter \
+                     Zeichen, bleibt der Textspiegel darüber stehen."
+                ),
+            );
         }
 
         // Form-XObjects werden einmalig neu geschrieben — auch die, in denen
@@ -601,14 +635,17 @@ impl PdfRedactor {
                 mut mirrors,
                 deferred,
             } = pending;
-            let mut late = mirrors_to_clear(
-                doc,
-                page_id,
-                &deferred,
-                StreamKey::Page,
-                &plans,
-                &form_plans,
-            );
+            // Die Formularpläne sind jetzt vollständig; die Abschnitte tragen
+            // ihre Antwort fertig bei sich (siehe [`DeferredMirror`]). Die
+            // eigenen Textoperationen der Seite werden **nicht** noch einmal
+            // befragt: über sie ist oben entschieden worden, und `plans` ist
+            // seither unverändert.
+            let mut late = MirrorFixes::default();
+            for open in deferred {
+                if open.touched(&form_plans) {
+                    open.fix.apply(&mut late);
+                }
+            }
             mirrors.append(&mut late);
             for warning in late.warnings {
                 push_warning(&mut report, warning);
@@ -1119,6 +1156,89 @@ impl MirrorFixes {
     }
 }
 
+/// Wie viele zurückgestellte Textspiegel ein **Dokument** insgesamt mitführen
+/// darf ([`PendingPage::deferred`]).
+///
+/// Die Decken des Seiten-Scans gelten je Seite, und das ist dort richtig: eine
+/// Warnung über eine Seite soll nicht davon abhängen, was auf ihren Nachbarn
+/// steht. Was der Redaktor **zwischen** Seiten- und Formularschleife festhält,
+/// ist aber dokumentweit, und die alte Begründung („die Kosten bleiben
+/// gedeckelt, weil jede Seite ihren eigenen Inhalt mitbringen muss“) stimmte
+/// nicht: `/Contents` darf auf denselben Strom zeigen wie die Nachbarseite.
+/// Gemessen (Debug, eigener Prozess, `zg_r1_decke::mess_seiten_mal_paare`):
+/// 224 752 Byte, 1 000 Seiten, **ein** Strom, je 99 900 Spiegel-Paare —
+/// Redaktor 105 s und **6 439 MB**, ohne Schwärzung, ohne Warnung.
+///
+/// Zwei Dinge stehen dagegen. Erstens hält [`to_deferred`] nur noch das, was
+/// die späte Frage wirklich braucht: die **Objekt-Ids** der Formulare, einmal
+/// je Formular statt einmal je Platzierung, und ohne deren Pfade — das allein
+/// nimmt dem Fall oben den Faktor. Zweitens diese Decke: sie zählt die
+/// zurückgestellten Abschnitte des ganzen Dokuments. 100 000 davon wiegen nach
+/// derselben Messung rund 25 MB. Wird sie erreicht, wird nicht mehr
+/// zurückgestellt — und **gesagt**, dass für diese Abschnitte die Frage
+/// „berührt eine Schwärzung das Formular darunter?“ nicht mehr gestellt wurde.
+const MAX_DEFERRED_MIRRORS: usize = 100_000;
+
+/// Ein Abschnitt, dessen Spiegel erst nach der Formularschleife entschieden
+/// wird — mit genau dem, was diese Entscheidung noch braucht.
+///
+/// Gebraucht wird zweierlei: **welche Formulare** im Geltungsbereich stehen,
+/// und was zu tun ist, falls eines davon Zeichen verliert. Das Zweite steht
+/// hier **fertig entschieden** ([`MirrorFix`]) und nicht mehr als
+/// Eigenschaftsliste. Nicht mitgeführt werden deshalb
+///
+/// * die **Eigenschaftsliste** selbst: sie trägt den Spiegeltext, und der ist
+///   so lang, wie die Datei ihn macht. Je Seite eine Kopie davon war der
+///   Speicher aus Befund R1-4 (gemessen: 1 000 Seiten an **einem** Strom,
+///   3 320 MB allein für die Listen);
+/// * die **Pfade** der Platzierungen: gefragt wird nur nach der Objekt-Id,
+///   und dieselbe Id steht unter einem Spiegel oft tausendfach. Je Pfad hing
+///   daran ein eigener `Vec` auf dem Haufen;
+/// * die eigenen **Textoperationen** (`shows`): über sie ist beim Lesen der
+///   Seite bereits entschieden worden. Verliert eine von ihnen Zeichen, hat
+///   [`mirrors_to_clear`] den Abschnitt schon erledigt, und
+///   [`MirrorFixes::covers`] nimmt ihn aus der Liste; eine Seite ohne
+///   Schwärzung hat gar keine Pläne, gegen die zu prüfen wäre.
+#[derive(Debug)]
+struct DeferredMirror {
+    /// Die Formulare im Geltungsbereich, **je Formular einmal**.
+    forms: Vec<ObjectId>,
+    fix: MirrorFix,
+}
+
+impl DeferredMirror {
+    fn new(doc: &Document, owner: ObjectId, record: &MarkedTextRecord) -> Self {
+        // Über eine Menge und nicht über `Vec::dedup`: das kürzt zwar die
+        // Länge, behält aber die **Kapazität** der langen Liste.
+        let ids: BTreeSet<ObjectId> = record.forms.iter().map(|(_, id)| *id).collect();
+        Self {
+            forms: ids.into_iter().collect(),
+            fix: mirror_fix(doc, owner, record),
+        }
+    }
+
+    /// Verliert eines der Formulare im Geltungsbereich Zeichen?
+    fn touched(&self, form_plans: &BTreeMap<ObjectId, BTreeMap<usize, Plan>>) -> bool {
+        self.forms.iter().any(|form| {
+            form_plans
+                .get(form)
+                .is_some_and(|plans| plans.values().any(|plan| plan.hidden_count() > 0))
+        })
+    }
+}
+
+/// Bucht die zurückgestellten Abschnitte einer Seite auf das dokumentweite
+/// Konto und liefert, was mitgeführt wird und was dabei wegfiel.
+fn take_deferred(
+    left: &mut usize,
+    mut deferred: Vec<DeferredMirror>,
+) -> (Vec<DeferredMirror>, usize) {
+    let dropped = deferred.len().saturating_sub(*left);
+    deferred.truncate(*left);
+    *left -= deferred.len();
+    (deferred, dropped)
+}
+
 /// Eine Seite, die neu zu schreiben ist — **nach** der Formularschleife.
 ///
 /// Ein Spiegel im Seitenstrom über einem Formular ist erst entscheidbar, wenn
@@ -1143,7 +1263,7 @@ struct PendingPage {
     mirrors: MirrorFixes,
     /// Abschnitte über Formularen, die beim Lesen der Seite noch nicht berührt
     /// waren — nach der Formularschleife neu befragt.
-    deferred: Vec<MarkedTextRecord>,
+    deferred: Vec<DeferredMirror>,
 }
 
 /// Verliert eines der Formulare im Geltungsbereich dieses Abschnitts Zeichen?
@@ -1211,44 +1331,95 @@ fn mirrors_to_clear(
         if !touched {
             continue;
         }
-        match record.property_id {
-            // Eigenes Objekt: dort bereinigen. Wird dieselbe Liste von einem
-            // zweiten, unberührten Abschnitt benutzt, verliert auch der seinen
-            // Spiegel — eine geteilte Liste ist ein geteilter Spiegel, und zu
-            // viel entfernt ist hier die sichere Richtung.
-            Some(id) => {
+        mirror_fix(doc, owner, record).apply(&mut fixes);
+    }
+    fixes
+}
+
+/// Was an **einem** berührten Abschnitt zu tun ist — fertig entschieden, ohne
+/// die Eigenschaftsliste selbst festzuhalten.
+///
+/// Getrennt von [`mirrors_to_clear`], weil dieselbe Entscheidung an zwei
+/// Zeitpunkten fällt: beim Lesen der Seite, und für die zurückgestellten
+/// Abschnitte nach der Formularschleife ([`DeferredMirror`]). Der zweite
+/// Zeitpunkt darf die Liste nicht mehr vorliegen haben — sie trägt den
+/// Spiegeltext, und den je Seite mitzuschleppen war der Speicher aus Befund
+/// R1-4.
+#[derive(Debug)]
+enum MirrorFix {
+    /// Eigenes Objekt: dort bereinigen. Wird dieselbe Liste von einem
+    /// zweiten, unberührten Abschnitt benutzt, verliert auch der seinen
+    /// Spiegel — eine geteilte Liste ist ein geteilter Spiegel, und zu viel
+    /// entfernt ist hier die sichere Richtung.
+    Object(ObjectId),
+    /// Inline in den Strom zurückschreiben — dazu die Fundorte im
+    /// Ressourcenverzeichnis, an denen dieselbe Liste sonst stehen bliebe.
+    Inline {
+        op_index: usize,
+        cleaned: Dictionary,
+        homes: Vec<MirrorHome>,
+        warning: Option<String>,
+    },
+}
+
+impl MirrorFix {
+    fn apply(self, fixes: &mut MirrorFixes) {
+        match self {
+            MirrorFix::Object(id) => {
                 fixes.objects.insert(id);
             }
-            None => {
-                // Eine Liste, die über `/Resources /Properties` benannt war,
-                // steht **auch** im Verzeichnis. Die Operation neu zu
-                // schreiben nimmt sie dort nicht mit: bis Fix-Runde 6 fand
-                // `leaks` den Klartext danach unverändert im
-                // Ressourcenobjekt, ohne Warnung und mit Rückgabewert 0
-                // (Register #34, Befund Q3-5). Gesucht wird der Fundort in
-                // allen vier Wegen gleich — Seite, Formular, geerbt vom
-                // Seitenbaum, geteiltes `/Properties`-Objekt.
-                if let Some(name) = &record.property_name {
-                    if let Some(home) = property_list_home(doc, owner, name) {
-                        fixes.homes.insert(home);
-                    }
+            MirrorFix::Inline {
+                op_index,
+                cleaned,
+                homes,
+                warning,
+            } => {
+                fixes.homes.extend(homes);
+                if let Some(warning) = warning {
+                    fixes.warnings.push(warning);
                 }
-                let (cleaned, dropped) = clean_property_list(&record.properties);
-                if !dropped.is_empty() {
-                    fixes.warnings.push(format!(
-                        "Die Eigenschaftsliste einer Marked-Content-Auszeichnung enthielt \
-                         neben dem Textspiegel indirekte Verweise ({}). Eine Liste, die \
-                         inline im Strom steht, darf keine enthalten (PDF 32000-1, 14.6.2); \
-                         sie sind deshalb mit entfallen. Bitte prüfen, ob die Datei dadurch \
-                         anders aussieht.",
-                        dropped.join(", ")
-                    ));
-                }
-                fixes.inline.insert(record.op_index, cleaned);
+                fixes.inline.insert(op_index, cleaned);
             }
         }
     }
-    fixes
+}
+
+/// Entscheidet den Fundort eines berührten Abschnitts.
+fn mirror_fix(doc: &Document, owner: ObjectId, record: &MarkedTextRecord) -> MirrorFix {
+    if let Some(id) = record.property_id {
+        return MirrorFix::Object(id);
+    }
+    // Eine Liste, die über `/Resources /Properties` benannt war, steht
+    // **auch** im Verzeichnis. Die Operation neu zu schreiben nimmt sie dort
+    // nicht mit: bis Fix-Runde 6 fand `leaks` den Klartext danach unverändert
+    // im Ressourcenobjekt, ohne Warnung und mit Rückgabewert 0 (Register #34,
+    // Befund Q3-5). Gesucht wird der Fundort in allen vier Wegen gleich —
+    // Seite, Formular, geerbt vom Seitenbaum, geteiltes `/Properties`-Objekt.
+    let homes = match &record.property_name {
+        // Gesucht wird ab dem Eigentümer der Ressourcen, die beim Lesen
+        // **galten** — bei einem Form-XObject ohne eigenes `/Resources` ist
+        // das die platzierende Seite, nicht das Formular (PDF 32000-1,
+        // 8.10.1; Befund R1-1). `owner` bleibt nur der Rückfall für
+        // Datensätze ohne Seitenkontext (`crate::content::interpret`).
+        Some(name) => property_list_homes(doc, record.property_owner.unwrap_or(owner), name),
+        None => Vec::new(),
+    };
+    let (cleaned, dropped) = clean_property_list(&record.properties);
+    let warning = (!dropped.is_empty()).then(|| {
+        format!(
+            "Die Eigenschaftsliste einer Marked-Content-Auszeichnung enthielt neben dem \
+             Textspiegel indirekte Verweise ({}). Eine Liste, die inline im Strom steht, \
+             darf keine enthalten (PDF 32000-1, 14.6.2); sie sind deshalb mit entfallen. \
+             Bitte prüfen, ob die Datei dadurch anders aussieht.",
+            dropped.join(", ")
+        )
+    });
+    MirrorFix::Inline {
+        op_index: record.op_index,
+        cleaned,
+        homes,
+        warning,
+    }
 }
 
 /// Entfernt die Textschlüssel aus einer Eigenschaftsliste.

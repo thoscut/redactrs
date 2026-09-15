@@ -326,6 +326,14 @@ fn q2_unchecked_kennt_mehr_gruende_als_die_doku_aufzaehlt() {
 /// Wert ist der Pfad der zu messenden Datei.
 const MESS_KIND: &str = "Q2_MESS_SPEICHER_KIND";
 
+/// Byte in MB — 1024² Byte, wie überall in diesem Projekt (`Limits`,
+/// `--max-decompressed-mb`, die Meldungen des Laders). Die Messausgabe hier
+/// rechnete bis Fix-Runde 6 mit 1 000 000 und fiel dadurch um 4,9 % zu hoch
+/// aus: die gemessenen 205 / 138 MB sind 196 / 135 MB.
+fn mb(bytes: u64) -> u64 {
+    bytes / (1024 * 1024)
+}
+
 /// Der Spitzenwert des Prozesses in Byte — `VmHWM` aus `/proc/self/status`.
 /// `None` auf Zielen ohne `/proc`; dort misst diese Messung nichts und sagt
 /// es (wie in `zd_orakel_budget.rs`).
@@ -416,9 +424,9 @@ fn q2_mess_speicher_ohne_klon() {
             std::path::Path::new(&pfad)
                 .file_stem()
                 .map_or_else(|| "?".into(), |n| n.to_string_lossy()),
-            dateigroesse / 1_000_000,
+            mb(dateigroesse as u64),
             match peak {
-                Some(b) => format!("{} MB", b / 1_000_000),
+                Some(b) => format!("{} MB", mb(b)),
                 None => "ohne Speichermessung (kein /proc)".to_string(),
             },
             check.unchecked.len()

@@ -238,6 +238,22 @@ pub struct LeakCheck {
     /// Was nicht durchsucht wurde, je Stelle ein Satz (Objekt, Grund) — die
     /// fünf möglichen Gründe stehen oben am Typ.
     pub unchecked: Vec<String>,
+    /// Wie viele **Stellen** ungeprüft blieben.
+    ///
+    /// `unchecked.len()` ist etwas anderes: die Zahl der **Zeilen**. Über
+    /// [`MAX_UNCHECKED`] hinaus fasst eine Summenzeile viele Stellen zu einer
+    /// Zeile zusammen, und dann ist die Zeilenzahl **kleiner** als die Zahl
+    /// der Stellen: 61 nicht entpackte Ströme stehen als 50 Zeilen + eine
+    /// Summenzeile („… und 11 weitere“) + die Zeile über Sicht 7 = 52 Zeilen.
+    /// Wer „52 Stelle(n) nicht geprüft“ darunter schreibt, sagt eine kleinere
+    /// Zahl als die Liste darüber (Befund R2-B).
+    ///
+    /// Gezählt wird hier jede Stelle einzeln, auch die von der Decke
+    /// verschwiegene; die beiden Zeilen, die keine einzelne Stelle nennen
+    /// („Sicht 7 nicht gelaufen“, „Objektgraph nicht durchsucht“) zählen als
+    /// je eine. `unchecked_places == 0` heißt deshalb genau dasselbe wie
+    /// `unchecked.is_empty()`.
+    pub unchecked_places: usize,
 }
 
 /// [`leaks_many`] mit einem Budget für entpackte Bytes.
@@ -303,12 +319,15 @@ pub fn leaks_many_within(
             findings,
             literal,
             unchecked: Vec::new(),
+            unchecked_places: 0,
         };
     }
 
     scan_raw_file(pdf_bytes, &mut probe);
     let mut raw_budget = Budget::new(max_decompressed_bytes);
     scan_raw_streams(pdf_bytes, &mut probe, &mut raw_budget);
+    // Stellen zählen, bevor die Decke aus vielen Stellen eine Zeile macht.
+    let mut places = raw_budget.places();
     let mut unchecked = raw_budget.into_unchecked();
 
     // Lässt sich die Datei nicht laden, bleiben die Rohsuchen die Messung —
@@ -329,10 +348,14 @@ pub fn leaks_many_within(
             let mut budget = Budget::new(max_decompressed_bytes);
             scan_object_graph(&doc, &mut probe, &mut budget);
             let skipped = budget.skipped;
+            places += budget.places();
             unchecked.extend(budget.into_unchecked());
             if skipped == 0 {
                 scan_decoded_text(&doc, &mut probe);
             } else {
+                // Eine ganze Sicht, die nicht lief: eine Stelle mehr, auch
+                // wenn sie kein einzelnes Objekt nennt.
+                places += 1;
                 unchecked.push(format!(
                     "Sicht 7 (Schriftdekoder) nicht gelaufen: {skipped} Strom/Ströme \
                      wurden nicht entpackt, und der Schriftdekoder entpackt ohne \
@@ -340,9 +363,12 @@ pub fn leaks_many_within(
                 ));
             }
         }
-        Err(reason) => unchecked.push(format!(
-            "Objektgraph (Sichten 3–7) nicht durchsucht — {reason}"
-        )),
+        Err(reason) => {
+            places += 1;
+            unchecked.push(format!(
+                "Objektgraph (Sichten 3–7) nicht durchsucht — {reason}"
+            ));
+        }
     }
 
     let (findings, literal) = probe.into_hits();
@@ -350,6 +376,7 @@ pub fn leaks_many_within(
         findings,
         literal,
         unchecked,
+        unchecked_places: places,
     }
 }
 
@@ -403,6 +430,15 @@ impl Budget {
                 self.remaining, self.total
             ));
         }
+    }
+
+    /// Wie viele **Stellen** diese Sicht offen ließ — auch die, die hinter
+    /// der Decke [`MAX_UNCHECKED`] in einer Summenzeile verschwinden.
+    ///
+    /// Das ist die Zahl für [`LeakCheck::unchecked_places`]; die Zahl der
+    /// Zeilen (`unchecked.len()`) ist bei voller Decke **kleiner**.
+    fn places(&self) -> usize {
+        self.skipped + self.noted
     }
 
     /// Merkt eine Stelle, die aus einem anderen Grund als dem Budget offen
@@ -1087,11 +1123,14 @@ struct Decoded {
     /// Der Grund für eine Zeile in [`LeakCheck::unchecked`] — ohne den
     /// Objektpfad, den der Aufrufer davorsetzt.
     ///
-    /// Gesetzt, sobald die Kette an einem Filternamen stehen blieb, den
-    /// dieses Programm nicht kennt — **an welcher Stelle auch immer**. Nicht
-    /// gesetzt bei einem Bildfilter ([`filters::is_image_filter`]): der ist
-    /// ein im Modulkopf benannter blinder Fleck, und eine Meldung darüber
-    /// stünde an jeder zweiten Datei mit einem Foto.
+    /// Gesetzt, sobald die Kette an einem Glied stehen blieb, das dieses
+    /// Programm nicht anwenden kann — **an welcher Stelle auch immer**: ein
+    /// Filtername, den es nicht kennt, oder ein Glied ganz ohne Namen
+    /// (`[/LZWDecode null]`, ein Verweis ins Leere, eine Zahl, eine
+    /// Zeichenkette — siehe [`filters::filter_names`]). Nicht gesetzt bei
+    /// einem Bildfilter ([`filters::is_image_filter`]): der ist ein im
+    /// Modulkopf benannter blinder Fleck, und eine Meldung darüber stünde an
+    /// jeder zweiten Datei mit einem Foto.
     unchecked: Option<String>,
 }
 
@@ -1130,17 +1169,51 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
     // Ob er der erste ist oder der letzte, ändert nichts daran, was hinter
     // ihm liegt: ungelesen. Nur **welcher** Filter es ist, entscheidet, ob
     // das eine Meldung wert ist.
-    let stopped = (applied < total).then(|| String::from_utf8_lossy(&names[applied]).into_owned());
-    let unchecked = match &stopped {
-        Some(rest) if !filters::is_image_filter(&names[applied]) && applied == 0 => Some(format!(
-            "gar nicht dekodiert — /{rest} ist hier kein bekannter Filter (Glied 1 \
-             von {total}); gelesen sind nur die rohen, gepackten Bytes"
+    // Der Grund für eine Meldung — `None` heißt: die Kette lief ganz durch,
+    // oder sie blieb an etwas stehen, worüber zu schweigen richtig ist.
+    let grund = (applied < total).then(|| {
+        let name = &names[applied];
+        // Ein leeres Glied ist keines mit unbekanntem Namen, sondern eines
+        // ganz **ohne** Namen: `/Filter [/LZWDecode null]`, ein Verweis ins
+        // Leere, eine Zahl, eine Zeichenkette (siehe `filters::filter_names`).
+        if name.is_empty() {
+            return Some(
+                "der Wert an dieser Stelle ist kein Filtername (Verweis ins Leere, \
+                 null, Zahl oder Zeichenkette)"
+                    .to_string(),
+            );
+        }
+        if filters::is_image_filter(name) {
+            // Der benannte blinde Fleck — aber nur als **letztes** Glied.
+            // Die Ausgabe eines Bildfilters sind Abtastwerte; kein Erzeuger
+            // hängt dahinter noch einen Filter (PDF 32000-1, 7.4.1: die
+            // Reihenfolge im Array ist die Dekodierreihenfolge). Steht doch
+            // eines dahinter, liegt dort kein Bild, sondern ein Glied, das
+            // niemand angewandt hat — und darüber zu schweigen, verkauft
+            // einen Bildfilternamen als meldungsfreie Zone (Befund R2-A).
+            return (applied + 1 < total).then(|| {
+                format!(
+                    "/{} ist ein Bildfilter und wird nicht dekodiert, aber die Kette \
+                     geht dahinter weiter",
+                    String::from_utf8_lossy(name)
+                )
+            });
+        }
+        Some(format!(
+            "/{} ist hier kein bekannter Filter",
+            String::from_utf8_lossy(name)
+        ))
+    });
+    let unchecked = match grund.flatten() {
+        Some(grund) if applied == 0 => Some(format!(
+            "gar nicht dekodiert — {grund} (Glied 1 von {total}); gelesen sind \
+             nur die rohen, gepackten Bytes"
         )),
-        Some(rest) if !filters::is_image_filter(&names[applied]) => Some(format!(
-            "nur bis Filter {applied} von {total} dekodiert — /{rest} ist hier kein \
-             bekannter Filter; was dahinter steht, hat keine Sicht gelesen"
+        Some(grund) => Some(format!(
+            "nur bis Filter {applied} von {total} dekodiert — {grund}; was dahinter \
+             steht, hat keine Sicht gelesen"
         )),
-        _ => None,
+        None => None,
     };
 
     let chain = |names: &[Vec<u8>]| {
@@ -1150,17 +1223,27 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
             .collect::<Vec<_>>()
             .join("+")
     };
-    let data = match &stopped {
+    let data = match applied < total {
         // Nichts entpackt: die Rohsicht ist die einzige Sicht.
         _ if applied == 0 => None,
-        Some(rest) => Some((
-            format!(
-                "dekodiert: {} — bis Filter {applied} von {total}, danach /{rest} unbekannt",
-                chain(&names[..applied])
-            ),
-            data,
-        )),
-        None => Some((format!("dekodiert: {}", chain(&names)), data)),
+        true => {
+            let rest = if names[applied].is_empty() {
+                "ein Glied ohne Filternamen".to_string()
+            } else {
+                format!(
+                    "/{} unbekannt",
+                    String::from_utf8_lossy(&names[applied])
+                )
+            };
+            Some((
+                format!(
+                    "dekodiert: {} — bis Filter {applied} von {total}, danach {rest}",
+                    chain(&names[..applied])
+                ),
+                data,
+            ))
+        }
+        false => Some((format!("dekodiert: {}", chain(&names)), data)),
     };
     Ok(Decoded { data, unchecked })
 }

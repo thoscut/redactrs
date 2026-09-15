@@ -157,9 +157,10 @@ fn decode_chain(
     stream: &Stream,
     limit: usize,
 ) -> Result<(Vec<u8>, usize, usize), Oversize> {
-    // Ohne `/Filter` oder mit einem unbrauchbaren Wert liest `lopdf` den
-    // Strom als „nicht gefiltert“, und die Rohbytes sind dann das Einzige,
-    // was es zu lesen gibt.
+    // Ohne `/Filter` (oder mit dem Wert `null`) ist der Strom nicht
+    // gefiltert, und die Rohbytes sind das Einzige, was es zu lesen gibt.
+    // Ein Wert, der da steht und **kein** Name ist, ist etwas anderes:
+    // `filter_names` gibt dafür ein namenloses Glied zurück.
     let Some(filters) = filter_names(doc, &stream.dict) else {
         return Ok((stream.content.clone(), 0, 0));
     };
@@ -199,23 +200,67 @@ pub(crate) fn is_image_filter(name: &[u8]) -> bool {
 /// Die Filterkette aus `/Filter` — aufgelöst, in Dekodierreihenfolge.
 ///
 /// Wie `lopdf::Stream::filters`, nur dass der Wert und jedes Element einer
-/// Liste ein Verweis sein dürfen (`/Filter 5 0 R`, Befund G1-C1). `None`
-/// heißt „kein brauchbarer Filter“: Schlüssel fehlt, Verweis ins Leere, weder
-/// Name noch Liste von Namen — für `lopdf` ist das alles „ungefiltert“.
+/// Liste ein Verweis sein dürfen (`/Filter 5 0 R`, Befund G1-C1).
+///
+/// `None` heißt **kein Filter**: der Schlüssel fehlt, oder sein Wert ist
+/// `null` — nach PDF 32000-1, 7.3.9 ist ein Eintrag mit dem Wert `null` wie
+/// ein fehlender. Die Rohbytes sind dann der ganze Inhalt, und jeder Leser
+/// sieht dasselbe.
+///
+/// # Das namenlose Glied
+///
+/// Ein Glied, das sich **nicht** zu einem Namen auflösen lässt — ein Verweis
+/// ins Leere (`[/LZWDecode 999 0 R]`), ein ausgeschriebenes `null`, eine
+/// Zahl, eine Zeichenkette —, steht als **leerer** Name in der Kette und
+/// bleibt damit ein Glied. Bis Fix-Runde 6 sammelte diese Funktion die Liste
+/// mit `collect::<Option<Vec<_>>>()`: ein solches Glied verwarf die **ganze**
+/// Kette, und der Aufrufer sah denselben Zustand wie bei einem Strom ganz
+/// ohne `/Filter` — kein Filter, nichts zu entpacken, nichts zu melden.
+/// `/Filter [/LZWDecode null]` über LZW-gepacktem Klartext kam so als „nicht
+/// gefunden“ mit Rückgabewert 0 zurück, `/Filter [/LZWDecode /R2Fremd]` mit
+/// Rückgabewert 3 (Befund R2-C, `tests/zg_r2_unbrauchbarer_filterwert.rs`).
+///
+/// Ein leerer Name kann kein bekannter Filter sein ([`decode_one`] kennt ihn
+/// nicht, [`is_image_filter`] auch nicht): die Kette bleibt dort stehen wie
+/// an jedem anderen unbekannten Namen. Der **strenge** Leser gibt sie damit
+/// auf (`Ok(None)` — er täte es auch vorher, nur mit den Rohbytes als
+/// vermeintlichem Klartext), der **nachsichtige** dekodiert bis dorthin und
+/// sagt, woran er hängen blieb.
+///
+/// Warum der Verweis ins Leere **nicht** wie `null` behandelt wird, obwohl
+/// 7.3.9 beide gleichsetzt: was an `999 0 R` steht, ist aus dieser Datei
+/// nicht zu erfahren. Ein Leser mit einer anderen Querverweistabelle — eine
+/// ältere Revision, eine Wiederherstellung — kann dort einen Filternamen
+/// finden. „Ich weiß es nicht“ ist etwas anderes als „da ist nichts“.
 pub(crate) fn filter_names(doc: &Document, dict: &Dictionary) -> Option<Vec<Vec<u8>>> {
-    let (_, filter) = doc.dereference(dict.get(b"Filter").ok()?).ok()?;
+    /// Ein Glied, das kein Name ist. Ein leerer Name ist nie ein bekannter
+    /// Filter, und `/` (der leere Name) als Filter wäre es ebenso wenig.
+    const NAMENLOS: Vec<u8> = Vec::new();
+
+    let value = dict.get(b"Filter").ok()?;
+    let Ok((_, filter)) = doc.dereference(value) else {
+        // Verweis ins Leere (oder im Kreis): ein Glied, dessen Name hier
+        // niemand kennt.
+        return Some(vec![NAMENLOS]);
+    };
     match filter {
+        // 7.3.9: ein Eintrag mit dem Wert `null` ist wie ein fehlender.
+        Object::Null => None,
         Object::Name(name) => Some(vec![name.clone()]),
-        Object::Array(items) => items
-            .iter()
-            .map(|item| {
-                doc.dereference(item)
-                    .ok()
-                    .and_then(|(_, o)| o.as_name().ok())
-                    .map(<[u8]>::to_vec)
-            })
-            .collect(),
-        _ => None,
+        Object::Array(items) => Some(
+            items
+                .iter()
+                .map(|item| {
+                    doc.dereference(item)
+                        .ok()
+                        .and_then(|(_, o)| o.as_name().ok())
+                        .map_or(NAMENLOS, <[u8]>::to_vec)
+                })
+                .collect(),
+        ),
+        // Zahl, Zeichenkette, Dictionary, Strom: ein Wert steht da, ein
+        // Filtername ist es nicht.
+        _ => Some(vec![NAMENLOS]),
     }
 }
 
@@ -242,7 +287,8 @@ pub fn page_content(doc: &Document, page_id: ObjectId) -> Vec<u8> {
 }
 
 /// Ein einzelner Filter mit seinem `/DecodeParms`-Eintrag. `Ok(None)` für
-/// alles, was hier nicht hingehört (Bildfilter, Unbekanntes).
+/// alles, was hier nicht hingehört (Bildfilter, Unbekanntes, und das
+/// namenlose Glied aus [`filter_names`] — ein leerer Name trifft keinen Arm).
 fn decode_one(
     filter: &[u8],
     data: &[u8],
@@ -822,6 +868,10 @@ mod tests {
 
     /// `/Filter 5 0 R` und `/Filter [6 0 R]`: der Filtername als Verweis
     /// (Befund G1-C1). `lopdf` liest das als „ungefiltert“.
+    ///
+    /// Dazu die beiden Fälle, in denen sich **nichts** auflösen lässt, und
+    /// ihr Unterschied (Befund R2-C): ein Verweis ins Leere ist ein Glied
+    /// ohne Namen, `null` ist gar kein Filter.
     #[test]
     fn filter_als_verweis_wird_aufgeloest() {
         let mut doc = doc();
@@ -837,8 +887,30 @@ mod tests {
             deflate(PLAIN),
         );
         assert_eq!(decoded_content(&doc, &stream).as_deref(), Some(PLAIN));
-        // Verweis ins Leere: wie bei `lopdf` „ungefiltert“ — die Rohbytes.
+
+        // Verweis ins Leere: ein Glied, dessen Name hier niemand kennt (seit
+        // Fix-Runde 6, Befund R2-C). Der **strenge** Leser gibt die Kette auf,
+        // statt die gepackten Bytes für Klartext zu halten — das tat er
+        // vorher, und `scan_page` lehnte die Seite dann ohne Grund ab.
         let stream = with_filter(Object::Reference((999, 0)), deflate(PLAIN));
+        assert_eq!(decoded_content(&doc, &stream), None);
+        assert_eq!(
+            filter_names(&doc, &stream.dict),
+            Some(vec![Vec::new()]),
+            "ein namenloses Glied, keine leere Kette"
+        );
+        // Der **nachsichtige** Leser sagt, dass er gar nicht erst anfangen
+        // konnte: kein Filter angewandt, ein Glied insgesamt.
+        assert_eq!(
+            decoded_prefix_within(&doc, &stream, usize::MAX),
+            Ok((Vec::new(), 0))
+        );
+
+        // `/Filter null` dagegen ist **kein** Filter (PDF 32000-1, 7.3.9: ein
+        // Eintrag mit dem Wert `null` ist wie ein fehlender) — die Rohbytes
+        // sind der ganze Inhalt, und jeder Leser sieht dasselbe.
+        let stream = with_filter(Object::Null, deflate(PLAIN));
+        assert_eq!(filter_names(&doc, &stream.dict), None);
         assert_eq!(decoded_content(&doc, &stream), Some(deflate(PLAIN)));
     }
 

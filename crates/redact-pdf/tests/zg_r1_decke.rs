@@ -189,6 +189,30 @@ fn decken_warnungen(warnings: &[String]) -> Vec<&String> {
         .collect()
 }
 
+/// Nur die Decke über `Spiegel × Formularplatzierung`.
+fn formular_warnungen(warnings: &[String]) -> Vec<&String> {
+    decken_warnungen(warnings)
+        .into_iter()
+        .filter(|w| w.contains("Formularplatzierung"))
+        .collect()
+}
+
+/// Nur die Decke über `Spiegel × Textoperation`.
+fn text_warnungen(warnings: &[String]) -> Vec<&String> {
+    decken_warnungen(warnings)
+        .into_iter()
+        .filter(|w| w.contains("Textoperation"))
+        .collect()
+}
+
+/// Die dokumentweite Decke des Redaktors (`MAX_DEFERRED_MIRRORS`).
+fn zurueckgestellt_warnungen(warnings: &[String]) -> Vec<&String> {
+    warnings
+        .iter()
+        .filter(|w| w.contains("Textspiegel über Form-XObjects zurück"))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Material
 // ---------------------------------------------------------------------------
@@ -349,18 +373,24 @@ fn aufklappen_eine_ueber_der_decke_sagt_es() {
     assert_eq!(hits.len(), 1, "{:?}", scan.warnings);
 }
 
-/// **Befund R1-4 (Summe über das Dokument).** Die Decke gilt je Seiten-Scan,
-/// und die Begründung im Kommentar lautet: „Die Kosten bleiben trotzdem
-/// gedeckelt, weil jede Seite ihren eigenen Inhalt mitbringen muss.“ Eine
-/// Seite muss aber gar nichts mitbringen: `/Contents` darf auf **denselben**
-/// Strom zeigen wie die Nachbarseite. Zwei Seiten, ein Strom von 9 kB, und
-/// jede zahlt die volle Decke.
+/// **Befund R1-4, erste Hälfte: die Decke des Seiten-Scans bleibt je Seite.**
+/// Sie gilt je Seiten-Scan, und die alte Begründung im Kommentar („die Kosten
+/// bleiben gedeckelt, weil jede Seite ihren eigenen Inhalt mitbringen muss“)
+/// stimmte nicht: `/Contents` darf auf **denselben** Strom zeigen wie die
+/// Nachbarseite. Zwei Seiten, ein Strom von 9 kB, und jede zahlt die volle
+/// Decke — das ist hier festgehalten und bleibt so: `scan_page` ist öffentlich
+/// und seitenweise, und eine Warnung über *diese* Seite darf nicht davon
+/// abhängen, was auf der Nachbarseite steht.
 ///
-/// Gemessen mit 1 000 Seiten (Datei 224 752 B, Spiegel deckungsgleich, also
-/// ohne jede Warnung): Extraktor 199 s / 89 MB, Redaktor 116 s / **6 439 MB**
-/// (`mess_seiten_mal_paare`, `R1_PAGES=1000 R1_B=100 R1_D=999`). Der Speicher
-/// steht in `redact::PendingPage::deferred`: jede Seite hält ihre Spiegel mit
-/// allen Paaren bis zum Ende der Formularschleife fest.
+/// Was daraus wurde, entschied der **Redaktor**: er hielt die Spiegel jeder
+/// Seite mit allen Paaren bis zum Ende der Formularschleife fest. Gemessen mit
+/// 1 000 Seiten (Datei 224 752 B, Spiegel deckungsgleich, also ohne jede
+/// Warnung; `mess_seiten_mal_paare`, `R1_PAGES=1000 R1_B=100 R1_D=999`,
+/// Debug, eigener Prozess): Redaktor 105 s / **6 439 MB**. Seit Fix-Runde 7
+/// hält `redact::DeferredMirror` nur noch die Objekt-Ids der Formulare und die
+/// fertige Antwort: 63 s / **37 MB**. Die zweite Hälfte — die dokumentweite
+/// Decke darüber — steht in
+/// [`genau_an_der_dokumentweiten_decke_bleibt_es_still`].
 #[test]
 fn jede_seite_zahlt_die_volle_decke_aus_einem_geteilten_strom() {
     let bytes = klammern_ueber_platzierungen(2, 100, 1_000, false);
@@ -384,19 +414,151 @@ fn jede_seite_zahlt_die_volle_decke_aus_einem_geteilten_strom() {
 // 2. Die Einheit: `Klammern × Tj` zählt nicht
 // ---------------------------------------------------------------------------
 
-/// **Befund R1-3.** 400 verschachtelte Klammern über 400 Textoperationen
-/// führen 160 000 Textzuordnungen — über der Decke, ohne Decke, ohne Wort.
-/// Dieselbe Produktstruktur wie `Klammern × Do`, nur die andere Liste.
+/// **Befund R1-3 (Sollfassung).** 400 verschachtelte Klammern über 400
+/// Textoperationen bieten 160 000 Textzuordnungen an — dieselbe
+/// Produktstruktur wie `Klammern × Do`, nur die andere Liste. Sie steht jetzt
+/// unter derselben Decke, und dass etwas wegfiel, steht da.
+///
+/// Vorher: 160 000 Zuordnungen, keine Warnung. Gemessen an 6 000 × 6 000 aus
+/// 263 kB (Debug, eigener Prozess): `scan_page` 0,72 s / 315 MB, Extraktor
+/// **31,1 s** / 316 MB, Redaktor 588 MB. Nachher: 0,45 s / 35 MB, 0,55 s /
+/// 36 MB, 36 MB.
 #[test]
-fn klammern_mal_textoperationen_kennen_keine_decke() {
+fn klammern_mal_textoperationen_stehen_unter_derselben_decke() {
     let scan = scan_first(&klammern_ueber_text(1, 400, 400, false));
     let zuordnungen = textzuordnungen(&scan);
-    assert_eq!(zuordnungen, 160_000, "{zuordnungen}");
+    assert_eq!(zuordnungen, DECKE, "{zuordnungen}");
+    let hits = text_warnungen(&scan.warnings);
+    assert_eq!(hits.len(), 1, "{:?}", scan.warnings);
     assert!(
-        decken_warnungen(&scan.warnings).is_empty(),
-        "{:?}",
+        formular_warnungen(&scan.warnings).is_empty(),
+        "die Formulardecke hat nichts verloren: {:?}",
         scan.warnings
     );
+}
+
+/// Text: 2 Klammern × 50 000 Textoperationen = genau 100 000 — nichts fällt
+/// weg, also kein Wort. Dieselbe Prüfung wie oben für die Formulardecke: eine
+/// Decke, die an der aufgehenden Zahl warnt, ist ein falscher Alarm.
+#[test]
+fn text_genau_an_der_decke_bleibt_still() {
+    let scan = scan_first(&klammern_ueber_text(1, 2, 50_000, false));
+    assert_eq!(textzuordnungen(&scan), DECKE);
+    let hits = decken_warnungen(&scan.warnings);
+    assert!(hits.is_empty(), "nichts ging verloren, trotzdem: {hits:?}");
+}
+
+/// Text: 2 × 50 001 = 100 002 — zwei Zuordnungen fallen weg, und das steht da.
+#[test]
+fn text_eine_zuordnung_ueber_der_decke_sagt_es() {
+    let scan = scan_first(&klammern_ueber_text(1, 2, 50_001, false));
+    assert_eq!(textzuordnungen(&scan), DECKE);
+    assert_eq!(text_warnungen(&scan.warnings).len(), 1, "{:?}", scan.warnings);
+}
+
+/// Die beiden Decken zehren nicht voneinander: dieselbe Seite trägt 100 000
+/// Textzuordnungen **und** 100 000 Spiegel-Formular-Paare, ohne dass eine der
+/// beiden die andere aufbraucht.
+#[test]
+fn text_und_formulare_haben_getrennte_konten() {
+    let mut m = Multi::new(1);
+    let res = m.resources_id;
+    m.add_form(res, "Fm1", &text_at(600, "A"));
+    let mut raw = String::new();
+    for i in 0..2 {
+        raw.push_str(&format!("/Span <</ActualText (A{i})>> BDC\n"));
+    }
+    raw.push_str("BT /F1 10 Tf 12 TL 72 700 Td\n");
+    raw.push_str(&"(A) '\n".repeat(50_000));
+    raw.push_str("ET\n");
+    raw.push_str(&"/Fm1 Do\n".repeat(50_000));
+    raw.push_str("EMC\nEMC\n");
+    m.set_content(raw.as_bytes());
+    let scan = scan_first(&m.finish());
+    assert_eq!(textzuordnungen(&scan), DECKE, "Textkonto");
+    assert_eq!(paare(&scan), DECKE, "Formularkonto");
+    let hits = decken_warnungen(&scan.warnings);
+    assert!(hits.is_empty(), "nichts ging verloren, trotzdem: {hits:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 2b. Die dokumentweite Decke des Redaktors
+// ---------------------------------------------------------------------------
+
+/// `redact::MAX_DEFERRED_MIRRORS`.
+const DOKUMENTDECKE: usize = 100_000;
+
+/// Schwärzt nichts und liefert die Warnungen des Redaktors.
+fn redaktor_warnungen(bytes: &[u8]) -> Vec<String> {
+    let mut doc = load_from_bytes(bytes).expect("PDF ladbar");
+    PdfRedactor::new()
+        .apply_with_report(&mut doc, &[])
+        .expect("Schwärzung")
+        .warnings
+}
+
+/// **Befund R1-4, zweite Hälfte.** Was der Redaktor zwischen Seiten- und
+/// Formularschleife festhält, ist dokumentweit und braucht eine dokumentweite
+/// Decke. Genau `MAX_DEFERRED_MIRRORS` zurückgestellte Abschnitte
+/// (1 000 Seiten × 100 Spiegel über je einer Platzierung) gehen auf — und
+/// bleiben still. Eine Decke, die an der aufgehenden Zahl warnt, ist derselbe
+/// falsche Alarm wie in Befund Q3-1b.
+#[test]
+fn genau_an_der_dokumentweiten_decke_bleibt_es_still() {
+    let bytes = klammern_ueber_platzierungen(DOKUMENTDECKE / 100, 100, 1, true);
+    let warnings = redaktor_warnungen(&bytes);
+    let hits = zurueckgestellt_warnungen(&warnings);
+    assert!(hits.is_empty(), "nichts ging verloren, trotzdem: {hits:?}");
+}
+
+/// Einer mehr — und der Redaktor sagt, wie viele Abschnitte er nicht mehr
+/// mitgeführt hat. Ohne diese Decke wuchs der Speicher linear mit
+/// Seitenzahl × Spiegeln, aus einer Datei, die dafür nichts mitbringen muss.
+#[test]
+fn ueber_der_dokumentweiten_decke_sagt_der_redaktor_es_an() {
+    let bytes = klammern_ueber_platzierungen(DOKUMENTDECKE / 100 + 1, 100, 1, true);
+    let warnings = redaktor_warnungen(&bytes);
+    let hits = zurueckgestellt_warnungen(&warnings);
+    assert_eq!(hits.len(), 1, "{warnings:?}");
+    assert!(hits[0].contains("100 davon"), "{}", hits[0]);
+}
+
+/// Die Gegenrichtung zur Sparsamkeit: ein Spiegel im Seitenstrom über einem
+/// Formular, das erst eine **spätere** Seite trifft, wird weiterhin geleert
+/// (Befund G1-A2). `DeferredMirror` hält dafür nur noch die Objekt-Id des
+/// Formulars und die fertige Antwort — nicht mehr die Eigenschaftsliste.
+#[test]
+fn ein_spiegel_ueber_einem_spaeter_geschwaerzten_formular_faellt_weiterhin() {
+    const GEHEIM: &str = "DE89 3704 0044 0532 0130 00";
+    let mut m = Multi::new(2);
+    let res = m.resources_id;
+    m.add_form(res, "Fm0", &text_at(600, GEHEIM));
+    // Seite 1: der Spiegel über der Platzierung, mehrfach gezeichnet.
+    let mut erste = String::from("/Span <</ActualText (Zahlung an DE89)>> BDC\n");
+    erste.push_str(&"/Fm0 Do\n".repeat(50));
+    erste.push_str("EMC\n");
+    m.own_content(0, erste.as_bytes());
+    // Seite 2: dasselbe Formular, ohne Spiegel — hier wird geschwärzt.
+    m.own_content(1, b"/Fm0 Do\n");
+    let bytes = m.finish();
+
+    let doc = load_from_bytes(&bytes).expect("PDF ladbar");
+    let (runs, _) = PdfExtractor::new()
+        .extract_with_warnings(&doc)
+        .expect("Extraktion");
+    let redactions: Vec<Redaction> = redactions_for(&runs, GEHEIM)
+        .into_iter()
+        .filter(|r| r.region.page == 1)
+        .collect();
+    assert!(!redactions.is_empty(), "nichts auf Seite 2 zu schwärzen");
+
+    let mut doc = load_from_bytes(&bytes).expect("PDF ladbar");
+    PdfRedactor::new()
+        .apply_with_report(&mut doc, &redactions)
+        .expect("Schwärzung");
+    let out = redact_pdf::save_to_bytes(&doc).expect("Speichern");
+    let found = redact_pdf::leaks(&out, "Zahlung an DE89");
+    assert!(found.is_empty(), "der Spiegel steht noch: {found:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -496,21 +658,21 @@ fn mess_seiten_mal_paare() {
         bytes.len(),
         hwm()
     );
-    let doc = load_from_bytes(&bytes).expect("PDF ladbar");
-    let start = std::time::Instant::now();
-    let (runs, warnings) = PdfExtractor::new()
-        .extract_with_warnings(&doc)
-        .expect("Extraktion");
-    println!(
-        "  Extraktor: {:?}, {} Läufe, {} Warnung(en) {:?}, {}",
-        start.elapsed(),
-        runs.len(),
-        warnings.len(),
-        warnings.first(),
-        hwm()
-    );
-    drop(runs);
-    drop(doc);
+    if env_usize("R1_SKIP_EXTRACT", 0) == 0 {
+        let doc = load_from_bytes(&bytes).expect("PDF ladbar");
+        let start = std::time::Instant::now();
+        let (runs, warnings) = PdfExtractor::new()
+            .extract_with_warnings(&doc)
+            .expect("Extraktion");
+        println!(
+            "  Extraktor: {:?}, {} Läufe, {} Warnung(en) {:?}, {}",
+            start.elapsed(),
+            runs.len(),
+            warnings.len(),
+            warnings.first(),
+            hwm()
+        );
+    }
     let mut doc = load_from_bytes(&bytes).expect("PDF ladbar");
     let start = std::time::Instant::now();
     let report = PdfRedactor::new()

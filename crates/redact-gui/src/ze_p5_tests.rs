@@ -237,7 +237,7 @@ fn ze_p5_2_die_andere_schreibweise_muesste_ein_leck_sein() {
     );
     assert_eq!(plan.needles, vec![SPACED.to_string()], "{plan:?}");
     assert_eq!(plan.kept_forms, vec![true], "{plan:?}");
-    assert_eq!(plan.kept, 0, "{plan:?}");
+    assert_eq!(plan.kept_literal, vec![false], "{plan:?}");
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
     assert!(check.found_leak(), "{}", check.sentence());
@@ -389,7 +389,7 @@ fn ze_p5_3_die_raender_der_normalform() {
         "{plan:?}"
     );
     assert_eq!(plan.without_text, 2, "{plan:?}");
-    assert_eq!(plan.kept, 0, "{plan:?}");
+    assert!(plan.kept_literal.iter().all(|k| !k), "{plan:?}");
 }
 
 // ===========================================================================

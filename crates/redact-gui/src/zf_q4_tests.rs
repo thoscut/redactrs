@@ -177,10 +177,10 @@ fn zf_q4_1_drei_schreibweisen_alle_rollen() {
                 );
                 let leckt = case.contains(&Role::Miss);
                 println!(
-                    "{case:?} needles={} kept_forms={:?} kept={} -> {}",
+                    "{case:?} needles={} kept_forms={:?} kept_literal={:?} -> {}",
                     plan.needles.len(),
                     plan.kept_forms,
-                    plan.kept,
+                    plan.kept_literal,
                     check.sentence()
                 );
                 if leckt && !check.found_leak() {
@@ -358,7 +358,9 @@ fn woertlich_gedeckt() -> (RedactApp, PathBuf) {
 /// **Befund Q4-1, behoben — so weit die Oberfläche kommt.** Die Schwärzung
 /// auf Seite 1 geht daneben, die IBAN steht dort weiter im Seitentext — und
 /// weil eine **abgewählte** Zeile auf Seite 2 denselben Text wörtlich trägt,
-/// wird nach wie vor nicht gesucht. Neu ist, **was die Zeile darüber sagt**:
+/// bekommt kein Urteil (seit Fix-Runde 7 wird er gesucht — und gefunden, denn
+/// die abgewählte Zeile steht da). Neu war in Fix-Runde 5, **was die Zeile
+/// darüber sagt**:
 /// nicht mehr „zählen deshalb nicht als Leck“ (ein Urteil, das niemand
 /// gefällt hat), sondern „über sie sagt diese Prüfung nichts“ — und das
 /// bleibt als Warnung stehen.
@@ -388,19 +390,21 @@ fn zf_q4_1_woertlich_gedeckt_sagt_die_zeile_es() {
     );
 
     let plan = app.state.plan_export_check(&summary);
-    assert!(plan.needles.is_empty(), "{plan:?}");
-    assert_eq!(plan.kept, 1, "{plan:?}");
+    assert_eq!(plan.kept_literal, vec![true], "{plan:?}");
     let check = plan.run(&out);
     println!("Satz: {}", check.sentence());
     println!("Warnung: {:?}", check.warning());
     assert!(!check.found_leak());
-    assert_eq!(check.checked, 0);
+    // Seit Fix-Runde 7 wird gesucht — und **gefunden**; nur zuzuordnen ist
+    // der Fund nicht (Befund R4-1).
+    assert_eq!(check.checked, 1);
     assert_eq!(check.kept, 1);
-    assert_eq!(check.unsearched, 1, "gar nicht gesucht, also kein Urteil");
+    assert_eq!(check.unsearched, 1, "gefunden, aber kein Urteil");
+    assert_eq!(check.vanished(), 0);
     let sentence = check.sentence();
     assert!(
         sentence.contains(
-            "1 Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile: \
+            "1 Text(e) stehen wörtlich auch in einer abgewählten, gelöschten oder geschützten Zeile: \
              über sie sagt diese Prüfung nichts — ob dort eine Schwärzung danebenging, \
              bleibt offen."
         ),
@@ -410,10 +414,12 @@ fn zf_q4_1_woertlich_gedeckt_sagt_die_zeile_es() {
         !sentence.contains("zählen deshalb nicht als Leck"),
         "das Urteil hat niemand gefällt: {sentence}"
     );
-    // Der Vorbehalt steht vorn — vor „Es wurde nichts gesucht.“
+    // Der Vorbehalt steht vorn — vor dem Ergebnis.
     assert!(
         sentence.find("stehen wörtlich auch").unwrap()
-            < sentence.find("Es wurde nichts gesucht.").unwrap(),
+            < sentence
+                .find("0 gesuchte Text(e) stehen nicht mehr in der Ausgabe.")
+                .unwrap(),
         "{sentence}"
     );
     let warning = check.warning().expect("das gehört in die Warnungen");

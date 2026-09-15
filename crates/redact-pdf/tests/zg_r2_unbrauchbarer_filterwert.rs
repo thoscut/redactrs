@@ -20,10 +20,12 @@
 //! Zahl, Zeichenkette), verwirft deshalb die ganze Kette **stumm** — auch
 //! wenn die anderen Glieder tadellose, bekannte Filter sind.
 //!
-//! **BEFUND_R2_C**: `/Filter [/LZWDecode null]` über LZW-gepacktem Klartext
-//! ist genau die Stelle, die Fix-Runde 6 schließen wollte — nur eine Ebene
-//! früher. Kein Fund, keine Meldung, Rückgabewert 0. Derselbe Strom unter
-//! `/Filter [/LZWDecode /R2Fremd]` wird gemeldet.
+//! **BEFUND_R2_C — geschlossen (Fix-Runde 7).** `filter_names` verwirft die
+//! Kette nicht mehr: jedes Glied, das sich nicht zu einem Namen auflösen
+//! lässt, steht als **namenloses Glied** darin, und die Kette bleibt dort
+//! stehen wie an jedem anderen unbekannten Filter. Aus
+//! `/Filter [/LZWDecode null]` wird deshalb beides — die LZW-Sicht, die den
+//! Klartext freilegt, **und** eine `unchecked`-Zeile über den Rest.
 
 mod common;
 
@@ -109,13 +111,13 @@ fn r2_lzw_gepackt_ist_der_massstab() {
 // BEFUND_R2_C
 // ---------------------------------------------------------------------------
 
-/// **BEFUND_R2_C** — ein `/Filter`-Wert, der kein Name (oder keine Liste von
-/// Namen) ist, macht das Orakel **stumm**: kein Fund, keine `unchecked`-Zeile,
-/// Rückgabewert 0.
+/// **BEFUND_R2_C, geschlossen** — ein `/Filter`-Wert, der kein Name (oder
+/// keine Liste von Namen) ist, machte das Orakel **stumm**: kein Fund, keine
+/// `unchecked`-Zeile, Rückgabewert 0.
 ///
 /// Sechs Formen, alle über derselben LZW- bzw. ASCII85-Nutzlast, die keine
 /// Rohsicht lesen kann. In fünf davon steht neben dem unbrauchbaren Glied ein
-/// **bekannter** Filter, der den Klartext freilegen würde:
+/// **bekannter** Filter, der den Klartext freilegt:
 ///
 /// * `[/LZWDecode 999 0 R]` — Verweis ins Leere (PDF 32000-1, 7.3.9: ein
 ///   Verweis auf ein nicht vorhandenes Objekt ist `null`, kein Fehler),
@@ -125,43 +127,48 @@ fn r2_lzw_gepackt_ist_der_massstab() {
 /// * `[/LZWDecode (LZWDecode)]` — Zeichenkette statt Name,
 /// * `999 0 R` allein — der Einzelwert als Verweis ins Leere.
 ///
-/// Der Unterschied zur gemeldeten Form liegt allein in der **Art** des
-/// Wertes: `[/LZWDecode /R2Fremd]` ist derselbe Strom mit einem fremden
-/// **Namen** und wird gemeldet. `filter_names` sammelt die Liste mit
-/// `collect::<Option<Vec<_>>>()`; ein Glied, das kein Name ist, verwirft
-/// deshalb die ganze Kette, und `decode_stream` sieht `names.is_empty()` —
+/// Bis Fix-Runde 6 sammelte `filter_names` die Liste mit
+/// `collect::<Option<Vec<_>>>()`; ein Glied, das kein Name ist, verwarf
+/// deshalb die ganze Kette, und `decode_stream` sah `names.is_empty()` —
 /// denselben Zustand wie bei einem Strom ganz ohne `/Filter`, über den es zu
-/// Recht schweigt.
+/// Recht schweigt. Der Unterschied zur gemeldeten Form lag allein in der
+/// **Art** des Wertes: `[/LZWDecode /R2Fremd]` ist derselbe Strom mit einem
+/// fremden **Namen** und wurde gemeldet.
 ///
-/// Schwere: dieselbe wie bei Befund Q2-1/Q5, den Fix-Runde 6 geschlossen hat —
-/// „nicht gefunden“ ohne Vorbehalt an einer Stelle, die niemand gelesen hat.
-///
-/// Vorschlag: `filter_names` gibt die Kette mit einem Platzhalter für jedes
-/// nicht auflösbare Glied zurück (z. B. `b"?"`), statt sie zu verwerfen —
-/// dann greift die Meldung der Fix-Runde 6 unverändert.
+/// Seit Fix-Runde 7 steht jedes nicht auflösbare Glied als **namenloses
+/// Glied** in der Kette. Damit gilt für alle sechs Formen dasselbe wie für
+/// einen fremden Namen: die Kette läuft bis dorthin (die fünf ersten Formen
+/// legen den Klartext frei — aus der stillen Lücke wird ein **Fund**), und
+/// über den Rest steht eine `unchecked`-Zeile. Nur `999 0 R` allein hat kein
+/// Glied vor sich: dort bleibt es bei den rohen Bytes plus Meldung.
 #[test]
-fn befund_r2_c_ein_filterwert_der_kein_name_ist_macht_stumm() {
+fn befund_r2_c_ein_filterwert_der_kein_name_ist_wird_gemeldet() {
     let lzw = lzw_encode(&nutzlast());
-    let faelle: Vec<(&str, Object, Vec<u8>)> = vec![
+    // (Beschreibung, /Filter-Wert, Strominhalt, Sicht, die entsteht)
+    let faelle: Vec<(&str, Object, Vec<u8>, Option<&str>)> = vec![
         (
             "[/LZWDecode 999 0 R]",
             Object::Array(vec![name("LZWDecode"), Object::Reference((999, 0))]),
             lzw.clone(),
+            Some("dekodiert: LZWDecode — bis Filter 1 von 2"),
         ),
         (
             "[/LZWDecode null]",
             Object::Array(vec![name("LZWDecode"), Object::Null]),
             lzw.clone(),
+            Some("dekodiert: LZWDecode — bis Filter 1 von 2"),
         ),
         (
             "[/ASCII85Decode null]",
             Object::Array(vec![name("ASCII85Decode"), Object::Null]),
             a85(&nutzlast()),
+            Some("dekodiert: ASCII85Decode — bis Filter 1 von 2"),
         ),
         (
             "[/LZWDecode 42]",
             Object::Array(vec![name("LZWDecode"), Object::Integer(42)]),
             lzw.clone(),
+            Some("dekodiert: LZWDecode — bis Filter 1 von 2"),
         ),
         (
             "[/LZWDecode (LZWDecode)]",
@@ -170,27 +177,42 @@ fn befund_r2_c_ein_filterwert_der_kein_name_ist_macht_stumm() {
                 Object::string_literal("LZWDecode".to_string()),
             ]),
             lzw.clone(),
+            Some("dekodiert: LZWDecode — bis Filter 1 von 2"),
         ),
-        ("999 0 R", Object::Reference((999, 0)), lzw.clone()),
+        ("999 0 R", Object::Reference((999, 0)), lzw.clone(), None),
     ];
 
-    for (wie, filter, raw) in faelle {
-        let (bytes, _) = pdf(filter, raw);
+    for (wie, filter, raw, sicht) in faelle {
+        let (bytes, id) = pdf(filter, raw);
         let check = pruefe(&bytes);
+        match sicht {
+            Some(beschriftung) => assert!(
+                check.findings[0].iter().any(|m| m.starts_with(&format!(
+                    "Objekt {} {} <Stream, {beschriftung}",
+                    id.0, id.1
+                ))),
+                "{wie}: das bekannte Glied muss laufen und den Klartext freilegen: {:#?}",
+                check.findings[0]
+            ),
+            None => assert!(
+                check.findings[0].is_empty(),
+                "{wie}: vor dem namenlosen Glied steht nichts, was entpacken könnte: {:#?}",
+                check.findings[0]
+            ),
+        }
         assert!(
-            check.findings[0].is_empty(),
-            "{wie}: unerwarteter Fund — dann ist der Aufbau schief: {:#?}",
-            check.findings[0]
-        );
-        assert!(
-            check.unchecked.is_empty(),
-            "BEFUND_R2_C geschlossen für {wie}? Dann diese Zusicherung umdrehen: {:#?}",
+            check.unchecked.iter().any(|m| m.starts_with(&format!(
+                "Objekt {} {} <Stream>:",
+                id.0, id.1
+            )) && m.contains("kein Filtername")),
+            "{wie}: der Rest der Kette ist ungelesen und muss es sagen: {:#?}",
             check.unchecked
         );
+        assert_eq!(check.unchecked_places, 1, "{wie}: {:#?}", check.unchecked);
     }
 
     // Gegenprobe: derselbe Strom, ein fremder **Name** statt des
-    // unbrauchbaren Wertes — gemeldet.
+    // unbrauchbaren Wertes — Wortlaut unverändert seit Fix-Runde 6.
     let (bytes, _) = pdf(Object::Array(vec![name("LZWDecode"), name("R2Fremd")]), lzw);
     let check = pruefe(&bytes);
     assert!(
@@ -198,9 +220,46 @@ fn befund_r2_c_ein_filterwert_der_kein_name_ist_macht_stumm() {
             .unchecked
             .iter()
             .any(|m| m.contains("nur bis Filter 1 von 2 dekodiert — /R2Fremd")),
-        "der Unterschied liegt allein in der Art des Wertes: {:#?}",
+        "der Wortlaut für einen Namen bleibt: {:#?}",
         check.unchecked
     );
+}
+
+/// Die Gegenrichtung zu BEFUND_R2_C: `/Filter null` **direkt** am Strom ist
+/// kein namenloses Glied, sondern gar kein Filter.
+///
+/// PDF 32000-1, 7.3.9: ein Dictionary-Eintrag mit dem Wert `null` ist wie ein
+/// fehlender Eintrag. Jeder Leser sieht hier denselben ungefilterten Strom,
+/// es gibt nichts, worüber die Leser auseinanderliefen — und die Rohbytes
+/// sind vollständig durchsucht. Eine Meldung wäre ein Fehlalarm.
+///
+/// Der Unterschied zum Verweis ins Leere (`999 0 R`, oben): dort ist aus
+/// **dieser** Datei nicht zu erfahren, was an der Stelle steht; ein Leser mit
+/// einer anderen Querverweistabelle — eine ältere Revision, eine
+/// Wiederherstellung — kann dort sehr wohl einen Filternamen finden.
+#[test]
+fn r2_filter_null_am_strom_ist_kein_filter() {
+    let (bytes, id) = pdf(Object::Null, b"IBAN steht hier im Klartext".to_vec());
+    let check = pruefe(&bytes);
+    assert!(check.unchecked.is_empty(), "{:#?}", check.unchecked);
+    assert_eq!(check.unchecked_places, 0);
+
+    // Und der Beleg, dass die Rohsicht wirklich liest: derselbe Aufbau mit
+    // dem Geheimnis im Strom.
+    let (bytes, id2) = pdf(
+        Object::Null,
+        format!("Kontoauszug, IBAN {SECRET}").into_bytes(),
+    );
+    assert_eq!(id, id2);
+    let check = pruefe(&bytes);
+    assert!(
+        check.findings[0]
+            .iter()
+            .any(|m| m.starts_with(&format!("Objekt {} {} <Stream, roh>", id.0, id.1))),
+        "{:#?}",
+        check.findings[0]
+    );
+    assert!(check.unchecked.is_empty(), "{:#?}", check.unchecked);
 }
 
 /// Schreibt die Datei zu BEFUND_R2_C nach `ZG_R2_WERT_PDF`, damit der Befund

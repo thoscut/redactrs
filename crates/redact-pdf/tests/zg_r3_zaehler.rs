@@ -116,7 +116,6 @@ fn ohne_zweiten_halter_eins_und_das_objekt_ist_weg() {
 /// sich 4; 4 fällt beim Aufräumen (niemand hält es), 5 bleibt. Der Bericht
 /// meldet 1 — über einen Text, den `--check-leaks` findet.
 #[test]
-#[ignore = "Befund R3: rot bis zur Korrektur"]
 fn verweiskette_meldet_eine_entfernung_ueber_text_der_bleibt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let ziel = d.add(Object::string_literal(format!("Notiz {SECRET}")));
@@ -165,6 +164,66 @@ fn zwei_gefallene_schluessel_auf_dasselbe_objekt_zaehlen_je_schluessel() {
     assert!(!ids_in(&out).contains(&text));
     assert!(leaks(&out, SECRET).is_empty());
     assert_eq!(report.annotation_texts_cleared, 2, "{:?}", report.summary());
+}
+
+// ---------------------------------------------------------------------------
+// C2) Der Zähler der Dateiverweise
+// ---------------------------------------------------------------------------
+
+fn zugeordnete_datei(d: &mut Doc) -> (ObjectId, ObjectId) {
+    let strom = d.add(Object::Stream(lopdf::Stream::new(
+        dictionary! { "Type" => "EmbeddedFile", "Subtype" => "text/xml" },
+        format!("<ram:IBANID>{SECRET}</ram:IBANID>").into_bytes(),
+    )));
+    let filespec = d.add(Object::Dictionary(dictionary! {
+        "Type" => "Filespec",
+        "F" => Object::string_literal("factur-x.xml"),
+        "AFRelationship" => "Alternative",
+        "EF" => dictionary! { "F" => Object::Reference(strom) },
+    }));
+    d.catalog_set("AF", Object::Array(vec![Object::Reference(filespec)]));
+    (filespec, strom)
+}
+
+/// `/AF` am Katalog fällt, die Datei dahinter auch: der Bericht sagt es.
+#[test]
+fn eine_zugeordnete_datei_faellt_und_wird_gemeldet() {
+    let mut d: Doc = page(&["Rechnung 4711"]);
+    let (filespec, strom) = zugeordnete_datei(&mut d);
+
+    let (report, out) = strip(&d.finish());
+    let ids = ids_in(&out);
+    assert!(!ids.contains(&filespec) && !ids.contains(&strom));
+    assert!(leaks(&out, SECRET).is_empty());
+    assert_eq!(report.file_specs_removed, 1, "{:?}", report.summary());
+    assert!(report
+        .summary()
+        .iter()
+        .any(|zeile| zeile.contains("Dateiverweis (/AF, /FS)")));
+}
+
+/// Dieselbe zugeordnete Datei, von einem zweiten Halter gehalten: der
+/// Schlüssel fällt, die Datei bleibt — und der Bericht meldet **nichts**.
+///
+/// Mutation, die diesen Test rot macht: `Tally::settled` ohne `alive`.
+#[test]
+fn eine_gehaltene_zugeordnete_datei_wird_nicht_gemeldet() {
+    let mut d: Doc = page(&["Rechnung 4711"]);
+    let (filespec, _) = zugeordnete_datei(&mut d);
+    d.page_dict_set("Zusatz", Object::Reference(filespec));
+
+    let (report, out) = strip(&d.finish());
+    assert!(ids_in(&out).contains(&filespec));
+    assert!(
+        !leaks(&out, SECRET).is_empty(),
+        "die Datei steht noch in der Ausgabe"
+    );
+    assert_eq!(
+        report.file_specs_removed,
+        0,
+        "eine Datei, die --check-leaks findet, darf nicht als entfernt gemeldet werden: {:?}",
+        report.summary()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +326,6 @@ fn ebene_mit_verweisnamen(d: &mut Doc) -> ObjectId {
 /// „Metadaten: nichts zu entfernen“ über eine Datei, aus der gerade ein
 /// Ebenenname entfernt wurde.
 #[test]
-#[ignore = "Befund R3: rot bis zur Korrektur (Doku nennt die Zahl planmäßig zu klein; die Zusammenfassung schweigt)"]
 fn ebenenname_als_verweis_wird_entfernt_aber_nicht_gemeldet() {
     let mut d: Doc = page(&[]);
     let name = ebene_mit_verweisnamen(&mut d);

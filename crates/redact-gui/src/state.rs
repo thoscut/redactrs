@@ -11,7 +11,7 @@
 //! Geometrie (MediaBox plus `/Rotate`), kein Fenster, keine Grafik. Sie liegt
 //! im Sichtmodul, weil sie dort gebraucht und geprüft wird.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -392,6 +392,17 @@ impl HitOutcome {
 /// Buchhaltung des Budgets nicht.
 const MAX_NAMED_PLACES: usize = 3;
 
+/// So viele Zeichen trägt die Statuszeile höchstens
+/// ([`ExportCheck::status_line`]).
+///
+/// Die Teilsätze von [`ExportCheck::sentence`] treten **zusammen** auf: Fund,
+/// ungeprüfte Stellen, Texte jenseits der Decke, wörtlich gedeckte Texte, das
+/// Urteil am Fund, der Vorbehalt, die Handregionen. Gemessen mit den echten
+/// Stellen eines Laufs: **981 Zeichen** — eine Zeile, die niemand liest, sagt
+/// so wenig wie gar keine. 400 Zeichen sind rund vier Zeilen im Fenster; was
+/// darüber liegt, steht ganz in den Warnungen ([`ExportCheck::warning`]).
+pub const MAX_STATUS_CHARS: usize = 400;
+
 /// Eine ungeprüfte Stelle, gekürzt auf Ort und Grund.
 ///
 /// [`redact_pdf::LeakCheck::unchecked`] schreibt je Stelle einen ganzen Satz:
@@ -456,20 +467,23 @@ pub struct ExportCheck {
     /// Schutzeintrag. Dass sie in der Ausgabe stehen, ist eine Entscheidung
     /// und kein Leck.
     ///
-    /// Zwei Wege führen hierher, und sie sind **nicht** dasselbe Urteil:
+    /// Gezählt wird nur, was **gefunden** wurde: ein Text, der nirgends mehr
+    /// steht, ist verschwunden und zählt zur Entwarnung — gleich, was daneben
+    /// abgewählt ist (Befund R4-1). Zwei Wege führen hierher, und sie sind
+    /// **nicht** dasselbe Urteil:
     ///
-    /// 1. **wörtlich derselbe Text** steht in einer stehen gelassenen Zeile —
-    ///    dann wird gar nicht erst gesucht ([`AppState::plan_export_check`]).
-    ///    Diese Texte zählt [`ExportCheck::unsearched`] noch einmal für sich:
-    ///    über sie sagt die Prüfung **nichts**;
-    /// 2. gesucht wurde, und getroffen hat **nur die Fassung ohne Leerraum**
+    /// 1. eine stehen gelassene Zeile trägt **wörtlich denselben Text**
+    ///    ([`ExportCheckPlan::kept_literal`]) — dann ist der Fund nicht
+    ///    zuzuordnen. Diese Texte zählt [`ExportCheck::unsearched`] noch
+    ///    einmal für sich: über sie sagt die Prüfung **nichts**;
+    /// 2. getroffen hat **nur die Fassung ohne Leerraum**
     ///    ([`redact_pdf::LeakCheck::literal`]) einer stehen gelassenen Zeile
     ///    derselben Normalform ([`ExportCheckPlan::kept_forms`]). Nur das ist
     ///    ein Urteil: die Schreibweise steht **nicht** mehr wörtlich in der
     ///    Ausgabe, also ist der Rest die stehen gelassene Zeile.
     pub kept: usize,
-    /// Davon die Texte aus Weg 1: gar nicht gesucht, weil eine bewusst stehen
-    /// gelassene Zeile **wörtlich** denselben Text trägt.
+    /// Davon die Texte aus Weg 1: gefunden, aber eine bewusst stehen gelassene
+    /// Zeile trägt **wörtlich** denselben Text.
     ///
     /// Immer `<= kept`. Sie sind der Teil von `kept`, der **kein** Urteil ist:
     /// Ging die Schwärzung daneben, stünde derselbe Text auch dort noch — und
@@ -479,6 +493,10 @@ pub struct ExportCheck {
     /// über sie „über sie sagt diese Prüfung nichts“ statt „zählt nicht als
     /// Leck“, und [`ExportCheck::warning`] nimmt sie auf: die Statuszeile ist
     /// flüchtig, die Warnung bleibt.
+    ///
+    /// **Der Name meint den Fund, nicht die Suche**: gesucht wird auch dieser
+    /// Text (bis Fix-Runde 6 nicht — deshalb der Name). Blieb er aus, steht er
+    /// hier nicht, und die Prüfung gibt ihre Entwarnung.
     pub unsearched: usize,
     /// Die Decke, die für diesen Lauf galt — im Regelfall
     /// [`redact_core::MAX_CHECK_NEEDLES`]; ein Test darf sie tiefer legen
@@ -509,6 +527,19 @@ impl ExportCheck {
         !self.unchecked.is_empty()
     }
 
+    /// Wie viele der gesuchten Schreibweisen wirklich **verschwunden** sind.
+    ///
+    /// [`ExportCheck::checked`] zählt, was in die Suche ging; davon abzuziehen
+    /// ist, was das Orakel gefunden hat — die Lecks
+    /// ([`ExportCheck::leaking`]) und die gedeckten Funde
+    /// ([`ExportCheck::kept`], darin [`ExportCheck::unsearched`]). Der Rest
+    /// steht nicht mehr in der Ausgabe, und nur über ihn gibt der Satz eine
+    /// Entwarnung (Befund R4-7).
+    pub fn vanished(&self) -> usize {
+        self.checked
+            .saturating_sub(self.kept + self.leaking.len())
+    }
+
     /// Der Satz für die Warnungen — `None`, wenn es nichts zu warnen gibt.
     ///
     /// Ein Fund und eine unvollständige Antwort tragen den ganzen Satz der
@@ -526,14 +557,28 @@ impl ExportCheck {
     /// nicht zurückzulesen gab, und schickt damit an die falsche Stelle
     /// (Befund Q4-2). Deshalb steht `unreadable` hier oben.
     pub fn warning(&self) -> Option<String> {
-        if self.unreadable.is_some() || self.found_leak() || self.incomplete() {
-            return Some(self.sentence());
+        let sentence = self.sentence();
+        // Was die Statuszeile nicht trägt, muss ganz in den Warnungen stehen —
+        // sonst wäre der gekürzte Satz die einzige Fassung (Befund R4-6).
+        if self.unreadable.is_some()
+            || self.found_leak()
+            || self.incomplete()
+            || sentence.chars().count() > MAX_STATUS_CHARS
+        {
+            return Some(sentence);
         }
+        // Hier bleibt der Fall **ein** Grund. Stehen beide zusammen, ist der
+        // Satz länger als die Statuszeile trägt (die beiden Teilsätze wiegen
+        // zusammen über 330 Zeichen) — dann steht er oben schon **ganz** in
+        // der Warnung, und die nennt damit beide. Bis Fix-Runde 6 kehrte
+        // diese Funktion in dieser Lage mit dem ersten Grund zurück: die Zahl
+        // jenseits der Decke und die Decke selbst standen allein in der
+        // Statuszeile, die die nächste Aktion überschreibt (Befund R4-3).
         if self.unsearched > 0 {
             return Some(format!(
-                "Nachprüfung unvollständig — über {} Text(e) sagt sie nichts: sie stehen \
-                 wörtlich auch in einer abgewählten oder geschützten Zeile und wurden deshalb \
-                 nicht gesucht.",
+                "Nachprüfung unvollständig — über {} Text(e) sagt sie nichts: sie stehen in der \
+                 Ausgabe und wörtlich auch in einer abgewählten, gelöschten oder geschützten \
+                 Zeile.",
                 self.unsearched
             ));
         }
@@ -545,6 +590,42 @@ impl ExportCheck {
             ));
         }
         None
+    }
+
+    /// Der Satz für die **Statuszeile** — höchstens [`MAX_STATUS_CHARS`]
+    /// Zeichen.
+    ///
+    /// [`ExportCheck::sentence`] ist die ganze Wahrheit und kann lang werden:
+    /// gemessen **981 Zeichen** mit den echten ungeprüften Stellen eines Laufs
+    /// (`zg_r4_tests::zg_r4_3_die_laengste_statuszeile_ist_wieder_ueber_804_zeichen`).
+    /// Fix-Runde 6 hat dagegen einen **Bestandteil** gekürzt ([`short_place`],
+    /// 804 → 411 Zeichen für die Stellen allein) — die Zeile als Ganzes blieb
+    /// ungedeckelt, denn die Teilsätze treten zusammen auf (Befund R4-6).
+    ///
+    /// Gekürzt wird **hinten**, und das ist die sichere Richtung: ein Fund
+    /// führt den Satz an ([`ExportCheck::sentence`]) und steht damit immer da,
+    /// und ohne Fund stehen die Vorbehalte vorn — abgeschnitten wird zuerst
+    /// die Entwarnung, nie eine Warnung. Der ganze Satz steht in den
+    /// Warnungen: [`ExportCheck::warning`] gibt ihn, sobald er hier nicht mehr
+    /// hineinpasst.
+    pub fn status_line(&self) -> String {
+        const TAIL: &str = " … (ganzer Satz in den Warnungen)";
+        let sentence = self.sentence();
+        if sentence.chars().count() <= MAX_STATUS_CHARS {
+            return sentence;
+        }
+        let room = MAX_STATUS_CHARS - TAIL.chars().count();
+        let end = sentence
+            .char_indices()
+            .nth(room)
+            .map_or(sentence.len(), |(at, _)| at);
+        let head = sentence[..end].trim_end();
+        // Am letzten Wort trennen, aber nicht den halben Satz opfern.
+        let head = match head.rfind(' ') {
+            Some(space) if space * 2 > head.len() => head[..space].trim_end(),
+            _ => head,
+        };
+        format!("{head}{TAIL}")
     }
 
     /// Der Satz für die Statuszeile.
@@ -586,16 +667,23 @@ impl ExportCheck {
                 self.leaking.len(),
                 self.checked
             )
-        } else if self.checked == 0 && self.kept > 0 {
-            // Es gab Texte — sie stehen nur alle auch in einer stehen
-            // gelassenen Zeile. „Keine Zeile mit bekanntem Text“ wäre falsch.
+        } else if self.checked == 0 && (self.kept > 0 || self.skipped > 0) {
+            // Es gab Texte — sie lagen nur alle jenseits der Decke (oder sind
+            // gedeckt). „Keine Zeile mit bekanntem Text“ wäre falsch: bei
+            // einer Decke von 0 sagte der Satz beides zugleich (Befund R4-8).
             "es wurde nichts gesucht.".to_string()
         } else if self.checked == 0 {
             "keine geschwärzte Zeile mit bekanntem Text — es wurde nichts nachgeprüft.".to_string()
         } else {
+            // **Verschwunden**, nicht gesucht: `checked` zählt die Begriffe,
+            // die in die Suche gingen. Ein Begriff, den das Orakel gefunden
+            // hat und den eine stehen gelassene Zeile deckt, steht sehr wohl
+            // noch in der Ausgabe — ihn mitzuzählen hieße, im selben Satz
+            // „steht nicht mehr“ und „deckt sich mit einer abgewählten Zeile“
+            // über **denselben** Text zu sagen (Befund R4-7).
             format!(
                 "{} gesuchte Text(e) stehen nicht mehr in der Ausgabe.",
-                self.checked
+                self.vanished()
             )
         };
         let mut caveats: Vec<String> = Vec::new();
@@ -615,16 +703,20 @@ impl ExportCheck {
             ));
         }
         if self.skipped > 0 {
+            // „weitere“ nur, wenn es erste gab: bei einer Decke von 0 ist
+            // keiner gesucht worden (Befund R4-8).
             caveats.push(format!(
-                "{} weitere Text(e) wurden nicht gesucht — höchstens {} Begriffe je \
+                "{} {}Text(e) wurden nicht gesucht — höchstens {} Begriffe je \
                  Nachprüfung (dieselbe Decke wie --check-leaks); sie stehen in der \
                  Trefferliste weiter hinten.",
-                self.skipped, self.limit
+                self.skipped,
+                if self.checked > 0 { "weitere " } else { "" },
+                self.limit
             ));
         }
         if self.unsearched > 0 {
             caveats.push(format!(
-                "{} Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile: \
+                "{} Text(e) stehen wörtlich auch in einer abgewählten, gelöschten oder geschützten Zeile: \
                  über sie sagt diese Prüfung nichts — ob dort eine Schwärzung danebenging, \
                  bleibt offen.",
                 self.unsearched
@@ -644,7 +736,7 @@ impl ExportCheck {
         let judged = self.kept.saturating_sub(self.unsearched);
         if judged > 0 {
             parts.push(format!(
-                "{judged} Text(e) decken sich mit einer abgewählten oder geschützten Zeile und \
+                "{judged} Text(e) decken sich mit einer abgewählten, gelöschten oder geschützten Zeile und \
                  zählen deshalb nicht als Leck."
             ));
         }
@@ -719,10 +811,20 @@ pub struct ExportCheckPlan {
     /// gilt `false`: dann ist jeder Fund ein Leck, und das ist die sichere
     /// Seite.
     pub kept_forms: Vec<bool>,
+    /// Je Begriff: trägt eine bewusst stehen gelassene Zeile ihn
+    /// **wörtlich**, Zeichen für Zeichen?
+    ///
+    /// Gleiche Länge und Reihenfolge wie [`ExportCheckPlan::needles`].
+    /// `true` heißt nicht „nicht suchen“, sondern „ein **Fund** ist nicht
+    /// zuzuordnen“: er kann die stehen gelassene Zeile sein oder eine
+    /// danebengegangene Schwärzung, und beide sähen gleich aus. Gesucht wird
+    /// trotzdem — **nicht gefunden** ist eine Aussage, und zwar eine sichere
+    /// ([`ExportCheckPlan::run_within`], Befund R4-1). Fehlt der Eintrag,
+    /// gilt `false`: dann ist jeder Fund ein Leck, und das ist die sichere
+    /// Seite.
+    pub kept_literal: Vec<bool>,
     /// Siehe [`ExportCheck::without_text`].
     pub without_text: usize,
-    /// Siehe [`ExportCheck::kept`].
-    pub kept: usize,
     /// Das Entpackbudget der Suche in Byte — **dieselbe** Zahl, mit der die
     /// Oberfläche das Dokument geladen hat (`Config::limits`, also
     /// `--max-decompressed-mb`). Was darüber liegt, wird nicht durchsucht
@@ -739,8 +841,8 @@ impl Default for ExportCheckPlan {
         Self {
             needles: Vec::new(),
             kept_forms: Vec::new(),
+            kept_literal: Vec::new(),
             without_text: 0,
-            kept: 0,
             max_decompressed_bytes: redact_pdf::document::Limits::default().max_decompressed_bytes,
         }
     }
@@ -807,8 +909,11 @@ impl ExportCheckPlan {
                     leaking: Vec::new(),
                     without_text: self.without_text,
                     skipped: self.needles.len(),
-                    kept: self.kept,
-                    unsearched: self.kept,
+                    // Gesucht wurde nichts, also ist auch nichts gedeckt und
+                    // nichts offen: der Satz sagt, dass es keine Aussage gibt,
+                    // und eine Zahl daneben behauptete eine.
+                    kept: 0,
+                    unsearched: 0,
                     limit,
                     unchecked: Vec::new(),
                 }
@@ -838,13 +943,25 @@ impl ExportCheckPlan {
         // wurde nie gesucht — ein echtes Leck ohne ein Wort (Befund P5-2).
         // Getrennt werden kann beides erst am Fund selbst
         // ([`redact_pdf::LeakCheck::literal`]).
-        let mut kept = self.kept;
+        let mut kept = 0usize;
+        let mut unsearched = 0usize;
         let mut leaking = Vec::new();
         for (index, (hits, needle)) in found.findings.iter().zip(needles.iter()).enumerate() {
             if hits.is_empty() {
+                // Nicht gefunden — und das ist eine Aussage, auch über einen
+                // Text, den eine stehen gelassene Zeile wörtlich trägt: steht
+                // er nirgends mehr, kann er auch dort nicht danebengegangen
+                // sein (Befund R4-1).
                 continue;
             }
-            if is_leak(
+            if self.kept_literal.get(index).copied().unwrap_or(false) {
+                // Gefunden — aber eine stehen gelassene Zeile trägt denselben
+                // Text Zeichen für Zeichen: dieser Fund kann sie sein oder
+                // eine danebengegangene Schwärzung. Kein Leck und keine
+                // Entwarnung, sondern **keine Aussage**.
+                kept += 1;
+                unsearched += 1;
+            } else if is_leak(
                 found.literal.get(index).copied(),
                 self.kept_forms.get(index).copied(),
             ) {
@@ -861,10 +978,11 @@ impl ExportCheckPlan {
             without_text: self.without_text,
             skipped,
             kept,
-            // Was der Plan schon gezählt hat, wurde **nie gesucht** — der
-            // Rest von `kept` ist am Fund entschieden. Beides in einer Zahl
-            // hieße, ein Urteil und ein Nichturteil zu verrechnen.
-            unsearched: self.kept,
+            // Der Teil von `kept`, der **kein Urteil** ist: gefunden, aber von
+            // einer wörtlich gleichen stehen gelassenen Zeile nicht zu
+            // trennen. Beides in einer Zahl hieße, ein Urteil und ein
+            // Nichturteil zu verrechnen.
+            unsearched,
             limit,
             unchecked: found.unchecked,
         }
@@ -1310,6 +1428,33 @@ pub struct AppState {
     /// eine Schiebe-Sitzung ist **ein** Schritt im Verlauf, nicht einer je
     /// Anschlag. Siehe [`AppState::move_selected`].
     nudging: Option<RegionId>,
+    /// Gelöschte Trefferzeilen mit bekanntem Text — Kennung und Text.
+    ///
+    /// Eine Zeile zu **löschen** (Entf) ist derselbe Wunsch wie sie
+    /// **abzuwählen**: „die bleibt stehen“. Ohne diese Erinnerung sähe die
+    /// Nachprüfung den Unterschied: die abgewählte Zeile steht in
+    /// [`AppState::regions`] und deckt ihren Text, die gelöschte steht
+    /// nirgends — und ihr Text wurde zum Leck gemeldet (Befund R4-2).
+    ///
+    /// Geschlüsselt auf die [`RegionId`], nicht auf den Text: kommt die Zeile
+    /// durch **Rückgängig** zurück, steht ihre Kennung wieder in `regions`,
+    /// und [`AppState::kept_by_deletion`] übergeht sie — ohne dass hier etwas
+    /// aufgeräumt werden müsste. Dieselbe Zeile zweimal zu löschen legt
+    /// deshalb auch nur einen Eintrag an.
+    ///
+    /// Geleert wird, wo die **ganze** Trefferliste ausgetauscht wird: beim
+    /// Dokumentwechsel ([`AppState::load_bytes`]), bei einer neuen Analyse
+    /// ([`AppState::analyze`]) und beim Laden einer Review-Datei
+    /// ([`AppState::apply_review_file`]). Eine Löschung ist eine Aussage über
+    /// **diese** Liste; nach einer neuen Analyse steht der Treffer wieder da
+    /// (mit neuer Kennung), und ihn weiter als stehen gelassen zu führen wäre
+    /// die Fehlerklasse „eine Zusicherung wird an die nächste Stelle
+    /// mitgenommen, wo sie nicht gilt“ — und zwar in der gefährlichen
+    /// Richtung: aus einem Leck würde „keine Aussage“. Der Preis ist der
+    /// Sonderfall „analysieren, dann rückgängig“: dort ist die Löschung
+    /// vergessen, und die stehen gelassene Zeile gilt wieder als Fund — ein
+    /// Fehlalarm, den ein erneutes Löschen (oder Abwählen) aufhebt.
+    deleted_hits: BTreeMap<RegionId, String>,
 }
 
 impl Default for AppState {
@@ -1337,6 +1482,7 @@ impl Default for AppState {
             pending: None,
             replacing: None,
             nudging: None,
+            deleted_hits: BTreeMap::new(),
         }
     }
 }
@@ -1545,6 +1691,9 @@ impl AppState {
         self.current_page = 0;
         self.selected_region = None;
         self.regions.clear();
+        // Die gelöschten Zeilen gehörten zum vorigen Dokument — wie der
+        // Verlauf.
+        self.deleted_hits.clear();
         self.end_edit_sessions();
         self.extract_warnings = warnings.clone();
         self.warnings = warnings;
@@ -1807,6 +1956,9 @@ impl AppState {
         self.regions = annotated;
         self.regions.extend(manual);
         self.selected_region = None;
+        // Die Trefferliste ist eine neue; was aus der alten gelöscht wurde,
+        // sagt über sie nichts ([`AppState::deleted_hits`]).
+        self.deleted_hits.clear();
 
         let summary = self.hit_summary();
         let found = summary.found;
@@ -2072,6 +2224,10 @@ impl AppState {
     }
 
     /// Löscht die ausgewählte Region. `false`, wenn nichts ausgewählt war.
+    ///
+    /// Trug sie einen bekannten Text, merkt sich die Nachprüfung ihn
+    /// ([`AppState::deleted_hits`]): wer eine Zeile löscht, will sie behalten
+    /// — genau wie beim Abwählen.
     pub fn delete_selected(&mut self) -> bool {
         let Some(index) = self.selected_region else {
             return false;
@@ -2082,10 +2238,40 @@ impl AppState {
         }
         self.end_edit_sessions();
         self.history.record(&self.regions);
-        self.regions.remove(index);
+        let removed = self.regions.remove(index);
+        // Ein gelöschter **Schutzeintrag** der Negativliste ist das
+        // Gegenteil: er hielt eine Schwärzung ab, und ohne ihn wird die Zeile
+        // geschwärzt. Ihren Text als „stehen gelassen“ zu merken, nähme der
+        // Nachprüfung genau die Zeile, die jetzt geschwärzt gehört.
+        if !removed.is_blocking() {
+            if let Some(text) = removed
+                .region
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                self.deleted_hits.insert(removed.id, text.to_string());
+            }
+        }
         self.selected_region = None;
         self.status = "Region gelöscht".to_string();
         true
+    }
+
+    /// Die Texte gelöschter Trefferzeilen, die **nicht** zurückgekommen sind.
+    ///
+    /// Ein Rückgängig stellt die Zeile samt ihrer [`RegionId`] wieder her;
+    /// steht die Kennung wieder in [`AppState::regions`], ist die Zeile nicht
+    /// mehr gelöscht und deckt nichts. Ohne diesen Abgleich bliebe der Text
+    /// gedeckt, und ein echtes Leck an einer wieder eingeschalteten Zeile
+    /// wäre nur noch „keine Aussage“.
+    fn kept_by_deletion(&self) -> Vec<String> {
+        self.deleted_hits
+            .iter()
+            .filter(|(id, _)| !self.regions.iter().any(|entry| entry.id == **id))
+            .map(|(_, text)| text.clone())
+            .collect()
     }
 
     /// Schiebt ein Rechteck so weit zurück, dass es wieder ganz auf dem Blatt
@@ -2966,22 +3152,50 @@ impl AppState {
     /// zwar für die Zielgruppe, die per Doppelklick arbeitet und gar keine
     /// Konsole öffnet.
     ///
-    /// ## Was nicht gesucht wird
+    /// ## Gesucht wird jeder Text — entschieden wird am Fund
     ///
     /// Ein Text, der auch in einer **bewusst stehen gelassenen** Zeile steht
-    /// — abgewählt, durch die Negativliste geschützt, Schutzeintrag —, wird
-    /// nicht gesucht. Vorher galt er als Leck: zwei Treffer „Musterbank“, einer
-    /// abgewählt, und die Nachprüfung meldete „1 … steht NOCH in der Ausgabe —
-    /// darf so nicht weitergegeben werden“ über eine Datei, die genau so
-    /// gewollt war. Gesagt wird es trotzdem ([`ExportCheck::kept`]): dass
-    /// dieser Text nicht geprüft werden konnte, gehört in den Satz.
+    /// — abgewählt, durch die Negativliste geschützt, Schutzeintrag oder mit
+    /// der Entf-Taste aus der Trefferliste geworfen —, wird **gesucht wie
+    /// jeder andere**. Gemerkt wird nur, dass ein Fund nicht zuzuordnen wäre
+    /// ([`ExportCheckPlan::kept_literal`]).
+    ///
+    /// Bis Fix-Runde 6 fiel diese Entscheidung **vor** der Suche: der Text kam
+    /// gar nicht erst in `needles`. Damit waren zwei Aussagen weggeworfen, und
+    /// nur eine davon ist zweideutig. „Gefunden“ ist es — der Fund kann die
+    /// stehen gelassene Zeile sein. „**Nicht** gefunden“ ist es nicht: steht
+    /// der Text nirgends mehr in der Ausgabe, steht er auch in keiner
+    /// danebengegangenen Schwärzung. Gemessen (`zg_r4_tests::
+    /// zg_r4_1_ein_text_der_nachweislich_weg_ist_bleibt_trotzdem_ungeprueft`):
+    /// ein großes Rechteck räumte die abgewählte Zeile mit ab, „Betrag“ stand
+    /// nachweislich nirgends mehr in der Ausgabe — und die Oberfläche sagte
+    /// „über sie sagt diese Prüfung nichts“ und trug eine Warnung ein, die nur
+    /// durch Wiedereinschalten der Schwärzung verschwand (Befund R4-1).
+    ///
+    /// Der Fehlalarm, den Befund 5 aus Fix-Runde 4 abgestellt hat, kommt
+    /// dadurch **nicht** zurück: er hing am **Fund**, und ein Fund unter
+    /// `kept_literal` ist weiter kein Leck, sondern keine Aussage
+    /// (`zf_q4_tests::zf_q4_1_woertlich_gedeckt_und_getroffen_ist_kein_alarm`).
     ///
     /// Je Text fällt **eine** Entscheidung, gleich wie viele Zeilen ihn
-    /// tragen: gesucht oder stehen gelassen. Vorher wurde ein stehen
-    /// gelassener Text nach der ersten geschwärzten Zeile aus der Liste
-    /// gestrichen — bei zwei geschwärzten Zeilen und einer abgewählten stand
-    /// derselbe Text dann in `needles` **und** `kept`, und die Nachprüfung
-    /// schlug Alarm über eine Datei, die genau so gewollt war.
+    /// tragen. Vorher wurde ein stehen gelassener Text nach der ersten
+    /// geschwärzten Zeile aus der Liste gestrichen — bei zwei geschwärzten
+    /// Zeilen und einer abgewählten stand derselbe Text dann in `needles`
+    /// **und** `kept`, und die Nachprüfung schlug Alarm über eine Datei, die
+    /// genau so gewollt war.
+    ///
+    /// ## Eine gelöschte Zeile ist eine stehen gelassene
+    ///
+    /// Es gibt zwei Wege, eine Trefferzeile zu behalten: sie **abwählen** oder
+    /// sie **löschen** (Entf, [`AppState::delete_selected`]). Die gelöschte
+    /// steht danach in keiner Liste mehr — und die Nachprüfung meldete ihren
+    /// Text als Leck: „1 von 1 gesuchten Text(en) steht NOCH in der Ausgabe —
+    /// diese Datei ist nicht geschwärzt“ über eine Datei, die genau so gewollt
+    /// war (Befund R4-2). Wer eine Zeile behalten wollte, bekam also entweder
+    /// eine Warnung, die nie verschwindet, oder einen falschen Alarm.
+    /// [`AppState::kept_by_deletion`] merkt die gelöschten Treffer, solange
+    /// das Dokument offen ist; ein Rückgängig bringt die Zeile samt ihrer
+    /// [`RegionId`] zurück und nimmt sie damit von selbst wieder heraus.
     ///
     /// Die Decke ([`redact_core::MAX_CHECK_NEEDLES`]) wird hier **nicht**
     /// angewendet, sondern im Lauf ([`ExportCheckPlan::run`]) — der Plan
@@ -3010,13 +3224,15 @@ impl AppState {
     ///
     /// ## Wann eine stehen gelassene Zeile eine Schreibweise deckt
     ///
-    /// **Wörtlich** — und dann wird gar nicht erst gesucht: derselbe Text in
-    /// zwei Zeilen, eine geschwärzt, eine abgewählt (Befund 5 aus
-    /// Fix-Runde 4). Gesagt wird es ([`ExportCheck::kept`]), und zwar als
-    /// das, was es ist: **kein Urteil** ([`ExportCheck::unsearched`]).
+    /// **Wörtlich** — dann ist ein **Fund** nicht zuzuordnen
+    /// ([`ExportCheckPlan::kept_literal`], Befund 5 aus Fix-Runde 4):
+    /// derselbe Text in zwei Zeilen, eine geschwärzt, eine stehen gelassen.
+    /// Gesucht wird er trotzdem. Bleibt er aus, ist das eine Entwarnung wie
+    /// jede andere; wird er gefunden, sagt der Satz, dass er über ihn
+    /// **nichts** sagt ([`ExportCheck::unsearched`]).
     ///
-    /// Denn das ist die halbe Wahrheit. Ging die Schwärzung daneben, steht
-    /// der Text auch dort noch — und weil beide Vorkommen Zeichen für
+    /// Denn ein Fund ist hier die halbe Wahrheit. Ging die Schwärzung daneben,
+    /// steht der Text auch dort noch — und weil beide Vorkommen Zeichen für
     /// Zeichen dasselbe sind, ist der Fund von der stehen gelassenen Zeile
     /// nicht zu unterscheiden. Bis Fix-Runde 5 hieß der Satz „decken sich …
     /// und zählen deshalb nicht als Leck“ und [`ExportCheck::warning`] gab
@@ -3024,10 +3240,10 @@ impl AppState {
     /// hat (Befund Q4-1). Jetzt sagt der Satz, dass über diese Texte nichts
     /// gesagt wird, und die Warnung bleibt stehen.
     ///
-    /// **Warum nicht einfach doch gesucht wird:** dann käme der Fehlalarm
-    /// zurück, den Befund 5 abgestellt hat — trifft das Rechteck, ist der
-    /// einzige Rest die bewusst stehen gelassene Zeile, und ein Alarm darüber
-    /// wäre falsch (`zf_q4_tests::
+    /// **Warum der Fund kein Alarm wird:** dann käme der Fehlalarm zurück,
+    /// den Befund 5 abgestellt hat — trifft das Rechteck, ist der einzige
+    /// Rest die bewusst stehen gelassene Zeile, und ein Alarm darüber wäre
+    /// falsch (`zf_q4_tests::
     /// zf_q4_1_woertlich_gedeckt_und_getroffen_ist_kein_alarm`). Trennen
     /// ließen sich beide Lagen nur, wenn der Fund einer **Stelle** zuzuordnen
     /// wäre: die Oberfläche kennt Seite und Rechteck jeder Zeile,
@@ -3036,7 +3252,8 @@ impl AppState {
     /// nicht — dieselbe Überlegung wie bei „wörtlich oder nur ohne
     /// Leerraum“, wo Fix-Runde 5 statt einer Textsuche das maschinenlesbare
     /// [`redact_pdf::LeakCheck::literal`] bekam. Solange es das für den Ort
-    /// nicht gibt, ist der ehrliche Satz die richtige Antwort.
+    /// nicht gibt, ist der ehrliche Satz die richtige Antwort — aber eben nur
+    /// über den **Fund**, nicht über die Suche (Befund R4-1).
     ///
     /// **Auf der Normalform** fällt die Entscheidung **nicht** hier, sondern
     /// am Fund ([`ExportCheckPlan::run_within`]): der Plan merkt sich nur, ob
@@ -3089,15 +3306,19 @@ impl AppState {
                 kept_texts.insert(text);
             }
         }
+        // Gelöscht ist auch stehen gelassen — sonst ist der eine Weg ein
+        // falscher Alarm und der andere eine bleibende Warnung.
+        for text in self.kept_by_deletion() {
+            kept_squeezed.insert(redact_pdf::squeeze(&text));
+            kept_texts.insert(text);
+        }
 
         let mut needles: Vec<String> = Vec::new();
         let mut kept_forms: Vec<bool> = Vec::new();
-        let mut kept = 0usize;
+        let mut kept_literal: Vec<bool> = Vec::new();
         let mut without_text = 0usize;
-        // Je **Schreibweise** eine Entscheidung — `seen` merkt sich, welche
-        // schon gefallen ist. Ein `retain` an `kept_texts` täte das nicht:
-        // nach der ersten geschwärzten Zeile wäre der Text dort weg, und die
-        // zweite landete in `needles`.
+        // Je **Schreibweise** ein Begriff — `seen` merkt sich, welche schon
+        // in der Liste steht.
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for (index, entry) in self.regions.iter().enumerate() {
             if !summary.outcome(index).is_redacted() {
@@ -3108,15 +3329,11 @@ impl AppState {
                     if !seen.insert(text.clone()) {
                         continue;
                     }
-                    // Wörtlich deckt eine stehen gelassene Zeile sofort —
-                    // dann gibt es nichts zu suchen. Trägt sie nur dieselbe
-                    // Normalform, wird gesucht und erst am Fund entschieden.
-                    if kept_texts.contains(&text) {
-                        kept += 1;
-                    } else {
-                        kept_forms.push(kept_squeezed.contains(&redact_pdf::squeeze(&text)));
-                        needles.push(text);
-                    }
+                    // Beide Marken sagen nur, was ein **Fund** bedeuten kann
+                    // — gesucht wird so oder so.
+                    kept_literal.push(kept_texts.contains(&text));
+                    kept_forms.push(kept_squeezed.contains(&redact_pdf::squeeze(&text)));
+                    needles.push(text);
                 }
                 None => without_text += 1,
             }
@@ -3125,8 +3342,8 @@ impl AppState {
         ExportCheckPlan {
             needles,
             kept_forms,
+            kept_literal,
             without_text,
-            kept,
             max_decompressed_bytes: self.config.limits.max_decompressed_bytes,
         }
     }
@@ -3215,6 +3432,9 @@ impl AppState {
             })
             .collect();
         self.selected_region = None;
+        // Wie bei der Analyse: eine neue Trefferliste, und die gelöschten
+        // Zeilen der alten gehören nicht dazu.
+        self.deleted_hits.clear();
         self.status = match identity {
             ReviewIdentity::Matches => format!(
                 "Review übernommen: {} Einträge (Prüfsumme stimmt)",

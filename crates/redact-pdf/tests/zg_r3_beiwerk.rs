@@ -18,8 +18,10 @@
 //! Orakel: `leaks` an den geschriebenen Bytes; dazu der `MetadataReport`, ob
 //! er die Entfernung behauptet, die nicht stattfand.
 //!
-//! Die Proben, die einen offenen Befund zeigen, sind `#[ignore]` und rot —
-//! sie sind der Beleg, keine Zusicherung (Muster wie `zf_q1_luecken`).
+//! Die Proben waren als Befund `#[ignore]` und rot; seit Fix-Runde 7 sind
+//! sie scharf und grün (`meta.rs`: `/FS` und `/AF` fallen am Objekt,
+//! `/Metadata` und `/PieceInfo` an jedem Objekt, `/3DD`, `/3DV` und `/RO`
+//! als Beiwerk). `#[ignore]` bleibt allein das Werkzeug `korpus_schreiben`.
 
 mod common;
 
@@ -181,7 +183,6 @@ fn vermessung_behaelt_ihr_ap_bytegleich() {
 /// Popup steht in `/Annots` und hält über `/Parent` die Annotation samt
 /// `/FS` und eingebetteter Datei am Leben.
 #[test]
-#[ignore = "Befund R3: rot bis zur Korrektur"]
 fn dateianhang_mit_popup_verliert_seine_datei() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let (a, _) = dateianhang(&mut d);
@@ -206,7 +207,6 @@ fn dateianhang_mit_popup_verliert_seine_datei() {
 /// Ein Dateianhang mit **Antwort** (`/IRT`) — „Antworten“ auf einen
 /// Dateianhang-Kommentar. Die Antwort hält die Annotation samt Datei.
 #[test]
-#[ignore = "Befund R3: rot bis zur Korrektur"]
 fn dateianhang_mit_antwort_verliert_seine_datei() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let (a, _) = dateianhang(&mut d);
@@ -235,11 +235,12 @@ fn dateianhang_ohne_zweiten_halter_faellt_samt_datei() {
     assert_eq!(report.file_attachments_removed, 1);
 }
 
-/// Der Bericht darf für die beiden gehaltenen Anhänge keine Entfernung
-/// melden — das hält er. (Die Datei bleibt trotzdem: siehe die rot
-/// markierten Proben.)
+/// Der gehaltene Anhang verliert seine Datei — und **genau das** meldet der
+/// Bericht. Die Annotation selbst bleibt (ihr `/Popup` hält sie), sie ist
+/// aber aus `/Annots` gestrichen und trägt kein `/FS` mehr; Filespec und
+/// eingebettete Datei sind weg.
 #[test]
-fn gehaltener_dateianhang_wird_nicht_als_entfernt_gemeldet() {
+fn gehaltener_dateianhang_verliert_seine_datei_und_der_bericht_sagt_es() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let (a, filespec) = dateianhang(&mut d);
     let popup = d.add(Object::Dictionary(dictionary! {
@@ -253,15 +254,54 @@ fn gehaltener_dateianhang_wird_nicht_als_entfernt_gemeldet() {
         Object::Array(vec![Object::Reference(a), Object::Reference(popup)]),
     );
     let (report, out) = strip(&d.finish());
-    assert_eq!(report.file_attachments_removed, 0, "{:?}", report.summary());
+    assert_eq!(report.file_attachments_removed, 1, "{:?}", report.summary());
     let doc = load_from_bytes(&out).expect("Ausgabe lädt");
     assert!(
         doc.objects.contains_key(&a),
         "die Annotation steht noch (Popup /Parent)"
     );
     assert!(
+        doc.get_dictionary(a).unwrap().get(b"FS").is_err(),
+        "ihr /FS ist gefallen"
+    );
+    assert!(
+        !doc.objects.contains_key(&filespec),
+        "der Filespec ist weg"
+    );
+    assert!(leaks(&out, SECRET).is_empty());
+}
+
+/// Gegenprobe zum Zähler: hält ein **zweiter Verweis** denselben Filespec,
+/// bleibt die Datei stehen — und der Bericht meldet keine Entfernung. Das
+/// ist die Zusicherung von `MetadataReport`, an der einzigen Stelle, an der
+/// sie für Dateianhänge messbar ist.
+///
+/// Mutation, die diesen Test rot macht: `file_attachments_removed` wieder
+/// je gestrichener Annotation zählen (statt je gefallener Datei) — dann
+/// meldet der Bericht 1 über eine Datei, die `--check-leaks` findet.
+#[test]
+fn ein_gehaltener_filespec_wird_nicht_als_entfernt_gemeldet() {
+    let mut d: Doc = page(&["Rechnung 4711"]);
+    let (a, filespec) = dateianhang(&mut d);
+    d.page_dict_set("Annots", Object::Array(vec![Object::Reference(a)]));
+    // Der zweite Halter: irgendetwas außerhalb des Metadatenlaufs.
+    d.page_dict_set("Zusatz", Object::Reference(filespec));
+
+    let (report, out) = strip(&d.finish());
+    let doc = load_from_bytes(&out).expect("Ausgabe lädt");
+    assert!(
         doc.objects.contains_key(&filespec),
-        "der Filespec steht noch"
+        "der zweite Halter hält den Filespec"
+    );
+    assert!(
+        !leaks(&out, SECRET).is_empty(),
+        "und damit steht die eingebettete Datei noch da"
+    );
+    assert_eq!(
+        report.file_attachments_removed,
+        0,
+        "eine Datei, die --check-leaks findet, darf nicht als entfernt gemeldet werden: {:?}",
+        report.summary()
     );
 }
 
@@ -269,7 +309,6 @@ fn gehaltener_dateianhang_wird_nicht_als_entfernt_gemeldet() {
 /// hängt eine ZUGFeRD-/Factur-X-Rechnung ihre XML-Fassung an, zusätzlich zu
 /// `/Names /EmbeddedFiles`. `/Names` fällt, `/AF` hält die Datei.
 #[test]
-#[ignore = "Befund R3: rot bis zur Korrektur"]
 fn zugeordnete_datei_am_katalog_bleibt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let strom = d.add(Object::Stream(Stream::new(
@@ -296,7 +335,6 @@ fn zugeordnete_datei_am_katalog_bleibt() {
 
 /// Dieselbe zugeordnete Datei an der **Seite** und an einer **Annotation**.
 #[test]
-#[ignore = "Befund R3: rot bis zur Korrektur"]
 fn zugeordnete_datei_an_seite_und_annotation_bleibt() {
     for ort in ["Seite", "Annotation"] {
         let mut d: Doc = page(&["Rechnung 4711"]);
@@ -326,10 +364,40 @@ fn zugeordnete_datei_an_seite_und_annotation_bleibt() {
     }
 }
 
+/// Eine **direkt** in `/Annots` stehende Annotation mit `/AF`: kein eigenes
+/// Objekt, also erreicht sie der Durchgang über `doc.objects` nicht — nur der
+/// Trägerlauf kommt an sie heran.
+///
+/// Mutation, die diesen Test rot macht: `FILE_SPEC_KEYS` aus `clean_carrier`
+/// nehmen (der Durchgang über die Objekte allein genügt nicht).
+#[test]
+fn direkt_eingebettete_annotation_verliert_ihre_zugeordnete_datei() {
+    let mut d: Doc = page(&["Rechnung 4711"]);
+    let strom = d.add(Object::Stream(Stream::new(
+        dictionary! { "Type" => "EmbeddedFile" },
+        format!("IBAN {SECRET}").into_bytes(),
+    )));
+    let filespec = d.add(Object::Dictionary(dictionary! {
+        "Type" => "Filespec",
+        "F" => Object::string_literal("daten.txt"),
+        "EF" => dictionary! { "F" => Object::Reference(strom) },
+    }));
+    d.page_dict_set(
+        "Annots",
+        Object::Array(vec![Object::Dictionary(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Text",
+            "Rect" => vec![10.into(), 10.into(), 30.into(), 30.into()],
+            "Contents" => Object::string_literal("Notiz"),
+            "AF" => Object::Array(vec![Object::Reference(filespec)]),
+        })]),
+    );
+    muss_fallen(&d.finish(), "/AF an einer direkt eingebetteten Annotation");
+}
+
 /// XMP an einem **Bild-XObject** — so exportiert InDesign platzierte Fotos
 /// mit ihren Metadaten (`dc:description`, Kamerabesitzer, Standort).
 #[test]
-#[ignore = "Befund R3: rot bis zur Korrektur"]
 fn xmp_an_einem_bild_xobject_bleibt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let xmp = d.add(Object::Stream(Stream::new(
@@ -360,7 +428,6 @@ fn xmp_an_einem_bild_xobject_bleibt() {
 /// `/PieceInfo` an einem **Form-XObject** (Tabelle 95) — Illustrator legt
 /// dort seine privaten Daten ab.
 #[test]
-#[ignore = "Befund R3: rot bis zur Korrektur"]
 fn pieceinfo_an_einem_form_xobject_bleibt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let form = d.add(Object::Stream(Stream::new(
@@ -389,7 +456,6 @@ fn pieceinfo_an_einem_form_xobject_bleibt() {
 /// JavaScript-Strom, Tabelle 300) und `/3DV` eine Ansicht mit `/XN`, dem
 /// frei wählbaren Anzeigenamen (Tabelle 304).
 #[test]
-#[ignore = "Befund R3: rot bis zur Korrektur"]
 fn dreid_annotation_behaelt_javascript_und_ansichtsnamen() {
     for (was, key) in [("JavaScript", "js"), ("Ansichtsname", "xn")] {
         let mut d: Doc = page(&["Rechnung 4711"]);
@@ -430,7 +496,6 @@ fn dreid_annotation_behaelt_javascript_und_ansichtsnamen() {
 /// Eine Redact-Annotation: `/OverlayText` fällt schon; `/RO` ist ein
 /// Form-XObject, das über die Stelle gelegt wird — mit Text darin.
 #[test]
-#[ignore = "Befund R3: rot bis zur Korrektur"]
 fn redact_annotation_behaelt_ihr_ro() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let font_id = d.font_id;
@@ -640,6 +705,61 @@ fn korpus_schreiben() {
             b"/OC /oc1 BDC BT /F1 12 Tf 72 700 Td (Kontoinhaber: Max Mustermann) Tj ET EMC\n",
         );
         faelle.push(("ebenenname_verweis", d.finish()));
+    }
+
+    // 3D-Annotation: JavaScript im `/3DD`-Strom, Ansichtsname in `/3DV /XN`.
+    {
+        let mut d: Doc = page(&["Kontoinhaber: Max Mustermann", &format!("IBAN: {SECRET}")]);
+        let js = d.add(Object::Stream(Stream::new(
+            dictionary! {},
+            format!("app.alert(\"{SECRET}\");").into_bytes(),
+        )));
+        let daten = d.add(Object::Stream(Stream::new(
+            dictionary! {
+                "Type" => "3D",
+                "Subtype" => "U3D",
+                "OnInstantiate" => Object::Reference(js),
+            },
+            b"U3D\0\0\0\0".to_vec(),
+        )));
+        let a = d.add(Object::Dictionary(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "3D",
+            "Rect" => vec![300.into(), 400.into(), 420.into(), 490.into()],
+            "3DD" => Object::Reference(daten),
+            "3DV" => dictionary! {
+                "Type" => "3DView",
+                "XN" => Object::string_literal(format!("Ansicht {SECRET}")),
+                "IN" => Object::string_literal("v1"),
+                "MS" => "M",
+            },
+        }));
+        d.page_dict_set("Annots", Object::Array(vec![Object::Reference(a)]));
+        faelle.push(("dreid", d.finish()));
+    }
+    // Redact-Annotation mit Text im `/RO`-Form-XObject.
+    {
+        let mut d: Doc = page(&["Kontoinhaber: Max Mustermann"]);
+        let font_id = d.font_id;
+        let ro = d.add(Object::Stream(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 200.into(), 20.into()],
+                "Resources" => dictionary! { "Font" => dictionary! { "F1" => Object::Reference(font_id) } },
+            },
+            format!("BT /F1 8 Tf 2 2 Td ({SECRET}) Tj ET\n").into_bytes(),
+        )));
+        let a = d.add(Object::Dictionary(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Redact",
+            "Rect" => vec![72.into(), 650.into(), 272.into(), 670.into()],
+            "QuadPoints" => vec![72.into(), 670.into(), 272.into(), 670.into(), 72.into(), 650.into(), 272.into(), 650.into()],
+            "OverlayText" => Object::string_literal("GESCHWAERZT"),
+            "RO" => Object::Reference(ro),
+        }));
+        d.page_dict_set("Annots", Object::Array(vec![Object::Reference(a)]));
+        faelle.push(("redact_ro", d.finish()));
     }
 
     for (name, bytes) in faelle {
