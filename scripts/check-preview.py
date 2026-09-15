@@ -67,6 +67,17 @@ import sys
 import zlib
 from pathlib import Path
 
+# Die Ausgabe traegt Zeichen jenseits von ASCII (Pfeil, Umlaute). Unter Windows
+# ist die Konsolenkodierung cp1252, und `print` bricht dort mit einem
+# UnicodeEncodeError ab - der Windows-Job der CI war genau daran rot, obwohl an
+# den Belegen nichts fehlte. Ein Pruefer, der an seiner eigenen Ausgabe
+# scheitert, prueft nichts; deshalb schreibt er ueberall UTF-8.
+for _strom in (sys.stdout, sys.stderr):
+    try:
+        _strom.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):  # sehr alte Python-Fassungen
+        pass
+
 # --------------------------------------------------------------------------
 # Erwartungen
 #

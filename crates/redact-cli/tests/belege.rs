@@ -311,6 +311,10 @@ fn die_zahl_der_pruefungen_steht_im_readme() {
         .arg(wurzel.join("docs"))
         .current_dir(&wurzel)
         .stdin(Stdio::null())
+        // Zweiter Zaun neben `reconfigure` im Skript: unter Windows ist die
+        // Konsolenkodierung cp1252, und der Pfeil in der Ausgabe ließ `print`
+        // dort abbrechen.
+        .env("PYTHONIOENCODING", "utf-8")
         .output()
     {
         Ok(out) => out,
@@ -354,6 +358,20 @@ fn die_zahl_der_pruefungen_steht_im_readme() {
 fn jede_gelesene_dateiart_wird_mit_lf_ausgecheckt() {
     let attrs = lf(&std::fs::read_to_string(repo_root().join(".gitattributes"))
         .expect(".gitattributes lesbar"));
+    // Und dieselbe Klasse eine Ebene weiter: ein Prüfskript, dessen Ausgabe
+    // an der Konsolenkodierung scheitert, prüft nichts. `check-preview.py`
+    // stellt seine Ströme deshalb selbst auf UTF-8; fällt die Zeile weg, wird
+    // dieser Test rot statt der Windows-Job.
+    let skript = lf(
+        &std::fs::read_to_string(repo_root().join("scripts/check-preview.py"))
+            .expect("check-preview.py lesbar"),
+    );
+    assert!(
+        skript.contains(r#"reconfigure(encoding="utf-8""#),
+        "check-preview.py stellt seine Ausgabe nicht auf UTF-8 — unter Windows \
+         bricht sie am ersten Zeichen jenseits von ASCII ab"
+    );
+
     for endung in ["md", "txt", "rs", "toml", "yml", "sh", "py"] {
         let zeile = format!("*.{endung} text eol=lf");
         assert!(
