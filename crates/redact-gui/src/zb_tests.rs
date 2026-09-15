@@ -736,18 +736,27 @@ fn zb5_ein_abgewaehlter_text_ist_eine_entscheidung_kein_leck() {
         !status.contains("steht NOCH in der Ausgabe"),
         "die Entscheidung gilt als Leck: {status}"
     );
+    // Der Vorbehalt steht **vor** der Entwarnung (Befund Q4-3).
     assert!(
-        status.contains("Nachprüfung: 1 gesuchte Text(e) stehen nicht mehr in der Ausgabe."),
+        status.contains("1 gesuchte Text(e) stehen nicht mehr in der Ausgabe."),
         "{status}"
     );
     assert!(
         status.contains(
-            "1 Text(e) decken sich mit einer abgewählten oder geschützten Zeile und zählen \
-             deshalb nicht als Leck."
+            "1 Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile: \
+             über sie sagt diese Prüfung nichts"
         ),
         "{status}"
     );
-    assert!(app.state.warnings.is_empty(), "{:?}", app.state.warnings);
+    // Seit Befund Q4-1 bleibt dieser Vorbehalt auch in den Warnungen stehen:
+    // die Statuszeile überschreibt die nächste Aktion, und „nicht gesucht“
+    // ist keine Entwarnung.
+    assert_eq!(app.state.warnings.len(), 1, "{:?}", app.state.warnings);
+    assert!(
+        app.state.warnings[0].contains("über 1 Text(e) sagt sie nichts"),
+        "{:?}",
+        app.state.warnings
+    );
 
     // Das Orakel: die abgewählte IBAN steht wirklich noch da, die andere nicht.
     let bytes = std::fs::read(&out).unwrap();
@@ -797,12 +806,10 @@ fn zb5_zweimal_geschwaerzt_einmal_abgewaehlt_ist_kein_leck() {
         !status.contains("steht NOCH"),
         "die Entscheidung gilt als Leck: {status}"
     );
+    assert!(status.contains("Es wurde nichts gesucht."), "{status}");
     assert!(
-        status.contains("Nachprüfung: es wurde nichts gesucht."),
-        "{status}"
-    );
-    assert!(
-        status.contains("1 Text(e) decken sich mit einer abgewählten"),
+        status
+            .contains("1 Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile"),
         "{status}"
     );
 
@@ -1402,6 +1409,205 @@ fn zb_p5d5_auch_der_geglueckte_lauf_fordert_ein_neuzeichnen() {
         app.state.status.contains("Nachprüfung:"),
         "{}",
         app.state.status
+    );
+}
+
+// ===========================================================================
+// Q4-5 / Q4-6 — wann das Neuzeichnen kommt, und wem ein Urteil gehört
+// ===========================================================================
+
+/// Ein Dokument mit zwei Geheimnissen auf Seite 1.
+fn zwei_geheimnisse() -> Vec<u8> {
+    build_pdf(&[vec![
+        TextItem::new(72.0, 700.0, 10.0, "Zeile A GEHEIM-EINS"),
+        TextItem::new(72.0, 660.0, 10.0, "Zeile B GEHEIM-ZWEI"),
+    ]])
+}
+
+/// Ein Rechteck über der Zeile bei `y` — trifft.
+fn ueber(y: f64) -> Rect {
+    Rect::new(60.0, y - 10.0, 520.0, y + 14.0)
+}
+
+/// Ein Rechteck, unter dem nichts liegt — die Zeile gilt als geschwärzt und
+/// bleibt trotzdem stehen.
+fn daneben() -> Rect {
+    Rect::new(430.0, 20.0, 440.0, 40.0)
+}
+
+/// **Befund Q4-5.** Das Neuzeichnen wird am **Ende** des Prüf-Threads
+/// angefordert, nicht bei seinem Start.
+///
+/// Die beiden Tests aus Fix-Runde 5 (`zb_p5d5_*`) prüfen nur, **dass**
+/// angefordert wurde — beide blieben grün, wenn man `let _repaint = repaint;`
+/// aus dem Thread nimmt. Dann fällt der Wächter noch in
+/// `start_export_check` auf dem Oberflächen-Thread, das Neuzeichnen kommt
+/// beim Start, und der Fehler von P5-D5 wäre zurück (stirbt der Thread
+/// später, holt niemand mehr ein Urteil ab). Hier steht der Thread mit dem
+/// [`CheckGate`] still, und bis dahin darf **nichts** angefordert sein.
+///
+/// Mutation (`let _repaint = repaint;` entfernt): rot.
+#[test]
+fn zb_q4d5_das_neuzeichnen_kommt_erst_am_ende_des_pruefthreads() {
+    let out = tmp("q4d5").join("out.pdf");
+    let ctx = egui::Context::default();
+    assert!(!ctx.has_requested_repaint(), "frischer Kontext, nichts an");
+
+    let gate = Arc::new(crate::app::CheckGate::default());
+    let mut app = demo_app();
+    app.ui_ctx = Some(ctx.clone());
+    app.hold_check = Some(gate.clone());
+    app.export_to(out);
+
+    // Der Thread läuft wirklich — und hängt vor der Suche.
+    gate.wait_until_arrived();
+    assert!(app.export_check_running());
+    assert!(
+        !ctx.has_requested_repaint(),
+        "das Neuzeichnen wurde schon beim Start angefordert — der Wächter \
+         liegt nicht im Thread"
+    );
+
+    gate.release();
+    app.wait_for_export_checks();
+    assert!(
+        ctx.has_requested_repaint(),
+        "am Ende des Threads muss es angefordert sein"
+    );
+    assert!(
+        app.state.status.contains("Nachprüfung:"),
+        "{}",
+        app.state.status
+    );
+}
+
+/// **Befund Q4-6.** Ein zweiter Export **derselben** Datei beendet die
+/// ältere Prüfung.
+///
+/// [`ExportCheckPlan::run`] liest die Datei zum Prüfzeitpunkt. Läuft die
+/// erste Prüfung noch, wenn die zweite Ausgabe geschrieben ist, bewertet sie
+/// die **neuen** Bytes mit dem **alten** Plan — und trägt das Urteil unter
+/// dem Präfix des ersten Exports ein. Hier ist die erste Ausgabe sauber und
+/// die zweite leck: die alte Prüfung (Begriffe des ersten Exports) fände in
+/// den neuen Bytes nichts und meldete über den ersten Export eine
+/// Entwarnung, die für keine der beiden Dateien stimmt.
+///
+/// Mutation (`self.checks.retain(…)` in `start_export_check` entfernt): rot,
+/// zwei Urteile statt einem.
+#[test]
+fn zb_q4d6_ein_zweiter_export_derselben_datei_beendet_die_alte_pruefung() {
+    let dir = tmp("q4d6-zweimal");
+    let out = dir.join("out.pdf");
+    let gate = Arc::new(crate::app::CheckGate::default());
+
+    let mut app = RedactApp::silent(Config {
+        no_patterns: true,
+        ..Config::default()
+    });
+    app.open_bytes_and_analyze(&zwei_geheimnisse(), "zwei.pdf");
+    app.hold_check = Some(gate.clone());
+
+    // Erster Export: nur Zeile A, Rechteck trifft — die Ausgabe ist sauber.
+    app.state
+        .regions
+        .push(text_region(0, ueber(700.0), "GEHEIM-EINS"));
+    let erster = app.state.plan_export_check(&app.state.hit_summary());
+    assert_eq!(erster.needles, vec!["GEHEIM-EINS".to_string()]);
+    app.export_to(out.clone());
+    gate.wait_until_arrived();
+    assert_eq!(app.checks.len(), 1);
+
+    // Zweiter Export in **dieselbe** Datei: dazu Zeile B, deren Rechteck
+    // danebengeht — die neue Ausgabe leckt.
+    app.state
+        .regions
+        .push(text_region(0, daneben(), "GEHEIM-ZWEI"));
+    let zweiter = app.state.plan_export_check(&app.state.hit_summary());
+    assert_eq!(
+        zweiter.needles,
+        vec!["GEHEIM-EINS".to_string(), "GEHEIM-ZWEI".to_string()]
+    );
+    app.export_to(out.clone());
+    assert_eq!(
+        app.checks.len(),
+        1,
+        "die ältere Prüfung urteilt über Bytes, die es nicht mehr gibt"
+    );
+
+    gate.release();
+    let urteile = {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut count = 0;
+        while app.export_check_running() {
+            assert!(
+                Instant::now() < deadline,
+                "die Nachprüfung kommt nicht zum Ende"
+            );
+            count += app.poll_export_checks();
+        }
+        count
+    };
+    assert_eq!(urteile, 1, "ein Export, ein Urteil");
+    let status = app.state.status.clone();
+    println!("Statuszeile: {status}");
+    assert!(
+        status.contains("1 von 2 gesuchten Text(en) steht NOCH in der Ausgabe"),
+        "das Urteil gehört zum zweiten Export: {status}"
+    );
+    // Und das Orakel: die neue Ausgabe leckt wirklich.
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(!redact_pdf::leaks(&bytes, "GEHEIM-ZWEI").is_empty());
+    assert!(redact_pdf::leaks(&bytes, "GEHEIM-EINS").is_empty());
+}
+
+/// **Befund Q4-6, der zweite Fall.** Wird mitten in einer laufenden Prüfung
+/// ein **anderes Dokument** geöffnet, kommt ihr Urteil trotzdem an — und
+/// bleibt zuzuordnen.
+///
+/// Fallenlassen wäre falsch: die geschriebene Datei gibt es weiter, und ihr
+/// Leck verschwindet nicht dadurch, dass jemand ein anderes Dokument
+/// aufmacht. Zuzuordnen ist es über den **Dateinamen**, den Statuszeile
+/// (Präfix des Exports) und Warnung mitführen — das neue Dokument heißt
+/// anders und hat mit dem Urteil nichts zu tun.
+///
+/// Mutation (`file` aus `note_check_warning` weg): rot.
+#[test]
+fn zb_q4d6_ein_dokumentwechsel_verliert_das_urteil_nicht() {
+    let out = tmp("q4d6-wechsel").join("erste.pdf");
+    let gate = Arc::new(crate::app::CheckGate::default());
+
+    let mut app = RedactApp::silent(Config {
+        no_patterns: true,
+        ..Config::default()
+    });
+    app.open_bytes_and_analyze(&zwei_geheimnisse(), "zwei.pdf");
+    app.hold_check = Some(gate.clone());
+    // Rechteck daneben: die Ausgabe leckt.
+    app.state
+        .regions
+        .push(text_region(0, daneben(), "GEHEIM-EINS"));
+    app.export_to(out.clone());
+    gate.wait_until_arrived();
+
+    // Mitten in der Prüfung ein anderes Dokument.
+    app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+    assert!(app.export_check_running(), "die Prüfung läuft weiter");
+    assert!(app.state.warnings.is_empty(), "{:?}", app.state.warnings);
+
+    gate.release();
+    app.wait_for_export_checks();
+    let status = app.state.status.clone();
+    println!("Statuszeile: {status}");
+    assert!(status.contains("steht NOCH in der Ausgabe"), "{status}");
+    assert!(
+        status.contains("erste.pdf"),
+        "die Datei steht im Satz: {status}"
+    );
+    assert_eq!(app.state.warnings.len(), 1, "{:?}", app.state.warnings);
+    assert!(
+        app.state.warnings[0].starts_with("erste.pdf: "),
+        "{:?}",
+        app.state.warnings
     );
 }
 

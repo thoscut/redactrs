@@ -375,12 +375,65 @@ impl HitOutcome {
 /// So viele ungeprüfte Stellen nennt der Satz beim Namen; der Rest wird
 /// gezählt.
 ///
-/// [`redact_pdf::LeakCheck::unchecked`] darf bis zu 51 Zeilen tragen (50
-/// einzelne Ströme plus eine Summenzeile). Alle in die Statuszeile zu
-/// schreiben hieße, sie unlesbar zu machen; gar keine zu nennen hieße, die
-/// Ursache raten zu lassen. Drei zeigen, **worum** es geht — die Zahl davor
-/// sagt, wie viele es sind.
+/// [`redact_pdf::LeakCheck::unchecked`] darf **154** Zeilen tragen, nicht 51.
+/// Die Decke von 50 einzeln genannten Stellen plus Summenzeile (`redact-pdf`,
+/// `MAX_UNCHECKED`) gilt je **Zähler**, und davon gibt es drei: nicht
+/// entpackte Ströme der Rohsicht, dieselben der Objektsicht (jede Sicht hat
+/// ihr eigenes Budget) und Stellen aus anderem Grund — etwa die
+/// Verschachtelungstiefe. Dazu kommt die Zeile über Sicht 7. Gemessen
+/// (`zf_q4_tests::zf_q4_3_die_zahl_der_ungepruefeten_stellen_sprengt_die_zusage`):
+/// 60 zu große Ströme ergeben **52** Zeilen; die 154 sind die aus dem Code
+/// abgeleitete Obergrenze, keine gemessene Zahl.
+///
+/// Alle in die Statuszeile zu schreiben hieße, sie unlesbar zu machen; gar
+/// keine zu nennen hieße, die Ursache raten zu lassen. Drei zeigen, **worum**
+/// es geht — die Zahl davor sagt, wie viele es sind. Und jede von ihnen wird
+/// gekürzt ([`short_place`]): der Grund gehört in den Satz, die
+/// Buchhaltung des Budgets nicht.
 const MAX_NAMED_PLACES: usize = 3;
+
+/// Eine ungeprüfte Stelle, gekürzt auf Ort und Grund.
+///
+/// [`redact_pdf::LeakCheck::unchecked`] schreibt je Stelle einen ganzen Satz:
+/// „Rohdaten-Stream @0x298 (Objekt 4 0): nicht entpackt — 67 Byte gepackt,
+/// entpackt mehr als die verbleibenden 64 von 64 Byte des Budgets
+/// (--max-decompressed-mb); die gepackten Bytes wurden roh durchsucht.“ Drei
+/// davon machten die Statuszeile **804 Zeichen** lang (gemessen in
+/// `zf_q4_3_die_zahl_der_ungepruefeten_stellen_sprengt_die_zusage`) — eine
+/// Zeile, die niemand liest, sagt so wenig wie gar keine.
+///
+/// Gekürzt wird am ersten Komma, Semikolon oder Punkt **hinter** dem
+/// Gedankenstrich, also genau hinter dem Grund: „… (Objekt 4 0): nicht
+/// entpackt — 67 Byte gepackt“, „Objekt 5 0 /Kids[0]: nicht durchsucht —
+/// Verschachtelungstiefe 32 erreicht“, „Objektgraph (Sichten 3–7) nicht
+/// durchsucht — die Vorprüfung des Laders lehnt die Datei ab: PDF-Fehler:
+/// entpackte Streams überschreiten das Budget von 0 MB“. Der Grund bleibt damit stehen — er ist der Teil, der zur
+/// richtigen Stelle führt (Fix-Runde 5, „die Antwort behauptet keine Ursache
+/// mehr“); die volle Zeile steht weiter in [`ExportCheck::unchecked`], für
+/// den, der sie braucht.
+fn short_place(place: &str) -> &str {
+    const DASH: &str = " — ";
+    let after_reason = place.find(DASH).map_or(0, |dash| dash + DASH.len());
+    match place[after_reason..].find([',', ';', '.']) {
+        Some(cut) => place[..after_reason + cut].trim_end(),
+        None => place,
+    }
+}
+
+/// Derselbe Satzteil mit großem Anfangsbuchstaben — für Teile, die nicht
+/// mehr an erster Stelle stehen.
+///
+/// Die Teilsätze von [`ExportCheck::sentence`] wechseln ihren Platz (der
+/// Vorbehalt steht vor der Entwarnung, der Fund vor allem). Was hinter einem
+/// Punkt landet, fängt groß an; was direkt hinter „Nachprüfung: “ steht,
+/// klein.
+fn capitalized(part: &str) -> String {
+    let mut chars = part.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
 
 /// Ergebnis der Nachprüfung über die geschriebene Datei.
 ///
@@ -403,14 +456,30 @@ pub struct ExportCheck {
     /// Schutzeintrag. Dass sie in der Ausgabe stehen, ist eine Entscheidung
     /// und kein Leck.
     ///
-    /// Zwei Wege führen hierher, und beide sind dasselbe Urteil:
+    /// Zwei Wege führen hierher, und sie sind **nicht** dasselbe Urteil:
     ///
     /// 1. **wörtlich derselbe Text** steht in einer stehen gelassenen Zeile —
-    ///    dann wird gar nicht erst gesucht ([`AppState::plan_export_check`]);
+    ///    dann wird gar nicht erst gesucht ([`AppState::plan_export_check`]).
+    ///    Diese Texte zählt [`ExportCheck::unsearched`] noch einmal für sich:
+    ///    über sie sagt die Prüfung **nichts**;
     /// 2. gesucht wurde, und getroffen hat **nur die Fassung ohne Leerraum**
     ///    ([`redact_pdf::LeakCheck::literal`]) einer stehen gelassenen Zeile
-    ///    derselben Normalform ([`ExportCheckPlan::kept_forms`]).
+    ///    derselben Normalform ([`ExportCheckPlan::kept_forms`]). Nur das ist
+    ///    ein Urteil: die Schreibweise steht **nicht** mehr wörtlich in der
+    ///    Ausgabe, also ist der Rest die stehen gelassene Zeile.
     pub kept: usize,
+    /// Davon die Texte aus Weg 1: gar nicht gesucht, weil eine bewusst stehen
+    /// gelassene Zeile **wörtlich** denselben Text trägt.
+    ///
+    /// Immer `<= kept`. Sie sind der Teil von `kept`, der **kein** Urteil ist:
+    /// Ging die Schwärzung daneben, stünde derselbe Text auch dort noch — und
+    /// weil beide Vorkommen Zeichen für Zeichen gleich sind, kann die Prüfung
+    /// den einen Fund nicht dem einen oder anderen Ort zuordnen (Befund Q4-1,
+    /// Begründung bei [`AppState::plan_export_check`]). Deshalb sagt der Satz
+    /// über sie „über sie sagt diese Prüfung nichts“ statt „zählt nicht als
+    /// Leck“, und [`ExportCheck::warning`] nimmt sie auf: die Statuszeile ist
+    /// flüchtig, die Warnung bleibt.
+    pub unsearched: usize,
     /// Die Decke, die für diesen Lauf galt — im Regelfall
     /// [`redact_core::MAX_CHECK_NEEDLES`]; ein Test darf sie tiefer legen
     /// ([`ExportCheckPlan::run_within`]). Der Satz nennt sie, damit der
@@ -443,14 +512,30 @@ impl ExportCheck {
     /// Der Satz für die Warnungen — `None`, wenn es nichts zu warnen gibt.
     ///
     /// Ein Fund und eine unvollständige Antwort tragen den ganzen Satz der
-    /// Statuszeile; nicht gesuchte Texte jenseits der Decke (`skipped`)
-    /// bekommen einen eigenen: der Satz der Statuszeile beginnt dort mit
-    /// „stehen nicht mehr in der Ausgabe“, und das läse sich als Warnung
-    /// wie eine Entwarnung. Die Statuszeile überschreibt die nächste
-    /// Aktion; die Warnungen bleiben — deshalb steht es dort noch einmal.
+    /// Statuszeile; nicht gesuchte Texte (`skipped` jenseits der Decke,
+    /// `unsearched` wegen wörtlicher Deckung) bekommen einen eigenen: der
+    /// Satz der Statuszeile trägt dort auch eine Entwarnung, und die läse
+    /// sich als Warnung wie ein Freibrief. Die Statuszeile überschreibt die
+    /// nächste Aktion; die Warnungen bleiben — deshalb steht es dort noch
+    /// einmal.
+    ///
+    /// **Die Reihenfolge ist die der Ursachen, nicht die der Symptome.** Eine
+    /// unlesbare Ausgabe trägt jeden Begriff als `skipped` ein
+    /// ([`ExportCheckPlan::run_within`]) — wer `skipped` zuerst prüft, meldet
+    /// die Decke („höchstens 1 000 Begriffe“) an einer Datei, die es gar
+    /// nicht zurückzulesen gab, und schickt damit an die falsche Stelle
+    /// (Befund Q4-2). Deshalb steht `unreadable` hier oben.
     pub fn warning(&self) -> Option<String> {
-        if self.found_leak() || self.incomplete() {
+        if self.unreadable.is_some() || self.found_leak() || self.incomplete() {
             return Some(self.sentence());
+        }
+        if self.unsearched > 0 {
+            return Some(format!(
+                "Nachprüfung unvollständig — über {} Text(e) sagt sie nichts: sie stehen \
+                 wörtlich auch in einer abgewählten oder geschützten Zeile und wurden deshalb \
+                 nicht gesucht.",
+                self.unsearched
+            ));
         }
         if self.skipped > 0 {
             return Some(format!(
@@ -474,6 +559,18 @@ impl ExportCheck {
     ///    bekannten Text; über es sagt die Prüfung nichts. Verschwiegen wäre
     ///    das die gefährlichste Zeile der Oberfläche — „nichts gefunden“ an
     ///    einem Dokument, dessen Schwärzungen sämtlich von Hand gezogen sind.
+    ///
+    /// ## Die Reihenfolge: erst der Vorbehalt, dann die Entwarnung
+    ///
+    /// Steht ein **Fund** da, führt er — stärker als er sagt keine Zeile
+    /// etwas, und eine Entwarnung ist er nicht. Sonst kommen die Vorbehalte
+    /// (ungeprüfte Stellen, nicht gesuchte Texte) **vor** das Ergebnis. Die
+    /// umgekehrte Reihenfolge nennt der Doc-Kommentar von
+    /// [`ExportCheck::warning`] selbst als untauglich („das läse sich als
+    /// Warnung wie eine Entwarnung“) — bis Fix-Runde 5 abgestellt war sie
+    /// nur dort, während die Statuszeile, die der Nutzer zuerst liest, mit
+    /// „… stehen nicht mehr in der Ausgabe“ begann und den Vorbehalt
+    /// hinterherschickte (Befund Q4-3).
     pub fn sentence(&self) -> String {
         if let Some(error) = &self.unreadable {
             return format!(
@@ -484,7 +581,7 @@ impl ExportCheck {
         }
         let head = if self.found_leak() {
             format!(
-                "Nachprüfung: {} von {} gesuchten Text(en) steht NOCH in der Ausgabe \
+                "{} von {} gesuchten Text(en) steht NOCH in der Ausgabe \
                  — diese Datei ist nicht geschwärzt und darf so nicht weitergegeben werden.",
                 self.leaking.len(),
                 self.checked
@@ -492,18 +589,17 @@ impl ExportCheck {
         } else if self.checked == 0 && self.kept > 0 {
             // Es gab Texte — sie stehen nur alle auch in einer stehen
             // gelassenen Zeile. „Keine Zeile mit bekanntem Text“ wäre falsch.
-            "Nachprüfung: es wurde nichts gesucht.".to_string()
+            "es wurde nichts gesucht.".to_string()
         } else if self.checked == 0 {
-            "Nachprüfung: keine geschwärzte Zeile mit bekanntem Text — es wurde nichts \
-             nachgeprüft."
-                .to_string()
+            "keine geschwärzte Zeile mit bekanntem Text — es wurde nichts nachgeprüft.".to_string()
         } else {
             format!(
-                "Nachprüfung: {} gesuchte Text(e) stehen nicht mehr in der Ausgabe.",
+                "{} gesuchte Text(e) stehen nicht mehr in der Ausgabe.",
                 self.checked
             )
         };
-        let unchecked = if self.incomplete() {
+        let mut caveats: Vec<String> = Vec::new();
+        if self.incomplete() {
             let places = self.unchecked_places();
             // Die Stellen kommen aus `redact-pdf` und bringen ihre eigene
             // Zeichensetzung mit; ein zweiter Punkt dahinter sähe aus wie ein
@@ -513,36 +609,57 @@ impl ExportCheck {
             } else {
                 "."
             };
-            format!(
-                " {} Stelle(n) wurden nicht geprüft — die Antwort ist unvollständig: {places}{dot}",
+            caveats.push(format!(
+                "{} Stelle(n) wurden nicht geprüft — die Antwort ist unvollständig: {places}{dot}",
                 self.unchecked.len()
-            )
-        } else {
-            String::new()
-        };
-        let skipped = if self.skipped > 0 {
-            format!(
-                " {} weitere Text(e) wurden nicht gesucht — höchstens {} Begriffe je \
+            ));
+        }
+        if self.skipped > 0 {
+            caveats.push(format!(
+                "{} weitere Text(e) wurden nicht gesucht — höchstens {} Begriffe je \
                  Nachprüfung (dieselbe Decke wie --check-leaks); sie stehen in der \
                  Trefferliste weiter hinten.",
                 self.skipped, self.limit
-            )
+            ));
+        }
+        if self.unsearched > 0 {
+            caveats.push(format!(
+                "{} Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile: \
+                 über sie sagt diese Prüfung nichts — ob dort eine Schwärzung danebenging, \
+                 bleibt offen.",
+                self.unsearched
+            ));
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if self.found_leak() {
+            parts.push(head);
+            parts.append(&mut caveats);
         } else {
-            String::new()
-        };
-        let kept = if self.kept > 0 {
-            format!(
-                " {} Text(e) decken sich mit einer abgewählten oder geschützten Zeile und \
-                 zählen deshalb nicht als Leck.",
-                self.kept
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "{head}{unchecked}{skipped}{kept} Geprüft ist genau diese Liste, nicht die Datei.{}",
-            self.hand_made()
-        )
+            parts.append(&mut caveats);
+            parts.push(head);
+        }
+        // Der Rest von `kept`: gesucht **wurde**, getroffen hat nur die
+        // Fassung ohne Leerraum einer stehen gelassenen Zeile. Das ist ein
+        // Urteil und kein Vorbehalt — es gehört hinter das Ergebnis.
+        let judged = self.kept.saturating_sub(self.unsearched);
+        if judged > 0 {
+            parts.push(format!(
+                "{judged} Text(e) decken sich mit einer abgewählten oder geschützten Zeile und \
+                 zählen deshalb nicht als Leck."
+            ));
+        }
+        parts.push("Geprüft ist genau diese Liste, nicht die Datei.".to_string());
+        let mut sentence = String::from("Nachprüfung: ");
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 {
+                sentence.push(' ');
+                sentence.push_str(&capitalized(part));
+            } else {
+                sentence.push_str(part);
+            }
+        }
+        sentence.push_str(&self.hand_made());
+        sentence
     }
 
     /// Die ungeprüften Stellen, wie [`redact_pdf::LeakCheck::unchecked`] sie
@@ -557,7 +674,11 @@ impl ExportCheck {
     /// — die Stellen selbst wissen es besser.
     fn unchecked_places(&self) -> String {
         let named = self.unchecked.len().min(MAX_NAMED_PLACES);
-        let mut text = self.unchecked[..named].join("; ");
+        let mut text = self.unchecked[..named]
+            .iter()
+            .map(|place| short_place(place))
+            .collect::<Vec<_>>()
+            .join("; ");
         if let Some(rest) = self.unchecked.len().checked_sub(named).filter(|r| *r > 0) {
             text.push_str(&format!("; … und {rest} weitere"));
         }
@@ -687,6 +808,7 @@ impl ExportCheckPlan {
                     without_text: self.without_text,
                     skipped: self.needles.len(),
                     kept: self.kept,
+                    unsearched: self.kept,
                     limit,
                     unchecked: Vec::new(),
                 }
@@ -722,14 +844,14 @@ impl ExportCheckPlan {
             if hits.is_empty() {
                 continue;
             }
-            // Fehlt die Marke, gilt der Fund als wörtlich — ein Leck zu
-            // verschweigen wäre der teurere Irrtum.
-            let literal = found.literal.get(index).copied().unwrap_or(true);
-            if !literal && self.kept_forms.get(index).copied().unwrap_or(false) {
+            if is_leak(
+                found.literal.get(index).copied(),
+                self.kept_forms.get(index).copied(),
+            ) {
+                leaking.push((*needle).to_string());
+            } else {
                 kept += 1;
-                continue;
             }
-            leaking.push((*needle).to_string());
         }
 
         ExportCheck {
@@ -739,10 +861,37 @@ impl ExportCheckPlan {
             without_text: self.without_text,
             skipped,
             kept,
+            // Was der Plan schon gezählt hat, wurde **nie gesucht** — der
+            // Rest von `kept` ist am Fund entschieden. Beides in einer Zahl
+            // hieße, ein Urteil und ein Nichturteil zu verrechnen.
+            unsearched: self.kept,
             limit,
             unchecked: found.unchecked,
         }
     }
+}
+
+/// Ist dieser Fund ein Leck?
+///
+/// * `literal`: hat der Begriff **wörtlich** getroffen
+///   ([`redact_pdf::LeakCheck::literal`] an seiner Stelle)?
+/// * `kept_form`: trägt eine bewusst stehen gelassene Zeile dieselbe
+///   Normalform ([`ExportCheckPlan::kept_forms`] an seiner Stelle)?
+///
+/// Ein **wörtlicher** Fund ist immer ein Leck. Nur ein Fund, den allein die
+/// Fassung ohne Leerraum gebracht hat, kann die stehen gelassene Zeile sein —
+/// und auch das nur, wenn es eine mit derselben Normalform gibt.
+///
+/// **Beide Vorgaben stehen auf der sicheren Seite**, und beide sind hier
+/// prüfbar: fehlt die Marke, gilt der Fund als wörtlich; fehlt der Eintrag im
+/// Plan, gilt keine Zeile als deckend. Ein Leck zu verschweigen ist der
+/// teurere Irrtum. Dass eine Vorgabe von außen nicht erreichbar ist
+/// ([`redact_pdf::leaks_many_within`] füllt `literal` immer in der Länge von
+/// `findings`), heißt nicht, dass sie ungeprüft bleiben muss — deshalb steht
+/// die Entscheidung in einer eigenen Funktion und nicht mitten im Lauf. Siehe
+/// `zf_q4_tests::zf_q4_1_die_beiden_vorgaben_stehen_auf_der_sicheren_seite`.
+pub(crate) fn is_leak(literal: Option<bool>, kept_form: Option<bool>) -> bool {
+    literal.unwrap_or(true) || !kept_form.unwrap_or(false)
 }
 
 /// Ergebnis einer Konfliktauflösung, aufbereitet für die Anzeige.
@@ -2862,9 +3011,32 @@ impl AppState {
     /// ## Wann eine stehen gelassene Zeile eine Schreibweise deckt
     ///
     /// **Wörtlich** — und dann wird gar nicht erst gesucht: derselbe Text in
-    /// zwei Zeilen, eine geschwärzt, eine abgewählt, ist eine Entscheidung
-    /// und kein Leck (Befund 5 aus Fix-Runde 4). Gesagt wird es trotzdem
-    /// ([`ExportCheck::kept`]).
+    /// zwei Zeilen, eine geschwärzt, eine abgewählt (Befund 5 aus
+    /// Fix-Runde 4). Gesagt wird es ([`ExportCheck::kept`]), und zwar als
+    /// das, was es ist: **kein Urteil** ([`ExportCheck::unsearched`]).
+    ///
+    /// Denn das ist die halbe Wahrheit. Ging die Schwärzung daneben, steht
+    /// der Text auch dort noch — und weil beide Vorkommen Zeichen für
+    /// Zeichen dasselbe sind, ist der Fund von der stehen gelassenen Zeile
+    /// nicht zu unterscheiden. Bis Fix-Runde 5 hieß der Satz „decken sich …
+    /// und zählen deshalb nicht als Leck“ und [`ExportCheck::warning`] gab
+    /// `None` — eine Entwarnung über ein Leck, das die Prüfung nie gesucht
+    /// hat (Befund Q4-1). Jetzt sagt der Satz, dass über diese Texte nichts
+    /// gesagt wird, und die Warnung bleibt stehen.
+    ///
+    /// **Warum nicht einfach doch gesucht wird:** dann käme der Fehlalarm
+    /// zurück, den Befund 5 abgestellt hat — trifft das Rechteck, ist der
+    /// einzige Rest die bewusst stehen gelassene Zeile, und ein Alarm darüber
+    /// wäre falsch (`zf_q4_tests::
+    /// zf_q4_1_woertlich_gedeckt_und_getroffen_ist_kein_alarm`). Trennen
+    /// ließen sich beide Lagen nur, wenn der Fund einer **Stelle** zuzuordnen
+    /// wäre: die Oberfläche kennt Seite und Rechteck jeder Zeile,
+    /// [`redact_pdf::LeakCheck`] nennt die Seite aber nur im **Text** der
+    /// Fundmeldung („Seite 1 …“). Darauf stützt sich diese Entscheidung
+    /// nicht — dieselbe Überlegung wie bei „wörtlich oder nur ohne
+    /// Leerraum“, wo Fix-Runde 5 statt einer Textsuche das maschinenlesbare
+    /// [`redact_pdf::LeakCheck::literal`] bekam. Solange es das für den Ort
+    /// nicht gibt, ist der ehrliche Satz die richtige Antwort.
     ///
     /// **Auf der Normalform** fällt die Entscheidung **nicht** hier, sondern
     /// am Fund ([`ExportCheckPlan::run_within`]): der Plan merkt sich nur, ob

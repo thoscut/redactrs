@@ -333,7 +333,7 @@ Rückgabewerte:
 | `0` | Erfolg — und nichts blieb ungeprüft |
 | `1` | Verarbeitungsfehler. Im Stapelbetrieb: mindestens eine Datei ist gescheitert |
 | `2` | Bedienfehler (Argumente, Einstellungsdatei, Prüfsummen, `--max-candidates`) |
-| `3` | **Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.** Beim Schwärzen: es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. Bei [`--check-leaks`](#pruefen): mindestens einer der Suchbegriffe steht noch in der Datei — **oder** eine Stelle konnte nicht geprüft werden (Entpackgrenze, Verschachtelungstiefe), auch ohne einen einzigen Fund. |
+| `3` | **Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.** Beim Schwärzen: es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. Bei [`--check-leaks`](#pruefen): mindestens einer der Suchbegriffe steht noch in der Datei — **oder** eine Stelle konnte nicht geprüft werden (fünf Gründe, siehe [`SECURITY.md`](SECURITY.md)), auch ohne einen einzigen Fund. |
 
 `3` ist kein Fehler und kein „alles gut“ — es ist die Aufforderung, genau diese
 Stellen anzusehen. In einem Skript gehört er behandelt wie ein Fehler, solange
@@ -345,9 +345,12 @@ ausdrücklich **kein** `1` — die Datei wurde gelesen, die Suche lief vollstän
 durch, die Antwort steht fest. Sie lautet nur „ja, es steht noch drin“.
 
 Der dritte Fall ist der stillste und deshalb der wichtigste: `--check-leaks`
-endet **auch ohne Fund** mit `3`, wenn es eine Stelle nicht lesen konnte — ein
-Strom über dem Restbudget von `--max-decompressed-mb`, oder eine
-Verschachtelung unterhalb der Tiefe, bis zu der die Objektsicht liest. Über
+endet **auch ohne Fund** mit `3`, wenn es eine Stelle nicht lesen konnte. Fünf
+Gründe gibt es dafür — ein Strom über dem Restbudget von
+`--max-decompressed-mb`, eine Verschachtelung unterhalb der Tiefe, bis zu der
+die Objektsicht liest, ein Filtername, den das Programm nicht kennt, eine vom
+Lader abgelehnte Vorprüfung, und der Schriftdekoder, der deshalb gar nicht erst
+lief; `SECURITY.md` zählt sie mit ihren Meldungen auf. Über
 eine solche Stelle sagt „nicht gefunden“ nichts, und genau deshalb darf sie
 nicht als `0` durchgehen. Sie steht als `NICHT GEPRÜFT: …` in der Ausgabe.
 
@@ -1267,8 +1270,15 @@ Gesucht wird auf allen Ebenen, auf denen ein Geheimnis überleben kann: rohe
 Dateibytes, jeder roh gefundene `stream … endstream`-Block (auch
 Flate-dekomprimiert, also inklusive Altrevisionen), jedes Stream-Objekt des
 Objektgraphen dekodiert, die Objekte in `/ObjStm`-Containern und **jedes**
-Zeichenketten-Objekt unter jedem Schlüssel — jeweils in UTF-8, Latin-1/PDFDoc,
-UTF-16BE und als Hex-String. Im Zweifel meldet die Prüfung zu viel: dieselbe
+Zeichenketten-Objekt unter jedem Schlüssel — jeweils in **bis zu neun
+Byte-Kodierungen**: UTF-8/ASCII, Latin-1/PDFDoc, UTF-16BE und UTF-16LE, dazu
+jede der drei Bytefassungen (Latin-1, UTF-16BE, UTF-16LE) als Hex-String in
+Groß- und in Kleinschreibung. Neun sind es für einen Begriff aus reinem ASCII
+mit Buchstaben — dort fällt Latin-1 mit UTF-8 zusammen —, zehn mit Umlaut und
+sieben mit einem Zeichen jenseits von Latin-1. Fassungen, die auf dieselben
+Bytes fallen, werden nur einmal gesucht: bei einer IBAN aus Ziffern und `DE`
+ist der Hex-String in Groß- und in Kleinschreibung dieselbe Bytefolge, dort
+sind es sechs. Im Zweifel meldet die Prüfung zu viel: dieselbe
 Fundstelle erscheint einmal je Sichtweise. Ein Fehlalarm wird untersucht, ein
 übersehenes Leck wird ausgeliefert.
 
@@ -1281,8 +1291,8 @@ nichts nach.
 
 | Wert | heißt |
 |---|---|
-| `0` | Keiner der Begriffe steht noch in der Datei. **Kein Freibrief** — siehe unten. |
-| `3` | Mindestens einer steht noch darin — **oder** eine Stelle konnte nicht geprüft werden (`NICHT GEPRÜFT: …`, siehe unten). Der Lauf ist gelungen, das *Ergebnis* nicht. |
+| `0` | Keiner der Begriffe steht noch in der Datei — **und** jede Stelle konnte geprüft werden. **Kein Freibrief** — siehe unten. |
+| `3` | Mindestens einer steht noch darin — **oder** eine Stelle konnte nicht geprüft werden (`NICHT GEPRÜFT: …`, fünf mögliche Gründe, siehe unten), auch ohne einen einzigen Fund. Der Lauf ist gelungen, das *Ergebnis* nicht. |
 | `1` | Verarbeitungsfehler: die Datei ist keine PDF-Datei, nicht lesbar, zu groß oder verschlüsselt. |
 | `2` | Bedienfehler: kein Suchbegriff, mehr als eine Datei, oder ein Schalter, der nicht dazugehört. |
 
@@ -1363,7 +1373,9 @@ trägt ein Automat alle Begriffe in allen Kodierungen und läuft **einmal** je
 Datenblock — 1 000 Begriffe kosten kaum mehr als einer (nachgemessen an einer
 64-MiB-Datei: 5,20 s für einen, 6,27 s für 1 000, Verhältnis 1,21). Die Decke
 gilt dem Speicher: der Automat wächst linear mit der Liste, nachgemessen
-1,0 MB für 1 000 Begriffe (12 000 Muster), 7,1 MB für 10 000, 68 MB für
+1,0 MB für 1 000 Begriffe (bis zu 10 000 Muster: neun Byte-Kodierungen und der
+dekodierte Text je Begriff, dazu die Fassung ohne Leerraum, wo der Begriff
+welchen trägt), 7,1 MB für 10 000, 68 MB für
 100 000 und **675 MB** für eine Million — dazu 25 s allein für seinen Bau,
 bevor ein Byte der Datei gelesen ist. Und jeder Begriff bekommt eine eigene
 Zeile im Bericht. Der 1 001. Begriff endet deshalb mit Rückgabewert
@@ -1977,10 +1989,13 @@ Ein Text, den Sie bewusst stehen lassen, deckt nur sich selbst: steht dieselbe
 Zeichenfolge aus einer geschwärzten Zeile noch **wörtlich** in der Ausgabe,
 wird sie gemeldet. Nur wenn allein die Fassung ohne Leerraum trifft und eine
 stehen gelassene Zeile dieselbe Zeichenfolge trägt, zählt der Fund nicht als
-Leck — die Zeile sagt, wie viele Texte das betrifft.
+Leck — die Zeile sagt, wie viele Texte das betrifft. Sind beide **wörtlich**
+gleich, wird der Text gar nicht gesucht, und die Statuszeile sagt, dass sie
+über ihn nichts aussagt — die Warnung dazu bleibt stehen.
 
 Bleiben Stellen der Datei ungeprüft, sagt die Statuszeile, wie viele es sind,
-und nennt sie beim Namen samt Grund — „nicht gefunden“ ist dann keine Aussage.
+und nennt **bis zu drei davon** beim Namen samt Grund; der Rest wird gezählt
+(„… und N weitere“). „Nicht gefunden“ ist dann keine Aussage.
 
 ### Trefferliste
 
@@ -2138,7 +2153,7 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   | Katalog | `/Outlines` — die Lesezeichen; jeder `/Title` ist frei wählbarer Text („Kontoauszug DE89 …“) |
   | jede Seite | `/Metadata`, `/PieceInfo`, `/StructParents`, `/AA` |
   | jede Seite | Annotationen vom Typ `/FileAttachment` — ein Dateianhang klebt nicht nur im `/Names`-Baum |
-  | jede verbliebene Annotation **und alles, was sie erreichbar hält** (`/Popup`, `/Parent`-Kette, `/Kids`, `/IRT`) | die Aktionen `/A`, `/AA`, `/PA` und ein benanntes `/Dest` (ein ausdrückliches Ziel bleibt, auch hinter einem Verweis — ein Verweis im Feld muss auf eine Seite führen); die Klartexte `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`, `/OverlayText`, `/NM`, `/DS` und die `/MK`-Beschriftungen. **Nicht** `/DA` (benannte Lücke, siehe `SECURITY.md`) — was eine Annotation *zeichnet* (`/AP`), geht wie Seitentext durch die Schwärzung |
+  | jede verbliebene Annotation **und alles, was sie erreichbar hält** (`/Popup`, `/Parent`-Kette, `/Kids`, `/IRT`) | die Aktionen `/A`, `/AA`, `/PA` und ein benanntes `/Dest` (ein ausdrückliches Ziel bleibt, auch hinter einem Verweis — ein Verweis im Feld muss auf eine Seite führen); die Klartexte `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`, `/OverlayText`, `/NM`, `/DS` und die `/MK`-Beschriftungen. dazu die Beiwerk-Dictionaries `/Movie`, `/Measure` und `/RichMediaContent` als Ganzes (Filmdateiname, Maßangaben, eingebettete Medien-Dateien; Preis: ein Film und eine Vermessung sind danach nur noch Bild) und `/Alt`/`/ActualText` an jedem erreichten Dictionary. **Nicht** `/DA` (benannte Lücke, siehe `SECURITY.md`) — was eine Annotation *zeichnet* (`/AP`), geht wie Seitentext durch die Schwärzung |
 
   Preis: benannte Sprünge, Lesezeichen und Verweise ins Netz funktionieren
   danach nicht mehr, und aus einem Formular wird ein totes Blatt Papier. Das ist die sichere Richtung.
@@ -2179,8 +2194,9 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   kein Verbot. Unter Windows ist nichts umgesetzt**; die Einschränkung gehört
   zur Zusage dazu und steht ausgeschrieben in
   [`SECURITY.md`](SECURITY.md#kein-kernabzug-dieses-prozesses). Dort steht auch
-  der Nebeneffekt: der Prozess ist danach unter Linux für `ptrace` durch
-  denselben Benutzer unerreichbar.
+  der Nebeneffekt: der Prozess ist danach **unter Linux** für `ptrace` durch
+  denselben Benutzer unerreichbar — auf den übrigen Unix-Systemen hat
+  `setrlimit(RLIMIT_CORE, 0)` diesen Nebeneffekt nicht.
 * Review-Datei und Audit-Log entstehen unter Unix mit Modus `0600` — **in
   beiden Programmen**. Sie gehen durch denselben Schreibpfad
   (`redact_pipeline::write_review_file` bzw. `AuditLog::write`, beide über

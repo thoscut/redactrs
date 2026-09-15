@@ -104,8 +104,22 @@ pub fn decoded_content_within(
 /// Rückgabe: die Bytes nach dem letzten angewandten Filter und die **Anzahl
 /// angewandter Filter**. Ist sie so groß wie die Kette, lief sie ganz durch;
 /// ist sie kleiner, war das nächste Glied unbekannt (`names[applied]` nennt
-/// es). `0` heißt „gar nichts entpackt“ — die Bytes sind dann die Rohbytes
-/// des Stroms.
+/// es).
+///
+/// # Was bei `applied == 0` zurückkommt
+///
+/// Ein Strom **ohne** brauchbares `/Filter` (Schlüssel fehlt, Verweis ins
+/// Leere, leere Liste) hat eine Kette der Länge 0: sie ist vollständig
+/// gelaufen, und die Rohbytes kommen zurück.
+///
+/// Ist dagegen schon das **erste** Glied einer nicht leeren Kette unbekannt,
+/// kommt ein **leerer** Puffer zurück — nicht die Rohbytes. Die hat der
+/// Aufrufer ohnehin (`stream.content`), und eine Kopie davon wäre eine
+/// Stromgröße Speicher, die niemand bestellt hat und die `limit` nicht deckt:
+/// bis Fix-Runde 6 klonte diese Funktion die Rohbytes, **bevor** sie den
+/// ersten Filter kannte, und gab bei `/Filter /DCTDecode` 8 000 000 Byte
+/// zurück, obwohl `limit` 16 war (gemessen an einem 64-MiB-Strom: 205 MB
+/// statt 138 MB Spitzenbelegung, `tests/zf_q2_teildekoder.rs`).
 ///
 /// # Warum nicht über [`decoded_content_within`]
 ///
@@ -133,6 +147,11 @@ pub fn decoded_prefix_within(
 }
 
 /// Die Filterkette, so weit sie läuft: (Bytes, angewandte Filter, Kettenlänge).
+///
+/// Geklont wird erst, **nachdem** ein Filter wirklich etwas geliefert hat:
+/// die Eingabe des ersten Gliedes sind die Rohbytes des Stroms, geborgt.
+/// Wer gar nichts entpacken konnte, bekommt deshalb einen leeren Puffer und
+/// nicht eine zweite Kopie des Stroms (siehe [`decoded_prefix_within`]).
 fn decode_chain(
     doc: &Document,
     stream: &Stream,
@@ -145,15 +164,20 @@ fn decode_chain(
         return Ok((stream.content.clone(), 0, 0));
     };
     let total = filters.len();
-    let mut data = stream.content.clone();
+    if total == 0 {
+        // Eine leere Kette ist vollständig gelaufen.
+        return Ok((stream.content.clone(), 0, 0));
+    }
+    let mut data: Option<Vec<u8>> = None;
     for (index, filter) in filters.iter().enumerate() {
         let parms = decode_parms(doc, &stream.dict, index);
-        let Some(next) = decode_one(filter, &data, parms.as_ref(), limit)? else {
-            return Ok((data, index, total));
+        let input = data.as_deref().unwrap_or(&stream.content);
+        let Some(next) = decode_one(filter, input, parms.as_ref(), limit)? else {
+            return Ok((data.unwrap_or_default(), index, total));
         };
-        data = next;
+        data = Some(next);
     }
-    Ok((data, total, total))
+    Ok((data.unwrap_or_default(), total, total))
 }
 
 /// Ein Filter, den dieses Modul **bewusst** nicht dekodiert: Bilddaten.
@@ -1039,7 +1063,8 @@ mod tests {
         assert_eq!(data, plain);
     }
 
-    /// Schon das erste Glied unbekannt: nichts entpackt, die Rohbytes stehen.
+    /// Schon das erste Glied unbekannt: nichts entpackt — und deshalb auch
+    /// **keine** Kopie der Rohbytes. Die stehen beim Aufrufer.
     #[test]
     fn der_orakelweg_meldet_wenn_er_gar_nicht_erst_anfangen_konnte() {
         let doc = doc();
@@ -1047,7 +1072,14 @@ mod tests {
         let (data, applied) =
             decoded_prefix_within(&doc, &stream, usize::MAX).expect("kein Oversize");
         assert_eq!(applied, 0);
-        assert_eq!(data, stream.content);
+        assert_eq!(data, Vec::<u8>::new(), "kein Klon des Stroms");
+        // Eine leere Kette dagegen ist ganz gelaufen: dort sind die Rohbytes
+        // das Ergebnis.
+        let ohne = Stream::new(dictionary! {}, b"roh".to_vec()).with_compression(false);
+        assert_eq!(
+            decoded_prefix_within(&doc, &ohne, usize::MAX),
+            Ok((b"roh".to_vec(), 0))
+        );
     }
 
     /// Ohne `/Filter` gibt es nichts zu entpacken — beide Wege liefern die

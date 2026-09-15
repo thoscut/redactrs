@@ -33,11 +33,170 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 Bereich: `git log v0.6.0..HEAD`.
 
-Fünf Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
+Sechs Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
 und Doku mit demselben Maßstab: jede Angabe hier stammt aus einem Lauf des
-gebauten Binaries, nicht aus dem Quelltext. Zuletzt (Runde 5) hört das Orakel
-auf, an einer unbekannten Filterstufe und an seiner Verschachtelungstiefe still
-aufzugeben, und die Doku sagt wieder, was das Programm tut.
+gebauten Binaries, nicht aus dem Quelltext. Zuletzt (Runde 6) hört das Orakel
+auch dort auf zu schweigen, wo schon das **erste** Glied einer Filterkette
+unbekannt ist, eine getaggte Seite kann den Rechner nicht mehr belegen — und
+jede Messzahl dieser Datei steht in einem Test.
+
+### Fix-Runde 6: was die Gegenprüfung der Runde 5 noch fand
+
+Fünf Gegenprüfer lasen die Korrekturen der Runde 5 mit eigenem Material gegen.
+**Drei schwere Befunde** blieben: eine getaggte Seite von 276 kB, die 41,7 s
+und 2,3 GB Arbeitsspeicher kostete, ohne dass eine Decke griff; ein unbekannter
+Filtername **an erster Stelle** einer Kette, der das Leck-Orakel stumm machte
+(„nicht gefunden“, Rückgabewert 0, über einen Strom, den keine Sicht gelesen
+hatte); und ein wörtlich gleicher abgewählter Text, der eine danebengegangene
+Schwärzung aus der Suche nahm. Dazu vier Klartextlecks an Nachbarn von
+Annotationen, vier Fundorte statt einem bei der direkten Eigenschaftsliste,
+zwei falsche Alarme — und die Erkenntnis, dass **keine einzige neue Zahl der
+letzten Runde gebunden war**: siebzehn Messwerte in README, `SECURITY.md` und
+`CHANGELOG.md` ließen sich in einem Lauf mutieren, ohne dass ein Test rot
+wurde.
+
+* **Die Messzahlen der Doku sind gebunden.** Die Gegenprüfung mutierte
+  siebzehn Zahlen und Sätze in einem Lauf — `5,20 s` zu `9,99 s`, `675 MB` zu
+  `42 MB`, `2 172 628 kB ≈ 2,1 GiB` zu `42 kB ≈ 0,1 GiB`, `24 MB, 0,02 s,
+  Exit 1` zu `77 MB, 9,02 s, Exit 3`, `siebenmal` zu einer anderen Zahl, den
+  ganzen Gründe-Satz — und **kein einziger Test wurde rot**. Die Runde 5 hatte
+  zwei ungebundene „1 000“ geschlossen und dabei sieben neue Zahlen ungebunden
+  angelegt. Jetzt steht jede Messzahl **einmal** im Testdatensatz
+  (`belege.rs`, `messwerte`), und der Satz der Doku wird daraus gebaut: wer die
+  Zahl in der Doku ändert, findet den Satz nicht mehr; wer sie im Test ändert,
+  ebenso. Was sich ableiten lässt, wird abgeleitet und nicht abgeschrieben —
+  das Verhältnis 1,21 aus 6,27 s und 5,20 s, die MB aus den gemessenen kB, die
+  Grenze 16 777 216 aus `redact_core::MAX_AUX_FILE_BYTES`, „10 Zeichen im
+  Spiegel, 5 in den Glyphen“ aus dem Spiegeltext `AlphaAlpha`, „bis zu drei
+  Stellen beim Namen“ aus `MAX_NAMED_PLACES` im Quelltext der Oberfläche, und
+  die Zahl der Kodierungen aus einem Lauf des gebauten Binaries.
+* **`--help` widersprach sich selbst.** Drei Absätze über dem Block „Drei
+  Fälle“ stand im selben Hilfetext weiter „Rückgabewert: `0`, wenn keiner der
+  Begriffe gefunden wurde, `3`, wenn mindestens einer noch dasteht“ — die zwei
+  Fälle, die die Runde 5 gerade abgeschafft hatte. Wer die Hilfe von oben nach
+  unten liest, findet zuerst die falsche Fassung; ein Lauf über eine Datei mit
+  einem Objekt auf Ebene 33 sagt „nicht gefunden“ und endet mit 3. Der Absatz
+  nennt jetzt die Bedingung für `0`, und
+  `der_dritte_fall_des_rueckgabewerts_drei_steht_ueberall` verbietet die alte
+  Fassung wörtlich. Dieselbe Bedingung fehlte in der Rückgabewert-Tabelle der
+  README.
+* **`SECURITY.md` zählte drei Gründe für „nicht geprüft“ auf, das Orakel kennt
+  fünf** — und die beiden fehlenden waren gerade die, die die Runde 5
+  hinzugefügt hatte (ein unbekannter Filtername; der Schriftdekoder, der nach
+  einem übersprungenen Strom gar nicht erst läuft). Eine Aufzählung, die
+  weniger nennt, als es gibt, liest sich wie eine vollständige. Alle fünf
+  stehen jetzt mit ihrem Wortlaut in einer Tabelle; ein Test hält jeden gegen
+  den Quelltext des Orakels, drei davon zusätzlich gegen einen Lauf des
+  gebauten Binaries (der vierte in `zf_q5_unbekannter_filter.rs`; der fünfte
+  gehört der Oberfläche, weil `check::run` die Datei vorher selbst lädt).
+* **UTF-16LE fehlte in beiden Kodierungslisten.** `--help` und die README
+  nannten „UTF-8, Latin-1/PDFDoc, UTF-16BE und als Hex-String“, obwohl die
+  Runde 5 UTF-16LE eingebaut hatte — vier Namen für neun Muster. Gesucht wird
+  in **neun** Byte-Kodierungen (zehn mit Umlaut, sieben jenseits von
+  Latin-1); die Zahl kommt jetzt aus einem Lauf, der jede Fassung in eine
+  Datei legt und die gemeldeten Namen zählt. Und „12 000 Muster (1 000
+  Begriffe × 12 Kodierungen)“ hat nie gestimmt: nach `Probe::new` sind es 10
+  je Begriff (neun Bytefassungen und der dekodierte Text), 11 mit einer
+  Fassung ohne Leerraum. Die alte Messung selbst bleibt gültig — gemessen
+  wurde die Zahl der Einzelsuchen, nicht die der Kodierungen.
+* **Die Zusage über unbekannte Filternamen gilt jetzt wirklich.**
+  `SECURITY.md` versprach: „Ein Filtername, den das Programm gar nicht kennt,
+  steht sehr wohl in `NICHT GEPRÜFT`.“ Das galt nur, wenn vorher schon ein
+  Filter gelaufen war: `/Filter /FooDecode` allein kam als „nicht gefunden“
+  mit Rückgabewert 0 zurück, `/Filter [/FlateDecode /FooDecode]` mit 3 —
+  dieselbe unlesbare Stelle, und die Meldung hing allein an der Position. Der
+  Code meldet sie jetzt an jeder Stelle der Kette; die Doku sagt dazu, was
+  gemessen ist: fünf Ketten, drei mit Meldung und Rückgabewert 3, zwei
+  (Bildfilter allein und am Kettenende) ohne Meldung und mit 0 — sonst käme
+  jede Datei mit einem Foto als unvollständig geprüft zurück.
+* **Drei Zusagen, die zu viel versprachen.** Der Satz zu `ptrace` stand
+  unqualifiziert unter einer Tabelle, die Windows und BSD getrennt ausweist —
+  der Nebeneffekt gehört zu `prctl`, also zu Linux; auf den übrigen
+  Unix-Systemen hat `setrlimit(RLIMIT_CORE, 0)` ihn nicht. Die README sagte
+  über ungeprüfte Stellen „nennt sie beim Namen samt Grund“, während
+  `MAX_NAMED_PLACES = 3` höchstens drei nennt und den Rest zählt. Und die
+  Bombentabelle mischte Einheiten: derselbe Messwert stand im Fließtext als
+  „2 172 628 kB ≈ 2,1 GiB“ (durch 1024²) und in der Tabelle als „2 173 MB“
+  (durch 1000). MB heißt in diesem Projekt 1024² Byte; die Tabelle nennt jetzt
+  **2 122 MB** und **3 145 MB** und sagt, aus welcher Zahl sie das rechnet.
+
+* **Eine getaggte Seite konnte den Rechner blockieren.** Verschachtelte
+  `BDC`-Klammern mit Textspiegel über denselben `Do` ließen die Zuordnung
+  Spiegel→Formular als Produkt wachsen: eine Datei von 276 kB mit **elf**
+  Objekten belegte 2 306 MB und lief 41,7 s, ohne Warnung und ohne dass irgendeine
+  Decke griff — die Liste entstand vor der ersten gezählten Zeichenoperation.
+  Der Aufbau ist jetzt gedeckelt und läuft einmal je Strom statt je Platzierung:
+  dieselbe Datei **0,56 s und 38 MB** (gemessen, Debug); ohne `/ActualText`
+  brauchte sie immer 0,15 s. Die Decke unter den Textspiegeln zählt jetzt
+  **Zuordnungen zwischen einem Spiegel und einer Formularplatzierung**:
+  höchstens 100 000 beim Aufbau und 100 000 beim Aufklappen, je Seiten-Scan
+  (zusammen rund 16 MB). Wird sie erreicht **und dabei etwas weggelassen**, sagt
+  eine Warnung, dass der Vergleich für die letzten Abschnitte unvollständig ist.
+* **Und sie meldete einen Verlust, obwohl keiner eintrat.** Genau 100 000
+  Aufklappungen gingen auf und lieferten trotzdem Rückgabewert 3 (`decke_99999.pdf`
+  0, `decke_100000.pdf` 3) — dieselbe Klasse wie der ASCII85-Fall der Runde 5.
+  Gefragt wird jetzt erst dort, wo eine Kante wirklich übersprungen wird.
+* **Ein Textspiegel im Ressourcenverzeichnis blieb stehen — an vier Orten.**
+  Eine Eigenschaftsliste, die direkt (ohne eigene Objekt-Id) in `/Resources
+  /Properties` steht, verlor ihren `/ActualText` nur im Strom; im Verzeichnis
+  stand der Klartext weiter in der Datei, ohne Warnung und mit Rückgabewert 0.
+  Betroffen waren die Seite, ein Form-XObject, ein vom Seitenbaum geerbtes
+  Verzeichnis und ein geteiltes `/Properties`-Objekt. Alle vier werden jetzt an
+  ihrem Fundort bereinigt (`property_list_home` läuft die Ressourcenkette samt
+  `/Parent`-Vererbung ab; ein geteiltes Verzeichnis wirkt auf beide Nutzer).
+* **`--check-leaks` schwieg über einen Strom, dessen erster Filter unbekannt
+  war.** `/Filter /FooDecode` kam als „nicht gefunden“ mit Rückgabewert 0 zurück,
+  dieselbe Datei als `/Filter [/FlateDecode /FooDecode]` mit 3 — die Meldung hing
+  allein an der Position. Jetzt entscheidet der Filter, an dem die Kette stehen
+  blieb: ein Bildfilter bleibt der benannte blinde Fleck (an jeder Stelle), jeder
+  andere unbekannte Name steht in der `NICHT GEPRÜFT`-Liste, auch als erstes
+  Glied. Das Orakel klonte außerdem die Rohbytes eines Stroms, bevor es den
+  ersten Filter kannte, und warf den Klon bei einem unbekannten Filter wieder weg:
+  gemessen (64-MiB-Strom, `/DCTDecode`, Budget 512 MiB) **205 MB vorher, 138 MB
+  nachher**. Die alte Kostenzahl „1 000 Begriffe 65,7 s“ ist widerlegt und durch
+  eine nachstellbare Rechnung ersetzt: 6 Muster je Begriff über 268 MB je
+  Durchgang, `memmem` 9,9 GB/s → 0,163 s je Begriff, rund **163 s für 1 000
+  Begriffe als untere Schranke**; heute 5,01 s (1 Begriff) gegen 5,99 s (1 000).
+* **Vier Klartextlecks an Annotationsnachbarn.** Der Dateiname einer
+  Movie-Annotation (`/Movie /F`), die Maßangaben einer Vermessung (`/Measure`,
+  mit Text in `/R`, `/U`, `/RT`, `/RD`, `/PS`, `/SS`) und eine eingebettete
+  Datei unter `/RichMediaContent /Assets` blieben in der Ausgabe stehen; alle drei
+  Beiwerk-Dictionaries fallen jetzt als Ganzes, gezeichnet wird von ihnen nichts.
+  Und `/Alt` und `/ActualText` werden an **jedem** Dictionary geleert, das der
+  Trägerlauf erreicht — auch an einem, das kein Träger ist: ein `/StructElem`,
+  auf das das `/IRT` einer Annotation zeigt, verwaist **nicht** mit
+  `/StructTreeRoot`, der Verweis hielt es samt Klartext am Leben. Gemessen: eine
+  Datei mit der IBAN auf der Seite und in `/Movie /F` endete mit „Schwärzungen:
+  1“ und Rückgabewert 0, während `--check-leaks` an der Ausgabe **6 Fundstellen**
+  fand — jetzt 0.
+* **Die Zahlen im Audit-Log melden keine Entfernung mehr, die `--check-leaks`
+  findet — jetzt für jede Zahl, nicht nur für die vier Nutzlast-Zähler.** Stand
+  hinter einem entfernten Schlüssel ein Verweis, zählt er nur, wenn das Objekt
+  dahinter nach dem Aufräumen wirklich fehlt: „1 Lesezeichen entfernt“ über
+  einen `/Title 4 0 R`, den ein zweiter Halter am Leben hielt, war eine
+  Falschmeldung. Kosten gemessen am ungünstigsten Material (200 000 Annotationen
+  mit `/Contents` als Verweis): 767–791 ms statt 746 ms, kein zusätzlicher
+  Speicher.
+* **Oberfläche: „zählen deshalb nicht als Leck“ war die falsche Aussage.** Steht
+  ein geschwärzter Text **wörtlich** auch in einer bewusst stehen gelassenen
+  Zeile, wird er nicht gesucht — die Statuszeile verkaufte das als Ergebnis und
+  hinterließ keine Warnung, auch wenn die Schwärzung danebenging und der Text auf
+  ihrer eigenen Seite noch stand. Jetzt sagt sie, dass sie über diese Texte
+  **nichts** sagt, und die Warnung bleibt. Eine Zuordnung des Fundes zu Seite und
+  Rechteck wurde geprüft und verworfen: das Orakel nennt den Ort nur im Text der
+  Fundmeldung — bleibt als Vertrag für die nächste Runde stehen.
+* **Drei weitere Sätze der Oberfläche.** Ließ sich die geschriebene Datei nicht
+  zurücklesen, nannte die bleibende Warnung die Decke von 1 000 Begriffen als
+  Grund statt der Wahrheit — sie nennt jetzt denselben Grund wie die Statuszeile.
+  Die Statuszeile begann mit der Entwarnung und brachte den Vorbehalt danach;
+  jetzt führt der Fund, ohne Fund stehen die Vorbehalte vorn, und die genannten
+  ungeprüften Stellen sind auf Ort und Grund gekürzt (804 → 411 Zeichen bei drei
+  Stellen). Und wurde dieselbe Datei ein zweites Mal exportiert, während die
+  erste Nachprüfung noch lief, bewertete diese die **neuen** Bytes mit dem
+  **alten** Plan unter dem Präfix des ersten Exports — die ältere Prüfung endet
+  jetzt mit dem zweiten Export. Der Wächter, der das Neuzeichnen anfordert, ist
+  jetzt belegt: ein Test hält den Prüf-Thread an und verlangt, dass vor seinem
+  Ende **kein** Bild angefordert wird (vorher blieb die Mutation unbemerkt).
 
 ### Fix-Runde 5: was die Gegenprüfung der Runde 4 noch fand
 
@@ -65,8 +224,8 @@ neun Stellen, an denen die Doku mehr oder anderes sagte als der Code.
   `SECURITY.md` nannte „1024 MB“ und ließ offen, was das für den Bedarf heißt.
   Gemessen an einer 1 020 KiB großen Datei mit einem 1-GiB-Strom, mit den
   **Vorgabewerten**: `--check-leaks` endet mit Rückgabewert 0 und einem `VmHWM`
-  von 2 172 628 kB ≈ 2,1 GiB — dieselbe Spitze wie beim Schwärzen
-  (2 172 312 kB), also rund das Doppelte des größten Einzelstroms. Steht in der
+  von 2 172 628 kB = 2 122 MB ≈ 2,1 GiB — dieselbe Spitze wie beim Schwärzen
+  (2 172 312 kB = 2 121 MB), also rund das Doppelte des größten Einzelstroms. Steht in der
   Grenzentabelle.
 * **Ein Kostensatz, der den abgeschafften Zustand beschrieb.** `--help`, README
   und die Fehlermeldung in `check.rs` sagten „Jeder Begriff kostet einen
@@ -161,7 +320,9 @@ neun Stellen, an denen die Doku mehr oder anderes sagte als der Code.
   beendet die Kette der Vorfahren. Neue Decke: höchstens 100 000
   Formularplatzierungen unter den Spiegeln einer Seite (Mehrkosten gemessen:
   8,5 MB, unter 0,3 s); wird sie erreicht, sagt eine Warnung, dass der
-  Vergleich für die letzten Abschnitte unvollständig ist.
+  Vergleich für die letzten Abschnitte unvollständig ist. (Die Fix-Runde 6 hat
+  diese Decke noch einmal umgestellt — sie zählt seither Zuordnungen zwischen
+  Spiegel und Platzierung, siehe oben.)
 * **Die Oberfläche suchte nur eine von zwei Schreibweisen.** Standen dieselbe
   Zeichenfolge mit und ohne Leerzeichen in zwei geschwärzten Zeilen, wurde nur
   die erste gesucht: die Statuszeile meldete „1 gesuchte(r) Text steht nicht
@@ -291,10 +452,12 @@ und Doku, die mehr sagte als der Code. Diese Runde schließt sie.
   komprimierbarem Bildstrom, `zd_mess_1000_begriffe_kosten_wie_einer`):
   1 Begriff **5,20 s**, 1 000 Begriffe **6,27 s** — Verhältnis 1,21, in der
   Fix-Runde 5 nachgemessen. Vorher war es Begriffe × Bytes; die alte Fassung
-  ist nicht mehr im Baum, ihr Kostengesetz aber nachstellbar: dieselben
-  12 000 Muster (1 000 Begriffe × 12 Kodierungen) einzeln mit `memmem` über
-  64 MiB gesucht kosten **89,2 s**, ein Begriff (12 Muster) 0,08 s; derselbe
-  Durchgang mit einem Automaten kostet 0,28 s. Die Fundstellen sind Zeichen
+  ist nicht mehr im Baum, ihr Kostengesetz aber nachstellbar: **12 000
+  Einzelsuchen** mit `memmem` über 64 MiB kosten **89,2 s**, zwölf davon
+  0,08 s; derselbe Durchgang mit einem Automaten kostet 0,28 s. (Die 12 000
+  waren damals als „1 000 Begriffe × 12 Kodierungen“ gerechnet; es sind in
+  Wahrheit 10 Muster je Begriff — siehe Fix-Runde 6. Gemessen wurde die Zahl
+  der Einzelsuchen, am Kostengesetz ändert die Richtigstellung nichts.) Die Fundstellen sind Zeichen
   für Zeichen dieselben (`positions_agree_with_the_naive_search`).
 * **Und es hat ein Budget: `leaks_many_within`.** Das Orakel packte jeden
   Strom aus, den es fand — die Grenze `--max-decompressed-mb` galt nur dem
@@ -309,8 +472,10 @@ und Doku, die mehr sagte als der Code. Diese Runde schließt sie.
   1 044 192 Byte gepackt): mit `--max-decompressed-mb 16` lehnt die Vorprüfung
   beide Formen nach 0,02 s bei 24 MB ab (Rückgabewert 1); mit
   `--max-decompressed-mb 4096` — dem Lauf ohne wirksame Grenze — steigt die
-  Spitze auf **2 173 MB** (Seiteninhalt) bzw. **3 220 MB** (`/ObjStm`), je rund
-  18 s. Hier standen bis dahin 345 MB und 882 MB; das konnte nicht stimmen, ein
+  Spitze auf **2 122 MB** (Seiteninhalt) bzw. **3 145 MB** (`/ObjStm`), je rund
+  18 s (2 172 628 bzw. 3 220 164 kB; MB heißt hier wie überall 1024² Byte —
+  die Fix-Runde 6 hat diese beiden Zahlen von der Zehnerteilung auf die
+  Einheit des Dokuments gebracht). Hier standen bis dahin 345 MB und 882 MB; das konnte nicht stimmen, ein
   wirklich entpacktes GiB liegt danach im Speicher.
 * **Filterketten: ein Verweis ist eine Schreibweise, kein Grund zur Absage.**
   `/Filter 5 0 R`, `/DecodeParms` als Verweis und Werte *im*

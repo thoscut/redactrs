@@ -1,26 +1,34 @@
 //! Gegenprüfung Q2: was `filters::decoded_prefix_within` liefert — und was es
 //! dafür belegt.
 //!
-//! # Befund Q2-2 (Speicher, gemessen)
+//! # Befund Q2-2 (Speicher, gemessen) — behoben in Fix-Runde 6
 //!
-//! `decode_chain` klont die Rohbytes des Stroms **bevor** es weiß, ob der erste
-//! Filter überhaupt bekannt ist. Bei `applied == 0` wirft
-//! `audit_bytes::decode_stream` diesen Klon sofort weg — bezahlt ist er
-//! trotzdem. Gemessen (Release, Kindprozess, `VmHWM`) an einer Datei mit einem
-//! 64-MiB-Strom:
+//! `decode_chain` klonte die Rohbytes des Stroms, **bevor** es wusste, ob der
+//! erste Filter überhaupt bekannt ist. Bei `applied == 0` warf
+//! `audit_bytes::decode_stream` diesen Klon sofort weg — bezahlt war er
+//! trotzdem. Gemessen (Release, Kindprozess, `VmHWM`, 64-MiB-Strom, Budget
+//! 512 MiB; [`q2_mess_speicher_ohne_klon`]):
 //!
 //! ```text
-//! ohne /Filter          Datei 67 MB   VmHWM 138 MB
-//! /Filter /DCTDecode    Datei 67 MB   VmHWM 205 MB
+//!                          vorher     nachher
+//! ohne /Filter             138 MB     138 MB
+//! /Filter /DCTDecode       205 MB     138 MB
 //! ```
 //!
-//! Dazu passt die Zusicherung in `leaks_many_within` nicht: „Spitzenbelegung:
-//! ein Strom in Arbeit (höchstens Budget + 1 Byte)“. Der Klon hängt nicht am
-//! Budget, sondern an der Stromgröße — `decoded_prefix_within` gibt bei einem
+//! Dazu passte die Zusicherung in `leaks_many_within` nicht: „Spitzenbelegung:
+//! ein Strom in Arbeit (höchstens Budget + 1 Byte)“. Der Klon hing nicht am
+//! Budget, sondern an der Stromgröße — `decoded_prefix_within` gab bei einem
 //! unbekannten ersten Filter 8 000 000 Byte zurück, obwohl `limit` 16 war.
-//! Gefährlich ist es (heute) nicht: `document::prescan` verbucht denselben
-//! Strom vorher gegen dasselbe Budget, die Datei wird also ohnehin abgelehnt,
-//! wenn sie zu groß ist. Aber diese Deckung steht nirgends geschrieben.
+//! Gefährlich war es (heute) nicht: `document::prescan` verbucht denselben
+//! Strom vorher gegen dasselbe Budget, die Datei fliegt also ohnehin heraus,
+//! wenn sie zu groß ist ([`q2_prescan_deckt_den_klon_ab`]). Aber diese Deckung
+//! stand nirgends geschrieben, und eine Zusicherung, die nicht gilt, ist ein
+//! Fehler.
+//!
+//! Jetzt fragt die Kette erst `decode_one` und klont erst, wenn ein Filter
+//! wirklich etwas geliefert hat; wer gar nichts entpacken konnte, bekommt
+//! einen leeren Puffer. Die Rohbytes hat der Aufrufer ohnehin — das Orakel
+//! durchsucht sie in Sicht 2.
 
 use lopdf::{dictionary, Document, Object, Stream};
 use redact_pdf::filters::{decoded_content_within, decoded_prefix_within, Oversize};
@@ -52,15 +60,16 @@ const KLARTEXT: &[u8] = b"IBAN: DE89 3704 0044 0532 0130 00 -- Klartext";
 // Was liefert der Teil-Dekoder?
 // ---------------------------------------------------------------------------
 
-/// Erster Filter unbekannt: **Rohbytes**, `applied == 0` — nicht „nichts“.
-/// Der strenge Leser sagt dazu `Ok(None)`.
+/// Erster Filter unbekannt: `applied == 0` und ein **leerer** Puffer — die
+/// Rohbytes stehen beim Aufrufer, eine Kopie wäre eine Stromgröße Speicher,
+/// die niemand bestellt hat (Befund Q2-2). Der strenge Leser sagt `Ok(None)`.
 #[test]
-fn q2_erster_filter_unbekannt_liefert_die_rohbytes() {
+fn q2_erster_filter_unbekannt_liefert_nichts() {
     let doc = Document::with_version("1.5");
     let s = kette(&["Q2Phantasie"], KLARTEXT.to_vec());
     let (data, applied) = decoded_prefix_within(&doc, &s, usize::MAX).expect("kein Oversize");
     assert_eq!(applied, 0);
-    assert_eq!(data, KLARTEXT, "die Rohbytes, unverändert");
+    assert_eq!(data, Vec::<u8>::new(), "kein Klon der Rohbytes");
     assert_eq!(decoded_content_within(&doc, &s, usize::MAX), Ok(None));
 }
 
@@ -194,20 +203,23 @@ fn a85(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// **BEFUND_Q2_2**: bei unbekanntem erstem Filter kommt mehr zurück als
-/// `limit` erlaubt — die Rohbytes wurden geklont, bevor jemand nach dem Filter
-/// gefragt hat.
+/// **BEFUND_Q2_2**, umgedreht: bei unbekanntem erstem Filter kommt nichts
+/// zurück — vorher waren es 8 000 000 Byte bei `limit = 16`, weil die Rohbytes
+/// geklont wurden, bevor jemand nach dem Filter gefragt hatte.
 #[test]
-fn q2_teilpuffer_kann_das_budget_ueberschreiten() {
+fn q2_der_teilpuffer_bleibt_im_budget() {
     let doc = Document::with_version("1.5");
     let s = kette(&["Q2Phantasie"], vec![b'X'; 8_000_000]);
     let (data, applied) = decoded_prefix_within(&doc, &s, 16).expect("kein Oversize");
     assert_eq!(applied, 0);
     assert_eq!(
         data.len(),
-        8_000_000,
-        "gemessener Zustand: 8 MB zurück bei limit = 16"
+        0,
+        "8 MB Rückgabe bei limit = 16 — der Klon ist zurück"
     );
+    // Und die Grenze gilt weiter, sobald wirklich entpackt wird.
+    let gross = kette(&["FlateDecode"], deflate(&vec![b'A'; 1_000_000]));
+    assert_eq!(decoded_prefix_within(&doc, &gross, 16), Err(Oversize));
 }
 
 /// Die Deckung, die den Befund heute harmlos macht: derselbe Strom wird von
@@ -304,4 +316,138 @@ fn q2_unchecked_kennt_mehr_gruende_als_die_doku_aufzaehlt() {
         "der fünfte Grund fehlt: {:#?}",
         check.unchecked
     );
+}
+
+// ---------------------------------------------------------------------------
+// Messung — bleibt ignoriert
+// ---------------------------------------------------------------------------
+
+/// Umgebungsvariable, mit der sich die Messung als Kindprozess erkennt; ihr
+/// Wert ist der Pfad der zu messenden Datei.
+const MESS_KIND: &str = "Q2_MESS_SPEICHER_KIND";
+
+/// Der Spitzenwert des Prozesses in Byte — `VmHWM` aus `/proc/self/status`.
+/// `None` auf Zielen ohne `/proc`; dort misst diese Messung nichts und sagt
+/// es (wie in `zd_orakel_budget.rs`).
+#[cfg(target_os = "linux")]
+fn peak_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
+    Some(
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmHWM:"))
+            .and_then(|v| v.trim().strip_suffix("kB"))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+            .expect("VmHWM"),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
+/// Eine Datei mit **einem** großen Strom, wahlweise unter einem Filter.
+///
+/// Der Inhalt ist Füllmaterial ohne `(` und `<`: gemessen werden soll der
+/// Klon des Stroms, nicht die Zeichenketten-Verkettung, die aus zufälligen
+/// Klammern eine zweite große Kopie baut. Gespeichert wird ohne Kompression,
+/// damit die Dateigröße die Stromgröße ist.
+fn ein_grosser_strom(mib: usize, filter: Option<&str>) -> Vec<u8> {
+    let mut noise = Vec::with_capacity(mib << 20);
+    while noise.len() < mib << 20 {
+        noise.extend_from_slice(b"0123456789 abcdefghij ABCDEFGHIJ .-_+*/=%$!? ");
+    }
+    noise.truncate(mib << 20);
+
+    let mut doc = Document::with_version("1.5");
+    let pages = doc.new_object_id();
+    let page = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages,
+        "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+    });
+    doc.objects.insert(
+        pages,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1_i64,
+        }),
+    );
+    let katalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    doc.trailer.set("Root", katalog);
+    let stream = match filter {
+        Some(name) => kette(&[name], noise),
+        None => Stream::new(dictionary! {}, noise).with_compression(false),
+    };
+    let id = doc.add_object(Object::Stream(stream));
+    doc.get_dictionary_mut(katalog)
+        .expect("Katalog")
+        .set("Q2Gross", Object::Reference(id));
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).expect("speicherbar");
+    bytes
+}
+
+/// **Messung zu Befund Q2-2**: was ein Strom mit unbekanntem erstem Filter
+/// über die Spitzenbelegung des Prozesses hinaus kostet.
+///
+/// Ohne `/Filter` liest das Orakel nur die Rohbytes (Sicht 1/2); mit
+/// `/Filter /DCTDecode` kam bis Fix-Runde 6 eine ganze Stromkopie dazu, die
+/// `decode_stream` sofort wegwarf. `VmHWM` ist der Spitzenwert des
+/// **Prozesses**, deshalb misst je ein Kindprozess — und die Datei baut der
+/// **Elternprozess**, damit das Erzeugen nicht die Spitze prägt.
+///
+/// Lauf: `cargo test --release -p redact-pdf --test zf_q2_teildekoder --
+/// --ignored --nocapture`
+#[test]
+#[ignore = "Messung — Release, --nocapture"]
+fn q2_mess_speicher_ohne_klon() {
+    let mib: usize = std::env::var("Q2_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64);
+    if let Ok(pfad) = std::env::var(MESS_KIND) {
+        let pdf = std::fs::read(&pfad).expect("Messdatei");
+        let dateigroesse = pdf.len();
+        let check = leaks_many_within(&pdf, &["DE89 3704 0044 0532 0130 00"], 512 << 20);
+        let peak = peak_rss_bytes();
+        eprintln!(
+            "MESSUNG {}: Datei {} MB, VmHWM {}, unchecked {}",
+            std::path::Path::new(&pfad)
+                .file_stem()
+                .map_or_else(|| "?".into(), |n| n.to_string_lossy()),
+            dateigroesse / 1_000_000,
+            match peak {
+                Some(b) => format!("{} MB", b / 1_000_000),
+                None => "ohne Speichermessung (kein /proc)".to_string(),
+            },
+            check.unchecked.len()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("redact-q2-mess-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("Messverzeichnis");
+    for filter in ["ohne_filter", "DCTDecode", "Q2Phantasie", "FlateDecode"] {
+        let pfad = dir.join(format!("{filter}.pdf"));
+        {
+            let pdf = ein_grosser_strom(mib, (filter != "ohne_filter").then_some(filter));
+            std::fs::write(&pfad, &pdf).expect("Messdatei schreiben");
+        }
+        let exe = std::env::current_exe().expect("Testbinary");
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "q2_mess_speicher_ohne_klon",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(MESS_KIND, &pfad)
+            .output()
+            .expect("Kindprozess");
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "Kindprozess: {}", output.status);
+        std::fs::remove_file(&pfad).ok();
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }

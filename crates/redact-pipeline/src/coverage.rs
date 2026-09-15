@@ -213,6 +213,13 @@ mod tests {
         // ---------------------------------------------- Deckungslücken
         (
             true,
+            "Unter den Textspiegeln dieser Seite stehen mehr als 100000 Zuordnungen \
+             zwischen einem Spiegel und einer Formularplatzierung; ab dort wurden die \
+             Glyphen den Spiegeln nicht mehr zugeordnet. Der Vergleich zwischen Spiegel \
+             und Glyphen ist für die letzten Abschnitte deshalb unvollständig.",
+        ),
+        (
+            true,
             "Der Erscheinungsstrom einer Annotation (Objekt 12 0) ließ sich nicht \
              dekodieren; sein Text wurde nicht durchsucht und kann deshalb nicht \
              geschwärzt worden sein.",

@@ -723,18 +723,25 @@ fn many_placements_maybe_mirrored(
     d.finish()
 }
 
-/// Über der Decke (100 000 Platzierungen) sagt der Scan, dass er nicht mehr
+/// Über der Decke (100 000 Aufklappungen) sagt der Scan, dass er nicht mehr
 /// zugeordnet hat — statt still einen falschen Vergleich zu ziehen.
 ///
-/// 10 000 × (1 + 10) = 110 000 Platzierungen aus einer Datei von wenigen
-/// Kilobyte. Ohne Decke hinge der Umfang der Schließung an nichts mehr.
+/// 10 000 × 11 = 110 000 Aufklappungen aus einer Datei von wenigen Kilobyte.
+/// Ohne Decke hinge der Umfang der Schließung an nichts mehr.
+///
+/// **Zahl in Fix-Runde 6 angehoben** (vorher 10 000 × 10). Die alte Datei
+/// klappte genau 100 000 Kanten auf und verlor damit **nichts** — sie warnte
+/// nur, weil die Decke schon am Blatt gefragt wurde, das gar keine Kinder
+/// hat. Genau dieser falsche Alarm ist Befund Q3-1b
+/// (`zf_q3_spiegel::befund_decke_warnt_bei_genau_aufgehender_zahl`); der Test
+/// hier hing an ihm und hätte ihn sonst wieder eingefordert.
 #[test]
 fn ueber_der_decke_sagt_der_scan_es_an() {
-    let (_, warnings) = analyse(&many_placements(10_000, 10));
+    let (_, warnings) = analyse(&many_placements(10_000, 11));
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("Formularplatzierungen") && w.contains("unvollständig")),
+        warnings.iter().any(
+            |w| w.contains("Zuordnungen zwischen einem Spiegel") && w.contains("unvollständig")
+        ),
         "keine Warnung über die Decke: {warnings:?}"
     );
 }
@@ -745,8 +752,48 @@ fn ueber_der_decke_sagt_der_scan_es_an() {
 fn unter_der_decke_bleibt_es_still() {
     let (_, warnings) = analyse(&many_placements(10_000, 1));
     assert!(
-        !warnings.iter().any(|w| w.contains("Formularplatzierungen")),
+        !warnings
+            .iter()
+            .any(|w| w.contains("Zuordnungen zwischen einem Spiegel")),
         "Warnung unter der Decke: {warnings:?}"
+    );
+}
+
+/// Ein Formular, das seinen Spiegel selbst trägt, wird viermal platziert.
+///
+/// `scan_marked_text` lief bis Fix-Runde 6 bei **jeder** Platzierung erneut
+/// über denselben Strom — der Datensatz entdoppelt zwar (`ScanResult::marked`
+/// über `(Strom, Operationsindex)`), die neue Decke hätte aber viermal
+/// gezählt: 4 × 26 000 = 104 000 Paare aus einem Datensatz, der am Ende
+/// 26 000 führt, und damit eine Warnung über eine Deckungslücke, die es nicht
+/// gibt. Gezählt wird deshalb einmal je Strom.
+#[test]
+fn dasselbe_formular_viermal_platziert_zaehlt_seine_spiegel_einmal() {
+    let mut d = page(&[]);
+    let resources = d.resources_id;
+    let (inner, _) = add_form(&mut d, resources, "Fm1", &text_at(600, "A"));
+    let body = format!(
+        "/Span <</ActualText ({})>> BDC\n{}EMC\n",
+        "A".repeat(26_000),
+        "/Fm1 Do\n".repeat(26_000)
+    );
+    let (_, outer_res) = add_form(&mut d, resources, "Fm0", &body);
+    d.doc
+        .get_dictionary_mut(outer_res)
+        .expect("Ressourcen")
+        .set("XObject", dictionary! { "Fm1" => inner });
+
+    let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+    raw.extend_from_slice("q /Fm0 Do Q\n".repeat(4).as_bytes());
+    d.set_content(&raw);
+    let bytes = d.finish();
+
+    let (_, warnings) = analyse(&bytes);
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.contains("Zuordnungen zwischen einem Spiegel")),
+        "Warnung über die Decke an 26 000 Paaren: {warnings:?}"
     );
 }
 
@@ -832,11 +879,7 @@ fn warnung_ueber_indirekte_verweise_steht_genau_einmal() {
     let (runs, _) = analyse(&bytes);
     let redactions = redactions_for(&runs, SECRET);
     assert!(!redactions.is_empty(), "nichts zu schwärzen");
-    // **Nicht** auf `leaks` geprüft: der Spiegel bleibt in dieser Bauart im
-    // Ressourcenverzeichnis stehen — siehe
-    // `befund_direkte_eigenschaftsliste_behaelt_ihren_spiegel` weiter unten.
-    // Hier geht es allein um die Zahl der Warnungen.
-    let (_, warnings) = pipeline(&bytes, &redactions);
+    let (out, warnings) = pipeline(&bytes, &redactions);
 
     let hits: Vec<&String> = warnings
         .iter()
@@ -844,34 +887,34 @@ fn warnung_ueber_indirekte_verweise_steht_genau_einmal() {
         .collect();
     assert_eq!(hits.len(), 1, "{warnings:?}");
     assert!(hits[0].contains("/Foo"), "{}", hits[0]);
+    // Seit Fix-Runde 6 ist auch das Ressourcenverzeichnis bereinigt — beide
+    // Fundorte, der im Seitenstrom und der im Formular (siehe
+    // `befund_direkte_eigenschaftsliste_behaelt_ihren_spiegel`).
+    let found = leaks(&out, SECRET);
+    assert!(found.is_empty(), "{found:?}");
 }
 
-/// **Neuer Befund (offen, Fix-Runde 5).** Eine Eigenschaftsliste, die als
-/// **direktes** Dictionary in `/Resources /Properties` steht, verliert ihren
-/// Spiegel nur im Strom — im Ressourcenverzeichnis bleibt er stehen.
-///
-/// `mirror_property_list` liefert für sie `property_id == None` (sie ist kein
-/// eigenes Objekt), und `mirrors_to_clear` schickt sie deshalb denselben Weg
-/// wie eine inline im Strom stehende Liste: `rebuild_marked` schreibt die
-/// bereinigte Fassung inline an die Stelle des `/MC0`. Der Eintrag in den
-/// Ressourcen wird dabei ausdrücklich nicht angefasst („den andere Abschnitte
-/// vielleicht noch brauchen“) — und dort steht der Klartext weiter in der
-/// Datei. Ein Betrachter zeigt ihn nicht mehr; `leaks` findet ihn:
+/// **Befund aus Fix-Runde 5, in Runde 6 geschlossen.** Eine Eigenschaftsliste,
+/// die als **direktes** Dictionary in `/Resources /Properties` steht, verlor
+/// ihren Spiegel nur im Strom — im Ressourcenverzeichnis blieb er stehen:
 ///
 /// ```text
 /// Objekt 2 0/Properties/MC0/ActualText [Zeichenkette, literal]: …Zahlung an DE89 …
 /// ```
 ///
-/// Ohne Warnung, mit Rückgabewert 0. Die Korrektur braucht die **Objekt-Id
-/// des Verzeichnisses**, in dem die Liste steht; die kennt heute weder
-/// `content::mirror_property_list` (es sieht nur `&Dictionary`) noch
-/// `content::page_resources` (es mischt die geerbten Verzeichnisse zu einem
-/// neuen zusammen). Das ist mehr als eine kleinste Änderung und deshalb
-/// hier als Beleg hinterlegt statt beiläufig behoben.
+/// Ohne Warnung, mit Rückgabewert 0. `mirror_property_list` liefert für so
+/// eine Liste `property_id == None` (sie ist kein eigenes Objekt), und
+/// `mirrors_to_clear` schickte sie deshalb denselben Weg wie eine inline im
+/// Strom stehende Liste: `rebuild_marked` schrieb die bereinigte Fassung
+/// inline an die Stelle des `/MC0` und ließ den Eintrag in den Ressourcen
+/// stehen.
 ///
-/// Lauf: `cargo test -p redact-pdf --test ze_p2_spiegel -- --ignored`.
+/// Der Datensatz trägt jetzt zusätzlich den **Ressourcennamen**
+/// (`MarkedTextRecord::property_name`), und `content::property_list_home`
+/// sucht dazu den Fundort im Dokument — dieselbe Suche für alle vier Wege
+/// (Seite, Formular, geerbt vom Seitenbaum, geteiltes `/Properties`-Objekt,
+/// siehe `zf_q3_properties.rs`).
 #[test]
-#[ignore = "Befund: direkte Eigenschaftsliste in /Properties behält ihren Spiegel"]
 fn befund_direkte_eigenschaftsliste_behaelt_ihren_spiegel() {
     let lie = format!("Zahlung an {SECRET}");
     let mut d = page(&[]);

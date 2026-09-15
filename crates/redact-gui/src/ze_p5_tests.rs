@@ -482,9 +482,14 @@ fn ze_p5_5_ein_zu_kleines_budget_kommt_bis_in_den_satz() {
         "{:#?}",
         check.unchecked
     );
+    // Im Satz steht die Stelle **gekürzt** — Ort und Grund, ohne die
+    // Buchhaltung des Budgets (Befund Q4-3).
+    let voll = check.unchecked.first().expect("eine Stelle").clone();
+    let (ort_und_grund, rest) = voll.split_once(", ").expect("die volle Zeile rechnet vor");
+    assert!(sentence.contains(ort_und_grund), "{sentence}");
     assert!(
-        sentence.contains(check.unchecked.first().expect("eine Stelle").as_str()),
-        "{sentence}"
+        !sentence.contains(rest),
+        "gekürzt, nicht abgeschrieben: {sentence}"
     );
     assert!(
         sentence.contains("Geprüft ist genau diese Liste, nicht die Datei."),
@@ -494,10 +499,7 @@ fn ze_p5_5_ein_zu_kleines_budget_kommt_bis_in_den_satz() {
     assert!(!sentence.contains(".. Geprüft"), "{sentence}");
     let warning = check.warning().expect("unvollständig ist eine Warnung");
     assert!(warning.contains("nicht geprüft"), "{warning}");
-    assert!(
-        warning.contains(check.unchecked.first().expect("eine Stelle").as_str()),
-        "{warning}"
-    );
+    assert!(warning.contains(ort_und_grund), "{warning}");
 }
 
 /// **Die zweite Ursache, an einem echten Lauf (Fix-Runde 5).** Seit der
@@ -555,8 +557,15 @@ fn ze_p5_5_die_tiefengrenze_kommt_auch_bis_in_den_satz() {
     let sentence = check.sentence();
     println!("Statuszeile: {sentence}");
     let warning = check.warning().expect("unvollständig ist eine Warnung");
-    assert!(sentence.contains(tiefe.as_str()), "{sentence}");
-    assert!(warning.contains(tiefe.as_str()), "{warning}");
+    let (ort_und_grund, rest) = tiefe
+        .split_once("; ")
+        .expect("die volle Zeile erklärt nach");
+    assert!(sentence.contains(ort_und_grund), "{sentence}");
+    assert!(warning.contains(ort_und_grund), "{warning}");
+    assert!(
+        !sentence.contains(rest),
+        "gekürzt, nicht abgeschrieben: {sentence}"
+    );
     // Der alte Satz hätte hier die falsche Ursache genannt und in die falsche
     // Richtung geschickt: „(Entpackgrenze)“ an einem Lauf mit vollem Budget.
     assert!(

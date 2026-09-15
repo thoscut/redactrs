@@ -299,6 +299,41 @@ fn zf_q4_1_ohne_marke_gilt_der_fund_als_woertlich() {
     assert_eq!(check.kept, 0);
 }
 
+/// Die beiden Vorgaben der Entscheidung, unmittelbar geprüft.
+///
+/// [`crate::state::is_leak`] entscheidet je Fund; `None` heißt „diese Angabe
+/// fehlt“. Beide Vorgaben müssen auf der sicheren Seite stehen — im Zweifel
+/// ist der Fund ein Leck. Die eine (`kept_forms` fehlt) erreicht ein Test von
+/// außen ([`zf_q4_1_ohne_marke_gilt_der_fund_als_woertlich`]); die andere
+/// (`literal` fehlt) nicht, weil [`redact_pdf::leaks_many_within`] die Marke
+/// immer in der Länge von `findings` füllt. Ungeprüft bleiben muss sie
+/// deshalb nicht.
+///
+/// Mutation (`literal.unwrap_or(true)` → `unwrap_or(false)`): rot.
+/// Mutation (`kept_form.unwrap_or(false)` → `unwrap_or(true)`): rot.
+#[test]
+fn zf_q4_1_die_beiden_vorgaben_stehen_auf_der_sicheren_seite() {
+    use crate::state::is_leak;
+    // Die beiden Lagen, die im Lauf wirklich vorkommen.
+    assert!(
+        is_leak(Some(true), Some(true)),
+        "wörtlich ist immer ein Leck"
+    );
+    assert!(!is_leak(Some(false), Some(true)), "nur gequetscht, gedeckt");
+    assert!(
+        is_leak(Some(false), Some(false)),
+        "nur gequetscht, ungedeckt"
+    );
+    assert!(is_leak(Some(true), Some(false)));
+    // Und die Vorgaben.
+    assert!(
+        is_leak(None, Some(true)),
+        "ohne Marke gilt der Fund als wörtlich"
+    );
+    assert!(is_leak(None, None));
+    assert!(is_leak(Some(false), None), "ohne Eintrag deckt keine Zeile");
+}
+
 // --- Befund Q4-1: wörtlich gedeckt heißt gar nicht erst gesucht ------------
 
 /// Baut die Lage des Befunds: Seite 1 trägt die IBAN und ist zum Schwärzen
@@ -320,20 +355,21 @@ fn woertlich_gedeckt() -> (RedactApp, PathBuf) {
     (app, out)
 }
 
-/// **Befund Q4-1 (stilles Leck).** So verhält sich der Code heute: die
-/// Schwärzung auf Seite 1 geht daneben, die IBAN steht dort weiter im
-/// Seitentext — und weil eine **abgewählte** Zeile auf Seite 2 denselben Text
-/// wörtlich trägt, wird gar nicht erst gesucht. Der Satz lautet „es wurde
-/// nichts gesucht … zählen deshalb nicht als Leck“, [`ExportCheck::warning`]
-/// gibt `None`.
+/// **Befund Q4-1, behoben — so weit die Oberfläche kommt.** Die Schwärzung
+/// auf Seite 1 geht daneben, die IBAN steht dort weiter im Seitentext — und
+/// weil eine **abgewählte** Zeile auf Seite 2 denselben Text wörtlich trägt,
+/// wird nach wie vor nicht gesucht. Neu ist, **was die Zeile darüber sagt**:
+/// nicht mehr „zählen deshalb nicht als Leck“ (ein Urteil, das niemand
+/// gefällt hat), sondern „über sie sagt diese Prüfung nichts“ — und das
+/// bleibt als Warnung stehen.
 ///
-/// Das ist derselbe Irrtum, den Fix-Runde 5 für die **Normalform** abgestellt
-/// hat (Befund P5-2: „eine geschwärzte Zeile, deren Rechteck danebenging,
-/// galt als stehen gelassen und wurde nie gesucht — ein echtes Leck ohne ein
-/// Wort“). Für die **wörtliche** Deckung fällt die Entscheidung weiter im
-/// Plan, also vor der Suche.
+/// Warum nicht gesucht wird, steht bei [`AppState::plan_export_check`]:
+/// beide Vorkommen sind Zeichen für Zeichen gleich, ein wörtlicher Fund
+/// wäre also von der bewusst stehen gelassenen Zeile nicht zu unterscheiden
+/// — und blind zu suchen brächte den Fehlalarm zurück, den der Test
+/// [`zf_q4_1_woertlich_gedeckt_und_getroffen_ist_kein_alarm`] festhält.
 #[test]
-fn zf_q4_1_woertlich_gedeckt_so_ist_es_heute() {
+fn zf_q4_1_woertlich_gedeckt_sagt_die_zeile_es() {
     let (app, out) = woertlich_gedeckt();
     let summary = app.state.hit_summary();
     assert_eq!(summary.outcome(0), HitOutcome::Redacted);
@@ -356,11 +392,35 @@ fn zf_q4_1_woertlich_gedeckt_so_ist_es_heute() {
     assert_eq!(plan.kept, 1, "{plan:?}");
     let check = plan.run(&out);
     println!("Satz: {}", check.sentence());
+    println!("Warnung: {:?}", check.warning());
     assert!(!check.found_leak());
     assert_eq!(check.checked, 0);
-    assert!(check.sentence().contains("es wurde nichts gesucht"));
-    assert!(check.sentence().contains("zählen deshalb nicht als Leck"));
-    assert!(check.warning().is_none(), "keine Warnung: {check:?}");
+    assert_eq!(check.kept, 1);
+    assert_eq!(check.unsearched, 1, "gar nicht gesucht, also kein Urteil");
+    let sentence = check.sentence();
+    assert!(
+        sentence.contains(
+            "1 Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile: \
+             über sie sagt diese Prüfung nichts — ob dort eine Schwärzung danebenging, \
+             bleibt offen."
+        ),
+        "{sentence}"
+    );
+    assert!(
+        !sentence.contains("zählen deshalb nicht als Leck"),
+        "das Urteil hat niemand gefällt: {sentence}"
+    );
+    // Der Vorbehalt steht vorn — vor „Es wurde nichts gesucht.“
+    assert!(
+        sentence.find("stehen wörtlich auch").unwrap()
+            < sentence.find("Es wurde nichts gesucht.").unwrap(),
+        "{sentence}"
+    );
+    let warning = check.warning().expect("das gehört in die Warnungen");
+    assert!(
+        warning.contains("über 1 Text(e) sagt sie nichts"),
+        "{warning}"
+    );
 }
 
 /// Die Gegenrichtung — und die Grenze für jede Korrektur von Befund Q4-1:
@@ -404,7 +464,6 @@ fn zf_q4_1_woertlich_gedeckt_und_getroffen_ist_kein_alarm() {
 /// beidem muss die Oberfläche tun — suchen (und den Fund melden) oder sagen,
 /// dass sie über diese Zeile nichts weiß. Heute tut sie keines von beidem.
 #[test]
-#[ignore = "Befund Q4-1: wörtliche Deckung entscheidet weiter vor der Suche"]
 fn zf_q4_1_woertlich_gedeckt_muesste_gesagt_werden() {
     let (app, out) = woertlich_gedeckt();
     let summary = app.state.hit_summary();
@@ -511,7 +570,6 @@ fn zf_q4_2_tausend_schreibweisen_fuellen_die_decke_und_der_satz_sagt_es() {
 /// sie nur in der Warnungsliste, nicht in der Statuszeile, die der Nutzer
 /// zuerst liest.
 #[test]
-#[ignore = "Befund Q4-3: die Statuszeile setzt die Entwarnung vor den Vorbehalt"]
 fn zf_q4_2_der_vorbehalt_muesste_vor_der_entwarnung_stehen() {
     let mut check = ExportCheck {
         limit: redact_core::MAX_CHECK_NEEDLES,
@@ -693,14 +751,13 @@ fn unlesbar() -> ExportCheck {
     plan.run(&tmp("unlesbar").join("gibt-es-nicht.pdf"))
 }
 
-/// **Befund Q4-2.** So ist es heute: die Statuszeile sagt die Wahrheit („ließ
-/// sich nicht zurücklesen“), die **Warnung** aber nennt die Decke als Grund —
-/// „höchstens 1000 Begriffe je Nachprüfung; sie stehen in der Trefferliste
-/// weiter hinten“. Von beiden bleibt die Warnung stehen (die Statuszeile
-/// überschreibt die nächste Aktion, so steht es im Doc-Kommentar von
-/// [`ExportCheck::warning`]) — es bleibt also gerade die falsche Begründung.
+/// **Befund Q4-2, die Gegenprobe.** Die Lage, die in die Irre führte, ist
+/// unverändert: eine unlesbare Ausgabe trägt **jeden** Begriff als `skipped`
+/// ein. Nur die Reihenfolge in [`ExportCheck::warning`] entscheidet jetzt
+/// nach der Ursache — die Decke („höchstens 1000 Begriffe“) kommt nicht mehr
+/// vor, und die Warnung ist wörtlich der Satz der Statuszeile.
 #[test]
-fn zf_q4_3_unlesbar_so_ist_es_heute() {
+fn zf_q4_3_unlesbar_nennt_die_decke_nicht_mehr() {
     let check = unlesbar();
     println!("Satz:    {}", check.sentence());
     println!("Warnung: {:?}", check.warning());
@@ -708,20 +765,16 @@ fn zf_q4_3_unlesbar_so_ist_es_heute() {
     assert_eq!(check.skipped, 2, "alle Begriffe gelten als „nicht gesucht“");
     let warning = check.warning().expect("es gibt eine Warnung");
     assert!(
-        warning.contains("höchstens 1000 Begriffe je Nachprüfung"),
-        "{warning}"
+        !warning.contains("höchstens 1000 Begriffe je Nachprüfung"),
+        "die Decke ist nicht der Grund: {warning}"
     );
-    assert!(
-        !warning.contains("zurücklesen"),
-        "die Warnung nennt den wahren Grund nicht: {warning}"
-    );
+    assert_eq!(warning, check.sentence(), "derselbe Grund wie in der Zeile");
 }
 
 /// **Befund Q4-2, die richtige Erwartung.** Die Warnung, die stehen bleibt,
 /// muss denselben Grund nennen wie der Satz: die Datei ließ sich nicht
 /// zurücklesen. Die Decke hat damit nichts zu tun.
 #[test]
-#[ignore = "Befund Q4-2: warning() nennt bei unlesbarer Datei die Decke als Grund"]
 fn zf_q4_3_unlesbar_muesste_den_wahren_grund_nennen() {
     let check = unlesbar();
     let warning = check.warning().expect("es gibt eine Warnung");
@@ -761,42 +814,73 @@ fn many_packed_streams(pages: usize) -> Vec<u8> {
     bytes
 }
 
-/// **Befund Q4-4 (Doku).** Der Doc-Kommentar von [`MAX_NAMED_PLACES`] sagt:
-/// „[`redact_pdf::LeakCheck::unchecked`] darf bis zu 51 Zeilen tragen (50
-/// einzelne Ströme plus eine Summenzeile).“ Das stimmt je **Budget**, und es
-/// gibt zwei davon (Rohsicht und Objektsicht), dazu die Zeile über Sicht 7.
-/// Gemessen: 60 zu große Ströme ergeben mehr als 51 Zeilen.
+/// **Befund Q4-4 (Doku), richtiggestellt.** Der Doc-Kommentar von
+/// `MAX_NAMED_PLACES` sagte: „[`redact_pdf::LeakCheck::unchecked`] darf bis
+/// zu 51 Zeilen tragen (50 einzelne Ströme plus eine Summenzeile).“ Das gilt
+/// je **Budget und Grund**, und davon gibt es mehrere.
 ///
-/// Folgenlos für die Anzeige (genannt werden ohnehin drei), aber die Zahl in
-/// der Begründung ist falsch — und sie ist die einzige Begründung dafür,
-/// warum überhaupt gekürzt wird.
+/// Gemessen (60 zu große Ströme, Budget 64 Byte): **52** Zeilen — 50 Ströme
+/// der Rohsicht, ihre Summenzeile, und „Objektgraph (Sichten 3–7) nicht
+/// durchsucht“. Damit ist die 51 widerlegt. Die Obergrenze folgt aus
+/// `redact_pdf`s `MAX_UNCHECKED = 50`: die Decke gilt je **Zähler**, und es
+/// sind drei (nicht entpackte Ströme der Rohsicht, dieselben der Objektsicht,
+/// Stellen aus anderem Grund — etwa die Verschachtelungstiefe), jeder mit
+/// eigener Summenzeile, dazu die Zeile über Sicht 7: **154**.
+///
+/// Folgenlos für die Anzeige (genannt werden ohnehin drei), aber die Zahl war
+/// die einzige Begründung dafür, warum überhaupt gekürzt wird.
+///
+/// Und die zweite Hälfte von Befund Q4-3: mit drei genannten Stellen war der
+/// Satz **804 Zeichen** lang. Gekürzt auf Ort und Grund sind es **411**.
 #[test]
 fn zf_q4_3_die_zahl_der_ungepruefeten_stellen_sprengt_die_zusage() {
     let out = tmp("stellen").join("viele.pdf");
     std::fs::write(&out, many_packed_streams(60)).unwrap();
-    let plan = ExportCheckPlan {
-        needles: vec![SPACED.to_string()],
-        kept_forms: vec![false],
-        max_decompressed_bytes: 64,
-        ..ExportCheckPlan::default()
+    let laufen = |budget: u64| {
+        ExportCheckPlan {
+            needles: vec![SPACED.to_string()],
+            kept_forms: vec![false],
+            max_decompressed_bytes: budget,
+            ..ExportCheckPlan::default()
+        }
+        .run(&out)
     };
-    let check = plan.run(&out);
-    println!("{} ungeprüfte Stellen", check.unchecked.len());
+
+    // Budget 64: der Lader lehnt ab, nur die Rohsicht meldet.
+    let check = laufen(64);
+    println!("Budget 64: {} ungeprüfte Stellen", check.unchecked.len());
     for line in check.unchecked.iter().take(3) {
         println!("   {line}");
     }
-    println!(
-        "Satz ({} Zeichen): {}",
-        check.sentence().chars().count(),
-        check.sentence()
-    );
+    let sentence = check.sentence();
+    println!("Satz ({} Zeichen): {sentence}", sentence.chars().count());
     assert!(
         check.unchecked.len() > 51,
         "die Zusage im Doc-Kommentar wäre gehalten: {}",
         check.unchecked.len()
     );
     // Genannt werden trotzdem nur drei, der Rest gezählt.
-    assert!(check
-        .sentence()
-        .contains(&format!("… und {} weitere", check.unchecked.len() - 3)));
+    assert!(sentence.contains(&format!("… und {} weitere", check.unchecked.len() - 3)));
+    // Befund Q4-3: 804 Zeichen waren es mit den vollen Stellen.
+    assert!(
+        sentence.chars().count() < 450,
+        "die Statuszeile ist wieder unlesbar lang ({} Zeichen): {sentence}",
+        sentence.chars().count()
+    );
+    // Gekürzt heißt: Ort und Grund bleiben, die Buchhaltung geht.
+    assert!(sentence.contains(": nicht entpackt — "), "{sentence}");
+    assert!(!sentence.contains("des Budgets"), "{sentence}");
+
+    // Ein Budget, das die Vorprüfung durchlässt: die Objektsicht meldet ihre
+    // eigenen Stellen dazu — deutlich über 51.
+    // Die Gegenrichtung: mit einem Budget, das reicht, bleibt nichts übrig —
+    // die 52 sind das Budget, nicht die Datei.
+    let genug = laufen(120_000);
+    println!(
+        "Budget 120 000: {} ungeprüfte Stellen",
+        genug.unchecked.len()
+    );
+    assert!(genug.unchecked.is_empty(), "{:?}", genug.unchecked);
+    assert!(!genug.incomplete());
+    assert!(genug.warning().is_none(), "{:?}", genug.warning());
 }

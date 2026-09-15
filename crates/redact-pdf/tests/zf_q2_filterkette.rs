@@ -1,23 +1,26 @@
 //! Gegenprüfung Q2: die Ausnahme für Bildfilter und der unbekannte Filtername.
 //!
-//! # Befund Q2-1 (Leck, still)
+//! # Befund Q2-1 (Leck, still) — behoben in Fix-Runde 6
 //!
-//! `audit_bytes::decode_stream` gibt bei `applied == 0` **ohne jede Meldung**
-//! `Ok(None)` zurück. Ob das erste Kettenglied ein Bildfilter ist (Absicht) oder
+//! `audit_bytes::decode_stream` gab bei `applied == 0` **ohne jede Meldung**
+//! `Ok(None)` zurück. Ob das erste Kettenglied ein Bildfilter war (Absicht) oder
 //! ein Filtername, den das Programm nicht kennt (dann soll es laut Modulkopf
-//! und laut SECURITY.md „sehr wohl“ in `unchecked` stehen), wird dort **nicht**
-//! unterschieden — [`filters::is_image_filter`] wird nur im `applied > 0`-Zweig
+//! und laut SECURITY.md „sehr wohl“ in `unchecked` stehen), wurde dort **nicht**
+//! unterschieden — [`filters::is_image_filter`] wurde nur im `applied > 0`-Zweig
 //! befragt.
 //!
 //! Folge: `/Filter [/Crypt /ASCII85Decode]` mit `/Name /Identity` — ein
 //! normgerechter Durchreicher (PDF 32000-1, 7.4.10), den MuPDF anstandslos zum
-//! Klartext auspackt — liefert **0 Fundstellen und 0 `unchecked`-Zeilen**, an
-//! der Kommandozeile „nicht gefunden“ mit Rückgabewert 0. Dasselbe gilt für
-//! jeden Phantasienamen an erster Stelle.
+//! Klartext auspackt — lieferte **0 Fundstellen und 0 `unchecked`-Zeilen**, an
+//! der Kommandozeile „nicht gefunden“ mit Rückgabewert 0. Dasselbe galt für
+//! jeden Phantasienamen an erster Stelle; dieselbe Kette umgestellt
+//! (`[/ASCII85Decode /Q2Phantasie]`) wurde gemeldet, Rückgabewert 3 — die
+//! Meldung hing allein an der Position.
 //!
-//! Diese Tests halten den **gemessenen Zustand** fest, damit die Korrektur ihn
-//! umdreht: die mit `BEFUND_Q2_1` markierten Zusicherungen müssen nach dem Fix
-//! umgeschrieben werden (dann steht der Filtername in `unchecked`).
+//! Seit der Korrektur entscheidet allein der Filter, an dem die Kette stehen
+//! blieb: ein Bildfilter schweigt (an **jeder** Stelle), jeder andere
+//! unbekannte Name steht in `unchecked`. Die mit `BEFUND_Q2_1` markierten
+//! Zusicherungen sind umgedreht; sie halten jetzt die Korrektur.
 
 mod common;
 
@@ -99,8 +102,8 @@ fn q2_bildfilter_am_kettenende_meldet_nichts_und_findet_den_anfang() {
     }
 }
 
-/// Die Kehrseite: ein Filtername, den niemand kennt, **muss** gemeldet werden —
-/// solange er nicht an erster Stelle steht (siehe Befund Q2-1).
+/// Die Kehrseite: ein Filtername, den niemand kennt, **muss** gemeldet werden.
+/// (An erster Stelle ebenso — siehe Befund Q2-1 weiter unten.)
 #[test]
 fn q2_unbekannter_filtername_an_zweiter_stelle_steht_in_unchecked() {
     let check = pruefe(&pdf(
@@ -129,7 +132,7 @@ fn q2_unbekannter_filtername_an_zweiter_stelle_steht_in_unchecked() {
 // ---------------------------------------------------------------------------
 
 /// **BEFUND_Q2_1** — normgerechte Datei, jeder Leser sieht den Klartext, das
-/// Orakel schweigt.
+/// Orakel schwieg (bis Fix-Runde 6) und sagt es jetzt.
 ///
 /// `/Filter [/Crypt /ASCII85Decode]`, `/DecodeParms [<</Name /Identity>> null]`.
 /// `/Crypt` mit `/Identity` verändert die Daten nicht (PDF 32000-1, 7.4.10);
@@ -153,19 +156,23 @@ fn q2_crypt_identity_an_erster_stelle_ist_ein_stilles_leck() {
     assert_eq!(
         check.findings[0],
         Vec::<String>::new(),
-        "gemessener Zustand: das Orakel findet nichts"
+        "keine Sicht kommt an den Klartext heran (ASCII85 hinter /Crypt)"
     );
-    // BEFUND_Q2_1: hier muss nach der Korrektur eine Zeile über /Crypt stehen.
-    assert_eq!(
-        check.unchecked,
-        Vec::<String>::new(),
-        "gemessener Zustand: und es sagt auch nicht, dass es nichts gelesen hat"
+    // BEFUND_Q2_1, umgedreht: das Orakel sagt jetzt, dass es nichts gelesen hat.
+    assert!(
+        check.unchecked.iter().any(
+            |m| m.contains("Objekt 7 0") && m.contains("/Crypt ist hier kein bekannter Filter")
+        ),
+        "„nicht gefunden“ ohne einen Blick in den Strom: {:#?}",
+        check.unchecked
     );
 }
 
-/// **BEFUND_Q2_1**, zweite Hälfte: derselbe Strom, nur der unbekannte Filter
-/// wandert an die zweite Stelle — dann wird gemeldet. Die Meldung hängt also
-/// allein an der Position, nicht am Filternamen.
+/// **BEFUND_Q2_1**, zweite Hälfte: derselbe Strom, einmal mit dem unbekannten
+/// Filter an erster und einmal an zweiter Stelle. Die Meldung hing allein an
+/// der **Position**; jetzt hängt sie am **Filternamen**, und beide Fassungen
+/// werden gemeldet. Gefunden wird der Klartext in keiner von beiden — die
+/// Stelle ist unlesbar, und genau das steht jetzt in `unchecked`.
 #[test]
 fn q2_dieselbe_kette_umgestellt_wird_gemeldet() {
     let raw = ascii85_encode(&nutzlast());
@@ -177,17 +184,61 @@ fn q2_dieselbe_kette_umgestellt_wird_gemeldet() {
         dictionary! { "Filter" => kette(&["ASCII85Decode", "Q2Phantasie"]) },
         raw,
     ));
+    // BEFUND_Q2_1, umgedreht: vorn wird jetzt genauso gemeldet wie hinten.
     assert!(
-        vorn.unchecked.is_empty(),
-        "gemessener Zustand: vorn schweigt"
+        vorn.unchecked
+            .iter()
+            .any(|m| m.contains("/Q2Phantasie ist hier kein bekannter Filter")),
+        "vorn schweigt: {:#?}",
+        vorn.unchecked
     );
     assert!(
         vorn.findings[0].is_empty(),
-        "gemessener Zustand: vorn findet nichts"
+        "vorn kommt keine Sicht an den Klartext (ASCII85 ist nicht entpackt)"
     );
     assert!(
         !hinten.unchecked.is_empty() && !hinten.findings[0].is_empty(),
         "hinten wird gefunden und gemeldet"
+    );
+}
+
+/// Ein Bildfilter an **erster** Stelle, mit einer Kette dahinter: die Ausnahme
+/// hängt am Filter, an dem die Kette stehen blieb — nicht an seiner Position.
+///
+/// Ein Prüfer maß `[/DCTDecode /ASCII85Decode]`: 0 Funde, 0 `unchecked`,
+/// Rückgabewert 0. Das bleibt so, und zwar richtig: hinter `/DCTDecode` liegen
+/// Bilddaten, und was dahinter noch in der Kette steht, ändert daran nichts —
+/// entpacken lässt sich davon ohnehin nichts. Eine `NICHT GEPRÜFT`-Zeile hier
+/// wäre dieselbe Zeile wie bei `/DCTDecode` allein, nur an einer Kette; sie
+/// käme an jeder zweiten Datei mit einem Foto (die Reihenfolge im
+/// `/Filter`-Array ist die Dekodierreihenfolge, PDF 32000-1, 7.4.1 — eine
+/// Distiller-Datei schreibt `[/ASCII85Decode /DCTDecode]`, aber niemand
+/// verbietet die andere).
+#[test]
+fn q2_bildfilter_an_erster_stelle_schweigt_auch_mit_kette_dahinter() {
+    let check = pruefe(&pdf(
+        dictionary! { "Filter" => kette(&["DCTDecode", "ASCII85Decode"]) },
+        ascii85_encode(&nutzlast()),
+    ));
+    assert_eq!(
+        check.unchecked,
+        Vec::<String>::new(),
+        "der benannte blinde Fleck bleibt still, auch als erstes Glied einer Kette"
+    );
+    assert!(
+        check.findings[0].is_empty(),
+        "entpackt wurde nichts: {:#?}",
+        check.findings[0]
+    );
+    // Die Gegenprobe an derselben Kette: derselbe Bau, nur mit einem Namen,
+    // den niemand kennt, an erster Stelle — der wird gemeldet.
+    let fremd = pruefe(&pdf(
+        dictionary! { "Filter" => kette(&["Q2Phantasie", "ASCII85Decode"]) },
+        ascii85_encode(&nutzlast()),
+    ));
+    assert!(
+        !fremd.unchecked.is_empty(),
+        "der Unterschied liegt am Namen, nicht an der Kette"
     );
 }
 

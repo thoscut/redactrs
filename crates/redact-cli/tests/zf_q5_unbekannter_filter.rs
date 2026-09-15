@@ -44,11 +44,15 @@
 //! Seiteninhalts ließ sich nicht in Operationen zerlegen“) — nur die
 //! Nachprüfung winkt durch.
 //!
-//! Deshalb zwei Tests: [`unbekannter_filter_in_der_kette_wird_benannt`] hält
-//! die Hälfte fest, die trägt (scharf), und
-//! [`befund_q5_unbekannter_filter_allein_bleibt_stumm`] ist der Beleg für die
-//! Hälfte, die nicht trägt (`#[ignore]`, wie im Baum üblich für einen
-//! benannten Befund).
+//! **Fix-Runde 6: der Befund ist geschlossen.** `decode_stream` meldet den
+//! unbekannten Filternamen jetzt **an jeder Stelle der Kette**, auch als
+//! erstem Glied (`gar nicht dekodiert — /FooDecode ist hier kein bekannter
+//! Filter (Glied 1 von N)`); `#[ignore]` ist bei
+//! [`befund_q5_unbekannter_filter_allein_bleibt_stumm`] entfernt. Dazu
+//! [`die_zusage_ueber_unbekannte_filter_gilt_an_jeder_stelle_der_kette`]: es
+//! fährt alle fünf Ketten, über die `SECURITY.md` etwas zusagt — unbekannter
+//! Filter allein, an erster und an letzter Stelle, Bildfilter allein und am
+//! Kettenende — und hält das Ergebnis gegen den Wortlaut der Zusage.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -203,12 +207,15 @@ fn unbekannter_filter_in_der_kette_wird_benannt() {
 /// `SECURITY.md` sagt an dieser Stelle das Gegenteil („Ein Filtername, den das
 /// Programm gar nicht kennt, steht sehr wohl darin“).
 ///
-/// Der Test ist `#[ignore]`, weil er den Befund belegt und nicht die
-/// Korrektur; er wird scharf, sobald `decode_stream` auch bei `applied == 0`
-/// den Grund meldet. Lauf:
-/// `cargo test -p redact-cli --test zf_q5_unbekannter_filter -- --ignored`
+/// **Geschlossen in der Fix-Runde 6** (Agent A, `audit_bytes::decode_stream`):
+/// der Grund steht jetzt auch bei `applied == 0`, eine dekodierte Sicht gibt
+/// es weiterhin nicht (die Rohbytes hat die Rohsicht gelesen, eine zweite
+/// gleichlautende Meldung brächte nichts). Der Test ist deshalb **scharf**.
+///
+/// Mutationsnachweis (gefahren): in `decode_stream` den Zweig
+/// `Some(rest) if … && applied == 0` gestrichen → dieser Test ist rot
+/// („stille Entwarnung“, Rückgabewert 0).
 #[test]
-#[ignore = "Befund Q5: unbekannter Filter an erster Stelle bleibt unbenannt (rc 0)"]
 fn befund_q5_unbekannter_filter_allein_bleibt_stumm() {
     let dir = workdir("allein");
     let geheim = "GEHEIM Max Mustermann";
@@ -230,6 +237,79 @@ fn befund_q5_unbekannter_filter_allein_bleibt_stumm() {
         Some(3),
         "Rückgabewert 0 über einen Strom, den niemand aufgemacht hat:\n{text}"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **E5 — die Zusage von `SECURITY.md`, an fünf Ketten gemessen.**
+///
+/// `SECURITY.md` sagt zu: Text hinter einem **Bildfilter** ist ein benannter
+/// blinder Fleck und **keine** `NICHT GEPRÜFT`-Zeile (sonst käme jede Datei
+/// mit einem Foto als unvollständig geprüft zurück) — ein Filtername, den das
+/// Programm **gar nicht kennt**, steht sehr wohl darin, an jeder Stelle der
+/// Kette.
+///
+/// Bis zur Fix-Runde 6 galt die zweite Hälfte nur, wenn vorher schon ein
+/// Filter gelaufen war. Dieser Test fährt alle fünf Fälle, über die die
+/// Zusage etwas sagt, und verlangt dazu, dass der Satz in `SECURITY.md`
+/// wörtlich dasteht — eine Zusage ohne Lauf ist eine Behauptung, ein Lauf
+/// ohne Zusage ist ein Zufall.
+#[test]
+fn die_zusage_ueber_unbekannte_filter_gilt_an_jeder_stelle_der_kette() {
+    let dir = workdir("zusage");
+    let geheim = "GEHEIM Max Mustermann";
+    let roh = verschleiert(geheim);
+    let gepackt = flate_stored(&roh);
+
+    // (Name, Filterangabe, Strominhalt, muss benannt werden?)
+    let faelle: [(&str, &str, &[u8], bool); 5] = [
+        ("foo_allein", "/FooDecode", &roh, true),
+        ("foo_zuerst", "[/FooDecode /FlateDecode]", &roh, true),
+        ("foo_zuletzt", "[/FlateDecode /FooDecode]", &gepackt, true),
+        ("bild_allein", "/DCTDecode", &roh, false),
+        ("bild_zuletzt", "[/FlateDecode /DCTDecode]", &gepackt, false),
+    ];
+
+    for (name, filter, daten, benannt) in faelle {
+        let datei = format!("{name}.pdf");
+        std::fs::write(dir.join(&datei), pdf_mit_stromfilter(filter, daten)).unwrap();
+        let out = run_in(&dir, &[&datei, "--check-leaks", "GEHEIM"]);
+        let text = stdout(&out);
+        assert_eq!(
+            text.contains("  NICHT GEPRÜFT: "),
+            benannt,
+            "{name} ({filter}): die Stelle ist {}benannt:\n{text}",
+            if benannt { "nicht " } else { "zu Unrecht " }
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(if benannt { 3 } else { 0 }),
+            "{name} ({filter}): falscher Rückgabewert:\n{text}"
+        );
+        if benannt {
+            assert!(
+                text.contains("/FooDecode ist hier kein bekannter Filter"),
+                "{name}: der unbekannte Filtername fehlt in der Meldung:\n{text}"
+            );
+        }
+    }
+
+    // Und die Zusage steht so in `SECURITY.md`.
+    let wurzel = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let security = std::fs::read_to_string(wurzel.join("SECURITY.md"))
+        .expect("SECURITY.md lesbar")
+        .replace("\r\n", "\n");
+    let security = security.split_whitespace().collect::<Vec<_>>().join(" ");
+    for satz in [
+        "ein benannter blinder Fleck und **keine** `NICHT GEPRÜFT`-Zeile",
+        "Ein Filtername, den das Programm gar nicht kennt, steht sehr wohl darin — \
+         **an jeder Stelle der Kette**, auch als erstes Glied.",
+    ] {
+        assert!(
+            security.contains(satz),
+            "SECURITY.md sagt „{satz}“ nicht mehr zu"
+        );
+    }
 
     std::fs::remove_dir_all(&dir).ok();
 }

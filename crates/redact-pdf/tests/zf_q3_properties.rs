@@ -8,13 +8,13 @@
 //!
 //! Geprüft werden vier Orte für dieselbe Liste:
 //!
-//! | Ort                                        | Ergebnis |
-//! |--------------------------------------------|----------|
-//! | Seite, Liste als eigenes Objekt             | bereinigt |
-//! | Seite, Liste direkt (Register #34)          | bleibt |
-//! | **Formular**, Liste direkt                  | bleibt |
-//! | **geerbt vom Seitenbaum**, Liste direkt     | bleibt |
-//! | **`/Properties` als geteiltes Objekt**, Liste direkt | bleibt |
+//! | Ort                                        | vor Runde 6 | seither |
+//! |--------------------------------------------|----------|----------|
+//! | Seite, Liste als eigenes Objekt             | bereinigt | bereinigt |
+//! | Seite, Liste direkt (Register #34)          | bleibt | bereinigt |
+//! | **Formular**, Liste direkt                  | bleibt | bereinigt |
+//! | **geerbt vom Seitenbaum**, Liste direkt     | bleibt | bereinigt |
+//! | **`/Properties` als geteiltes Objekt**, Liste direkt | bleibt | bereinigt |
 
 mod common;
 
@@ -215,22 +215,21 @@ fn liste_als_eigenes_objekt_verliert_ihren_spiegel() {
     assert!(found.is_empty(), "Warnungen {warnings:?}, Lecks {found:?}");
 }
 
-/// **Befund Q3-5 (neu, offen).** Register #34 nennt nur die Seite (erster
-/// Fall in der Schleife, hier zum Vergleich mit dabei). Derselbe Klartext
-/// bleibt aber genauso stehen, wenn die Liste
+/// **Befund Q3-5, in Fix-Runde 6 geschlossen.** Register #34 nannte nur die
+/// Seite (erster Fall in der Schleife, hier zum Vergleich mit dabei).
+/// Derselbe Klartext blieb aber genauso stehen, wenn die Liste
 ///
 /// * in den Ressourcen eines **Form-XObjects** steht,
 /// * über den **Seitenbaum geerbt** wird (`/Pages /Resources`), oder
 /// * in einem **`/Properties`-Objekt** steht, das mehrere Ströme teilen.
 ///
-/// Alle drei sind eigene Fundorte in der Datei: die Korrektur, die Register
-/// #34 beschreibt („die Objekt-Id des Verzeichnisses, in dem die Liste
-/// steht“), muss für jeden von ihnen greifen, nicht nur für
-/// `page_resources`. Ohne Warnung, mit Rückgabewert 0.
-///
-/// Lauf: `cargo test -p redact-pdf --test zf_q3_properties -- --ignored`.
+/// Alle vier sind eigene Fundorte in der Datei, und alle vier gehen jetzt
+/// denselben Weg: `content::property_list_home` läuft die Ressourcenkette von
+/// der Seite bzw. vom Formular aus ab — von innen nach außen, in derselben
+/// Reihenfolge, in der `merge_resources` die Verzeichnisse übereinanderlegt —
+/// und benennt das Objekt samt Weg darin (`MirrorHome`). `redact::
+/// clear_mirror_at` räumt dort auf.
 #[test]
-#[ignore = "Befund Q3-5: direkte Eigenschaftsliste behält ihren Spiegel auch außerhalb der Seitenressourcen"]
 fn befund_direkte_liste_bleibt_an_drei_weiteren_orten() {
     let mut offen = Vec::new();
     for ort in [

@@ -310,9 +310,16 @@ fn g5b_teilstring_eines_abgewaehlten_textes_gilt_als_leck() {
 }
 
 /// Derselbe Text auf Seite 1 geschwärzt (Rechteck trifft nichts: echtes
-/// Leck) und auf Seite 2 abgewählt: `kept`, nicht gesucht, kein Alarm —
-/// das echte Leck auf Seite 1 ist damit unprüfbar. Die Zeile sagt „nicht
-/// gesucht“; das Orakel selbst wüsste es besser, es nennt die Seite.
+/// Leck) und auf Seite 2 abgewählt: nicht gesucht, kein Alarm — das echte
+/// Leck auf Seite 1 ist damit unprüfbar.
+///
+/// **Seit Befund Q4-1 sagt die Zeile das auch.** Vorher stand hier „1 Text(e)
+/// decken sich … und zählen deshalb nicht als Leck“ — ein Urteil, das die
+/// Prüfung nicht gefällt hat, und [`ExportCheck::warning`] gab `None`. Jetzt
+/// steht da, dass sie über diesen Text **nichts** sagt, und es bleibt als
+/// Warnung stehen. Das Orakel wüsste es besser: es nennt die Seite. Die
+/// Oberfläche kann daraus nichts machen, solange die Seite nur im Text der
+/// Fundmeldung steht (siehe Vertrag im Bericht).
 #[test]
 fn g5b_ein_abgewaehlter_text_auf_seite_2_macht_das_leck_auf_seite_1_unpruefbar() {
     let out = tmp("b-seiten").join("out.pdf");
@@ -342,9 +349,18 @@ fn g5b_ein_abgewaehlter_text_auf_seite_2_macht_das_leck_auf_seite_1_unpruefbar()
     let check = plan.run(&out);
     println!("Statuszeile: {}", check.sentence());
     assert!(!check.found_leak());
-    assert!(check
-        .sentence()
-        .contains("1 Text(e) decken sich mit einer abgewählten"));
+    assert_eq!(check.unsearched, 1, "{check:?}");
+    assert!(check.sentence().contains(
+        "1 Text(e) stehen wörtlich auch in einer abgewählten oder geschützten Zeile: über sie \
+         sagt diese Prüfung nichts — ob dort eine Schwärzung danebenging, bleibt offen."
+    ));
+    let warning = check
+        .warning()
+        .expect("„nichts gesagt“ ist keine Entwarnung");
+    assert!(
+        warning.contains("über 1 Text(e) sagt sie nichts"),
+        "{warning}"
+    );
 
     // Das Orakel nennt die Seite des Lecks.
     let hits = redact_pdf::leaks(&std::fs::read(&out).unwrap(), "Musterbank");
@@ -405,7 +421,7 @@ fn g5b_leerer_text_und_tausend_gleiche() {
     let s = check.sentence();
     assert!(s.contains("2 Rechteck(e) ohne bekannten Text"), "{s}");
     assert!(
-        s.contains("1 Text(e) decken sich mit einer abgewählten"),
+        s.contains("1 Text(e) stehen wörtlich auch in einer abgewählten"),
         "{s}"
     );
 }
@@ -528,7 +544,20 @@ fn g5a2_nicht_geprueft_steht_im_satz_und_zaehlt_als_warnung() {
         sentence.contains("Objekt 7 0 (Bildstrom): über der Entpackgrenze"),
         "{sentence}"
     );
-    assert!(sentence.contains(tief), "{sentence}");
+    // Gekürzt auf Ort und Grund — die Erklärung dahinter bleibt in
+    // `unchecked` (Befund Q4-3: der Satz war mit drei Stellen 804 Zeichen).
+    assert!(
+        sentence.contains(
+            "Objekt 5 0 /Kids[0]: nicht durchsucht — Verschachtelungstiefe 32 \
+                           erreicht"
+        ),
+        "{sentence}"
+    );
+    assert!(
+        !sentence.contains("was tiefer liegt"),
+        "gekürzt: {sentence}"
+    );
+    assert!(check.unchecked.contains(&tief.to_string()));
     assert!(!sentence.contains("steht NOCH"), "{sentence}");
     assert!(!check.found_leak());
     assert!(check.incomplete());

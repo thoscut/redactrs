@@ -7,7 +7,7 @@ mod common;
 
 use common::{page, text_ops, Doc, SECRET};
 use lopdf::{dictionary, Object, ObjectId, Stream};
-use redact_pdf::{load_from_bytes, PdfExtractor};
+use redact_pdf::{load_from_bytes, scan_page, PdfExtractor};
 
 fn escape(text: &str) -> String {
     text.replace('\\', "\\\\")
@@ -387,4 +387,91 @@ fn schreibt_material() {
     let bytes = nested_brackets_over_outer(b, d);
     std::fs::write(format!("{dir}/faecher_{b}x{d}.pdf"), &bytes).expect("schreibbar");
     println!("{dir}/faecher_{b}x{d}.pdf: {} B", bytes.len());
+}
+
+// ---------------------------------------------------------------------------
+// F) Die Decke zählt jetzt schon beim Aufbau (Fix-Runde 6)
+// ---------------------------------------------------------------------------
+
+/// Wie viele Spiegel-Formular-Paare der Scan dieser Seite wirklich führt.
+///
+/// Das ist die Größe, die den Speicher belegt: `Σ|record.forms|`. Sie ist über
+/// `scan_page` von außen ablesbar und braucht weder Uhr noch Speichermesser —
+/// eine Messung wäre auf einer geteilten Maschine kein Beleg.
+fn spiegel_formular_paare(bytes: &[u8]) -> usize {
+    let doc = load_from_bytes(bytes).expect("PDF ladbar");
+    let page_id = doc.page_iter().next().expect("eine Seite");
+    let scan = scan_page(&doc, page_id).expect("Scan");
+    scan.marked.iter().map(|record| record.forms.len()).sum()
+}
+
+/// Die Decke aus `content::MAX_MIRROR_FORM_PLACEMENTS`.
+const DECKE: usize = 100_000;
+
+/// **Befund Q3-1a (Dienstverweigerung), in Fix-Runde 6 behoben.**
+///
+/// `scan_marked_text` läuft als erste Zeile von `scan_operations`, also **vor**
+/// der Schleife mit dem Aufwandskonto. Jede Spiegel-Klammer nahm dort jedes
+/// `Do` ihres Bereichs auf: `B` verschachtelte Klammern über `D` Platzierungen
+/// ergaben `B × D` Einträge, gegen keine Decke und ohne jede Buchung.
+///
+/// Gemessen (Debug, je eigener Prozess, `mess_ein_fall`):
+///
+/// | Datei | vorher | nachher |
+/// |---|---|---|
+/// | 92 kB (2 000 × 2 000)  | 4,71 s / 268 MB   | 0,26 s / 22 MB |
+/// | 184 kB (4 000 × 4 000) | 20,6 s / 1 036 MB | 0,41 s / 30 MB |
+/// | 276 kB (6 000 × 6 000) | 41,7 s / 2 306 MB | 0,56 s / 38 MB |
+///
+/// Hier steht nicht die Zeit, sondern die Zahl, an der sie hing: 4 000 000
+/// Paare vorher, höchstens `DECKE` nachher.
+#[test]
+fn verschachtelte_klammern_bleiben_unter_der_decke() {
+    let paare = spiegel_formular_paare(&nested_brackets(2000, 2000, false));
+    assert!(
+        paare <= DECKE,
+        "{paare} Spiegel-Formular-Paare aus einer Datei von 92 kB"
+    );
+}
+
+/// Und die Decke ist auch wirklich erreicht — sonst bewiese der Test oben
+/// nichts über eine Datei, die sie erreichen *will*.
+#[test]
+fn verschachtelte_klammern_erreichen_die_decke_und_sagen_es() {
+    let bytes = nested_brackets(2000, 2000, false);
+    assert_eq!(spiegel_formular_paare(&bytes), DECKE);
+    let (_, warnings) = analyse(&bytes).expect("lesbar");
+    let hits: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("Zuordnungen zwischen einem Spiegel"))
+        .collect();
+    assert_eq!(hits.len(), 1, "{warnings:?}");
+    assert!(hits[0].contains("unvollständig"), "{}", hits[0]);
+}
+
+/// Die Gegenrichtung: eine gewöhnliche getaggte Seite (jede Klammer über ihrem
+/// eigenen `Do`, keine Verschachtelung) bleibt weit unter der Decke und gibt
+/// **keine** Warnung. Eine Decke, die gewöhnliche Dateien ablehnt, wäre
+/// genauso ein Fehler wie eine Lücke.
+#[test]
+fn eine_klammer_je_platzierung_gibt_keine_warnung() {
+    let mut d = page(&[]);
+    let resources = d.resources_id;
+    add_form(&mut d, resources, "Fm1", &text_at(600, "A"));
+    let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+    for i in 0..2000 {
+        raw.extend_from_slice(
+            format!("/Span <</ActualText (A{i})>> BDC\n/Fm1 Do\nEMC\n").as_bytes(),
+        );
+    }
+    d.set_content(&raw);
+    let bytes = d.finish();
+    assert_eq!(spiegel_formular_paare(&bytes), 2000);
+    let (_, warnings) = analyse(&bytes).expect("lesbar");
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.contains("Zuordnungen zwischen einem Spiegel")),
+        "{warnings:?}"
+    );
 }

@@ -29,7 +29,6 @@ fn strip(bytes: &[u8]) -> (MetadataReport, Vec<u8>) {
 /// jemand anders hält. Der Bericht meldet „1 Lesezeichen“, der Titel steht
 /// weiter in der Datei.
 #[test]
-#[ignore = "Befund Q1-2a: outlines_removed meldet eine Entfernung, die --check-leaks findet"]
 fn ein_geteilter_lesezeichentitel_darf_nicht_als_entfernt_gelten() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let titel = d.add(Object::string_literal(format!("Kontoauszug {SECRET}")));
@@ -70,7 +69,6 @@ fn ein_geteilter_lesezeichentitel_darf_nicht_als_entfernt_gelten() {
 /// Dasselbe an einer Annotation: `/Contents` ist ein eigenes Objekt, das noch
 /// jemand anders hält. Der Bericht meldet „1 Kommentartext“.
 #[test]
-#[ignore = "Befund Q1-2b: annotation_texts_cleared meldet eine Entfernung, die --check-leaks findet"]
 fn ein_geteilter_annotationstext_darf_nicht_als_entfernt_gelten() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let text = d.add(Object::string_literal(format!("Notiz {SECRET}")));
@@ -97,4 +95,65 @@ fn ein_geteilter_annotationstext_darf_nicht_als_entfernt_gelten() {
         report.annotation_texts_cleared,
         hits.join("\n")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Messung: was die Nachschau kostet (kein Prüfstück)
+// ---------------------------------------------------------------------------
+
+/// Der ehrliche Zähler merkt sich je entferntem Schlüssel **mit Verweiswert**
+/// eine Objekt-Id und sieht nach dem Aufräumen einmal nach. Wie teuer ist das
+/// am ungünstigsten Material — jede Annotation mit `/Contents <ref>`?
+///
+/// Gemessen wird gegen dieselbe Datei mit **direkten** Zeichenketten: dort
+/// wird nichts gemerkt. Läuft mit `--ignored --nocapture`.
+#[test]
+#[ignore = "Messung, keine Prüfung"]
+fn mess_q1_2_kosten_der_nachschau() {
+    fn vm_hwm_kib() -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("VmHWM:"))
+                    .and_then(|line| line.split_whitespace().nth(1)?.parse().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    for indirekt in [false, true] {
+        let n = 200_000usize;
+        let mut d: Doc = page(&["Rechnung 4711"]);
+        let ids: Vec<Object> = (0..n)
+            .map(|k| {
+                let contents = if indirekt {
+                    Object::Reference(d.add(Object::string_literal(format!("Notiz {k}"))))
+                } else {
+                    Object::string_literal(format!("Notiz {k}"))
+                };
+                Object::Reference(d.add(Object::Dictionary(dictionary! {
+                    "Type" => "Annot",
+                    "Subtype" => "Text",
+                    "Rect" => vec![10.into(), 10.into(), 30.into(), 30.into()],
+                    "Contents" => contents,
+                })))
+            })
+            .collect();
+        d.page_dict_set("Annots", Object::Array(ids));
+        let vorher = vm_hwm_kib();
+        let start = std::time::Instant::now();
+        let report = strip_metadata(&mut d.doc);
+        let dauer = start.elapsed();
+        println!(
+            "{} Annotationen, /Contents {}: {:?}, gezählt {}, VmHWM {} MiB (+{} MiB)",
+            n,
+            if indirekt { "als Verweis" } else { "direkt   " },
+            dauer,
+            report.annotation_texts_cleared,
+            vm_hwm_kib() / 1024,
+            vm_hwm_kib().saturating_sub(vorher) / 1024,
+        );
+        assert_eq!(report.annotation_texts_cleared, n);
+    }
 }

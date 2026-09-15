@@ -655,6 +655,11 @@ struct PendingCheck {
     /// hinterlässt: nach einem zweiten Export wäre ein nackter Satz sonst
     /// keiner Datei mehr zuzuordnen (Befund G5-A4).
     file: String,
+    /// Der ganze Pfad der geprüften Ausgabe — die **Kennung** dieser
+    /// Prüfung. Zwei Dateien gleichen Namens in verschiedenen Ordnern sind
+    /// zwei Prüfungen; ein zweiter Export **derselben** Datei macht die
+    /// ältere gegenstandslos ([`RedactApp::start_export_check`]).
+    out: PathBuf,
     result: Receiver<ExportCheck>,
 }
 
@@ -685,6 +690,50 @@ impl Drop for RepaintOnDrop {
         if let Some(ctx) = &self.0 {
             ctx.request_repaint();
         }
+    }
+}
+
+/// Testhaken: hält den Prüf-Thread an, bis der Test ihn freigibt.
+///
+/// Ohne ihn ließ sich nicht prüfen, **wann** das Neuzeichnen angefordert
+/// wird. Beide Tests aus Fix-Runde 5 (`zb_p5d5_*`) blieben grün, wenn man
+/// [`RepaintOnDrop`] wieder außerhalb des Threads fallen ließ: dann wird das
+/// Neuzeichnen beim **Start** angefordert statt am **Ende**, und niemand
+/// merkt es — genau die Fehlerklasse „ein Test bleibt ohne seine Korrektur
+/// grün“ (Befund Q4-5). Mit dem Haken steht der Thread still, und der Test
+/// kann feststellen, dass bis dahin **nichts** angefordert wurde.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct CheckGate {
+    /// `(der Thread ist angekommen, der Test hat freigegeben)`.
+    state: std::sync::Mutex<(bool, bool)>,
+    signal: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl CheckGate {
+    /// Aus dem Prüf-Thread: melden und warten.
+    fn arrive_and_wait(&self) {
+        let mut state = self.state.lock().expect("Gatter");
+        state.0 = true;
+        self.signal.notify_all();
+        while !state.1 {
+            state = self.signal.wait(state).expect("Gatter");
+        }
+    }
+
+    /// Aus dem Test: warten, bis der Thread wirklich läuft.
+    pub(crate) fn wait_until_arrived(&self) {
+        let mut state = self.state.lock().expect("Gatter");
+        while !state.0 {
+            state = self.signal.wait(state).expect("Gatter");
+        }
+    }
+
+    /// Aus dem Test: den Thread laufen lassen.
+    pub(crate) fn release(&self) {
+        self.state.lock().expect("Gatter").1 = true;
+        self.signal.notify_all();
     }
 }
 
@@ -750,6 +799,9 @@ pub struct RedactApp {
     /// Weg „Thread ohne Ergebnis verschwunden“ einen Test hat (Befund G5-A3).
     #[cfg(test)]
     force_panic_in_check: bool,
+    /// Testhaken: hält den Prüf-Thread an, siehe [`CheckGate`].
+    #[cfg(test)]
+    hold_check: Option<std::sync::Arc<CheckGate>>,
 }
 
 impl Default for RedactApp {
@@ -788,6 +840,8 @@ impl RedactApp {
             password_input: String::new(),
             #[cfg(test)]
             force_panic_in_check: false,
+            #[cfg(test)]
+            hold_check: None,
         }
     }
 
@@ -1149,12 +1203,37 @@ impl RedactApp {
     /// Lässt sich kein Thread starten, läuft die Prüfung an Ort und Stelle:
     /// langsam ist besser als gar nicht — ohne sie stünde da eine
     /// Erfolgsmeldung ohne Nachprüfung.
+    ///
+    /// ## Ein zweiter Export derselben Datei beendet die ältere Prüfung
+    ///
+    /// [`ExportCheckPlan::run`] liest die Datei **zum Prüfzeitpunkt**, nicht
+    /// zum Exportzeitpunkt. Wird dieselbe Datei ein zweites Mal geschrieben,
+    /// während die erste Prüfung noch läuft, bewertet die ältere die **neuen**
+    /// Bytes mit dem **alten** Plan — und trägt ihr Urteil unter dem Präfix
+    /// des ersten Exports ein. Beides ist falsch, und die gefährliche
+    /// Richtung ist die Entwarnung: Die erste Ausgabe leckte, die zweite
+    /// nicht, und die Zeile meldet über den ersten Export „steht nicht mehr
+    /// in der Ausgabe“.
+    ///
+    /// Über die Bytes der ersten Ausgabe **kann** niemand mehr etwas sagen —
+    /// es gibt sie nicht mehr, die Datei trägt jetzt die zweite. Die ältere
+    /// Prüfung wird deshalb hier fallen gelassen (ihr Thread läuft aus, sein
+    /// `send` findet niemanden mehr); die neue prüft dieselbe Datei und trägt
+    /// ihr Urteil unter dem Präfix ein, zu dem es gehört. Verschwiegen wird
+    /// nichts: Die Warnungen der ersten Ausgabe hat `note_export_warnings`
+    /// bereits durch die der zweiten ersetzt, denn sie hängen am selben
+    /// Dateinamen.
     fn start_export_check(&mut self, prefix: String, plan: ExportCheckPlan, out: PathBuf) {
+        // Dieselbe Datei, ältere Prüfung: sie urteilt sonst über Bytes, die
+        // es nicht mehr gibt.
+        self.checks.retain(|pending| pending.out != out);
         let (sender, receiver) = std::sync::mpsc::channel();
         let repaint = RepaintOnDrop(self.ui_ctx.clone());
         let file = file_name_of(&out);
         #[cfg(test)]
         let force_panic = self.force_panic_in_check;
+        #[cfg(test)]
+        let gate = self.hold_check.clone();
         let spawned = std::thread::Builder::new()
             .name("redact-export-check".to_string())
             .spawn({
@@ -1169,6 +1248,13 @@ impl RedactApp {
                     // hier draußen); fallen gelassen wird er dort — auch beim
                     // Abwickeln einer Panik.
                     let _repaint = repaint;
+                    // Der Haken steht **hinter** dem Wächter: ein Test hält
+                    // den Thread hier an und stellt fest, dass bis dahin kein
+                    // Neuzeichnen angefordert ist (Befund Q4-5).
+                    #[cfg(test)]
+                    if let Some(gate) = &gate {
+                        gate.arrive_and_wait();
+                    }
                     #[cfg(test)]
                     assert!(!force_panic, "Testhaken: die Nachprüfung panikt");
                     let check = plan.run(&out);
@@ -1183,6 +1269,7 @@ impl RedactApp {
                 self.checks.push(PendingCheck {
                     prefix,
                     file,
+                    out,
                     result: receiver,
                 });
             }

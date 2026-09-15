@@ -352,10 +352,18 @@ pub struct Cli {
     /// überleben kann: rohe Dateibytes, jeder `stream … endstream`-Block (auch
     /// Flate-dekomprimiert, also inklusive Altrevisionen), jedes Stream-Objekt
     /// dekodiert, die Objekte in `/ObjStm`-Containern und jedes
-    /// Zeichenketten-Objekt unter jedem Schlüssel — jeweils in UTF-8,
-    /// Latin-1/PDFDoc, UTF-16BE und als Hex-String. `pdftotext … | grep …`
-    /// sieht davon einen Bruchteil und gibt an der eigenen Demo-Ausgabe
-    /// falsche Entwarnung.
+    /// Zeichenketten-Objekt unter jedem Schlüssel — jeweils in **bis zu neun
+    /// Byte-Kodierungen**: UTF-8/ASCII, Latin-1/PDFDoc, UTF-16BE und
+    /// UTF-16LE, dazu jede der drei Bytefassungen (Latin-1, UTF-16BE,
+    /// UTF-16LE) als Hex-String in Groß- und in Kleinschreibung. Neun sind es
+    /// für einen Begriff aus reinem ASCII mit Buchstaben — dort fällt Latin-1
+    /// mit UTF-8 zusammen —, zehn mit Umlaut und sieben mit einem Zeichen
+    /// jenseits von Latin-1 (dann gibt es keine Einbytefassung). Fassungen,
+    /// die auf dieselben Bytes fallen, werden nur einmal gesucht: bei einer
+    /// IBAN aus Ziffern und `DE` ist der Hex-String in Groß- und in
+    /// Kleinschreibung dieselbe Bytefolge, dort sind es sechs.
+    /// `pdftotext … | grep …` sieht davon einen Bruchteil und gibt an der
+    /// eigenen Demo-Ausgabe falsche Entwarnung.
     ///
     /// **`-` liest die Begriffe zeilenweise von der Standardeingabe.** Ein
     /// Suchbegriff ist ein Geheimnis; auf der Kommandozeile steht er in der
@@ -366,9 +374,13 @@ pub struct Cli {
     /// **Kein Komma-Trenner:** eine Angabe ist ein Begriff, ganz.
     /// „Mustermann, Max“ ist ein Name und nicht zwei.
     ///
-    /// Rückgabewert: `0`, wenn keiner der Begriffe gefunden wurde, `3`, wenn
-    /// mindestens einer noch dasteht. Ein Fund ist kein Verarbeitungsfehler —
-    /// der Lauf ist gelungen, das *Ergebnis* ist es nicht.
+    /// Rückgabewert: `0` **nur**, wenn keiner der Begriffe gefunden wurde
+    /// *und* jede Stelle geprüft werden konnte; `3`, wenn mindestens einer
+    /// noch dasteht **oder** eine Stelle ungeprüft blieb (`NICHT GEPRÜFT: …`)
+    /// — auch ohne einen einzigen Fund. Die drei Fälle stehen unter
+    /// „Rückgabewerte“ am Ende dieser Hilfe. Ein Fund ist kein
+    /// Verarbeitungsfehler — der Lauf ist gelungen, das *Ergebnis* ist es
+    /// nicht.
     ///
     /// **Die Suche hat ein Budget:** mehr als `--max-decompressed-mb` (Vorgabe
     /// 1024 MB) wird in Summe nicht ausgepackt — je Sicht der Suche einmal.
@@ -683,6 +695,18 @@ mod tests {
     /// Der Rückgabewert 3 hat **drei** Bedeutungen — und alle drei stehen im
     /// Hilfetext, in `README.md` und in `SECURITY.md`.
     ///
+    /// **Und der Hilfetext widerspricht sich dabei nicht selbst.**
+    /// Gegenprüfung der Fix-Runde 6: drei Absätze über dem Block „Drei Fälle“
+    /// stand im selben `--help` weiter „Rückgabewert: `0`, wenn keiner der
+    /// Begriffe gefunden wurde, `3`, wenn mindestens einer noch dasteht“ —
+    /// also genau die zwei Fälle, die die Runde 5 abgeschafft hatte. Wer die
+    /// Hilfe von oben nach unten liest, findet zuerst die falsche Fassung.
+    /// Der Lauf `redact-rs tief33.pdf --check-leaks GEHEIM` sagt „nicht
+    /// gefunden“, schreibt eine `NICHT GEPRÜFT`-Zeile und endet mit 3
+    /// (`ze_p4_check_leaks_grenzen::tiefe_33_ist_eine_stille_entwarnung`) —
+    /// nach dem alten Satz wäre das unmöglich. Dieser Test verlangt deshalb
+    /// die neue Fassung **und** verbietet die alte wörtlich.
+    ///
     /// Gegenprüfung E1 der Fix-Runde 5: der dritte Fall („nicht geprüft“, auch
     /// ohne Fund) war seit der Runde 4 im Code (`main.rs`, `check::report`),
     /// aber der Hilfetext sagte weiter „Zwei Fälle“, `SECURITY.md` „hat **zwei**
@@ -718,6 +742,24 @@ mod tests {
         assert!(
             help.contains("--check-leaks konnte eine Stelle NICHT PRÜFEN"),
             "--help nennt den dritten Fall nicht"
+        );
+
+        // Und derselbe Hilfetext sagt es **auch bei `--check-leaks`** so.
+        let glatter_hilfetext = glatt(&help);
+        assert!(
+            glatter_hilfetext.contains(
+                "Rückgabewert: `0` **nur**, wenn keiner der Begriffe gefunden wurde \
+                 *und* jede Stelle geprüft werden konnte; `3`, wenn mindestens einer \
+                 noch dasteht **oder** eine Stelle ungeprüft blieb"
+            ),
+            "der Absatz zu --check-leaks nennt die Bedingung für `0` nicht: {help}"
+        );
+        assert!(
+            !glatter_hilfetext.contains(
+                "Rückgabewert: `0`, wenn keiner der Begriffe gefunden wurde, `3`, \
+                 wenn mindestens einer noch dasteht"
+            ),
+            "derselbe --help-Text zählt oben zwei Fälle und unten drei: {help}"
         );
 
         let security = lies("SECURITY.md");
@@ -759,9 +801,17 @@ mod tests {
         assert!(
             readme.contains(
                 "**oder** eine Stelle konnte nicht geprüft werden \
-                 (Entpackgrenze, Verschachtelungstiefe), auch ohne einen einzigen Fund."
+                 (fünf Gründe, siehe [`SECURITY.md`](SECURITY.md)), \
+                 auch ohne einen einzigen Fund."
             ),
             "die README-Tabelle nennt den dritten Fall nicht"
+        );
+        assert!(
+            readme.contains(
+                "| `0` | Keiner der Begriffe steht noch in der Datei — \
+                 **und** jede Stelle konnte geprüft werden."
+            ),
+            "die README-Tabelle verspricht `0` ohne die Bedingung"
         );
     }
 

@@ -50,7 +50,6 @@ fn muss_fallen(bytes: &[u8], was: &str) {
 
 /// Befund Q1-1a: `/Movie /F`.
 #[test]
-#[ignore = "Befund Q1-1a: der Dateiname einer Movie-Annotation bleibt"]
 fn der_dateiname_einer_movie_annotation_bleibt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let a = d.add(Object::Dictionary(dictionary! {
@@ -68,7 +67,6 @@ fn der_dateiname_einer_movie_annotation_bleibt() {
 
 /// Befund Q1-1b: `/Measure /X /U`.
 #[test]
-#[ignore = "Befund Q1-1b: die Einheitenbeschriftung einer Vermessung bleibt"]
 fn die_einheitenbeschriftung_einer_vermessung_bleibt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let a = d.add(Object::Dictionary(dictionary! {
@@ -91,7 +89,6 @@ fn die_einheitenbeschriftung_einer_vermessung_bleibt() {
 
 /// Befund Q1-1c: eine eingebettete Datei unter `/RichMediaContent /Assets`.
 #[test]
-#[ignore = "Befund Q1-1c: eingebettete Datei an einer RichMedia-Annotation bleibt"]
 fn eine_eingebettete_datei_an_einer_richmedia_annotation_bleibt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let strom = d.add(Object::Stream(Stream::new(
@@ -123,7 +120,6 @@ fn eine_eingebettete_datei_an_einer_richmedia_annotation_bleibt() {
 /// Befund Q1-1d: `/IRT` hält ein Struktur-Element samt `/Alt` am Leben,
 /// obwohl `/StructTreeRoot` fällt — der `/K`-Baum „verwaist“ eben nicht.
 #[test]
-#[ignore = "Befund Q1-1d: /Alt eines Struktur-Elements hinter /IRT bleibt"]
 fn ein_strukturelement_hinter_irt_behaelt_seinen_alt_text() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let elem = d.add(Object::Dictionary(dictionary! {
@@ -145,4 +141,57 @@ fn ein_strukturelement_hinter_irt_behaelt_seinen_alt_text() {
     }));
     d.page_dict_set("Annots", Object::Array(vec![Object::Reference(a)]));
     muss_fallen(&d.finish(), "/IRT auf ein Struktur-Element");
+}
+
+/// Der härteste Lauf: dieselbe IBAN **auf der Seite** (die fällt) und
+/// zugleich in `/Movie /F` und im `/Alt` eines Struktur-Elements hinter
+/// `/IRT` (die fielen bis zu dieser Runde nicht).
+///
+/// Kein Prüfstück — das Werkzeug für den Lauf über die Kommandozeile:
+///
+/// ```console
+/// $ KORPUS_DIR=/tmp/k cargo test -p redact-pdf --test zf_q1_luecken \
+///       -- --ignored haertester_lauf_schreiben --nocapture
+/// $ redact-rs /tmp/k/haertester_lauf.pdf -f
+/// $ redact-rs /tmp/k/haertester_lauf_geschwaerzt.pdf --check-leaks "DE89 …"
+/// ```
+#[test]
+#[ignore = "Werkzeug, keine Prüfung"]
+fn haertester_lauf_schreiben() {
+    let dir = std::env::var("KORPUS_DIR").expect("KORPUS_DIR setzen");
+    std::fs::create_dir_all(&dir).expect("Verzeichnis");
+    let mut d: Doc = page(&["Kontoinhaber: Max Mustermann", &format!("IBAN: {SECRET}")]);
+    let elem = d.add(Object::Dictionary(dictionary! {
+        "Type" => "StructElem",
+        "S" => "P",
+        "Alt" => Object::string_literal(format!("Kontoauszug {SECRET}")),
+    }));
+    let root = d.add(Object::Dictionary(dictionary! {
+        "Type" => "StructTreeRoot",
+        "K" => Object::Reference(elem),
+    }));
+    d.catalog_set("StructTreeRoot", Object::Reference(root));
+    let film = d.add(Object::Dictionary(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Movie",
+        "Rect" => vec![10.into(), 10.into(), 30.into(), 30.into()],
+        "Movie" => dictionary! {
+            "F" => Object::string_literal(format!("Kontoauszug {SECRET}.mov")),
+            "Aspect" => vec![320.into(), 240.into()],
+        },
+    }));
+    let antwort = d.add(Object::Dictionary(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Text",
+        "Rect" => vec![40.into(), 10.into(), 60.into(), 30.into()],
+        "IRT" => Object::Reference(elem),
+        "Contents" => Object::string_literal("Antwort"),
+    }));
+    d.page_dict_set(
+        "Annots",
+        Object::Array(vec![Object::Reference(film), Object::Reference(antwort)]),
+    );
+    let bytes = d.finish();
+    std::fs::write(format!("{dir}/haertester_lauf.pdf"), &bytes).expect("schreibbar");
+    println!("Fundstellen in der Probe: {}", leaks(&bytes, SECRET).len());
 }

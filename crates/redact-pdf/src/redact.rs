@@ -34,7 +34,9 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 use redact_core::conflict::RectGrid;
 use redact_core::{Rect, RedactError, Redaction, Result};
 
-use crate::content::{MarkedTextRecord, ShowItem, ShowRecord, StreamKey, MIRROR_KEYS};
+use crate::content::{
+    property_list_home, MarkedTextRecord, MirrorHome, ShowItem, ShowRecord, StreamKey, MIRROR_KEYS,
+};
 use crate::image::InlineTarget;
 use crate::matrix::Matrix;
 
@@ -394,6 +396,7 @@ impl PdfRedactor {
         // Eigenschaftslisten, die als eigenes Objekt in der Datei stehen und
         // deshalb nicht im Strom, sondern im Objekt bereinigt werden.
         let mut property_objects: BTreeSet<ObjectId> = BTreeSet::new();
+        let mut property_homes: BTreeSet<MirrorHome> = BTreeSet::new();
         let no_inline: BTreeMap<usize, Operation> = BTreeMap::new();
         let no_plans: BTreeMap<usize, Plan> = BTreeMap::new();
         let no_marked: Vec<MarkedTextRecord> = Vec::new();
@@ -504,8 +507,14 @@ impl PdfRedactor {
 
             // Die Spiegel über den eigenen Glyphen dieser Seite (und über den
             // bis hierher bekannten Formularplänen) sind jetzt entscheidbar.
-            let mut mirrors =
-                mirrors_to_clear(&scan.marked, StreamKey::Page, &page_plans, &form_plans);
+            let mut mirrors = mirrors_to_clear(
+                doc,
+                *page_id,
+                &scan.marked,
+                StreamKey::Page,
+                &page_plans,
+                &form_plans,
+            );
             for warning in std::mem::take(&mut mirrors.warnings) {
                 push_warning(&mut report, warning);
             }
@@ -564,9 +573,16 @@ impl PdfRedactor {
             report.removed_glyphs += removed_here;
             add_per_redaction(&mut report, plans.values());
             let marked = form_marked.get(&form_id).unwrap_or(&no_marked);
-            let mut mirrors =
-                mirrors_to_clear(marked, StreamKey::Form(form_id), plans, &form_plans);
+            let mut mirrors = mirrors_to_clear(
+                doc,
+                form_id,
+                marked,
+                StreamKey::Form(form_id),
+                plans,
+                &form_plans,
+            );
             property_objects.append(&mut mirrors.objects);
+            property_homes.append(&mut mirrors.homes);
             for warning in std::mem::take(&mut mirrors.warnings) {
                 push_warning(&mut report, warning);
             }
@@ -585,13 +601,20 @@ impl PdfRedactor {
                 mut mirrors,
                 deferred,
             } = pending;
-            let mut late = mirrors_to_clear(&deferred, StreamKey::Page, &plans, &form_plans);
-            mirrors.inline.append(&mut late.inline);
-            mirrors.objects.append(&mut late.objects);
+            let mut late = mirrors_to_clear(
+                doc,
+                page_id,
+                &deferred,
+                StreamKey::Page,
+                &plans,
+                &form_plans,
+            );
+            mirrors.append(&mut late);
             for warning in late.warnings {
                 push_warning(&mut report, warning);
             }
             property_objects.append(&mut mirrors.objects);
+            property_homes.append(&mut mirrors.homes);
             let page_redactions: Vec<&Redaction> = by_page
                 .get(&index)
                 .map(|list| list.iter().map(|(_, r)| *r).collect())
@@ -618,6 +641,11 @@ impl PdfRedactor {
         // Datei stehen — sie gehören keinem Strom, sondern dem Dokument.
         for id in property_objects {
             clear_mirror_object(doc, id);
+        }
+        // … und die, die keine eigene Objekt-Id haben, sondern direkt in einem
+        // `/Properties` stehen.
+        for home in property_homes {
+            clear_mirror_at(doc, &home);
         }
 
         Ok(report)
@@ -1067,6 +1095,10 @@ struct MirrorFixes {
     /// Eigenschaftslisten, die als eigenes Objekt in der Datei stehen; sie
     /// werden im Dokument bereinigt, nicht im Strom.
     objects: BTreeSet<ObjectId>,
+    /// Eigenschaftslisten, die **direkt** in einem `/Properties`-Dictionary
+    /// stehen — auch sie gehören dem Dokument und nicht dem Strom, nur haben
+    /// sie keine eigene Objekt-Id (siehe [`MirrorHome`]).
+    homes: BTreeSet<MirrorHome>,
     warnings: Vec<String>,
 }
 
@@ -1077,6 +1109,13 @@ impl MirrorFixes {
             || record
                 .property_id
                 .is_some_and(|id| self.objects.contains(&id))
+    }
+
+    /// Nimmt die Fundorte von `other` auf.
+    fn append(&mut self, other: &mut Self) {
+        self.inline.append(&mut other.inline);
+        self.objects.append(&mut other.objects);
+        self.homes.append(&mut other.homes);
     }
 }
 
@@ -1152,6 +1191,8 @@ fn touches_form_plan(
 /// dessen Spiegel über einem inneren Formular steht, wird dafür selbst neu
 /// geschrieben, auch wenn es keinen eigenen Plan hat (Befund G1-A1).
 fn mirrors_to_clear(
+    doc: &Document,
+    owner: ObjectId,
     marked: &[MarkedTextRecord],
     stream: StreamKey,
     plans: &BTreeMap<usize, Plan>,
@@ -1179,6 +1220,19 @@ fn mirrors_to_clear(
                 fixes.objects.insert(id);
             }
             None => {
+                // Eine Liste, die über `/Resources /Properties` benannt war,
+                // steht **auch** im Verzeichnis. Die Operation neu zu
+                // schreiben nimmt sie dort nicht mit: bis Fix-Runde 6 fand
+                // `leaks` den Klartext danach unverändert im
+                // Ressourcenobjekt, ohne Warnung und mit Rückgabewert 0
+                // (Register #34, Befund Q3-5). Gesucht wird der Fundort in
+                // allen vier Wegen gleich — Seite, Formular, geerbt vom
+                // Seitenbaum, geteiltes `/Properties`-Objekt.
+                if let Some(name) = &record.property_name {
+                    if let Some(home) = property_list_home(doc, owner, name) {
+                        fixes.homes.insert(home);
+                    }
+                }
                 let (cleaned, dropped) = clean_property_list(&record.properties);
                 if !dropped.is_empty() {
                     fixes.warnings.push(format!(
@@ -1237,6 +1291,39 @@ fn rebuild_marked(op: &Operation, cleaned: &Dictionary) -> Operation {
         op.operator.as_str(),
         vec![tag, Object::Dictionary(cleaned.clone())],
     )
+}
+
+/// Leert den Textspiegel einer Eigenschaftsliste, die **direkt** in einem
+/// `/Properties`-Dictionary steht.
+///
+/// Der Weg besteht aus direkten Schlüsseln (siehe [`MirrorHome`]); bricht er
+/// ab, ist nichts zu tun — dann sieht die Datei anders aus als beim Lesen, und
+/// blind irgendwo zu löschen wäre schlimmer als nichts zu tun.
+///
+/// Teilen sich zwei Seiten das Verzeichnis, wirkt das auf beide. Das ist
+/// dieselbe Richtung wie bei einer geteilten Liste mit eigener Objekt-Id
+/// ([`clear_mirror_object`]): lieber ein Spiegel zu viel entfernt als einer,
+/// der weiter das Geheimnis nennt.
+fn clear_mirror_at(doc: &mut Document, home: &MirrorHome) {
+    let Some((last, prefix)) = home.path.split_last() else {
+        return;
+    };
+    let mut dict = match doc.objects.get_mut(&home.object) {
+        Some(Object::Dictionary(dict)) => dict,
+        Some(Object::Stream(stream)) => &mut stream.dict,
+        _ => return,
+    };
+    for key in prefix {
+        dict = match dict.get_mut(key) {
+            Ok(Object::Dictionary(inner)) => inner,
+            _ => return,
+        };
+    }
+    if let Ok(Object::Dictionary(list)) = dict.get_mut(last) {
+        for key in MIRROR_KEYS {
+            list.remove(key);
+        }
+    }
 }
 
 /// Leert den Textspiegel einer Eigenschaftsliste, die als eigenes Objekt in der

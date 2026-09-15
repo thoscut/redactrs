@@ -247,12 +247,16 @@ getötet und ist nicht etwa vorher sauber ausgestiegen.
 * **Ein Abzug, den ein *anderes* Programm zieht**, etwa ein Debugger mit
   `root`-Rechten.
 
-Und der **Nebeneffekt**, den man kennen muss: der Prozess ist danach auch für
-`ptrace` durch denselben Benutzer unerreichbar, und `/proc/<pid>/` gehört
-`root`. Für ein Werkzeug, das Kontoauszüge im Speicher hält, ist das die
-richtige Richtung — ein anderes Programm desselben Benutzers kann den Klartext
-nicht mehr mitlesen. Wer mit `gdb` oder `strace` an einem Fehler arbeitet,
-braucht dafür `root` oder einen eigenen Bau ohne diese Zeile.
+Und der **Nebeneffekt — er gehört zu `prctl`, also zu Linux**: dort ist der
+Prozess danach auch für `ptrace` durch denselben Benutzer unerreichbar, und
+`/proc/<pid>/` gehört `root`. Für ein Werkzeug, das Kontoauszüge im Speicher
+hält, ist das die richtige Richtung — ein anderes Programm desselben Benutzers
+kann den Klartext nicht mehr mitlesen. Wer dort mit `gdb` oder `strace` an
+einem Fehler arbeitet, braucht `root` oder einen eigenen Bau ohne diese Zeile.
+**Auf macOS, BSD und den übrigen Unix-Systemen gibt es diesen Nebeneffekt
+nicht**: `setrlimit(RLIMIT_CORE, 0)` begrenzt den Abzug und sonst nichts — ein
+Debugger desselben Benutzers kommt weiterhin an den Prozess. Unter Windows ist
+ohnehin nichts umgesetzt (siehe Tabelle darüber).
 
 ### Die Grenzen gelten auch hinter der Entschlüsselung
 
@@ -377,16 +381,29 @@ entpackten Bytes liegen mehr als einmal gleichzeitig im Speicher).
 Nachgemessen an einer 1 020 KiB großen Datei mit einem einzigen
 Flate-Strom über 1 GiB Nullen, **mit den Vorgabewerten** (`--max-decompressed-mb
 1024`): `redact-rs bomb.pdf --check-leaks XX` endet mit Rückgabewert **0** — der
-Strom passt ja ins Budget — und mit einem `VmHWM` von 2 172 628 kB ≈ 2,1 GiB
-(18 s; gemessen über `getrusage(RUSAGE_CHILDREN).ru_maxrss`, dieselbe Zahl, die
-`/proc/<pid>/status` als `VmHWM` führt). Das Schwärzen derselben Datei erreicht
-dieselbe Spitze (2 172 312 kB) — die Nachprüfung ist hier nicht sparsamer als
-der Hauptweg. Derselbe Strom als `/ObjStm` verpackt kommt mit den Vorgabewerten
-gar nicht durch (Rückgabewert 1, `VmHWM` 1 056 688 kB); wer ihm mit
-`--max-decompressed-mb 4096` Luft gibt, misst 3 220 164 kB ≈ 3,1 GiB — also rund
-das **Dreifache**, weil ein Objektstrom zusätzlich geparst wird. Wer den Bedarf drücken will, senkt
+Strom passt ja ins Budget — und mit einem `VmHWM` von 2 172 628 kB, also
+**2 122 MB** ≈ 2,1 GiB (18 s; gemessen über
+`getrusage(RUSAGE_CHILDREN).ru_maxrss`, dieselbe Zahl, die
+`/proc/<pid>/status` als `VmHWM` führt; `kB` heißt dort 1024 Byte, und die
+MB-Angaben hier sind daraus durch 1024 geteilt, nicht durch 1000). Das
+Schwärzen derselben Datei erreicht dieselbe Spitze (2 172 312 kB = 2 121 MB) —
+die Nachprüfung ist hier nicht sparsamer als der Hauptweg. Derselbe Strom als
+`/ObjStm` verpackt kommt mit den Vorgabewerten gar nicht durch (Rückgabewert 1,
+`VmHWM` 1 056 688 kB = 1 032 MB); wer ihm mit `--max-decompressed-mb 4096` Luft
+gibt, misst 3 220 164 kB = **3 145 MB** ≈ 3,1 GiB — also rund das
+**Dreifache**, weil ein Objektstrom zusätzlich geparst wird. Wer den Bedarf drücken will, senkt
 `--max-decompressed-mb`: mit 16 MB bleibt derselbe Lauf bei 24 MB (Rückgabewert
 1, die Vorprüfung lehnt die Datei ab).
+
+**Und `--max-decompressed-mb` deckelt, was *entpackt* wird, nicht die Größe des
+Prozesses.** Zwei gemessene Stellen (Release, `VmHWM` des Kindprozesses,
+64-MiB-Strom, Budget 512 MiB): Das Orakel klonte die Rohbytes eines Stroms,
+bevor es den ersten Filter überhaupt kannte, und warf den Klon bei einem
+unbekannten Filter wieder weg — `/DCTDecode` kostete dadurch 205 MB, seit der
+Fix-Runde 6 sind es 138 MB, so viel wie ohne `/Filter`. Und ein Strom mit
+`/FlateDecode`, dessen Bytes sich als roher Deflate-Strom aufblasen lassen,
+kommt auf 621 MB: der Rückfall auf rohes Deflate ist die Nachbildung von
+`lopdf`, und das Budget deckelt das Entpackte, nicht den Prozess.
 
 ### Was `--max-parsed-mb` zählt — zwei Klassen, nicht eine
 
@@ -1048,16 +1065,23 @@ Grenze“, denn 4096 MB deckt das ganze GiB. Aufruf jeweils
 `getrusage(RUSAGE_CHILDREN).ru_maxrss` des Kindprozesses, dieselbe Zahl, die
 `/proc/<pid>/status` als `VmHWM` führt:
 
+Der Spitzenspeicher steht hier wie überall in diesem Dokument in **MB =
+1024² Byte**; `VmHWM` meldet KiB, geteilt wird also durch 1024, nicht durch
+1000. (Bis zur Fix-Runde 6 rechnete diese Tabelle durch 1000 und der Fließtext
+darüber durch 1024² — dieselbe Messung stand als „2 173 MB“ und als „2,1 GiB“
+da.)
+
 | Form der Bombe | mit 16 MB Budget | ohne die Grenze (4096 MB) |
 |---|---|---|
-| als Seiteninhalt | 24 MB, 0,02 s, **Exit 1** | 2 173 MB, 18 s, Exit 0 |
-| als Objektstrom (`/ObjStm`) | 24 MB, 0,02 s, **Exit 1** | 3 220 MB, 18 s, Exit 0 |
+| als Seiteninhalt | 24 MB, 0,02 s, **Exit 1** | 2 122 MB, 18 s, Exit 0 |
+| als Objektstrom (`/ObjStm`) | 24 MB, 0,02 s, **Exit 1** | 3 145 MB, 18 s, Exit 0 |
 
 Hier standen bis zur Fix-Runde 5 „345 MB“ und „882 MB“ für die rechte Spalte. Das konnte
 nicht stimmen: ein GiB, das wirklich entpackt wird, liegt danach im Speicher,
 und weniger als 1 074 MB kann eine Spitze dann nicht sein. Die Zahlen oben sind
-über je drei Läufe stabil auf drei Stellen (2 172–2 173 MB bzw. 3 220 MB); die
-Zeiten hängen an der Maschine und sind nur zur Größenordnung genannt.
+über je drei Läufe stabil auf sechs Stellen (2 172 628 kB bzw. 3 220 164 kB,
+also 2 122 MB bzw. 3 145 MB); die Zeiten hängen an der Maschine und sind nur
+zur Größenordnung genannt.
 
 Ein Strom über dem Restbudget wird übersprungen und **benannt** — die Antwort
 lautet dann „nicht geprüft“, nicht „nicht gefunden“ (Rückgabewert 3, siehe
@@ -1103,7 +1127,16 @@ bei rund 2 MB Seiteninhalt, also weit vor dem 16-MB-Budget:
 Zeichen, und `re`/`l`/`c` setzen keine. Ein Loch ist das nicht: aus einem Pfad
 bleibt nichts liegen (der Seiten-Scan hält Textoperationen, Marked Content und
 Formularplatzierungen, keine Pfaddaten), der Spitzenbedarf ist also der des
-`Operation`-Vektors und wird von `--max-parsed-mb` gedeckelt. Nachgemessen,
+`Operation`-Vektors und wird von `--max-parsed-mb` gedeckelt.
+
+Was der Seiten-Scan an **Marked Content und Formularplatzierungen** hält, ist
+seit dieser Fassung zusätzlich je Seiten-Scan gedeckelt: höchstens 100 000
+Zuordnungen zwischen einem Textspiegel und einer Formularplatzierung beim
+Aufbau der Liste und ebenso viele beim Aufklappen, zusammen rund 16 MB. Vorher
+war dieser Teil von **keiner** Grenze gedeckelt und wuchs als Produkt aus
+`BDC`-Klammern und `Do`-Aufrufen: eine Datei von 276 kB machte daraus 2 306 MB
+Spitzenspeicher und 41,7 s (Faktor 8 400), ohne Warnung und ohne dass eine
+Decke griff. Nachgemessen,
 jeweils eine Seite dicht unter dem 16-MB-Budget:
 
 | Eine Seite | geparster Strom | Spitzenspeicher | Byte je Byte |
@@ -1711,6 +1744,16 @@ Formularpläne feststehen. Die Warnung zum geteilten Formular nennt weiterhin
 die Seiten, auf denen das Formular steht; ein Spiegel bleibt auf keiner davon
 stehen (gemessen mit `leaks`: 0 Fundstellen).
 
+### Ein Struktur-Element, das keine Annotation erreicht
+
+Der Metadatenlauf erreicht Struktur-Elemente nur über die Annotationen einer
+Seite (`/Popup`, `/Parent`, `/Kids`, `/IRT`) und leert dort `/Alt` und
+`/ActualText`. Ein `/StructElem`, das kein solcher Weg erreicht und das ein
+Objekt außerhalb dieses Laufs am Leben hält, behält sein `/Alt`. Gewöhnlich
+fällt der ganze `/K`-Baum mit `/StructTreeRoot` und wird weggeräumt; Beleg für
+beide Richtungen: `zf_q1_luecken` und
+`zf_q1_korpus::ein_strukturelement_ohne_annotation_bleibt_unberuehrt`.
+
 ### `/DA` an Annotationen bleibt stehen
 
 Die Klartexte einer Annotation und alles, was sie erreichbar hält, werden mit
@@ -1852,13 +1895,37 @@ Maßstab, nur für den, der das Repository ohnehin gebaut hat.
 Sie entscheidet **am Fund**: ein wörtlicher Rest ist ein Leck. Trifft nur die
 Fassung ohne Leerraum und trägt eine bewusst stehen gelassene Zeile dieselbe
 Zeichenfolge, zählt der Fund nicht — die Statuszeile sagt, wie viele Texte das
-betrifft. Ein Text, der wörtlich auch in einer stehen gelassenen Zeile steht,
-wird gar nicht gesucht; für ihn bleibt die Sichtprüfung.
+betrifft. Ein Text, der **wörtlich** auch in einer bewusst stehen gelassenen
+Zeile steht, wird nicht gesucht: ein Fund wäre von dieser Zeile nicht zu
+unterscheiden. Die Nachprüfung behauptet darüber nichts — sie zählt diese Texte,
+sagt in der Statuszeile **und** in der bleibenden Warnung, dass sie über sie
+nichts weiß, und für sie bleibt die Sichtprüfung. (Bis zur Fix-Runde 6 hieß es
+„zählen deshalb nicht als Leck“, ohne Warnung — auch wenn die Schwärzung
+danebengegangen war.)
 
 Sie nennt außerdem jede ungeprüfte Stelle mit **ihrem eigenen** Grund und nimmt
-keine Ursache an. Gründe sind heute: entpackte Ströme über
-`--max-decompressed-mb`, eine vom Lader abgelehnte Vorprüfung, und Objekte
-tiefer als 32 Ebenen im Objektgraphen.
+keine Ursache an — in der Statuszeile höchstens drei beim Namen, der Rest
+gezählt („… und N weitere“); `MAX_NAMED_PLACES = 3` in
+`crates/redact-gui/src/state.rs`, denn 51 Zeilen in einer Statuszeile liest
+niemand. Die Kommandozeile schreibt jede Stelle als eigene
+`NICHT GEPRÜFT:`-Zeile.
+
+**Fünf Gründe gibt es, nicht drei** — so viele kennt
+`redact_pdf::leaks_many_within` heute. Bis zur Fix-Runde 6 zählte dieser
+Abschnitt drei auf; die beiden fehlenden waren gerade die, die die Fix-Runde 5
+hinzugefügt hatte:
+
+| Grund | Wortlaut in der Meldung |
+|---|---|
+| Entpackgrenze | `nicht entpackt — N Byte gepackt, entpackt mehr als die verbleibenden …` |
+| Vorprüfung des Laders abgelehnt | `Objektgraph (Sichten 3–7) nicht durchsucht — die Vorprüfung des Laders lehnt die Datei ab: …` |
+| Verschachtelungstiefe des Objektgraphen | `nicht durchsucht — Verschachtelungstiefe 32 erreicht` |
+| Filtername, den das Programm nicht kennt | `nur bis Filter N von M dekodiert` bzw. `gar nicht dekodiert — /FooDecode ist hier kein bekannter Filter` |
+| Schriftdekoder nicht gelaufen | `Sicht 7 (Schriftdekoder) nicht gelaufen: N Strom/Ströme wurden nicht entpackt` |
+
+Die letzte Zeile ist eine Folge der ersten: bleibt auch nur ein Strom
+ungepackt, läuft Sicht 7 gar nicht erst, weil der Schriftdekoder ohne eigene
+Grenze entpackt.
 
 ### Interpreter und Orakel lesen verschieden
 
@@ -1869,11 +1936,27 @@ ist, nicht schwärzen. Festgehalten in
 `ze_p2_seitenschleife::halb_dekodierter_strom_wird_nie_seiteninhalt`.
 
 **Was ein sauberer Lauf nicht ausschließt.** Text hinter einem Bildfilter
-(`/DCTDecode`, `/JPXDecode`, `/CCITTFaxDecode`, `/JBIG2Decode`), allein oder am
-Ende einer Filterkette: ein benannter blinder Fleck und **keine**
-`NICHT GEPRÜFT`-Zeile — sonst käme jede Datei mit einem Foto als unvollständig
-geprüft zurück. Ein Filtername, den das Programm gar nicht kennt, steht sehr
-wohl darin. Ebenso benannt: ein Textspiegel in einer direkt in
+(`/DCTDecode`, `/JPXDecode`, `/CCITTFaxDecode`, `/JBIG2Decode`) — **gleich, an
+welcher Stelle der Filterkette er steht**: ein benannter blinder Fleck und
+**keine** `NICHT GEPRÜFT`-Zeile — sonst käme jede Datei mit einem Foto als
+unvollständig geprüft zurück. Ein Filtername, den das Programm gar nicht kennt, steht sehr
+wohl darin — **an jeder Stelle der Kette**, auch als erstes Glied. Bis zur
+Fix-Runde 6 galt das nur, wenn vorher schon ein Filter gelaufen war:
+`/Filter /FooDecode` allein kam als „nicht gefunden“ mit Rückgabewert 0 zurück,
+`/Filter [/FlateDecode /FooDecode]` mit 3 — dieselbe unlesbare Stelle, und die
+Meldung hing allein an der Position. Am gebauten Binary nachgemessen, fünf
+Ketten (`zf_q5_unbekannter_filter::die_zusage_ueber_unbekannte_filter_gilt_an_jeder_stelle_der_kette`):
+
+| Filterkette | Meldung | Rückgabewert |
+|---|---|---|
+| `/FooDecode` | `gar nicht dekodiert — /FooDecode ist hier kein bekannter Filter (Glied 1 von 1)` | 3 |
+| `[/FooDecode /FlateDecode]` | `… (Glied 1 von 2)` | 3 |
+| `[/FlateDecode /FooDecode]` | `nur bis Filter 1 von 2 dekodiert — /FooDecode ist hier kein bekannter Filter` | 3 |
+| `/DCTDecode` | keine | 0 |
+| `[/FlateDecode /DCTDecode]` | keine | 0 |
+| `[/DCTDecode /ASCII85Decode]` | keine | 0 |
+
+Ebenso benannt: ein Textspiegel in einer direkt in
 `/Resources /Properties` stehenden Eigenschaftsliste bleibt im
 Ressourcenverzeichnis stehen (Beleg:
 `ze_p2_spiegel::befund_direkte_eigenschaftsliste_behaelt_ihren_spiegel`).

@@ -129,6 +129,40 @@ fn pdf_mit_getarntem_flate_strom(megabytes: usize, geheim: &str) -> Vec<u8> {
     ])
 }
 
+/// Ein `RunLengthDecode`-Strom, der sich weit über jedes kleine Budget
+/// aufbläst — und den die **Vorprüfung** des Laders nicht auspackt (sie
+/// dekodiert nur Flate, LZW und ASCII85 und zählt hier die Rohbytes). Genau
+/// die Lücke, in der die Objektsicht der Nachprüfung einen Strom auslässt,
+/// ohne dass der Lauf schon vorher mit Rückgabewert 1 endet — und damit die
+/// einzige Art Datei, an der die Kommandozeile den Grund „Sicht 7
+/// (Schriftdekoder) nicht gelaufen“ zeigen kann.
+fn pdf_mit_runlength_bombe(wiederholungen: usize) -> Vec<u8> {
+    // 129 heißt „das nächste Byte 128-mal“ — zwei Byte Eingabe, 128 Byte
+    // Ausgabe. 0x80 beendet den Strom.
+    let mut daten = Vec::with_capacity(wiederholungen * 2 + 1);
+    for _ in 0..wiederholungen {
+        daten.push(129u8);
+        daten.push(b'A');
+    }
+    daten.push(0x80);
+    let mut blob = format!(
+        "<< /Length {} /Filter /RunLengthDecode >>\nstream\n",
+        daten.len()
+    )
+    .into_bytes();
+    blob.extend_from_slice(&daten);
+    blob.extend_from_slice(b"\nendstream");
+    assemble(&[
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, blob),
+    ])
+}
+
 /// „nicht geprüft“ ist auf jedem Weg 3 — und `--json` bleibt abgelehnt.
 ///
 /// Vier Wege: laut, `--quiet`, Begriffe aus der Standardeingabe (`-`), und
@@ -303,12 +337,100 @@ fn tiefe_33_ist_eine_stille_entwarnung() {
             );
             // Und der Rat am Ende schickt niemanden an den falschen Schalter:
             // ein höheres Entpackbudget hilft gegen die Tiefengrenze nicht.
+            // Der Rat nennt die Ursachen, gegen die der Schalter nichts
+            // ausrichtet, in einem Satzteil „was an … hängt, nicht“ — die
+            // Tiefengrenze muss darin stehen; welche Ursachen er sonst noch
+            // nennt (seit Fix-Runde 6 auch den unbekannten Filternamen), ist
+            // hier nicht die Frage.
+            let rat = text.split("hängt, nicht").next().unwrap_or_default();
             assert!(
-                text.contains("was an der Verschachtelungstiefe hängt, nicht"),
+                rat.contains("was an der Verschachtelungstiefe"),
                 "Tiefe {tiefe}: der Satz verspricht --max-decompressed-mb als \
                  Heilmittel für jede Ursache:\n{text}"
             );
         }
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Gegenprüfung der Fix-Runde 6, E3: die Gründe der Ausgabe stehen in
+/// `SECURITY.md`.**
+///
+/// `SECURITY.md` zählte drei Gründe für eine `NICHT GEPRÜFT`-Zeile auf, das
+/// Orakel kennt fünf. Die Aufzählung ist jetzt vollständig
+/// (`belege.rs::die_fuenf_gruende_fuer_nicht_geprueft_stehen_in_security_md`
+/// hält sie gegen den Quelltext des Orakels); hier stehen die Gründe, die die
+/// **Kommandozeile** wirklich erreichen kann, gegen einen Lauf des gebauten
+/// Binaries. Drei sind es an dieser Stelle:
+///
+/// * die Entpackgrenze (`--max-decompressed-mb`),
+/// * der Schriftdekoder, der deshalb gar nicht erst läuft,
+/// * die Verschachtelungstiefe der Objektsicht.
+///
+/// Der vierte (ein unbekannter Filtername) steht in
+/// `zf_q5_unbekannter_filter.rs`; den fünften — die vom Lader abgelehnte
+/// Vorprüfung — kann die Kommandozeile nicht zeigen: `check::run` lädt die
+/// Datei vorher mit denselben Grenzen und bricht dann schon mit
+/// Rückgabewert 1 ab. Er gehört der Oberfläche, die das Orakel ohne diesen
+/// Schritt aufruft.
+///
+/// Mutationsnachweis: in `SECURITY.md` die Zeile „Schriftdekoder nicht
+/// gelaufen“ aus der Gründetabelle gestrichen → dieser Test ist rot.
+#[test]
+fn die_gruende_der_ausgabe_stehen_in_security_md() {
+    let wurzel = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let security = std::fs::read_to_string(wurzel.join("SECURITY.md"))
+        .expect("SECURITY.md lesbar")
+        .replace("\r\n", "\n");
+    let security = security.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let dir = workdir("gruende");
+    let mut gesehen: Vec<String> = Vec::new();
+
+    // (a) Entpackgrenze — und in ihrer Folge der Schriftdekoder.
+    std::fs::write(dir.join("rl.pdf"), pdf_mit_runlength_bombe(20_000)).unwrap();
+    let out = run_in(
+        &dir,
+        &[
+            "rl.pdf",
+            "--check-leaks",
+            "NICHT-DRIN",
+            "--max-decompressed-mb",
+            "1",
+        ],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", stdout(&out));
+    gesehen.extend(stdout(&out).lines().map(str::to_string));
+
+    // (b) Verschachtelungstiefe.
+    std::fs::write(
+        dir.join("tief33.pdf"),
+        pdf_mit_tiefem_text(33, "DE89 3704 0044 0532 0130 00"),
+    )
+    .unwrap();
+    let out = run_in(
+        &dir,
+        &["tief33.pdf", "--check-leaks", "DE89 3704 0044 0532 0130 00"],
+        None,
+    );
+    gesehen.extend(stdout(&out).lines().map(str::to_string));
+
+    let ausgabe = gesehen.join("\n");
+    for wortlaut in [
+        "nicht entpackt — ",
+        "Sicht 7 (Schriftdekoder) nicht gelaufen: ",
+        "nicht durchsucht — Verschachtelungstiefe ",
+    ] {
+        assert!(
+            ausgabe.contains(wortlaut),
+            "die Ausgabe kennt „{wortlaut}“ nicht mehr:\n{ausgabe}"
+        );
+        assert!(
+            security.contains(wortlaut.trim_end()),
+            "SECURITY.md nennt den Grund „{wortlaut}“ nicht, den der Lauf schreibt"
+        );
     }
 
     std::fs::remove_dir_all(&dir).ok();

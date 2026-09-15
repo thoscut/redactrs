@@ -28,8 +28,9 @@
 //!    nachsichtiger: bricht die Filterkette an einem unbekannten Glied ab,
 //!    wird durchsucht, was **bis dahin** entpackt war
 //!    ([`crate::filters::decoded_prefix_within`]), und die Fundstelle sagt,
-//!    wo es stehen blieb; bleibt gar nichts übrig, sind die Rohbytes die
-//!    Rückfallebene,
+//!    wo es stehen blieb; bleibt gar nichts übrig (schon das erste Glied
+//!    unbekannt), sind die Rohbytes aus Sicht 2 die Rückfallebene und der
+//!    Abbruch steht in [`LeakCheck::unchecked`],
 //! 4. **Objekte in Objekt-Streams** (`/ObjStm`) — komprimierte Container, die
 //!    eine reine Rohbyte-Suche nicht sehen kann,
 //! 5. **alle Zeichenketten-Objekte** im gesamten Objektgraph, egal unter
@@ -84,8 +85,13 @@
 //!   erzeugt deshalb **keinen** Eintrag in [`LeakCheck::unchecked`]: sonst
 //!   käme jede Datei mit einem Foto als „unvollständig geprüft“ zurück, und
 //!   eine Grenze, die gewöhnliche Dateien abweist, ist genauso ein Fehler wie
-//!   eine Lücke. Ein Filtername, den niemand kennt, ist etwas anderes und
-//!   steht sehr wohl in `unchecked`.
+//!   eine Lücke. Das gilt an **jeder** Stelle der Kette: entscheidend ist der
+//!   Filter, an dem die Kette stehen blieb, nicht seine Position. Ein
+//!   Filtername, den niemand kennt, ist etwas anderes und steht sehr wohl in
+//!   `unchecked` — seit Fix-Runde 6 auch dann, wenn er das **erste** Glied
+//!   ist (`/Filter /FooDecode` kam vorher als „nicht gefunden“ mit
+//!   Rückgabewert 0 zurück, `/Filter [/FlateDecode /FooDecode]` mit 3;
+//!   Befund Q2-1/Q5).
 //! * **Was tiefer liegt als [`MAX_DEPTH`]** Ebenen im Objektgraphen. Der
 //!   Lader lässt 100 zu, diese Sicht läuft 32 — der Abbruch steht seit
 //!   Fix-Runde 5 in [`LeakCheck::unchecked`] mit dem Objektpfad. Vorher war
@@ -99,12 +105,23 @@
 //! wird **einmal** entpackt und **einmal** durchlaufen — ein
 //! Aho-Corasick-Automat über alle Muster aller Begriffe ([`Matcher`]).
 //! Bis Fix-Runde 4 lief je Begriff und Kodierung eine eigene `memmem`-Suche
-//! über jeden Block; das kostete Begriffe × Bytes (gemessen: 64 MiB
-//! Bildstrom, 1 Begriff 0,26 s, 1 000 Begriffe 65,7 s).
+//! über jeden Block; das kostete Begriffe × Bytes. Nachgemessen in
+//! Fix-Runde 6 (`tests/zd_orakel_budget.rs::zd_mess_die_alte_suche_je_muster`,
+//! Release): an einer Datei mit einem 64-MiB-Strom läuft jedes Muster über
+//! 268 MB (Rohdatei, roher Stromblock gepackt und entpackt, derselbe Strom
+//! über den Objektgraphen dekodiert); 6 Muster je Begriff, `memmem` bei
+//! 9,9 GB/s — **0,163 s je Begriff, also rund 163 s für 1 000 Begriffe**, und
+//! das ist eine **untere** Schranke: die Zeichenketten-Verkettung und die
+//! Textsichten kommen darauf. Die früher hier genannten „65,7 s“ liegen unter
+//! dieser Schranke und sind damit falsch; die Größenordnung des CHANGELOG
+//! (rund 300 s) passt. Heute kostet derselbe Lauf mit 1 000 Begriffen 5,99 s
+//! gegen 5,01 s mit einem (Verhältnis 1,20).
 //!
 //! Entpackt wird nur bis zu einem Budget ([`leaks_many_within`]); was das
 //! Budget nicht deckt, steht in [`LeakCheck::unchecked`], damit „nicht
-//! gefunden“ nie stillschweigend „nicht gesucht“ bedeutet.
+//! gefunden“ nie stillschweigend „nicht gesucht“ bedeutet. Das Budget ist
+//! einer von **fünf** Gründen, die dort stehen können — die Aufzählung führt
+//! [`LeakCheck`].
 //!
 //! ## Fehlerrichtung
 //!
@@ -173,12 +190,33 @@ pub fn leaks_many(pdf_bytes: &[u8], needles: &[&str]) -> Vec<Vec<String>> {
 }
 
 /// Ergebnis von [`leaks_many_within`]: die Fundstellen je Suchbegriff und die
-/// Stellen, die **nicht** durchsucht wurden, weil das Budget nicht reichte
-/// oder die Datei sich nicht laden ließ.
+/// Stellen, die **nicht** durchsucht wurden.
 ///
 /// `unchecked` leer heißt: jede Sicht ist vollständig gelaufen. Ist es nicht
 /// leer, ist „nicht gefunden“ keine Aussage — der Aufrufer muss das sagen
 /// (Kommandozeile: Rückgabewert 3; Oberfläche: Satz in der Statuszeile).
+///
+/// Die Gründe, die dieser Code kennt, sind **fünf** — jede Zeile nennt ihren
+/// eigenen, der Aufrufer nimmt keinen an:
+///
+/// 1. **Entpackgrenze**: ein Strom ergäbe mehr als das verbleibende Budget
+///    (`--max-decompressed-mb`, [`Budget::skip`]); seine gepackten Bytes
+///    wurden roh durchsucht.
+/// 2. **Die Vorprüfung des Laders lehnt die Datei ab** ([`prescan`]) oder
+///    `lopdf` lädt sie nicht: dann fehlen die Sichten 3–7 ganz.
+/// 3. **Verschachtelungstiefe [`MAX_DEPTH`] erreicht** — was tiefer im
+///    Objektgraphen liegt, hat keine Sicht gelesen; die Zeile nennt den
+///    Objektpfad.
+/// 4. **Die Filterkette blieb an einem unbekannten Namen stehen** —
+///    „nur bis Filter N von M dekodiert“ bzw. „gar nicht dekodiert“, wenn
+///    schon das erste Glied unbekannt ist. Ein Bildfilter zählt nicht dazu
+///    (benannter blinder Fleck, siehe Modulkopf).
+/// 5. **Sicht 7 (Schriftdekoder) nicht gelaufen**: sie entpackt ohne eigene
+///    Grenze und läuft deshalb nur, wenn Sicht 3 jeden Strom entpacken
+///    konnte.
+///
+/// Gründe 1 und 4 sind je Sicht auf [`MAX_UNCHECKED`] Zeilen gedeckelt; was
+/// darüber liegt, steht als Summenzeile („… und N weitere …“).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeakCheck {
     /// Je Suchbegriff die Fundstellen, in der Reihenfolge der Eingabe.
@@ -197,7 +235,8 @@ pub struct LeakCheck {
     /// stehen gelassene Schreibweise derselben Normalform (Befund P5-2).
     /// Sie kostet nichts: gezählt wird beim Melden, nicht beim Suchen.
     pub literal: Vec<bool>,
-    /// Was nicht durchsucht wurde, je Stelle ein Satz (Objekt, Grund).
+    /// Was nicht durchsucht wurde, je Stelle ein Satz (Objekt, Grund) — die
+    /// fünf möglichen Gründe stehen oben am Typ.
     pub unchecked: Vec<String>,
 }
 
@@ -225,10 +264,33 @@ pub struct LeakCheck {
 /// Grenze; sie läuft nur, wenn Sicht 3 jeden Strom entpacken konnte — dann
 /// ist ihre Arbeit durch dasselbe Budget gedeckt.
 ///
-/// Spitzenbelegung: ein Strom in Arbeit (höchstens Budget + 1 Byte) neben dem
-/// geladenen Dokument (dessen Objektströme `lopdf` entpackt hält, durch die
-/// Vorprüfung ≤ Budget). Gemessen (`tests/zd_orakel_budget.rs`): 1 GiB
-/// Nullen, 1 MB gepackt, Budget 16 MiB → unter 100 MB, unter 2 s.
+/// # Spitzenbelegung
+///
+/// Gleichzeitig im Speicher stehen: die Dateibytes, das geladene Dokument
+/// daneben (dessen Objektströme `lopdf` entpackt hält, durch die Vorprüfung
+/// ≤ Budget) und **ein Strom in Arbeit**. Der Strom in Arbeit kostet
+/// höchstens das verbleibende Budget + 1 Byte — jeder Filter misst **beim**
+/// Entpacken —, dazu bei einer Kette gleichzeitig Eingabe und Ausgabe des
+/// laufenden Gliedes und, während er durchsucht wird, die aus ihm gebildete
+/// Zeichenketten-Verkettung ([`concat_pdf_strings`], höchstens noch einmal
+/// dieselbe Größe).
+///
+/// Die **Rohbytes** eines Stroms werden dafür nicht kopiert: bis Fix-Runde 6
+/// klonte `filters::decode_chain` sie, bevor es den ersten Filter kannte, und
+/// warf den Klon bei einem unbekannten ersten Glied wieder weg. Gemessen
+/// (Release, Kindprozess, `VmHWM`, 64-MiB-Strom, Budget 512 MiB,
+/// `tests/zf_q2_teildekoder.rs`): ohne `/Filter` 138 MB, mit
+/// `/Filter /DCTDecode` **205 MB** vorher und 138 MB nachher.
+///
+/// Das Budget ist eine Obergrenze für das, was **entpackt** wird, keine
+/// Zusage über die Größe des Prozesses: derselbe 64-MiB-Strom als
+/// `/FlateDecode`, dessen Bytes sich als roher Deflate-Strom auf gut das
+/// Doppelte aufblasen lassen, kommt bei 512 MiB Budget auf 621 MB — entpackte
+/// Bytes, ihre Verkettung, und zwei Sichten hintereinander. Wer das Budget
+/// hochdreht, kauft Speicher, nicht nur Erlaubnis.
+///
+/// Gemessen (`tests/zd_orakel_budget.rs`): 1 GiB Nullen, 1 MB gepackt,
+/// Budget 16 MiB → unter 100 MB, unter 2 s.
 pub fn leaks_many_within(
     pdf_bytes: &[u8],
     needles: &[&str],
@@ -977,24 +1039,18 @@ fn scan_stream(
     scan_blob(&stream.content, &format!("{path} <Stream, roh>"), probe);
 
     let decoded = match decode_stream(doc, stream, budget.room()) {
-        Ok(Some(view)) => {
-            budget.charge(view.data.len());
-            scan_blob(
-                &view.data,
-                &format!("{path} <Stream, {}>", view.label),
-                probe,
-            );
-            if let Some(rest) = view.unknown_rest {
-                budget.note(format!(
-                    "{path} <Stream>: nur bis Filter {} von {} dekodiert — /{rest} \
-                     ist hier kein bekannter Filter; was dahinter steht, hat keine \
-                     Sicht gelesen",
-                    view.applied, view.total
-                ));
+        Ok(view) => {
+            // Der Grund zuerst: er gilt auch dann, wenn es gar keine
+            // dekodierte Sicht zu durchsuchen gibt.
+            if let Some(reason) = view.unchecked {
+                budget.note(format!("{path} <Stream>: {reason}"));
             }
-            Some(view.data)
+            view.data.map(|(label, data)| {
+                budget.charge(data.len());
+                scan_blob(&data, &format!("{path} <Stream, {label}>"), probe);
+                data
+            })
         }
-        Ok(None) => None,
         Err(Oversize) => {
             budget.skip(&format!("{path} <Stream>"), stream.content.len());
             return;
@@ -1022,46 +1078,71 @@ fn scan_stream(
     }
 }
 
-/// Die dekodierte Sicht auf einen gefilterten Stream.
+/// Was [`decode_stream`] über einen Strom sagt.
 struct Decoded {
-    /// Beschriftung für die Fundstelle.
-    label: String,
-    data: Vec<u8>,
-    /// Wie viele Glieder der Kette wirklich liefen, und wie lang sie ist.
-    applied: usize,
-    total: usize,
-    /// Der Filtername, an dem die Kette abbrach — nur gesetzt, wenn er
-    /// nicht zu den bewusst nicht dekodierten Bildfiltern gehört
-    /// ([`filters::is_image_filter`]).
-    unknown_rest: Option<String>,
+    /// Die dekodierte Sicht: Beschriftung und Bytes. `None`, wenn kein Glied
+    /// der Kette lief — dann gibt es nichts zu durchsuchen, was die schon
+    /// gelaufene Rohsicht nicht bereits gelesen hätte.
+    data: Option<(String, Vec<u8>)>,
+    /// Der Grund für eine Zeile in [`LeakCheck::unchecked`] — ohne den
+    /// Objektpfad, den der Aufrufer davorsetzt.
+    ///
+    /// Gesetzt, sobald die Kette an einem Filternamen stehen blieb, den
+    /// dieses Programm nicht kennt — **an welcher Stelle auch immer**. Nicht
+    /// gesetzt bei einem Bildfilter ([`filters::is_image_filter`]): der ist
+    /// ein im Modulkopf benannter blinder Fleck, und eine Meldung darüber
+    /// stünde an jeder zweiten Datei mit einem Foto.
+    unchecked: Option<String>,
 }
 
 /// Die dekodierte Sicht auf einen gefilterten Stream — so weit, wie sie
-/// reicht.
+/// reicht — und der Grund, falls die Kette vorher stehen blieb.
 ///
-/// `None` ohne `/Filter` (die Rohbytes sind schon durchsucht) und wenn schon
-/// das **erste** Glied unbekannt ist (Bildfilter): dann sind die Rohbytes das
-/// Einzige, was es gibt, und die Rohsicht hat zusätzlich Flate an ihnen
-/// versucht — eine zweite, gleichlautende Meldung brächte nichts.
+/// Ohne `/Filter` gibt es beides nicht: die Rohbytes sind schon durchsucht.
 ///
-/// Bricht die Kette **später** ab, kommt zurück, was bis dahin entpackt war:
+/// Bricht die Kette ab, kommt zurück, was bis dahin entpackt war:
 /// `[/ASCIIHexDecode /FlateDecode /DCTDecode]` mit Klartext im Flate-Teil
 /// wird so wieder gefunden. Bis Commit `f982c12` konnte das Orakel das (ein
 /// eigener Dekoder, der abbrach und behielt), danach nicht mehr — siehe
 /// [`filters::decoded_prefix_within`].
-fn decode_stream(
-    doc: &Document,
-    stream: &Stream,
-    room: usize,
-) -> Result<Option<Decoded>, Oversize> {
+///
+/// Bricht sie **an ihrem ersten Glied** ab, gibt es keine dekodierte Sicht:
+/// die Rohbytes hat die Rohsicht gelesen, eine zweite gleichlautende Meldung
+/// brächte nichts. Der **Grund** steht trotzdem — bis Fix-Runde 6 stieg diese
+/// Funktion bei `applied == 0` mit `Ok(None)` aus und fragte
+/// [`filters::is_image_filter`] gar nicht erst. `/Filter /FooDecode` kam
+/// deshalb an der Kommandozeile als „nicht gefunden“ mit Rückgabewert 0
+/// zurück, `/Filter [/FlateDecode /FooDecode]` mit Rückgabewert 3 — dieselbe
+/// unlesbare Stelle, und die Meldung hing allein an der Position
+/// (Befund Q2-1/Q5).
+fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded, Oversize> {
     let names = filters::filter_names(doc, &stream.dict).unwrap_or_default();
     if names.is_empty() {
-        return Ok(None);
+        return Ok(Decoded {
+            data: None,
+            unchecked: None,
+        });
     }
+    let total = names.len();
     let (data, applied) = filters::decoded_prefix_within(doc, stream, room)?;
-    if applied == 0 {
-        return Ok(None);
-    }
+
+    // Der Filter, an dem die Kette stehen blieb — falls sie stehen blieb.
+    // Ob er der erste ist oder der letzte, ändert nichts daran, was hinter
+    // ihm liegt: ungelesen. Nur **welcher** Filter es ist, entscheidet, ob
+    // das eine Meldung wert ist.
+    let stopped = (applied < total).then(|| String::from_utf8_lossy(&names[applied]).into_owned());
+    let unchecked = match &stopped {
+        Some(rest) if !filters::is_image_filter(&names[applied]) && applied == 0 => Some(format!(
+            "gar nicht dekodiert — /{rest} ist hier kein bekannter Filter (Glied 1 \
+             von {total}); gelesen sind nur die rohen, gepackten Bytes"
+        )),
+        Some(rest) if !filters::is_image_filter(&names[applied]) => Some(format!(
+            "nur bis Filter {applied} von {total} dekodiert — /{rest} ist hier kein \
+             bekannter Filter; was dahinter steht, hat keine Sicht gelesen"
+        )),
+        _ => None,
+    };
+
     let chain = |names: &[Vec<u8>]| {
         names
             .iter()
@@ -1069,26 +1150,19 @@ fn decode_stream(
             .collect::<Vec<_>>()
             .join("+")
     };
-    let total = names.len();
-    let (label, unknown_rest) = if applied == total {
-        (format!("dekodiert: {}", chain(&names)), None)
-    } else {
-        let rest = String::from_utf8_lossy(&names[applied]).into_owned();
-        (
+    let data = match &stopped {
+        // Nichts entpackt: die Rohsicht ist die einzige Sicht.
+        _ if applied == 0 => None,
+        Some(rest) => Some((
             format!(
                 "dekodiert: {} — bis Filter {applied} von {total}, danach /{rest} unbekannt",
                 chain(&names[..applied])
             ),
-            (!filters::is_image_filter(&names[applied])).then_some(rest),
-        )
+            data,
+        )),
+        None => Some((format!("dekodiert: {}", chain(&names)), data)),
     };
-    Ok(Some(Decoded {
-        label,
-        data,
-        applied,
-        total,
-        unknown_rest,
-    }))
+    Ok(Decoded { data, unchecked })
 }
 
 // ---------------------------------------------------------------------------

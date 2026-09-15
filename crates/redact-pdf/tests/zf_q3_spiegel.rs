@@ -638,11 +638,12 @@ fn ceiling_warning(bytes: &[u8]) -> Vec<String> {
     let (_, warnings) = analyse(bytes);
     warnings
         .into_iter()
-        .filter(|w| w.contains("Formularplatzierungen"))
+        .filter(|w| w.contains("Zuordnungen zwischen einem Spiegel"))
         .collect()
 }
 
-/// **Befund Q3-1b (falscher Alarm).** Genau `MAX_MIRROR_FORM_PLACEMENTS`
+/// **Befund Q3-1b (falscher Alarm), in Fix-Runde 6 behoben.** Genau
+/// `MAX_MIRROR_FORM_PLACEMENTS`
 /// Aufklappungen: die Schließung hat **alle** Platzierungen zugeordnet, meldet
 /// aber „ab dort wurden die Glyphen den Spiegeln nicht mehr zugeordnet … der
 /// Vergleich ist unvollständig“. Das ist eine Deckungslücke und damit
@@ -654,9 +655,8 @@ fn ceiling_warning(bytes: &[u8]) -> Vec<String> {
 /// Flagge trotzdem. Dieselbe Klasse wie der in dieser Runde behobene
 /// ASCII85-Fall („lehnte einen Strom ab, der exakt ins Restbudget passte“).
 ///
-/// Lauf: `cargo test -p redact-pdf --test zf_q3_spiegel -- --ignored`.
+/// Gefragt wird jetzt erst dort, wo eine Kante wirklich aufzuklappen ist.
 #[test]
-#[ignore = "Befund Q3-1b: die Decke warnt schon, wenn sie genau aufgeht"]
 fn befund_decke_warnt_bei_genau_aufgehender_zahl() {
     let hits = ceiling_warning(&exactly_n_expansions(100_000));
     assert!(

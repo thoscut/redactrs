@@ -546,14 +546,17 @@ fn bombe_im_kindprozess() {
 // Messung — bleibt ignoriert
 // ---------------------------------------------------------------------------
 
-/// Ein Bildstrom aus Zufallsbytes (nicht komprimierbar, mit vielen `(`
-/// und `<`, die die Zeichenketten-Verkettung beschäftigen) — Größe in MiB
-/// über `ZD_MB`, Vorgabe 64.
-fn noise_pdf() -> Vec<u8> {
-    let mib: u64 = std::env::var("ZD_MB")
+/// Größe des Messstroms in MiB — `ZD_MB`, Vorgabe 64.
+fn mess_mib() -> u64 {
+    std::env::var("ZD_MB")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(64);
+        .unwrap_or(64)
+}
+
+/// Zufallsbytes (nicht komprimierbar, mit vielen `(` und `<`, die die
+/// Zeichenketten-Verkettung beschäftigen).
+fn rauschen(mib: u64) -> Vec<u8> {
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
     let mut noise = Vec::with_capacity((mib * MIB) as usize);
     while (noise.len() as u64) < mib * MIB {
@@ -562,6 +565,13 @@ fn noise_pdf() -> Vec<u8> {
         state ^= state << 17;
         noise.extend_from_slice(&state.to_le_bytes());
     }
+    noise
+}
+
+/// Ein Bildstrom aus Zufallsbytes — Größe in MiB über `ZD_MB`, Vorgabe 64.
+fn noise_pdf() -> Vec<u8> {
+    let mib = mess_mib();
+    let noise = rauschen(mib);
     let mut d = page(&[SECRET]);
     let image = Stream::new(
         dictionary! {
@@ -581,9 +591,15 @@ fn noise_pdf() -> Vec<u8> {
     d.finish()
 }
 
-/// Vorher (memmem je Begriff und Kodierung): 64 MiB, 1 Begriff 0,26 s,
-/// 1 000 Begriffe 65,7 s. Ziel: 1 000 Begriffe kosten ungefähr so viel wie
-/// einer — ein Automat über alle Muster, ein Durchgang je Datenblock.
+/// Ziel: 1 000 Begriffe kosten ungefähr so viel wie einer — ein Automat über
+/// alle Muster, ein Durchgang je Datenblock. Gemessen (Release, 64 MiB):
+/// 1 Begriff 5,01 s, 1 000 Begriffe 5,99 s, Verhältnis 1,20.
+///
+/// Was die alte Suche (`memmem` je Begriff und Kodierung) an derselben Datei
+/// gekostet hätte, misst [`zd_mess_die_alte_suche_je_muster`] nach: rund
+/// 163 s für 1 000 Begriffe, und das nur für die Bytesichten. Die früher hier
+/// genannten „1 000 Begriffe 65,7 s“ waren nicht belegt und liegen unter
+/// dieser Schranke.
 #[test]
 #[ignore = "Messung — Release, --nocapture"]
 fn zd_mess_1000_begriffe_kosten_wie_einer() {
@@ -610,4 +626,120 @@ fn zd_mess_1000_begriffe_kosten_wie_einer() {
         t1000 < t1 * 4,
         "1000 Begriffe ({t1000:?}) kosten mehr als das Vierfache von einem ({t1:?})"
     );
+}
+
+/// **Nachgemessen: was die alte Suche gekostet hat.**
+///
+/// `audit_bytes.rs` und dieser Test nannten bis Fix-Runde 6 „1 000 Begriffe
+/// 65,7 s“, der CHANGELOG „308,7 s“ für dieselbe Messung. Belegt war keine
+/// der beiden Zahlen, und die kleinere ist nicht haltbar: die alte Suche lief
+/// **je Muster** einmal über **jeden** Datenblock, und die Blöcke sind mehr
+/// als der eine Strom.
+///
+/// Nachgestellt wird genau das: dieselben Bytefolgen, die `audit_bytes`
+/// (`Needle::new`) heute in den Automaten legt — UTF-8, Latin-1, UTF-16BE
+/// und -LE und je die Hex-String-Fassung, gleiche Fassungen entdoppelt —,
+/// einzeln mit `memchr::memmem` über die Blöcke, die das Orakel an dieser
+/// Datei wirklich durchläuft:
+///
+/// * Sicht 1: die ganze Datei,
+/// * Sicht 2: der rohe `stream`-Block (gepackt) **und** sein Flate-Ergebnis,
+/// * Sicht 3: derselbe Strom über den Objektgraphen dekodiert.
+///
+/// Gemessen wird mit **einem** Begriff und linear auf 1 000 hochgerechnet —
+/// die alte Schleife war genau linear in der Zahl der Muster. Daneben steht
+/// derselbe Durchgang, wie er heute läuft (ein Automat, 1 000 Begriffe).
+///
+/// Ergebnis (Release, 64 MiB, geteilte Maschine): 6 Muster je Begriff,
+/// 268 MB je Durchgang, `memmem` bei 9,9 GB/s → **0,163 s je Begriff, 163 s
+/// hochgerechnet auf 1 000**; heute 5,98 s. 163 s ist eine **untere**
+/// Schranke für den alten Gesamtwert (die Zeichenketten-Verkettung und die
+/// Textsichten fehlen darin), also kann „65,7 s“ nicht stimmen.
+#[test]
+#[ignore = "Messung — Release, --nocapture"]
+fn zd_mess_die_alte_suche_je_muster() {
+    let mib = mess_mib();
+    let noise = rauschen(mib);
+    let packed = deflate(&noise);
+    let pdf = noise_pdf();
+    let bloecke: [(&str, &[u8]); 4] = [
+        ("Sicht 1: Rohdatei", &pdf),
+        ("Sicht 2: Stromblock gepackt", &packed),
+        ("Sicht 2: Stromblock entpackt", &noise),
+        ("Sicht 3: Objektstrom dekodiert", &noise),
+    ];
+    let muster = varianten(SECRET);
+    let bytes: u64 = bloecke.iter().map(|(_, b)| b.len() as u64).sum();
+    eprintln!(
+        "{} Muster je Begriff, {} Blöcke, zusammen {} MB je Durchgang",
+        muster.len(),
+        bloecke.len(),
+        bytes / 1_000_000
+    );
+
+    let started = Instant::now();
+    let mut treffer = 0usize;
+    for (_, block) in &bloecke {
+        for m in &muster {
+            treffer += memchr::memmem::find_iter(block, m).count();
+        }
+    }
+    let je_begriff = started.elapsed();
+    eprintln!(
+        "alte Suche, 1 Begriff: {je_begriff:?} ({} Treffer, {:.1} GB/s)",
+        treffer,
+        (bytes * muster.len() as u64) as f64 / je_begriff.as_secs_f64() / 1e9
+    );
+    eprintln!(
+        "alte Suche, 1 000 Begriffe (linear hochgerechnet): {:.1} s",
+        je_begriff.as_secs_f64() * 1000.0
+    );
+
+    let many: Vec<String> = (0..1000)
+        .map(|i| format!("DE{:02} 1234 5678 9012 3456 {:02}", i % 100, i / 10))
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let started = Instant::now();
+    let heute = check(&pdf, &many, u64::MAX);
+    eprintln!(
+        "heute (ein Automat), 1 000 Begriffe: {:?}",
+        started.elapsed()
+    );
+    assert!(heute.unchecked.is_empty());
+}
+
+/// Die Bytefolgen eines Begriffs, wie `audit_bytes::Needle::new` sie bildet —
+/// nachgebaut, weil sie privat sind.
+fn varianten(text: &str) -> Vec<Vec<u8>> {
+    fn hex(bytes: &[u8], gross: bool) -> Vec<u8> {
+        let ziffern: &[u8] = if gross {
+            b"0123456789ABCDEF"
+        } else {
+            b"0123456789abcdef"
+        };
+        bytes
+            .iter()
+            .flat_map(|b| [ziffern[(b >> 4) as usize], ziffern[(b & 0x0f) as usize]])
+            .collect()
+    }
+    let utf8 = text.as_bytes().to_vec();
+    let mut out = vec![utf8.clone()];
+    if text.chars().all(|c| (c as u32) < 0x100) {
+        let latin1: Vec<u8> = text.chars().map(|c| c as u8).collect();
+        if latin1 != utf8 {
+            out.push(latin1.clone());
+        }
+        out.push(hex(&latin1, true));
+        out.push(hex(&latin1, false));
+    }
+    let be: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    out.push(be.clone());
+    out.push(hex(&be, true));
+    out.push(hex(&be, false));
+    let le: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    out.push(le.clone());
+    out.push(hex(&le, true));
+    out.push(hex(&le, false));
+    out.dedup();
+    out
 }

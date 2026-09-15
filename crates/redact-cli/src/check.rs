@@ -206,8 +206,8 @@ fn needles(cli: &Cli) -> Result<Vec<String>> {
             "--check-leaks mit {} Suchbegriffen; mehr als {MAX_CHECK_NEEDLES} nimmt der Lauf \
              nicht an. Nicht der Zeit wegen — alle Begriffe laufen in einem Durchgang, \
              1 000 kosten kaum mehr als einer. Aber der Automat, der sie alle in allen \
-             Kodierungen trägt, wächst mit der Liste (gemessen: 1,0 MB bei 1 000 \
-             Begriffen, 675 MB und 25 s allein für den Bau bei einer Million), und jeder \
+             Kodierungen trägt, wächst mit der Liste (gemessen: 1,0 MB für 1 000 \
+             Begriffe, 675 MB und 25 s allein für den Bau bei einer Million), und jeder \
              Begriff bekommt eine eigene Zeile im Bericht. Teilen Sie die Liste auf und \
              rufen Sie mehrmals auf; jeder Lauf meldet für sich.",
             out.len()
@@ -353,12 +353,19 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
 /// **Verschachtelungstiefe** meldet, wäre das ein falscher Rat: an dieser
 /// Grenze ändert der Schalter nichts. Der Satz verweist deshalb auf den Grund,
 /// der je Stelle oben steht.
+///
+/// Fix-Runde 6 (Meldung von Agent A): der Schalter hilft auch dort nicht, wo
+/// die Filterkette an einem **unbekannten Filternamen** stehen blieb. Wer die
+/// Ursachen aufzählt, zählt sie vollständig auf — sonst schickt der Satz an
+/// zwei von drei Stellen an den falschen Schalter. Alle fünf Gründe stehen in
+/// `SECURITY.md`.
 fn unvollstaendig(unchecked: usize) -> String {
     format!(
         "Ergebnis: {unchecked} Stelle(n) nicht geprüft — die Antwort ist unvollständig. \
          Der Lauf hat sie oben als NICHT GEPRÜFT genannt, je Stelle mit ihrem Grund. \
          Was an der Entpackgrenze hängt, holt ein höheres --max-decompressed-mb; \
-         was an der Verschachtelungstiefe hängt, nicht."
+         was an der Verschachtelungstiefe oder an einem unbekannten Filternamen \
+         hängt, nicht."
     )
 }
 
@@ -379,8 +386,10 @@ mod tests {
         assert!(satz.contains("--max-decompressed-mb"), "{satz}");
         // Und er verspricht den Schalter nicht als Heilmittel für jede
         // Ursache: die Tiefengrenze der Objektsicht bleibt, wie hoch das
-        // Budget auch steht (Gegenprüfung E9 der Fix-Runde 5).
+        // Budget auch steht (Gegenprüfung E9 der Fix-Runde 5), und ein
+        // unbekannter Filtername ebenso (Fix-Runde 6).
         assert!(satz.contains("Verschachtelungstiefe"), "{satz}");
+        assert!(satz.contains("unbekannten Filternamen"), "{satz}");
     }
 
     fn cli(args: &[&str]) -> Cli {
@@ -441,6 +450,27 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains(&MAX_CHECK_NEEDLES.to_string()), "{text}");
         assert!(text.contains("Automat"), "der Grund fehlt: {text}");
+
+        // Und die Messung in der Klammer ist **dieselbe**, die `--help`
+        // nennt — nicht eine zweite Abschrift derselben Zahlen. Gegenprüfung
+        // der Fix-Runde 6: `675 MB` ließ sich an einer der beiden Stellen
+        // ändern, ohne dass ein Test rot wurde.
+        let messung = text
+            .split("(gemessen: ")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("die Fehlermeldung nennt keine Messung");
+        use clap::CommandFactory;
+        let help = Cli::command()
+            .render_long_help()
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            help.contains(messung),
+            "--help nennt eine andere Messung als die Fehlermeldung: „{messung}“"
+        );
 
         // Gegenprobe: genau an der Grenze geht es durch. Eine Decke, die
         // schon den erlaubten Fall ablehnt, wäre keine Härtung.
