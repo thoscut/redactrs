@@ -229,8 +229,9 @@ fn r2_zwei_summenzeilen_bei_gemischten_ursachen() {
 /// (`redact-cli/src/check.rs`: `let unchecked = check.unchecked.len();` →
 /// „{unchecked} Stelle(n) nicht geprüft“).
 ///
-/// Bei 61 übersprungenen Strömen sind das 50 Einzelzeilen + 1 Summenzeile
-/// + 1 Zeile „Sicht 7 nicht gelaufen“ = 52 — für 61 nicht geprüfte Ströme.
+/// Bei 61 übersprungenen Strömen sind das 50 Einzelzeilen, 1 Summenzeile und
+/// 1 Zeile „Sicht 7 nicht gelaufen“, zusammen 52 — für 61 nicht geprüfte
+/// Ströme.
 /// Die Summenzeile darüber sagt „… und 11 weitere“, die Schlusszeile nannte
 /// 52: zwei Zahlen zu derselben Sache, und die zusammenfassende war die
 /// kleinere. Das ist die Fehlerklasse „eine Decke zählt die falsche Einheit“.
