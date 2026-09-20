@@ -112,7 +112,7 @@ blieben.
   sondern schon den Bau, und der dortige CI-Job fährt `cargo clippy
   --workspace --all-targets` und `cargo test --workspace` — und einmal ein
   `/proc/self/status` mit `.expect(…)` ebendort, genau der Laufzeitfehler, an
-  dem der Windows-Job schon dreimal rot war. Der Symlink
+  dem der Windows-Job schon viermal rot war. Der Symlink
   steht jetzt unter `#[cfg(unix)]`, der Messhelfer samt seinem Test unter
   `#[cfg(target_os = "linux")]`. Die sechs `mkfifo`-Stellen bleiben als
   benannte Altlast in der Liste: sie hängen an `cfg(unix)`, scheitern aber am
@@ -199,6 +199,21 @@ blieben.
   weil die Fix-Runde 6 nur einen Bestandteil gekürzt hatte: gekürzt wird jetzt
   die ganze Zeile, hinten — die sichere Richtung, denn der Fund steht vorn —,
   und was nicht mehr hineinpasst, steht vollständig in den Warnungen.
+* **Der Prüfer der Plattformregel war selbst plattformabhängig.** Das lokale
+  Tor war grün, die CI rot — und zwar nur auf Windows, nur im Testschritt, und
+  ausgerechnet an `keine_systemeinrichtung_ohne_cfg_oder_ohne_ausweg`. Er
+  meldete alle verbliebenen `mkfifo`-Stellen als **neue** Verletzung, obwohl sie
+  namentlich in seiner Altlast-Liste stehen. Der Grund: `Path::display`
+  schreibt unter Windows Backslashes, die Liste nennt ihre Dateien mit
+  Schrägstrichen, und verglichen wurde ohne Vereinheitlichung. Der Prüfer machte
+  damit genau die Annahme, die er allen anderen verbietet — und das ist der
+  Grund, aus dem ein Tor, das Windows nur übersetzt statt es zu fahren, keine
+  Zusage über Windows machen kann. Vereinheitlicht wird jetzt vor dem
+  Vergleich, in einer eigenen Funktion, die der Prüfer und der neue Test
+  `ein_pfad_mit_backslashes_findet_seine_altlast` gemeinsam benutzen; der Test
+  baut die Windows-Schreibweise selbst und läuft deshalb auf jedem System.
+  Mutation (die Vereinheitlichung entfernt): genau dieser Test rot, kein
+  anderer.
 * **Offen: die Messzahlen dieser Punkte sind nicht gebunden.** Sie
   stehen dort, wo die Agenten sie gemessen haben — in der Doku am Quelltext
   von `content.rs`, `redact.rs`, `state.rs` und `meta.rs` —, aber nicht in

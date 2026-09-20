@@ -46,7 +46,7 @@
 //!   `is_err()`, `map_or`, `if let Ok(…)`, ein `match` mit `Err(…)`) — dann
 //!   fehlt auf anderen Zielen die Zahl und nicht der Test.
 //!
-//! Verboten ist die dritte Fassung, die dreimal rot war: die Einrichtung
+//! Verboten ist die dritte Fassung, die viermal rot war: die Einrichtung
 //! ungeschützt nennen und ihr Ergebnis als gegeben nehmen (`.expect(…)`,
 //! `.unwrap()`).
 //!
@@ -455,6 +455,21 @@ const ALTLASTEN: &[(&str, &str, &str)] = &[
     // Messtest unter `#[cfg(target_os = "linux")]`.
 ];
 
+/// Ein Pfad mit `/` als Trenner, egal auf welchem System er entstand.
+///
+/// Unter Windows liefert [`std::path::Display`] Backslashes, [`ALTLASTEN`] nennt
+/// seine Dateien aber mit Schrägstrichen. Ohne diese Vereinheitlichung passt
+/// dort **kein** Eintrag: jede Altlast gilt als neue Verletzung, und der Test
+/// ist ausgerechnet auf der Plattform rot, gegen deren Annahmen er wacht. Genau
+/// so war der Windows-Job der CI zum vierten Mal rot — der Prüfer machte
+/// selbst die Annahme, die er anderen verbietet.
+///
+/// Gebunden von [`ein_pfad_mit_backslashes_findet_seine_altlast`]; Mutation
+/// (die `replace`-Zeile entfernt): rot, auch auf Linux.
+fn mit_schraegstrichen(pfad: &str) -> String {
+    pfad.replace('\\', "/").replace("../../", "")
+}
+
 /// Eine gefundene Verletzung: Datei (relativ), Zeile, Marke, Quelltext.
 struct Verstoss {
     datei: String,
@@ -500,12 +515,13 @@ fn verstoesse() -> (Vec<Verstoss>, usize) {
                 || s.starts_with("#![cfg(windows")
                 || s.starts_with("#![cfg(target_family")
         });
-        let relativ = datei
-            .strip_prefix(repo_root())
-            .unwrap_or(datei)
-            .display()
-            .to_string()
-            .replace("../../", "");
+        let relativ = mit_schraegstrichen(
+            &datei
+                .strip_prefix(repo_root())
+                .unwrap_or(datei)
+                .display()
+                .to_string(),
+        );
 
         for (i, zeile) in zeilen.iter().enumerate() {
             let Some((marke, schutz)) = HEIKEL
@@ -547,6 +563,35 @@ fn verstoesse() -> (Vec<Verstoss>, usize) {
     (gefunden, geprueft)
 }
 
+/// **Der Prüfer darf nicht selbst plattformabhängig sein.** Ein Pfad, wie
+/// Windows ihn schreibt, muss seine Altlast finden.
+///
+/// Der Test steht hier, weil er auf **jedem** System läuft: er baut die
+/// Windows-Schreibweise selbst und schickt sie durch dieselbe Funktion, die der
+/// Prüfer benutzt. Ohne sie war der Windows-Job der CI rot und nannte alle
+/// sechs `mkfifo`-Stellen als neue Verletzung, obwohl sie namentlich in
+/// [`ALTLASTEN`] stehen.
+#[test]
+fn ein_pfad_mit_backslashes_findet_seine_altlast() {
+    for (datei, _, _) in ALTLASTEN {
+        assert!(
+            !datei.contains('\\'),
+            "ALTLASTEN nennt seine Dateien mit Schrägstrichen: {datei}"
+        );
+        let wie_windows = datei.replace('/', "\\");
+        assert_eq!(
+            mit_schraegstrichen(&wie_windows),
+            *datei,
+            "die Windows-Schreibweise findet ihre Altlast nicht"
+        );
+    }
+    // Und der Weg, den `strip_prefix` offenlässt, wird weiter gekürzt.
+    assert_eq!(
+        mit_schraegstrichen("..\\..\\crates\\redact-cli\\src\\main.rs"),
+        "crates/redact-cli/src/main.rs"
+    );
+}
+
 /// **Die Regel.** Jede Stelle im Baum, die eine Einrichtung des ausführenden
 /// Systems beim Namen nennt, steht unter einem Plattform-`cfg` **oder**
 /// behandelt ihr Ergebnis als optional — in **derselben Anweisung**.
@@ -580,7 +625,7 @@ fn keine_systemeinrichtung_ohne_cfg_oder_ohne_ausweg() {
         offen.is_empty(),
         "{} Stelle(n) nennen eine Einrichtung des ausführenden Systems, ohne \
          Plattform-cfg und ohne Ausweg in derselben Anweisung — genau daran war \
-         der Windows-Job der CI dreimal rot:\n{}",
+         der Windows-Job der CI viermal rot:\n{}",
         offen.len(),
         offen.join("\n")
     );

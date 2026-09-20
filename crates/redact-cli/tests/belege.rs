@@ -559,8 +559,10 @@ mod messwerte {
     /// Die verbliebene Altlast SIND die `mkfifo`-Stellen — eine Zahl, eine
     /// Stelle. Eine zweite Konstante daneben waere dieselbe Zahl zweimal.
     pub const PLATTFORM_ALTLASTEN: usize = 6;
-    /// So oft war der Windows-Job der CI an dieser Fehlerklasse rot.
-    pub const WINDOWS_ROT: usize = 3;
+    /// So oft war der Windows-Job der CI an dieser Fehlerklasse rot: der
+    /// dumpable-Test, `/proc/self/status` im Orakel-Budget, der Pfeil nach
+    /// cp1252 — und die Plattformregel selbst, die Pfade mit `/` erwartete.
+    pub const WINDOWS_ROT: usize = 4;
     /// Von den behobenen Stellen die beiden mit `std::os::unix`.
     pub const PLATTFORM_UNIX_API: usize = 2;
     /// Der Lauf, der „52 Stelle(n)“ unter mehr Zeilen schrieb
