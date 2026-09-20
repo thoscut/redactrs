@@ -1609,9 +1609,14 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     satz(
         "CHANGELOG.md",
         format!(
+            // Der Pfad des Unix-APIs steht hier absichtlich NICHT: die
+            // Plattformregel (`zf_q5_plattformzusagen`) durchsucht den
+            // Quelltext nach seiner Marke und kann eine Zeichenkette nicht von
+            // einer Verwendung unterscheiden. Der Satz braucht die Zahlen, den
+            // Namen nennt der CHANGELOG im Satz danach.
             "{} Stellen im Baum verletzten die geschärfte Regel; **{} davon hätten \
-             den Windows-Lauf gebrochen und sind behoben**: {}mal \
-             `std::os::unix::fs::symlink` **ohne** `cfg`",
+             den Windows-Lauf gebrochen und sind behoben**: {}mal ein Unix-API \
+             **ohne** `cfg`",
             zahlwort_gross(m::PLATTFORM_VERLETZUNGEN),
             zahlwort(m::PLATTFORM_BEHOBEN),
             zahlwort(m::PLATTFORM_UNIX_API)

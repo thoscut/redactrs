@@ -107,8 +107,8 @@ blieben.
   und auf einem schlanken Unix-Bild ohne `util-linux` panickt ein Test, statt
   sich mit einem Hinweis zu begnügen. Neun Stellen im Baum verletzten die
   geschärfte Regel; **drei davon hätten den Windows-Lauf gebrochen und sind
-  behoben**: zweimal `std::os::unix::fs::symlink` **ohne** `cfg` in einem
-  `#[cfg(test)]`-Modul der Oberfläche — das bricht nicht erst zur Laufzeit,
+  behoben**: zweimal ein Unix-API **ohne** `cfg` in einem
+  `#[cfg(test)]`-Modul der Oberfläche — ein `symlink` — das bricht nicht erst zur Laufzeit,
   sondern schon den Bau, und der dortige CI-Job fährt `cargo clippy
   --workspace --all-targets` und `cargo test --workspace` — und einmal ein
   `/proc/self/status` mit `.expect(…)` ebendort, genau der Laufzeitfehler, an

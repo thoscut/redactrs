@@ -46,7 +46,7 @@
 //!   `is_err()`, `map_or`, `if let Ok(…)`, ein `match` mit `Err(…)`) — dann
 //!   fehlt auf anderen Zielen die Zahl und nicht der Test.
 //!
-//! Verboten ist die dritte Fassung, die zweimal rot war: die Einrichtung
+//! Verboten ist die dritte Fassung, die dreimal rot war: die Einrichtung
 //! ungeschützt nennen und ihr Ergebnis als gegeben nehmen (`.expect(…)`,
 //! `.unwrap()`).
 //!
@@ -580,7 +580,7 @@ fn keine_systemeinrichtung_ohne_cfg_oder_ohne_ausweg() {
         offen.is_empty(),
         "{} Stelle(n) nennen eine Einrichtung des ausführenden Systems, ohne \
          Plattform-cfg und ohne Ausweg in derselben Anweisung — genau daran war \
-         der Windows-Job der CI zweimal rot:\n{}",
+         der Windows-Job der CI dreimal rot:\n{}",
         offen.len(),
         offen.join("\n")
     );
