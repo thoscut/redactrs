@@ -1351,6 +1351,39 @@ pub struct MarkedTextRecord {
     /// Formulare betroffen sind, liest die Id. Direkt aus
     /// [`scan_marked_text`] enthält die Liste nur die eigene Ebene.
     pub forms: Vec<(Vec<usize>, ObjectId)>,
+    /// Der Bereich der eingeschlossenen Operationen im dekodierten Strom —
+    /// `start..end`, dieselbe Spanne, aus der [`MarkedTextRecord::shows`] und
+    /// [`MarkedTextRecord::forms`] gesiebt sind.
+    ///
+    /// Bewusst die **Spanne** und nicht eine Liste der Bildplatzierungen
+    /// darin: ein Bild ist kein Text, es hat keine Glyphen, die einem Spiegel
+    /// zuzuordnen wären — gefragt wird nur, *ob* eine geschwärzte
+    /// Bildplatzierung in diesem Abschnitt liegt. Als Liste wäre das wieder
+    /// das Produkt „Klammern × Platzierungen“ mit eigener Decke
+    /// (`MAX_MIRROR_FORM_PLACEMENTS`); als Spanne kostet es zwei `usize` je
+    /// Abschnitt. Wer die Platzierungen braucht, liest [`ScanResult::images`]
+    /// und fragt hier nach.
+    pub range: std::ops::Range<usize>,
+}
+
+/// Ein platziertes Bild, so weit die Schwärzung es braucht: **wo** im Strom
+/// es steht und **welche Fläche** es einnimmt.
+///
+/// Kein Bildinhalt, keine Objekt-Id-Pflicht, kein Dekodieren — das macht
+/// [`crate::image`]. Hier zählt nur die Zuordnung „diese Platzierung liegt in
+/// jenem Marked-Content-Abschnitt und unter jener Schwärzung“.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImagePlacement {
+    /// Der Strom, in dem die Platzierung steht (Seite oder Form-XObject).
+    pub stream: StreamKey,
+    /// Index der `Do`- bzw. `BI`-Operation im dekodierten Strom.
+    pub op_index: usize,
+    /// Objekt-Id des Bild-XObjects; `None` bei einem Inline-Bild, das kein
+    /// eigenes Objekt hat.
+    pub id: Option<ObjectId>,
+    /// Die Hülle der Zielfläche im User-Space — das Einheitsquadrat des
+    /// Bildes durch die CTM (PDF 32000-1, 8.9.5.2).
+    pub bounds: Rect,
 }
 
 /// Ergebnis eines Seiten-Scans.
@@ -1359,6 +1392,33 @@ pub struct ScanResult {
     pub shows: Vec<ShowRecord>,
     /// Marked-Content-Abschnitte mit Textspiegel.
     pub marked: Vec<MarkedTextRecord>,
+    /// Bildplatzierungen **in Strömen, über denen ein Textspiegel steht** —
+    /// je Platzierung ihr Fundort im Strom und ihre Fläche im User-Space.
+    ///
+    /// Gebraucht wird genau eine Frage: liegt in diesem
+    /// Marked-Content-Abschnitt ein Bild, dessen Pixel eine Schwärzung
+    /// überschreibt? Dann ist der Spiegel darüber (`/Alt` bei `/Figure`:
+    /// „Kontoauszug, IBAN …“) genauso falsch wie ein Spiegel über
+    /// verschwundenen Glyphen — und bis zu dieser Fassung blieb er stehen
+    /// (Register #20).
+    ///
+    /// **Nur in Strömen mit Spiegel.** Eine Datei ohne Textspiegel liefert hier
+    /// nichts, kostet also nichts; das ist der Normalfall. Gefüllt wird beim
+    /// Durchlauf, also **je Platzierung**: ein zwanzigmal gezeichnetes
+    /// Formular bringt seine Bilder zwanzigmal mit, jedes Mal mit seiner
+    /// eigenen CTM. Genau so muss es sein — ein Bild kann an einer Stelle
+    /// geschwärzt werden und an einer anderen nicht.
+    ///
+    /// **Keine eigene Decke, und warum keine nötig ist.** Die Liste wächst
+    /// *linear* in den Platzierungen — eine je `Do`/`BI` —, und jede davon ist
+    /// eine Operation, die aus demselben Aufwandskonto zahlt wie jede andere
+    /// (`Budget::operation`). Das unterscheidet sie von der Zuordnung
+    /// Spiegel↔Formular, die als **Produkt** „Klammern × Platzierungen“
+    /// entstand und deshalb `MAX_MIRROR_FORM_PLACEMENTS` braucht. Gemessen an
+    /// 10 000/50 000/100 000 Bildplatzierungen unter einem Spiegel: dieselbe
+    /// Wanduhr wie ohne den Spiegel
+    /// (`zh_b_bildspiegel::mess_viele_bildplatzierungen`).
+    pub images: Vec<ImagePlacement>,
     /// Wie oft ein Form-XObject auf dieser Seite gezeichnet wurde.
     pub form_placements: BTreeMap<ObjectId, usize>,
     /// Form-XObjects, die in einem der gelesenen Ressourcenverzeichnisse
@@ -1380,6 +1440,13 @@ pub struct ScanResult {
     /// Abschnitte mit, und ein mehrfach platziertes Formular liefert sie
     /// mehrfach.
     seen_marked: HashSet<(StreamKey, usize)>,
+    /// Ströme, in denen ein Textspiegel steht — der Filter vor
+    /// [`ScanResult::images`].
+    ///
+    /// Gesetzt wird er, bevor der Strom überhaupt durchlaufen ist:
+    /// [`scan_marked_text`] läuft am Anfang von [`scan_operations`], also vor
+    /// der ersten Bildplatzierung desselben Stroms.
+    mirror_streams: HashSet<StreamKey>,
     /// Dasselbe für [`ScanResult::warnings`].
     ///
     /// Die Entdopplung war schon immer zugesagt; sie lief nur über
@@ -1517,6 +1584,30 @@ impl ScanResult {
 }
 
 impl ContentSink for ScanResult {
+    /// Die Bilder ja, den Grafikzustand nein — siehe
+    /// [`ContentSink::wants_images`].
+    fn wants_images(&self) -> bool {
+        true
+    }
+
+    /// Eine Bildplatzierung, aber nur in einem Strom, über dem ein Textspiegel
+    /// steht. Alles andere wird nicht gehalten: eine Datei ohne Spiegel
+    /// bezahlt für diese Liste nichts.
+    fn image(&mut self, cx: &SinkContext, event: &ImageEvent) {
+        if !self.mirror_streams.contains(&cx.stream) {
+            return;
+        }
+        let id = event
+            .name
+            .and_then(|name| image_id_of(cx.doc, cx.resources, name));
+        self.images.push(ImagePlacement {
+            stream: cx.stream,
+            op_index: cx.op_index,
+            id,
+            bounds: unit_square_bounds(&event.ctm),
+        });
+    }
+
     fn form_within(&mut self, parent: StreamKey, at: usize, id: ObjectId) {
         let StreamKey::Form(parent) = parent else {
             return;
@@ -1535,6 +1626,7 @@ impl ContentSink for ScanResult {
         // Ein mehrfach platziertes Form-XObject wird mehrfach durchlaufen; sein
         // Strom wird aber nur **einmal** neu geschrieben. Derselbe Spiegel darf
         // deshalb nicht mehrfach in der Liste stehen.
+        self.mirror_streams.insert(record.stream);
         if !self.seen_marked.insert((record.stream, record.op_index)) {
             return;
         }
@@ -1624,6 +1716,24 @@ pub trait ContentSink {
     /// Nur wenn `true`, werden Farben, Pfade, Clips und Bilder ausgewertet.
     fn wants_graphics(&self) -> bool {
         false
+    }
+    /// Nur wenn `true`, werden **Bildplatzierungen** gemeldet
+    /// ([`ContentSink::image`]).
+    ///
+    /// Eigene Frage, weil eine Senke die Bilder brauchen kann, ohne den
+    /// vollen Grafikzustand zu wollen: die CTM führt der Interpreter ohnehin
+    /// nach (`q`, `Q`, `cm` stehen außerhalb jeder Abfrage), Farben, Pfade und
+    /// Clips nicht. Die Schwärzung braucht genau die Fläche eines Bildes und
+    /// nichts weiter — siehe [`ScanResult::images`]. Voreinstellung ist
+    /// [`ContentSink::wants_graphics`]: wer Grafik will, bekommt die Bilder
+    /// wie bisher, und für jede andere Senke ändert sich nichts.
+    ///
+    /// Was eine Senke, die nur hier `true` sagt, **nicht** bekommt: gültige
+    /// `fill`, `fill_alpha` und `clip` im [`ImageEvent`] — der Farb- und
+    /// Clip-Zustand wird dann nicht nachgeführt. Wer sie liest, fragt nach
+    /// `wants_graphics`.
+    fn wants_images(&self) -> bool {
+        self.wants_graphics()
     }
     /// Eine abgeschlossene Text-Ausgabe-Operation.
     fn show(&mut self, _record: ShowRecord) {}
@@ -2826,6 +2936,7 @@ fn scan_marked_text(
             property_owner: owner,
             shows: in_range(budget, &range),
             forms: forms_in(budget, &range),
+            range,
         });
     }
     // Ein Punkt erbt den Bereich, in dem er steht.
@@ -2843,6 +2954,7 @@ fn scan_marked_text(
             property_owner: owner,
             shows: in_range(budget, &range),
             forms: forms_in(budget, &range),
+            range,
         });
     }
 }
@@ -2862,6 +2974,41 @@ fn form_id_of(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> Op
         .ok()?;
     let stream = object.as_stream().ok()?;
     (crate::ops::xobject_subtype(doc, &stream.dict) == Some(b"Form".as_slice())).then_some(id?)
+}
+
+/// Die Objekt-Id des **Bild**-XObjects hinter einem `Do`-Namen.
+///
+/// Gegenstück zu [`form_id_of`], dieselbe Auflösung, andere `/Subtype`-Probe.
+/// `None` für ein Inline-Bild (es hat kein eigenes Objekt), für einen
+/// fehlenden Eintrag und für alles, was kein Bild ist.
+fn image_id_of(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> Option<ObjectId> {
+    let entry = resources?.get(b"XObject").ok()?;
+    let (_, xobjects) = doc.dereference(entry).ok()?;
+    let (id, object) = doc
+        .dereference(xobjects.as_dict().ok()?.get(name).ok()?)
+        .ok()?;
+    let stream = object.as_stream().ok()?;
+    (crate::ops::xobject_subtype(doc, &stream.dict) == Some(b"Image".as_slice())).then_some(id?)
+}
+
+/// Die Hülle des transformierten Einheitsquadrats.
+///
+/// Ein Bild wird immer in `(0,0)-(1,1)` gezeichnet und von der CTM auf seine
+/// Zielfläche gebracht (PDF 32000-1, 8.9.5.2). Genommen werden alle **vier**
+/// Ecken, nicht zwei: bei einer gedrehten oder gescherten CTM sind die beiden
+/// anderen die äußeren.
+fn unit_square_bounds(ctm: &Matrix) -> Rect {
+    let corners = [
+        ctm.apply(0.0, 0.0),
+        ctm.apply(1.0, 0.0),
+        ctm.apply(0.0, 1.0),
+        ctm.apply(1.0, 1.0),
+    ];
+    let mut bounds = Rect::from_corners(corners[0], corners[1]);
+    for corner in &corners[2..] {
+        bounds = bounds.union(&Rect::from_corners(*corner, *corner));
+    }
+    bounds
 }
 
 /// Trägt die Eigenschaftsliste eines `BDC`/`DP` einen Textspiegel?
@@ -3122,6 +3269,9 @@ fn scan_operations(
         declare_forms(doc, resources, stream, budget, sink);
     }
     let graphics = sink.wants_graphics();
+    // Bilder können auch ohne den vollen Grafikzustand gebraucht werden —
+    // siehe [`ContentSink::wants_images`].
+    let images = graphics || sink.wants_images();
     let mut state = GraphicsState::new(initial_ctm);
     let mut stack: Vec<GraphicsState> = Vec::new();
     // Textmatrix und Zeilenmatrix
@@ -3467,7 +3617,7 @@ fn scan_operations(
             // Der Operationsstrom kommt von `ops::decode_content`, das
             // `BI … ID … EI` zu einer Operation mit Dictionary und Rohdaten
             // zusammenfasst.
-            "BI" if graphics => {
+            "BI" if images => {
                 if let (Some(Object::Dictionary(dict)), Some(Object::String(data, _))) =
                     (op.operands.first(), op.operands.get(1))
                 {
@@ -3493,7 +3643,7 @@ fn scan_operations(
                     // versteckt sich hier auch nichts.
                     XObjectEntry::Missing => {}
                     XObjectEntry::Image => {
-                        if graphics {
+                        if images {
                             sink.image(
                                 &cx,
                                 &ImageEvent {

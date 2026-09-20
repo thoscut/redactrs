@@ -102,6 +102,35 @@ pub struct RedactionReport {
     pub peak_decoded_images: usize,
     /// Dasselbe in Bytes (RGBA8, 4 Byte je Bildpunkt).
     pub peak_decoded_image_bytes: u64,
+    /// Ersatztexte, die **mit den Pixeln eines Bildes** gefallen sind.
+    ///
+    /// Gezählt werden **entfernte Schlüssel, nicht Absichten**: je
+    /// Marked-Content-Abschnitt, in dem eine geschwärzte Bildfläche liegt,
+    /// jeder Spiegelschlüssel seiner Eigenschaftsliste
+    /// ([`crate::content::MIRROR_KEYS`]), und je geschwärztem Bild-XObject
+    /// jedes `/Alt` und `/ActualText`, das an seinem Dictionary **noch stand**.
+    ///
+    /// Das „noch stand“ ist der Grund, warum ein Bild hier gewöhnlich mit
+    /// **1** zählt und nicht mit 2: ein Bild, dessen Pixel überschrieben
+    /// wurden, ist neu kodiert, und [`crate::image`] baut sein Dictionary dabei
+    /// aus den Bildeigenschaften neu auf — der Ersatztext daran ist mit den
+    /// Pixeln gefallen, bevor diese Stelle ihn sehen konnte. Zwei werden es
+    /// genau dann, wenn das Dictionary stehen bleibt: bei einem Bild, das sich
+    /// nicht dekodieren lässt und dessen Pixel deshalb bleiben (dann steht
+    /// darüber eine eigene Warnung).
+    ///
+    /// **Warum das gezählt gehört.** Ein `/Figure <</Alt (…)>> BDC /Im0 Do
+    /// EMC` ist die Standardform der Barrierefreiheit; steht dort, was auf dem
+    /// Bild zu lesen war („Kontoauszug, IBAN DE89 …“), überlebte die
+    /// Beschreibung bis zu dieser Fassung die Schwärzung des Bildes
+    /// (Register #20). Sie fällt jetzt — **auch dann**, wenn sie nichts
+    /// Schützenswertes sagt („Firmenlogo“). Das ist die sichere Richtung, aber
+    /// es ist ein Verlust an Barrierefreiheit, und ein Verlust, den niemand
+    /// bemerkt, ist der falsche. Diese Zahl benennt ihn.
+    ///
+    /// Ein Bild, das **keine** Schwärzung trifft, behält seinen Ersatztext;
+    /// diese Zahl bleibt dann 0.
+    pub image_alt_texts_cleared: usize,
     /// Warnungen — z.B. Seiten, deren Bildinhalt mangels OCR nicht durchsucht
     /// werden konnte.
     pub warnings: Vec<String>,
@@ -397,6 +426,16 @@ impl PdfRedactor {
         // deshalb nicht im Strom, sondern im Objekt bereinigt werden.
         let mut property_objects: BTreeSet<ObjectId> = BTreeSet::new();
         let mut property_homes: BTreeSet<MirrorHome> = BTreeSet::new();
+        // Geschwärzte Bildflächen in Form-XObjects: gefunden beim Scan der
+        // Seite, gebraucht erst beim einmaligen Neuschreiben des Formulars —
+        // derselbe Weg wie [`form_marked`]. Je Formular die Operationsindizes
+        // seiner getroffenen Bildplatzierungen.
+        let mut form_image_hits: BTreeMap<ObjectId, BTreeSet<usize>> = BTreeMap::new();
+        // Bild-XObjects, deren Fläche eine Schwärzung trifft. Ihr `/Alt` und
+        // `/ActualText` am Dictionary selbst geht denselben Weg wie die Pixel
+        // (siehe [`clear_image_alternates`]).
+        let mut blacked_images: BTreeSet<ObjectId> = BTreeSet::new();
+        let no_image_hits: BTreeSet<usize> = BTreeSet::new();
         // Dokumentweites Konto für [`PendingPage::deferred`] — siehe
         // [`MAX_DEFERRED_MIRRORS`].
         let mut deferred_left = MAX_DEFERRED_MIRRORS;
@@ -501,6 +540,33 @@ impl PdfRedactor {
             // Einmal je Seite statt je Textoperation — siehe [`RectIndex`].
             let rect_index = RectIndex::new(&indexed_rects);
 
+            // Welche Bildplatzierungen dieser Seite verlieren ihre Pixel?
+            // Gefragt wird die Fläche gegen dieselben — schon um `padding`
+            // erweiterten — Rechtecke, mit denen [`crate::image`] entscheidet,
+            // welche Bilder es anfasst. Gebraucht wird das für die Spiegel
+            // darüber (siehe [`mirrors_to_clear`]) und für den Ersatztext am
+            // Bild selbst.
+            let mut page_image_hits: BTreeSet<usize> = BTreeSet::new();
+            for placement in &scan.images {
+                if !rects.iter().any(|rect| placement.bounds.intersects(rect)) {
+                    continue;
+                }
+                match placement.stream {
+                    StreamKey::Page => {
+                        page_image_hits.insert(placement.op_index);
+                    }
+                    StreamKey::Form(id) => {
+                        form_image_hits
+                            .entry(id)
+                            .or_default()
+                            .insert(placement.op_index);
+                    }
+                }
+                if let Some(id) = placement.id {
+                    blacked_images.insert(id);
+                }
+            }
+
             let mut page_plans: BTreeMap<usize, Plan> = BTreeMap::new();
 
             for record in &scan.shows {
@@ -527,7 +593,9 @@ impl PdfRedactor {
                 StreamKey::Page,
                 &page_plans,
                 &form_plans,
+                &page_image_hits,
             );
+            report.image_alt_texts_cleared += mirrors.image_alt_texts;
             for warning in std::mem::take(&mut mirrors.warnings) {
                 push_warning(&mut report, warning);
             }
@@ -582,10 +650,12 @@ impl PdfRedactor {
             .chain(
                 form_marked
                     .iter()
-                    .filter(|(_, records)| {
-                        records
-                            .iter()
-                            .any(|record| touches_form_plan(record, &form_plans))
+                    .filter(|(id, records)| {
+                        let hits = form_image_hits.get(*id).unwrap_or(&no_image_hits);
+                        records.iter().any(|record| {
+                            touches_form_plan(record, &form_plans)
+                                || hits.range(record.range.clone()).next().is_some()
+                        })
                     })
                     .map(|(id, _)| *id),
             )
@@ -613,7 +683,9 @@ impl PdfRedactor {
                 StreamKey::Form(form_id),
                 plans,
                 &form_plans,
+                form_image_hits.get(&form_id).unwrap_or(&no_image_hits),
             );
+            report.image_alt_texts_cleared += mirrors.image_alt_texts;
             property_objects.append(&mut mirrors.objects);
             property_homes.append(&mut mirrors.homes);
             for warning in std::mem::take(&mut mirrors.warnings) {
@@ -682,6 +754,10 @@ impl PdfRedactor {
         // `/Properties` stehen.
         for home in property_homes {
             clear_mirror_at(doc, &home);
+        }
+        // Zuletzt der Ersatztext an den geschwärzten Bildern selbst.
+        for id in blacked_images {
+            report.image_alt_texts_cleared += clear_image_alternates(doc, id);
         }
 
         Ok(report)
@@ -1135,6 +1211,9 @@ struct MirrorFixes {
     /// stehen — auch sie gehören dem Dokument und nicht dem Strom, nur haben
     /// sie keine eigene Objekt-Id (siehe [`MirrorHome`]).
     homes: BTreeSet<MirrorHome>,
+    /// Spiegelschlüssel, die über einer geschwärzten Bildfläche standen —
+    /// siehe [`RedactionReport::image_alt_texts_cleared`].
+    image_alt_texts: usize,
     warnings: Vec<String>,
 }
 
@@ -1152,6 +1231,7 @@ impl MirrorFixes {
         self.inline.append(&mut other.inline);
         self.objects.append(&mut other.objects);
         self.homes.append(&mut other.homes);
+        self.image_alt_texts += other.image_alt_texts;
     }
 }
 
@@ -1309,6 +1389,23 @@ fn touches_form_plan(
 /// der Formularschleife geschrieben ([`PendingPage`]); und ein Formular,
 /// dessen Spiegel über einem inneren Formular steht, wird dafür selbst neu
 /// geschrieben, auch wenn es keinen eigenen Plan hat (Befund G1-A1).
+///
+/// **Und wenn ein Bild darunter liegt** (`image_hits`: die Operationsindizes
+/// der geschwärzten Bildplatzierungen dieses Stroms). Ein
+/// `/Figure <</Alt (Kontoauszug, IBAN …)>> BDC /Im0 Do EMC` hat **keine**
+/// Glyphen: `shows` ist leer, `forms` ist leer, und bis zu dieser Fassung war
+/// der Abschnitt damit „unberührt“ — die Pixel des Bildes wurden
+/// überschrieben, der Klartext daneben blieb stehen (Register #20, `leaks`
+/// fand ihn im Seitenstrom). Gefragt wird die Spanne des Abschnitts
+/// ([`MarkedTextRecord::range`]), nicht eine Liste der Platzierungen darin:
+/// ein Bild bringt keine Glyphen mit, die einem Spiegel zuzuordnen wären.
+///
+/// Die Richtung ist bewusst die grobe: geschwärzt gilt eine Platzierung, deren
+/// **Fläche** ein Schwärzungsrechteck schneidet — dieselbe Vorauswahl, mit der
+/// [`crate::image`] entscheidet, welche Bilder es überhaupt dekodiert. Bleiben
+/// die Pixel danach doch stehen (ein Bild, das sich nicht dekodieren lässt),
+/// fällt der Spiegel trotzdem. Das ist zu viel entfernt und nicht zu wenig,
+/// und über das Bild selbst steht dann ohnehin eine Warnung.
 fn mirrors_to_clear(
     doc: &Document,
     owner: ObjectId,
@@ -1316,23 +1413,45 @@ fn mirrors_to_clear(
     stream: StreamKey,
     plans: &BTreeMap<usize, Plan>,
     form_plans: &BTreeMap<ObjectId, BTreeMap<usize, Plan>>,
+    image_hits: &BTreeSet<usize>,
 ) -> MirrorFixes {
     let mut fixes = MirrorFixes::default();
     for record in marked {
         if record.stream != stream {
             continue;
         }
-        let touched = record
-            .shows
-            .iter()
-            .any(|index| plans.get(index).is_some_and(|plan| plan.hidden_count() > 0))
+        // Die Bildfrage zuerst, weil sie gezählt wird: was über einem
+        // geschwärzten Bild stand, ist ein Verlust an Barrierefreiheit und
+        // gehört in den Bericht — auch dann, wenn der Abschnitt schon wegen
+        // seiner Glyphen gefallen wäre.
+        let over_blacked_image = image_hits.range(record.range.clone()).next().is_some();
+        let touched = over_blacked_image
+            || record
+                .shows
+                .iter()
+                .any(|index| plans.get(index).is_some_and(|plan| plan.hidden_count() > 0))
             || touches_form_plan(record, form_plans);
         if !touched {
             continue;
         }
+        if over_blacked_image {
+            fixes.image_alt_texts += mirror_keys_in(&record.properties);
+        }
         mirror_fix(doc, owner, record).apply(&mut fixes);
     }
     fixes
+}
+
+/// Wie viele Spiegelschlüssel stehen in dieser Eigenschaftsliste?
+///
+/// Gezählt wird, was [`clean_property_list`] entfernt — dieselbe Liste an
+/// beiden Stellen, damit die Zahl im Bericht und der Eingriff in der Datei
+/// nicht auseinanderlaufen können.
+fn mirror_keys_in(properties: &Dictionary) -> usize {
+    properties
+        .iter()
+        .filter(|(key, _)| MIRROR_KEYS.contains(&key.as_slice()))
+        .count()
 }
 
 /// Was an **einem** berührten Abschnitt zu tun ist — fertig entschieden, ohne
@@ -1507,6 +1626,36 @@ fn clear_mirror_object(doc: &mut Document, id: ObjectId) {
     for key in MIRROR_KEYS {
         dict.remove(key);
     }
+}
+
+/// Nimmt einem geschwärzten Bild-XObject seinen **eigenen** Ersatztext:
+/// `/Alt` (die Beschreibung) und `/ActualText` (der Ersatz beim Kopieren) am
+/// Bilddictionary. Rückgabe: wie viele Schlüssel dort standen.
+///
+/// **Warum hier und nicht in [`crate::meta`].** `strip_metadata` weiß nichts
+/// von Schwärzungsrechtecken; es kennt keinen Unterschied zwischen dem Bild,
+/// über dem eine Schwärzung liegt, und dem Firmenlogo daneben. Wer die Pixel
+/// überschreibt, weiß es — und nur er darf entscheiden, denn ein Dokument ohne
+/// Ersatztexte ist für blinde Leser unbrauchbar. Genau deshalb steht der
+/// Schlüssel `/Alt` auch nicht in `crate::meta::ANNOTATION_TEXT_KEYS`: dort
+/// wäre er „Text an einer Annotation ohne Erscheinungsstrom“ und erzeugte am
+/// Bild einen strukturellen Fehlalarm (Befund #14).
+///
+/// **Warum überhaupt, wenn [`crate::image`] das Bilddictionary neu aufbaut?**
+/// Weil das eine Zusicherung an anderer Stelle ist, und weil sie nicht immer
+/// gilt: ein Bild, dessen Pixel sich nicht dekodieren lassen, wird nicht neu
+/// geschrieben — sein Dictionary bleibt stehen, samt `/Alt`. Wer die Fläche
+/// geschwärzt haben wollte, soll den Klartext darüber trotzdem nicht behalten.
+fn clear_image_alternates(doc: &mut Document, id: ObjectId) -> usize {
+    let dict = match doc.objects.get_mut(&id) {
+        Some(Object::Stream(stream)) => &mut stream.dict,
+        Some(Object::Dictionary(dict)) => dict,
+        _ => return 0,
+    };
+    [b"Alt".as_slice(), b"ActualText".as_slice()]
+        .iter()
+        .filter(|key| dict.remove(key).is_some())
+        .count()
 }
 
 /// Baut eine Text-Operation ohne die verdeckten Zeichen neu auf.

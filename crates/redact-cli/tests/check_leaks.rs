@@ -483,15 +483,32 @@ fn a_file_that_is_not_a_pdf_is_refused() {
 /// Der Test kommt ohne Schreiber am anderen Ende aus, und das ist der Punkt:
 /// schon das Öffnen einer Pipe ohne Schreiber blockiert endlos. Kehrt dieser
 /// Test zurück, ist vor dem Öffnen entschieden worden.
+///
+/// `cfg(unix)` sagt, dass es benannte Pipes gibt — nicht, dass `mkfifo` im
+/// `PATH` steht. Auf einem schlanken Unix-Bild ohne die Werkzeuge (BusyBox
+/// ohne `mkfifo`, ein Container mit `scratch`-Basis) ließ
+/// `expect("mkfifo startbar")` den Testlauf platzen, obwohl am Programm nichts
+/// falsch war — derselbe Fehler, den `belege.rs` bei `python3` schon
+/// vermeidet: fehlt das Werkzeug, ist hier nichts zu prüfen, und der Test
+/// **sagt das** und endet grün. Ein **vorhandenes** `mkfifo`, das scheitert,
+/// bleibt dagegen ein Fehler: dann gibt es die Pipe, und die Prüfung wäre
+/// klammheimlich ausgefallen.
 #[cfg(unix)]
 #[test]
 fn a_named_pipe_is_refused_without_opening_it() {
     let dir = workdir("pipe");
     let path = dir.join("pipe.pdf");
-    let ok = Command::new("mkfifo")
-        .arg(&path)
-        .status()
-        .expect("mkfifo startbar");
+    let ok = match Command::new("mkfifo").arg(&path).status() {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!(
+                "kein mkfifo im Pfad ({e}) — dass `--check-leaks` eine benannte \
+                 Pipe ablehnt, bleibt hier ungeprüft"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+    };
     assert!(ok.success(), "mkfifo ist fehlgeschlagen");
 
     let out = run(&[path.to_str().unwrap(), "--check-leaks", "DE89"]);

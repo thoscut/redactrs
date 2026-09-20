@@ -853,15 +853,31 @@ fn run_within(seconds: u64, args: &[&str]) -> Option<Output> {
 /// existiert dort also nicht; ein Test, der ihn nachstellen wollte, scheiterte
 /// schon am Anlegen und nähme dem Windows-Artefakt seinen grünen Testlauf —
 /// derselbe Grund, aus dem drei Tests zu Befund 6 ein `cfg` tragen.
+///
+/// `cfg(unix)` sagt, dass es benannte Pipes gibt — nicht, dass `mkfifo` im
+/// `PATH` steht. Auf einem schlanken Unix-Bild ohne die Werkzeuge (BusyBox ohne
+/// `mkfifo`, ein Container mit `scratch`-Basis) ließ `expect("mkfifo startbar")`
+/// den Testlauf platzen, obwohl am Programm nichts falsch war — derselbe Fehler,
+/// den `belege.rs` bei `python3` schon vermeidet. Fehlt das Werkzeug, gibt diese
+/// Funktion `None` zurück und **sagt es auf stderr**; der Aufrufer endet grün,
+/// aber nicht stillschweigend. Ein **vorhandenes** `mkfifo`, das scheitert,
+/// bleibt dagegen ein Fehler: dann gibt es die Pipe, und die Prüfung wäre
+/// klammheimlich ausgefallen.
 #[cfg(unix)]
-fn fifo(dir: &Path, name: &str) -> PathBuf {
+fn fifo(dir: &Path, name: &str) -> Option<PathBuf> {
     let path = dir.join(name);
-    let ok = Command::new("mkfifo")
-        .arg(&path)
-        .status()
-        .expect("mkfifo startbar");
+    let ok = match Command::new("mkfifo").arg(&path).status() {
+        Ok(status) => status,
+        Err(e) => {
+            eprintln!(
+                "kein mkfifo im Pfad ({e}) — dass hinter den vier Schaltern keine \
+                 benannte Pipe den Lauf hängen lässt, bleibt hier ungeprüft"
+            );
+            return None;
+        }
+    };
     assert!(ok.success(), "mkfifo ist fehlgeschlagen");
-    path
+    Some(path)
 }
 
 /// Die gemeinsame Erwartung an eine dünn belegte Riesendatei hinter einem
@@ -1042,7 +1058,10 @@ fn a_named_pipe_behind_any_switch_does_not_hang_the_run() {
         ("--manual-regions", "pipe_regionen.json"),
         ("--apply-review", "pipe_review.json"),
     ] {
-        let pipe = fifo(&dir, name);
+        let Some(pipe) = fifo(&dir, name) else {
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        };
         let ausgabe = dir.join(format!("{name}.pdf"));
         let out = run_within(
             30,

@@ -196,6 +196,7 @@ fn zb1_die_nachpruefung_haelt_die_oberflaeche_nicht_an() {
     let mut app = demo_app();
 
     app.export_to(out.clone());
+    app.wait_for_export();
 
     // Kein Abholen dazwischen: was hier steht, hat `export_to` selbst gesetzt.
     assert!(
@@ -249,6 +250,7 @@ fn zb1_ein_leck_kommt_an_auch_wenn_inzwischen_etwas_anderes_offen_ist() {
     assert_eq!(app.state.hit_summary().outcome(index), HitOutcome::Redacted);
 
     app.export_to(out.clone());
+    app.wait_for_export();
     assert!(app.export_check_running());
 
     // Dazwischen: ein anderes Dokument.
@@ -736,6 +738,7 @@ fn zb5_ein_abgewaehlter_text_ist_eine_entscheidung_kein_leck() {
     assert_eq!(plan.kept_literal, vec![true, false], "{plan:?}");
 
     app.export_to(out.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
     let status = app.state.status.clone();
     assert!(
@@ -807,6 +810,7 @@ fn zb5_zweimal_geschwaerzt_einmal_abgewaehlt_ist_kein_leck() {
     assert_eq!(plan.kept_literal, vec![true], "{plan:?}");
 
     app.export_to(out.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
     let status = app.state.status.clone();
     assert!(
@@ -1082,6 +1086,7 @@ fn zb_g5a1_nicht_gesuchte_texte_stehen_in_den_warnungen() {
     );
 
     app.export_to(out.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
     let status = app.state.status.clone();
     assert!(!status.contains("steht NOCH"), "{status}");
@@ -1122,6 +1127,7 @@ fn zb_g5a3_eine_panik_im_pruefthread_wird_gesagt_und_nicht_verschwiegen() {
     let mut app = demo_app();
     app.force_panic_in_check = true;
     app.export_to(out.clone());
+    app.wait_for_export();
     assert!(app.export_check_running());
     app.wait_for_export_checks();
     assert!(!app.export_check_running());
@@ -1148,6 +1154,7 @@ fn zb_g5a3_eine_panik_im_pruefthread_wird_gesagt_und_nicht_verschwiegen() {
     // Ohne den Haken kommt das Urteil wie immer.
     app.force_panic_in_check = false;
     app.export_to(out.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
     assert!(
         app.state
@@ -1178,7 +1185,9 @@ fn zb_g5a4_die_warnung_nennt_die_datei() {
     assert_eq!(app.state.hit_summary().outcome(index), HitOutcome::Redacted);
 
     app.export_to(first.clone());
+    app.wait_for_export();
     app.export_to(second.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
 
     let warnings = app.state.warnings.clone();
@@ -1248,11 +1257,13 @@ fn zb_p5d3_die_warnung_des_ersten_exports_ueberlebt_den_zweiten() {
     let mut app = leaking_app();
 
     app.export_to(dir.join("erste.pdf"));
+    app.wait_for_export();
     app.wait_for_export_checks();
     assert_eq!(leak_warnings(&app).len(), 1, "{:?}", app.state.warnings);
 
     // Erst wenn das erste Urteil steht, der zweite Export.
     app.export_to(dir.join("zweite.pdf"));
+    app.wait_for_export();
     app.wait_for_export_checks();
 
     let leaks = leak_warnings(&app);
@@ -1284,15 +1295,27 @@ fn zb_p5d3_dieselbe_datei_sammelt_sich_nicht_und_die_decke_haelt() {
 
     for _ in 0..3 {
         app.export_to(dir.join("gleich.pdf"));
+        app.wait_for_export();
         app.wait_for_export_checks();
     }
     assert_eq!(leak_warnings(&app).len(), 1, "{:?}", app.state.warnings);
 
-    // Und zwei Exporte derselben Datei, beide unterwegs, bevor das erste
-    // Urteil kommt: beide tragen denselben Satz, und der steht einmal da.
-    // Mutation (`contains`-Prüfung in `note_check_warning` weg): zwei, rot.
+    // Und zwei Exporte derselben Datei **kurz hintereinander**: beide tragen
+    // denselben Satz, und der steht einmal da.
+    //
+    // Der Satz „beide unterwegs, bevor das erste Urteil kommt“ stand hier
+    // früher und stimmte schon vorher nicht: seit Befund Q4-6 lässt der zweite
+    // Export die ältere Prüfung derselben Datei fallen, es ist also immer
+    // höchstens eine unterwegs. Seit Fix-Runde 8 schreibt der Export auf einem
+    // eigenen Thread, und der zweite Klick auf **dieselbe** Datei wird
+    // abgelehnt, solange der erste schreibt ([`EXPORT_BUSY`]) — deshalb wartet
+    // dieser Teil jetzt ausdrücklich auf jeden Export. Geprüft ist damit, was
+    // hier wirklich zu prüfen ist: zwei Exporte derselben Datei lassen genau
+    // eine Warnung stehen.
     app.export_to(dir.join("gleich.pdf"));
+    app.wait_for_export();
     app.export_to(dir.join("gleich.pdf"));
+    app.wait_for_export();
     app.wait_for_export_checks();
     assert_eq!(leak_warnings(&app).len(), 1, "{:?}", app.state.warnings);
 
@@ -1300,6 +1323,7 @@ fn zb_p5d3_dieselbe_datei_sammelt_sich_nicht_und_die_decke_haelt() {
     // gehört weg — sie spricht über eine Datei, die es nicht mehr gibt.
     let leaking = app.state.regions.pop().expect("das leckende Rechteck");
     app.export_to(dir.join("gleich.pdf"));
+    app.wait_for_export();
     app.wait_for_export_checks();
     assert!(
         leak_warnings(&app).is_empty(),
@@ -1310,6 +1334,7 @@ fn zb_p5d3_dieselbe_datei_sammelt_sich_nicht_und_die_decke_haelt() {
 
     for i in 0..MAX_WARNED_FILES + 1 {
         app.export_to(dir.join(format!("datei{i}.pdf")));
+        app.wait_for_export();
         app.wait_for_export_checks();
     }
     let leaks = leak_warnings(&app);
@@ -1337,6 +1362,7 @@ fn zb_p5d3_der_dokumentwechsel_raeumt_die_warnungen_weg() {
     let dir = tmp("p5d3-wechsel");
     let mut app = leaking_app();
     app.export_to(dir.join("erste.pdf"));
+    app.wait_for_export();
     app.wait_for_export_checks();
     assert_eq!(leak_warnings(&app).len(), 1, "{:?}", app.state.warnings);
 
@@ -1355,6 +1381,7 @@ fn zb_p5d3_der_dokumentwechsel_raeumt_die_warnungen_weg() {
             "Musterbank",
         ));
         app.export_to(dir.join(format!("neu{i}.pdf")));
+        app.wait_for_export();
         app.wait_for_export_checks();
         app.state.regions.pop();
     }
@@ -1390,6 +1417,7 @@ fn zb_p5d5_eine_panik_im_pruefthread_fordert_trotzdem_ein_neuzeichnen() {
     app.ui_ctx = Some(ctx.clone());
     app.force_panic_in_check = true;
     app.export_to(out);
+    app.wait_for_export();
     app.wait_for_export_checks();
 
     assert!(
@@ -1414,6 +1442,7 @@ fn zb_p5d5_auch_der_geglueckte_lauf_fordert_ein_neuzeichnen() {
     let mut app = demo_app();
     app.ui_ctx = Some(ctx.clone());
     app.export_to(out);
+    app.wait_for_export();
     app.wait_for_export_checks();
 
     assert!(ctx.has_requested_repaint());
@@ -1462,14 +1491,25 @@ fn daneben() -> Rect {
 #[test]
 fn zb_q4d5_das_neuzeichnen_kommt_erst_am_ende_des_pruefthreads() {
     let out = tmp("q4d5").join("out.pdf");
+    // **Zwei Kontexte, weil es zwei Threads sind.** Seit Fix-Runde 8 läuft
+    // auch der Export auf einem Thread, und der fordert am Ende zu Recht ein
+    // Neuzeichnen an — ohne das holte niemand sein Ergebnis ab. Ein einziger
+    // Kontext könnte hinterher nicht mehr sagen, **wer** angefordert hat, und
+    // die Aussage dieses Tests gilt dem **Prüf**-Thread. Der Export bekommt
+    // deshalb seinen eigenen Kontext; der zweite wird eingehängt, bevor die
+    // Nachprüfung überhaupt entsteht (sie entsteht in `poll_exports`, also
+    // erst im `wait_for_export` darunter).
+    let export_ctx = egui::Context::default();
     let ctx = egui::Context::default();
     assert!(!ctx.has_requested_repaint(), "frischer Kontext, nichts an");
 
     let gate = Arc::new(crate::app::CheckGate::default());
     let mut app = demo_app();
-    app.ui_ctx = Some(ctx.clone());
+    app.ui_ctx = Some(export_ctx.clone());
     app.hold_check = Some(gate.clone());
     app.export_to(out);
+    app.ui_ctx = Some(ctx.clone());
+    app.wait_for_export();
 
     // Der Thread läuft wirklich — und hängt vor der Suche.
     gate.wait_until_arrived();
@@ -1482,10 +1522,24 @@ fn zb_q4d5_das_neuzeichnen_kommt_erst_am_ende_des_pruefthreads() {
 
     gate.release();
     app.wait_for_export_checks();
-    assert!(
-        ctx.has_requested_repaint(),
-        "am Ende des Threads muss es angefordert sein"
-    );
+    // **Warten, nicht annehmen.** Der Wächter ([`RepaintOnDrop`]) fällt erst
+    // am Ende des Threads, also **nach** dem `send` des Urteils: der
+    // Oberflächen-Faden kann das Urteil längst abgeholt haben, während der
+    // Thread noch abwickelt. Die Annahme „Urteil da, also Neuzeichnen
+    // angefordert“ ist deshalb ein Wettlauf — gemessen: einmal rot in 60
+    // vollständigen Läufen der GUI-Sammlung unter Last (Fix-Runde 8,
+    // Reproduktionsschleife zu Register #50), mit genau dieser Meldung. Die
+    // Aussage des Tests bleibt dieselbe; die Mutation
+    // („`let _repaint = repaint;` aus dem Thread genommen“) fällt weiter auf
+    // die Prüfung **vor** `release` zurück und ist damit weiter rot.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ctx.has_requested_repaint() {
+        assert!(
+            Instant::now() < deadline,
+            "am Ende des Threads muss es angefordert sein"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
     assert!(
         app.state.status.contains("Nachprüfung:"),
         "{}",
@@ -1526,6 +1580,7 @@ fn zb_q4d6_ein_zweiter_export_derselben_datei_beendet_die_alte_pruefung() {
     let erster = app.state.plan_export_check(&app.state.hit_summary());
     assert_eq!(erster.needles, vec!["GEHEIM-EINS".to_string()]);
     app.export_to(out.clone());
+    app.wait_for_export();
     gate.wait_until_arrived();
     assert_eq!(app.checks.len(), 1);
 
@@ -1540,6 +1595,7 @@ fn zb_q4d6_ein_zweiter_export_derselben_datei_beendet_die_alte_pruefung() {
         vec!["GEHEIM-EINS".to_string(), "GEHEIM-ZWEI".to_string()]
     );
     app.export_to(out.clone());
+    app.wait_for_export();
     assert_eq!(
         app.checks.len(),
         1,
@@ -1599,6 +1655,7 @@ fn zb_q4d6_ein_dokumentwechsel_verliert_das_urteil_nicht() {
         .regions
         .push(text_region(0, daneben(), "GEHEIM-EINS"));
     app.export_to(out.clone());
+    app.wait_for_export();
     gate.wait_until_arrived();
 
     // Mitten in der Prüfung ein anderes Dokument.
@@ -1664,6 +1721,7 @@ fn zb_mess_nachpruefung_je_begriff_gegen_einen_durchgang() {
 
     let t = Instant::now();
     app.export_to(out.clone());
+    app.wait_for_export();
     let export_returns = t.elapsed();
     let t = Instant::now();
     app.wait_for_export_checks();

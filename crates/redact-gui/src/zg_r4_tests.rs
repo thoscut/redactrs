@@ -510,6 +510,14 @@ fn zg_r4_1_eine_neue_analyse_vergisst_die_geloeschten_zeilen() {
     // Noch einmal analysieren: der Treffer ist zurück — und sein Rechteck
     // geht daneben, die IBAN bleibt stehen.
     assert_eq!(state.analyze().expect("Analyse"), 1);
+    // Zwei Diagnosezeilen, keine Abschwächung: der Fehlschlag dieses Tests im
+    // Gate-Lauf der Fix-Runde 7 („kept_literal: [true]“) ließ zwei Ursachen zu
+    // — eine überlebende Löscherinnerung oder eine **zweite** Zeile in der
+    // Liste, die denselben Text stehen lässt (nur ein Schutzeintrag käme dafür
+    // in Frage, denn `analyze` gibt die Zahl der Funde ohne Schutzeinträge
+    // zurück). Fällt der Test wieder, soll die Zeile sagen, welche es war.
+    assert_eq!(state.regions.len(), 1, "{:?}", state.regions);
+    assert_eq!(state.hit_summary().outcome(0), HitOutcome::Redacted);
     assert!(state.set_region_rect(0, Rect::new(300.0, 20.0, 320.0, 40.0)));
     let (plan, check) = export_and_check(&state, &out);
     println!(
@@ -520,6 +528,154 @@ fn zg_r4_1_eine_neue_analyse_vergisst_die_geloeschten_zeilen() {
     assert_eq!(plan.kept_literal, vec![false], "{plan:?}");
     assert!(check.found_leak(), "{}", check.sentence());
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Dieselbe Klasse, der andere Weg: eine Review-Datei.**
+///
+/// Register #50 fragt weiter: kann `kept_texts` einen Text tragen, **ohne**
+/// dass eine stehen gelassene Zeile ihn liefert? Die Quellen sind genau zwei
+/// ([`AppState::plan_export_check`]): eine Zeile der **jetzigen** Liste mit
+/// Ausgang `Disabled`/`Blocked`/`Protecting` — und die Löscherinnerung
+/// [`AppState::kept_by_deletion`], die an der **Kennung** der gelöschten Zeile
+/// hängt. Gefährlich ist deshalb genau eine Lage: die Liste wird
+/// ausgetauscht, dieselbe Zeile kommt mit **neuer** Kennung zurück, und die
+/// Erinnerung an die Löschung bleibt. Dann hätte eine danebengegangene
+/// Schwärzung „keine Aussage“ statt einer Warnung — aus einem Leck würde
+/// Schweigen.
+///
+/// Eine neue Analyse ist dieser Weg (der Test darüber). Eine **Review-Datei**
+/// ist derselbe Weg: `apply_review_file` ersetzt die Liste genauso, und die
+/// Kennungen sind neu. Geprüft wird hier also nicht die Analyse, sondern die
+/// zweite Tür in denselben Raum.
+///
+/// Die dritte Tür (`load_bytes`) ist die harmloseste — dort ist auch das
+/// Dokument neu —, und eine vierte gibt es nicht: eine Handregion
+/// ([`AppState::add_manual_region`]) trägt **keinen** Text, kann also gar
+/// keinen Begriff liefern; Rückgängig/Wiederherstellen tragen die Kennungen
+/// mit und werden von `kept_by_deletion` wiedererkannt. Beides steht als
+/// Gegenprobe im Test.
+///
+/// Mutation (`deleted_hits.clear()` in `apply_review_file` entfernt): rot.
+#[test]
+fn zg_r4_1_eine_review_datei_vergisst_die_geloeschten_zeilen_auch() {
+    let dir = tmp("review-loeschen");
+    let out = dir.join("out.pdf");
+    let doc = build_pdf(&[vec![TextItem::new(
+        72.0,
+        700.0,
+        10.0,
+        "IBAN: DE89 3704 0044 0532 0130 00",
+    )]]);
+    let mut state = AppState::with_config(Config {
+        patterns: vec!["iban_de".to_string()],
+        ..Config::default()
+    });
+    state.load_bytes(&doc, None).expect("ladbar");
+    assert_eq!(state.analyze().expect("Analyse"), 1);
+    // Die Review-Datei hält den Treffer fest, **bevor** er gelöscht wird.
+    let review = state.to_review_file();
+
+    state.selected_region = Some(0);
+    assert!(state.delete_selected());
+    assert!(state.regions.is_empty());
+
+    // Die Liste kommt aus der Datei zurück — mit neuer Kennung.
+    state.apply_review_file(review).expect("Review-Datei gilt");
+    assert_eq!(state.regions.len(), 1, "{:?}", state.regions);
+    assert!(state.set_region_rect(0, Rect::new(300.0, 20.0, 320.0, 40.0)));
+
+    let (plan, check) = export_and_check(&state, &out);
+    println!(
+        "nach der Review-Datei: {}\n  Warnung: {:?}",
+        check.sentence(),
+        check.warning()
+    );
+    assert_eq!(
+        plan.kept_literal,
+        vec![false],
+        "die Löschung galt der alten Liste: {plan:?}"
+    );
+    // Das Orakel: die IBAN steht wirklich noch da.
+    let bytes = std::fs::read(&out).expect("Ausgabe lesbar");
+    assert!(
+        !redact_pdf::leaks(&bytes, "DE89 3704 0044 0532 0130 00").is_empty(),
+        "die Vorlage muss lecken"
+    );
+    assert!(check.found_leak(), "{}", check.sentence());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Die beiden Gegenproben zur Lage oben — **ohne** sie wäre die Aufzählung
+/// der Türen eine Behauptung.
+///
+/// 1. Eine Handregion trägt keinen Text. Sie kann deshalb keinen Begriff in
+///    `kept_texts` schmuggeln; sie zählt unter `without_text`, und darüber
+///    sagt die Nachprüfung ausdrücklich nichts.
+/// 2. Rückgängig trägt die **Kennungen** mit: die zurückgeholte Zeile ist für
+///    [`AppState::kept_by_deletion`] dieselbe, ihre Löscherinnerung greift
+///    nicht mehr — und nach Wiederherstellen greift sie wieder.
+#[test]
+fn zg_r4_1_handregion_ohne_text_und_rueckgaengig_mit_kennung() {
+    let doc = build_pdf(&[vec![TextItem::new(
+        72.0,
+        700.0,
+        10.0,
+        "IBAN: DE89 3704 0044 0532 0130 00",
+    )]]);
+    let mut state = AppState::with_config(Config {
+        patterns: vec!["iban_de".to_string()],
+        ..Config::default()
+    });
+    state.load_bytes(&doc, None).expect("ladbar");
+    assert_eq!(state.analyze().expect("Analyse"), 1);
+    let kennung = state.regions[0].id;
+
+    // (1) Löschen, dann eine Handregion über dieselbe Zeile ziehen.
+    state.selected_region = Some(0);
+    assert!(state.delete_selected());
+    let index = state
+        .add_manual_region(0, Rect::new(60.0, 690.0, 520.0, 714.0), "von Hand")
+        .expect("Handregion");
+    assert!(
+        state.regions[index].region.text.is_none(),
+        "eine Handregion trägt keinen Text — sonst wäre sie die vierte Tür"
+    );
+    let plan = state.plan_export_check(&state.hit_summary());
+    assert!(plan.needles.is_empty(), "{plan:?}");
+    assert_eq!(plan.without_text, 1, "{plan:?}");
+    assert!(plan.kept_literal.is_empty(), "{plan:?}");
+
+    // (2) Zurück auf den Stand vor der Handregion und vor der Löschung.
+    assert!(state.undo(), "die Handregion zurück");
+    assert!(state.undo(), "die Löschung zurück");
+    assert_eq!(state.regions.len(), 1, "{:?}", state.regions);
+    assert_eq!(
+        state.regions[0].id, kennung,
+        "Rückgängig trägt die Kennung mit — sonst erkennt die Erinnerung sie nicht"
+    );
+    assert!(state.set_region_rect(0, Rect::new(300.0, 20.0, 320.0, 40.0)));
+    let plan = state.plan_export_check(&state.hit_summary());
+    assert_eq!(
+        plan.kept_literal,
+        vec![false],
+        "die Zeile ist zurück: über sie ist wieder eine Aussage möglich — {plan:?}"
+    );
+
+    // Und wieder gelöscht: jetzt steht sie wirklich, die Erinnerung gilt.
+    assert!(state.redo(), "die Löschung wieder");
+    assert!(state.regions.is_empty(), "{:?}", state.regions);
+    state.regions.push(text_region(
+        0,
+        Rect::new(300.0, 20.0, 320.0, 40.0),
+        "DE89 3704 0044 0532 0130 00",
+    ));
+    let plan = state.plan_export_check(&state.hit_summary());
+    assert_eq!(
+        plan.kept_literal,
+        vec![true],
+        "die gelöschte Zeile steht noch da: ein Fund ist nicht zuzuordnen — {plan:?}"
+    );
 }
 
 // ===========================================================================

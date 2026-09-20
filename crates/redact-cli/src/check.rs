@@ -252,6 +252,21 @@ fn read_stdin_needles() -> Result<Vec<String>> {
 /// außen. Roh ausgegeben könnte er das Terminal steuern statt dazustehen —
 /// ausgerechnet in der Ausgabe, an der jemand ablesen will, ob eine Datei
 /// sauber ist.
+///
+/// ## Warum hier nur der **Satz** einer Fundstelle steht
+///
+/// Seit Fix-Runde 7 nennt `redact_pdf::LeakCheck::sites` denselben Ort
+/// maschinenlesbar: je Fundstelle die Sicht, die Seite (wo eine Sicht eine
+/// kennt) und die Objekt-Id (wo sie eine kennt) — Register #41, damit eine
+/// Oberfläche „gewollt stehen geblieben“ von „Schwärzung danebengegangen“
+/// trennen kann, ohne den Meldungstext zu raten.
+///
+/// Die Kommandozeile gibt ihn **nicht** aus, und das ist Absicht: diese
+/// Ausgabe ist ein Vertrag. `docs/pruefung.txt` hält sie Byte für Byte fest
+/// (`tests/belege.rs`, `die_fundstellen_in_pruefung_txt_sind_die_des_gebauten_binaries`),
+/// und Skripte lesen sie. Ein zusätzliches Stück in der Zeile bricht beides,
+/// und der Ort stünde dort doppelt — er steht im Satz schon. Wer ihn als
+/// **Daten** braucht, ruft das Orakel selbst auf; so macht es die Oberfläche.
 fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -> Result<ExitCode> {
     let name = safe_path(path);
     if !cli.quiet {

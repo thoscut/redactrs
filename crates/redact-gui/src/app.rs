@@ -37,6 +37,7 @@ use crate::theme::Theme;
 use crate::toolbar::{self, ToolAction, ToolContext, ToolItem};
 use crate::viewer::{self, PagePreview};
 use redact_pipeline::Config;
+use redact_pipeline::Outcome;
 
 /// Was im Hauptbereich steht, solange nichts geladen ist.
 ///
@@ -487,9 +488,29 @@ pub fn key_commands(keys: KeyState, has_selection: bool) -> Vec<KeyCommand> {
 /// Muss vor dem Schließen des Fensters nachgefragt werden?
 ///
 /// Reine Entscheidung, damit sie ohne Fenster prüfbar ist.
-pub fn needs_close_confirmation(has_manual_work: bool, already_confirmed: bool) -> bool {
-    has_manual_work && !already_confirmed
+///
+/// **Zwei Gründe, nicht einer.** Handarbeit ginge verloren — und seit
+/// Fix-Runde 8 kann auch ein **Export** noch unterwegs sein
+/// ([`RedactApp::export_to`]). Solange der im Zeichentakt lief, war das keine
+/// Frage: das Fenster nahm während des Schreibens keine Eingabe an, der
+/// Schließwunsch kam erst danach an, und die Datei stand. Jetzt beendete ein
+/// Klick auf das Kreuz den Prozess mitten im Schreiben. Geschrieben wird
+/// atomar, es gibt also keine halbe Datei — wohl aber **keine**, während die
+/// Statuszeile „Export läuft“ sagte. Wer schließt, soll wissen, was er
+/// wegwirft.
+pub fn needs_close_confirmation(
+    has_manual_work: bool,
+    export_running: bool,
+    already_confirmed: bool,
+) -> bool {
+    (has_manual_work || export_running) && !already_confirmed
 }
+
+/// Der Satz der Rückfrage, wenn beim Schließen noch ein Export schreibt.
+pub const ABANDON_EXPORT_QUESTION: &str =
+    "Ein Export ist noch nicht fertig. Wird das Fenster jetzt geschlossen, \
+     entsteht keine Ausgabedatei — geschrieben wird erst am Ende in einem Zug.\n\n\
+     Trotzdem schließen?";
 
 /// Text der Rückfrage. `what` beschreibt, was gleich passiert.
 pub fn discard_question(regions: usize, what: &str) -> String {
@@ -665,6 +686,27 @@ struct PendingCheck {
     result: Receiver<ExportCheck>,
 }
 
+/// Ein Export, der gerade auf seinem Thread schreibt.
+///
+/// Siehe [`RedactApp::export_to`]. Alles darin ist der Stand **zum Zeitpunkt
+/// des Klicks**: die Zieldatei, das Audit-Log, die Zahl der geschützten
+/// Flächen für die Meldung und der schon gefasste Plan der Nachprüfung. Was
+/// die Nutzerin danach an den Regionen ändert, gehört nicht mehr zu dieser
+/// Datei.
+struct PendingExport {
+    /// Die Zieldatei, wie sie der Dialog geliefert hat.
+    out: PathBuf,
+    /// Das Audit-Log dieses Exports ([`AppState::audit_target`]).
+    audit: PathBuf,
+    /// Wie viele Flächen die Negativliste gedeckt hat — für [`export_status`].
+    blocked: usize,
+    /// Der Plan der Nachprüfung, gefasst **vor** dem Schreiben.
+    check: ExportCheckPlan,
+    /// Die Kennung des laufenden Schreibvorgangs ([`writing_key`]).
+    writing: PathBuf,
+    result: Receiver<redact_core::Result<Outcome>>,
+}
+
 /// Der Dateiname für die Warnung — der ganze Pfad steht in der Exportmeldung.
 fn file_name_of(path: &std::path::Path) -> String {
     path.file_name()
@@ -691,6 +733,26 @@ fn file_name_of(path: &std::path::Path) -> String {
 /// vorher, aber nie falsch verschmolzen.
 fn file_key(path: &std::path::Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Die Kennung einer Datei, die **gerade geschrieben wird** — unabhängig
+/// davon, ob sie schon existiert.
+///
+/// [`file_key`] löst die Datei selbst auf und kann das erst, wenn es sie gibt:
+/// vor dem ersten Export liefert es den Pfad, wie er getippt war, danach den
+/// aufgelösten. Für die Frage „schreibt schon jemand diese Datei?“ wäre das
+/// genau der falsche Unterschied — derselbe Klick zweimal ergäbe zwei
+/// verschiedene Kennungen, und zwei Threads schrieben dasselbe Ziel. Aufgelöst
+/// wird deshalb das **Verzeichnis** (das gibt es), der Dateiname kommt
+/// unverändert daran.
+fn writing_key(path: &std::path::Path) -> PathBuf {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    match (dir, path.file_name()) {
+        (Some(dir), Some(name)) => std::fs::canonicalize(dir)
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Streicht das **erste** Vorkommen dieses Satzes aus der Liste.
@@ -768,6 +830,16 @@ impl CheckGate {
         }
     }
 
+    /// Aus dem Test: **ist** der Thread schon angekommen?
+    ///
+    /// Für Tests, die nicht blockieren dürfen: [`CheckGate::wait_until_arrived`]
+    /// wartet ohne Frist, und wenn die Arbeit — mutiert oder kaputt — gar nicht
+    /// auf einem Thread läuft, kommt niemand an. Der Testlauf hinge dann
+    /// stumm, und ein hängender Test ist schlimmer als ein roter.
+    pub(crate) fn arrived(&self) -> bool {
+        self.state.lock().expect("Gatter").0
+    }
+
     /// Aus dem Test: warten, bis der Thread wirklich läuft.
     pub(crate) fn wait_until_arrived(&self) {
         let mut state = self.state.lock().expect("Gatter");
@@ -785,6 +857,30 @@ impl CheckGate {
 
 /// Was die Statuszeile zeigt, solange die Nachprüfung läuft.
 pub const EXPORT_CHECK_RUNNING: &str = "Nachprüfung läuft …";
+
+/// Was die Statuszeile zeigt, solange der Export selbst läuft.
+///
+/// Bis Fix-Runde 8 lief nur die **Nachprüfung** auf einem Thread, der Export
+/// selbst im Zeichentakt: gemessen 6,3 s bei 305 Seiten, in denen das Fenster
+/// auf keinen Klick reagierte und nichts dastand. Wer exportiert, sah eine
+/// eingefrorene Anwendung und wusste nicht, ob sie noch lebt (Befund R4-19).
+pub const EXPORT_RUNNING: &str = "Export läuft — die Datei wird geschrieben …";
+
+/// Was die Statuszeile zeigt, wenn **dieselbe** Datei noch geschrieben wird.
+///
+/// Siehe [`RedactApp::export_to`]: ein zweiter Export derselben Datei wird
+/// abgelehnt, solange der erste schreibt.
+pub const EXPORT_BUSY: &str =
+    "Diese Datei wird noch geschrieben — bitte den laufenden Export abwarten.";
+
+/// Was dasteht, wenn der Export-Thread ohne Ergebnis verschwunden ist.
+///
+/// Dieselbe Überlegung wie bei der Nachprüfung: Schweigen sähe aus wie
+/// Erfolg. Die Datei entsteht atomar (Temp-Datei, dann `rename`, siehe
+/// `redact_pdf::write_file`) — es gibt also **kein** halb geschriebenes Ziel,
+/// wohl aber den Fall „gar nichts geschrieben“, und genau das sagt der Satz.
+pub const EXPORT_BROKEN: &str =
+    "Export: abgebrochen (interner Fehler) — es wurde keine Datei geschrieben.";
 
 /// Für so viele Ausgabedateien werden Export- und Prüfwarnungen gehalten.
 ///
@@ -814,6 +910,12 @@ pub struct RedactApp {
     /// exportiert, bekommt **beide** Urteile. Ein verworfener Empfänger hieße,
     /// dass ein Leck in der ersten Datei nie gemeldet würde.
     checks: Vec<PendingCheck>,
+    /// Laufende Exporte — je einer je Ausgabedatei.
+    ///
+    /// Mehr als einer geht nur in **verschiedene** Dateien: ein zweiter Export
+    /// derselben Datei wird abgelehnt, solange der erste schreibt (siehe
+    /// [`RedactApp::export_to`]).
+    exports: Vec<PendingExport>,
     /// Ausgabedateien, deren Warnungen gerade gehalten werden — jüngste
     /// zuletzt. Siehe [`RedactApp::note_export_warnings`] und
     /// [`MAX_WARNED_FILES`].
@@ -848,6 +950,14 @@ pub struct RedactApp {
     /// Testhaken: hält den Prüf-Thread an, siehe [`CheckGate`].
     #[cfg(test)]
     hold_check: Option<std::sync::Arc<CheckGate>>,
+    /// Testhaken: lässt den **Export** auf seinem Thread paniken — derselbe
+    /// Weg „Thread ohne Ergebnis verschwunden“ wie bei der Nachprüfung.
+    #[cfg(test)]
+    force_panic_in_export: bool,
+    /// Testhaken: hält den Export-Thread an, siehe [`CheckGate`]. Damit lässt
+    /// sich prüfen, dass die Oberfläche **währenddessen** weiterläuft.
+    #[cfg(test)]
+    hold_export: Option<std::sync::Arc<CheckGate>>,
 }
 
 impl Default for RedactApp {
@@ -875,6 +985,7 @@ impl RedactApp {
             central_rect: None,
             pages: PageCache::new(),
             checks: Vec::new(),
+            exports: Vec::new(),
             warned_files: Vec::new(),
             ui_ctx: None,
             theme,
@@ -888,6 +999,10 @@ impl RedactApp {
             force_panic_in_check: false,
             #[cfg(test)]
             hold_check: None,
+            #[cfg(test)]
+            force_panic_in_export: false,
+            #[cfg(test)]
+            hold_export: None,
         }
     }
 
@@ -935,6 +1050,30 @@ impl RedactApp {
             .set_level(rfd::MessageLevel::Warning)
             .set_title("Von Hand bearbeitete Schwärzungen verwerfen?")
             .set_description(discard_question(count, what))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show()
+            == rfd::MessageDialogResult::Yes
+    }
+
+    /// Darf ein laufender Export aufgegeben werden?
+    ///
+    /// Ohne laufenden Export sofort `true` — die Rückfrage soll nur dann
+    /// kommen, wenn wirklich etwas verloren geht. Eigene Frage und nicht
+    /// [`RedactApp::may_discard`]: dort geht es um Handarbeit, hier um eine
+    /// Datei, die es nachher nicht gibt, und ein Satz über Schwärzungen wäre
+    /// hier schlicht falsch.
+    fn may_abandon_export(&self) -> bool {
+        if !self.export_running() {
+            return true;
+        }
+        #[cfg(test)]
+        if let Ask::Answer(answer) = self.ask {
+            return answer;
+        }
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Export läuft noch — trotzdem schließen?")
+            .set_description(ABANDON_EXPORT_QUESTION)
             .set_buttons(rfd::MessageButtons::YesNo)
             .show()
             == rfd::MessageDialogResult::Yes
@@ -1156,34 +1295,202 @@ impl RedactApp {
         }
     }
 
+    /// Startet den Export nach `out` — **auf einem eigenen Thread**.
+    ///
+    /// Vorher lief das Schwärzen und Schreiben im Zeichentakt: gemessen 6,3 s
+    /// bei 305 Seiten, in denen das Fenster stand (Befund R4-19). Jetzt geht
+    /// ein Abzug des Zustands ([`AppState::plan_export`]) auf den Thread, das
+    /// Ergebnis kommt über einen Kanal zurück und wird in
+    /// [`RedactApp::poll_exports`] abgeholt — dasselbe Muster wie bei der
+    /// Nachprüfung und beim Rastern. Solange steht [`EXPORT_RUNNING`] in der
+    /// Statuszeile.
+    ///
+    /// **Die Ausgabe bleibt dieselbe**: es ist derselbe Aufruf von
+    /// `redact_pipeline::apply` mit denselben Regionen und derselben
+    /// [`redact_pipeline::Config`], nur an einer anderen Stelle ausgeführt
+    /// (`cli_and_gui_agree` vergleicht die Bytes und das Log Feld für Feld).
+    ///
+    /// **Was sofort passiert**: die beiden Ablehnungen (Ziel ist die
+    /// Originaldatei, nichts ausgewählt) fallen vor dem Thread und stehen
+    /// sofort in der Statuszeile. Der Plan der Nachprüfung wird ebenfalls
+    /// sofort gefasst — er gehört zu dem Stand, der exportiert wird, nicht zu
+    /// dem, der beim Eintreffen des Ergebnisses dasteht.
+    ///
+    /// ## Zwei schnelle Exporte derselben Datei
+    ///
+    /// Bei der Nachprüfung gewinnt der jüngere Lauf und der ältere wird fallen
+    /// gelassen ([`RedactApp::start_export_check`]) — er *liest* nur. Ein
+    /// Export *schreibt*, und deshalb geht es hier andersherum: der zweite
+    /// wird **abgelehnt**, solange der erste schreibt ([`EXPORT_BUSY`]).
+    ///
+    /// Der Grund ist die gefährliche Richtung. Geschrieben wird atomar (Temp-
+    /// Datei, dann `rename`), zwei Threads mischen also keine Bytes — aber die
+    /// Reihenfolge der `rename`-Aufrufe ist nicht die der Klicks. Landete der
+    /// ältere zuletzt, trüge die Datei die **alten** Bytes, während Meldung
+    /// und Nachprüfung vom **neuen** Plan sprechen: eine Entwarnung über eine
+    /// Ausgabe, die niemand geprüft hat. Ablehnen ist die ehrliche Antwort;
+    /// eine andere Datei parallel zu schreiben bleibt erlaubt.
+    ///
+    /// Eine laufende **Nachprüfung** derselben Datei wird dagegen hier schon
+    /// fallen gelassen — ab jetzt entstehen neue Bytes, und ihr Urteil wäre
+    /// eines über Bytes, die es nicht mehr gibt. Bis Fix-Runde 8 stand dieser
+    /// Schnitt in `start_export_check` und damit **nach** dem Schreiben; das
+    /// ging nur, solange das Schreiben denselben Takt blockierte.
     fn export_to(&mut self, out: PathBuf) {
         let audit = self.state.audit_target(&out);
         let blocked = self.state.blocked_regions().len();
         let summary = self.state.hit_summary();
-        match self.state.export(&out, Some(&audit)) {
+        let writing = writing_key(&out);
+        if self
+            .exports
+            .iter()
+            .any(|pending| pending.writing == writing)
+        {
+            self.state.status = EXPORT_BUSY.to_string();
+            return;
+        }
+        // Die Nachprüfung über die geschriebenen Bytes — der Weg, den die
+        // Kommandozeile als `--check-leaks` bekommen hat, hier ohne Konsole
+        // und ohne getippte Geheimnisse. Siehe
+        // [`AppState::plan_export_check`].
+        let check = self.state.plan_export_check(&summary);
+        let plan = match self.state.plan_export(&out, Some(&audit)) {
+            Ok(plan) => plan,
+            Err(e) => {
+                self.report(Err(e));
+                return;
+            }
+        };
+        // Ab hier entstehen neue Bytes dieser Datei.
+        let written = file_key(&out);
+        self.checks.retain(|pending| pending.key != written);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let repaint = RepaintOnDrop(self.ui_ctx.clone());
+        #[cfg(test)]
+        let force_panic = self.force_panic_in_export;
+        #[cfg(test)]
+        let gate = self.hold_export.clone();
+        let spawned = std::thread::Builder::new()
+            .name("redact-export".to_string())
+            .spawn({
+                let plan = plan.clone();
+                move || {
+                    // Wie bei der Nachprüfung: der Wächter hängt am **Ende des
+                    // Threads**, nicht an seinem Erfolg — stirbt der Thread
+                    // unterwegs, holt ohne Bild niemand das `Disconnected` ab,
+                    // und die Statuszeile bliebe für immer auf „Export läuft“.
+                    let _repaint = repaint;
+                    #[cfg(test)]
+                    if let Some(gate) = &gate {
+                        gate.arrive_and_wait();
+                    }
+                    #[cfg(test)]
+                    assert!(!force_panic, "Testhaken: der Export panikt");
+                    // Ein `Err` beim Senden heißt: niemand wartet mehr.
+                    let _ = sender.send(plan.run());
+                }
+            });
+        match spawned {
+            Ok(_) => {
+                self.state.status = EXPORT_RUNNING.to_string();
+                self.exports.push(PendingExport {
+                    out,
+                    audit,
+                    blocked,
+                    check,
+                    writing,
+                    result: receiver,
+                });
+            }
+            // Kein Thread zu haben ist kein Grund, nicht zu exportieren:
+            // langsam ist besser als gar nicht — genau wie bei der
+            // Nachprüfung.
+            Err(_) => {
+                let result = plan.run();
+                self.finish_export(&out, &audit, blocked, check, result);
+            }
+        }
+    }
+
+    /// Holt fertige Exporte ab — einmal je Bild, vor dem Zeichnen.
+    ///
+    /// Gibt zurück, wie viele Exporte fertig geworden sind.
+    pub fn poll_exports(&mut self) -> usize {
+        let mut done: Vec<(PendingExport, Option<redact_core::Result<Outcome>>)> = Vec::new();
+        let mut still = Vec::new();
+        for pending in std::mem::take(&mut self.exports) {
+            match pending.result.try_recv() {
+                Ok(result) => done.push((pending, Some(result))),
+                Err(TryRecvError::Empty) => still.push(pending),
+                // Der Thread ist ohne Ergebnis verschwunden (Panik).
+                Err(TryRecvError::Disconnected) => done.push((pending, None)),
+            }
+        }
+        self.exports = still;
+        let count = done.len();
+        for (pending, result) in done {
+            let PendingExport {
+                out,
+                audit,
+                blocked,
+                check,
+                ..
+            } = pending;
+            match result {
+                Some(result) => self.finish_export(&out, &audit, blocked, check, result),
+                None => {
+                    // Auch in die Warnungen: die Statuszeile überschreibt die
+                    // nächste Aktion, und ein Export, der nichts geschrieben
+                    // hat, darf nicht so aussehen wie einer, der es tat.
+                    let file = file_name_of(&out);
+                    self.note_check_warning(&file_key(&out), &file, EXPORT_BROKEN);
+                    self.state.status = EXPORT_BROKEN.to_string();
+                }
+            }
+        }
+        count
+    }
+
+    /// Trägt das Ergebnis eines Exports ein und startet die Nachprüfung.
+    ///
+    /// Genau die Schritte, die bis Fix-Runde 8 im Zeichentakt hinter
+    /// `state.export(…)` standen — in derselben Reihenfolge: Warnungen der
+    /// Datei eintragen (die des vorigen Exports **derselben** Datei fallen
+    /// dabei weg, [`RedactApp::note_export_warnings`]), Meldung bauen,
+    /// Nachprüfung starten.
+    fn finish_export(
+        &mut self,
+        out: &std::path::Path,
+        audit: &std::path::Path,
+        blocked: usize,
+        check: ExportCheckPlan,
+        result: redact_core::Result<Outcome>,
+    ) {
+        match result {
             Ok(outcome) => {
                 self.error = None;
                 // Erst jetzt gibt es die Datei — vorher könnte `file_key`
                 // sie nicht auflösen.
-                let key = file_key(&out);
-                self.note_export_warnings(&key, &file_name_of(&out), &outcome.warnings);
+                let key = file_key(out);
+                self.note_export_warnings(&key, &file_name_of(out), &outcome.warnings);
                 let prefix = export_status(
                     outcome.drawn_rects,
                     outcome.removed_glyphs,
-                    &out,
-                    &audit,
+                    out,
+                    audit,
                     blocked,
                     outcome.warnings.first().map(String::as_str),
                 );
-                // Die Nachprüfung über die geschriebenen Bytes — der Weg, den
-                // die Kommandozeile als `--check-leaks` bekommen hat, hier
-                // ohne Konsole und ohne getippte Geheimnisse. Siehe
-                // [`AppState::plan_export_check`].
-                let plan = self.state.plan_export_check(&summary);
-                self.start_export_check(prefix, plan, out, key);
+                self.start_export_check(prefix, check, out.to_path_buf(), key);
             }
             Err(e) => self.report(Err(e)),
         }
+    }
+
+    /// Läuft gerade ein Export?
+    pub fn export_running(&self) -> bool {
+        !self.exports.is_empty()
     }
 
     /// Trägt die Warnungen eines geglückten Exports ein — **ohne** die des
@@ -1390,6 +1697,10 @@ impl RedactApp {
     ///
     /// Gibt zurück, wie viele Urteile angekommen sind.
     pub fn poll_export_checks(&mut self) -> usize {
+        // Erst die fertigen Exporte: ihr Ergebnis startet die Nachprüfung, und
+        // so braucht es dafür kein weiteres Bild. Gezählt werden hier
+        // weiterhin nur die **Urteile** — ein fertiger Export ist keines.
+        self.poll_exports();
         let mut done = Vec::new();
         self.checks
             .retain(|pending| match pending.result.try_recv() {
@@ -1475,16 +1786,44 @@ impl RedactApp {
         !self.checks.is_empty()
     }
 
-    /// Wartet auf alle laufenden Nachprüfungen und trägt ihre Urteile ein.
+    /// Wartet, bis alle laufenden **Exporte** geschrieben sind — die
+    /// Nachprüfungen laufen danach weiter.
+    ///
+    /// Nur für Tests, und zwar für die, die den Prüf-Thread am [`CheckGate`]
+    /// abfangen: der beginnt erst, wenn der Export fertig ist und sein
+    /// Ergebnis abgeholt wurde ([`RedactApp::poll_exports`]). Ohne dieses
+    /// Warten stünde ein solcher Test vor einem Gatter, an dem nie jemand
+    /// ankommt.
+    #[cfg(test)]
+    pub fn wait_for_export(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while self.export_running() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "der Export kommt nicht zum Ende"
+            );
+            if self.poll_exports() == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// Wartet auf alle laufenden **Exporte und** Nachprüfungen und trägt ihre
+    /// Urteile ein.
     ///
     /// Nur für Tests: die Oberfläche wartet nie — sie holt je Bild ab.
+    ///
+    /// Beide Schritte, weil seit Fix-Runde 8 auch der Export auf einem Thread
+    /// läuft: „warte, bis der Export durch ist“ hieß bis dahin „warte auf die
+    /// Nachprüfung“, und ein Test, der nur darauf wartete, prüfte sonst eine
+    /// Datei, die noch niemand geschrieben hat.
     #[cfg(test)]
     pub fn wait_for_export_checks(&mut self) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while self.export_check_running() {
+        while self.export_running() || self.export_check_running() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "die Nachprüfung kommt nicht zum Ende"
+                "der Export kommt nicht zum Ende"
             );
             if self.poll_export_checks() == 0 {
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -2183,13 +2522,17 @@ impl RedactApp {
         if !ctx.input(|i| i.viewport().close_requested()) {
             return;
         }
-        if !needs_close_confirmation(self.state.has_manual_work(), self.close_confirmed) {
+        if !needs_close_confirmation(
+            self.state.has_manual_work(),
+            self.export_running(),
+            self.close_confirmed,
+        ) {
             return;
         }
         // Erst das Schließen zurücknehmen, dann fragen — sonst ist das Fenster
         // weg, bevor jemand antworten konnte.
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        if self.may_discard("Das Fenster zu schließen") {
+        if self.may_abandon_export() && self.may_discard("Das Fenster zu schließen") {
             self.close_confirmed = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -2496,6 +2839,14 @@ mod rev8_tests;
 #[cfg(test)]
 #[path = "zb_tests.rs"]
 mod zb_tests;
+
+// Fix-Runde 8, Agent C: der **Export** auf seinem eigenen Thread — der
+// Haken `hold_export`, die Ablehnung des zweiten Exports derselben Datei und
+// das Urteil, das eine laufende Prüfung verliert, sobald neue Bytes entstehen.
+// Kindmodul von `app` aus demselben Grund wie `zb_tests`.
+#[cfg(test)]
+#[path = "zh_c_export_tests.rs"]
+mod zh_c_export_tests;
 
 // Gegenprüfung R4, Teil 2: der Prüf-Thread selbst — `start_export_check`,
 // der Haken `CheckGate`, die Warnungsliste über mehrere Ausgabedateien.
@@ -4133,12 +4484,15 @@ mod tests {
     /// A8: die Rückfrage kommt genau dann, wenn wirklich etwas verloren geht.
     #[test]
     fn closing_only_asks_when_there_is_hand_work_to_lose() {
-        assert!(!needs_close_confirmation(false, false));
-        assert!(!needs_close_confirmation(false, true));
-        assert!(needs_close_confirmation(true, false));
+        assert!(!needs_close_confirmation(false, false, false));
+        assert!(!needs_close_confirmation(false, false, true));
+        assert!(needs_close_confirmation(true, false, false));
+        // Und der zweite Grund: ein Export, der noch schreibt.
+        assert!(needs_close_confirmation(false, true, false));
+        assert!(!needs_close_confirmation(false, true, true));
         // Nach dem Bestätigen darf nicht noch einmal gefragt werden, sonst
         // ließe sich das Fenster nie schließen.
-        assert!(!needs_close_confirmation(true, true));
+        assert!(!needs_close_confirmation(true, false, true));
 
         let text = discard_question(3, "Das Fenster zu schließen");
         assert!(text.contains('3'));
@@ -4716,15 +5070,29 @@ mod tests {
     /// endlos. Gearbeitet wird deshalb in einem eigenen Faden mit
     /// Zeitschranke — griffe die Grenze nicht, hinge sonst der Testlauf selbst,
     /// und ein hängender Test ist schlimmer als ein roter.
+    ///
+    /// `cfg(unix)` sagt, dass es benannte Pipes gibt — nicht, dass `mkfifo`
+    /// im `PATH` steht. Auf einem schlanken Unix-Bild ohne die Werkzeuge
+    /// (BusyBox ohne `mkfifo`, ein Container mit `scratch`-Basis) ließ das
+    /// ungeschützte `expect` auf dem Startergebnis den Testlauf platzen,
+    /// obwohl am Programm nichts falsch war — derselbe Fehler, den `belege.rs`
+    /// bei `python3` schon vermeidet: fehlt das Werkzeug, ist hier nichts zu
+    /// prüfen, und der Test sagt das und endet grün. Ein **vorhandenes**
+    /// `mkfifo`, das scheitert, bleibt dagegen ein Fehler: dann gibt es die
+    /// Pipe, und die Prüfung wäre stillschweigend ausgefallen.
     #[cfg(unix)]
     #[test]
     fn a_named_pipe_chosen_in_the_dialog_does_not_freeze_the_window() {
         let dir = temp_dir("pipe-review");
         let path = dir.join("pipe.json");
-        let ok = std::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .expect("mkfifo startbar");
+        let ok = match std::process::Command::new("mkfifo").arg(&path).status() {
+            Ok(status) => status,
+            Err(e) => {
+                eprintln!("kein mkfifo im Pfad ({e}) — die Pipe bleibt hier ungeprüft");
+                std::fs::remove_dir_all(&dir).ok();
+                return;
+            }
+        };
         assert!(ok.success(), "mkfifo ist fehlgeschlagen");
 
         // `RedactApp` bleibt in seinem Faden — nur die Meldung kommt zurück.
@@ -4886,6 +5254,7 @@ mod tests {
         });
         app.open_startup_document();
         app.export_to(out.clone());
+        app.wait_for_export();
         app.wait_for_export_checks();
 
         assert!(app.error.is_none(), "{:?}", app.error);
@@ -4913,6 +5282,7 @@ mod tests {
         });
         plain.open_startup_document();
         plain.export_to(second.clone());
+        plain.wait_for_export();
         plain.wait_for_export_checks();
         assert!(plain.error.is_none(), "{:?}", plain.error);
         assert!(AppState::audit_path_for(&second).exists());

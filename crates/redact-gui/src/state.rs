@@ -831,6 +831,55 @@ pub struct ExportCheckPlan {
     pub max_decompressed_bytes: u64,
 }
 
+/// Ein Export, der noch nicht geschrieben ist — alles, was
+/// [`redact_pipeline::apply`] dafür braucht, als reine Daten.
+///
+/// Der Grund ist derselbe wie bei [`ExportCheckPlan`]: so kommt die Arbeit auf
+/// einen eigenen Thread, ohne dass ein [`AppState`] (mit seinen Nicht-`Send`-
+/// Teilen und seiner fortlaufenden Bearbeitung) mitgehen müsste. Gemessen war
+/// der Export im Zeichentakt 6,3 s bei 305 Seiten — solange stand das Fenster
+/// und niemand wusste, ob es noch lebt (Befund R4-19).
+///
+/// Der Plan ist ein **Abzug**: was nach dem Klick an den Regionen geändert
+/// wird, steht nicht in der Ausgabe. Das ist die richtige Richtung — die Datei
+/// gehört zu dem Stand, den die Nutzerin exportiert hat, und die Nachprüfung
+/// bewertet denselben Stand ([`AppState::plan_export_check`]).
+#[derive(Clone)]
+pub struct ExportPlan {
+    /// Das geladene Dokument, ungeschwärzt — `run` schwärzt eine Kopie.
+    document: Arc<lopdf::Document>,
+    /// Die auszuführenden Schwärzungen ([`AppState::enabled_redactions`]).
+    redactions: Vec<Redaction>,
+    /// Die von der Negativliste gedeckten Flächen ([`AppState::blocked_regions`]).
+    blocked: Vec<BlockedRegion>,
+    /// Die Einstellungen dieses Exports ([`AppState::export_config`]).
+    config: Config,
+    /// Das halb gefüllte Log — die Zahlen des Eingangs stehen schon drin.
+    outcome: Outcome,
+}
+
+impl ExportPlan {
+    /// Schwärzt und schreibt — **die** Arbeit, und dieselbe wie auf der
+    /// Kommandozeile.
+    ///
+    /// Es ist derselbe Aufruf von [`redact_pipeline::apply`], der vorher in
+    /// [`AppState::export`] stand; verschoben ist nur, *wo* er läuft. Damit
+    /// bleibt die Ausgabe Byte für Byte dieselbe wie die der Kommandozeile
+    /// (`cli_and_gui_agree`).
+    pub fn run(mut self) -> Result<Outcome> {
+        let mut copy = (*self.document).clone();
+        redact_pipeline::apply(
+            &mut copy,
+            &self.redactions,
+            &self.blocked,
+            &self.config,
+            &mut self.outcome,
+        )?;
+        self.outcome.blocked_details = redact_pipeline::describe_blocked(&self.blocked);
+        Ok(self.outcome)
+    }
+}
+
 impl Default for ExportCheckPlan {
     /// Das Budget der Vorgabe — dieselbe Zahl wie `Config::default().limits`.
     /// Ein Plan aus [`AppState::plan_export_check`] trägt die Zahl der
@@ -3098,6 +3147,21 @@ impl AppState {
     ///   namens `…_geschwaerzt.pdf` samt Erfolgsmeldung — eine Datei, die
     ///   aussieht wie ein Ergebnis und keines ist.
     pub fn export(&self, out: &Path, audit: Option<&Path>) -> Result<Outcome> {
+        self.plan_export(out, audit)?.run()
+    }
+
+    /// Sammelt, was ein Export braucht — **ohne** zu schreiben.
+    ///
+    /// Derselbe Schnitt wie bei der Nachprüfung
+    /// ([`AppState::plan_export_check`], dann [`ExportCheckPlan::run`]): der
+    /// Plan ist ein Abzug des Zustands (reine Daten, `Send`), das Schreiben
+    /// macht [`ExportPlan::run`] — in der Oberfläche auf einem eigenen Thread.
+    ///
+    /// **Die beiden Ablehnungen fallen hier**, vor dem Thread und vor jedem
+    /// geschriebenen Byte: die Originaldatei als Ziel und „nichts ausgewählt“.
+    /// Sie sind die Antwort auf den Klick und müssen sofort in der
+    /// Statuszeile stehen, nicht erst, wenn ein Thread sich gemeldet hat.
+    pub fn plan_export(&self, out: &Path, audit: Option<&Path>) -> Result<ExportPlan> {
         let doc = self
             .document
             .as_ref()
@@ -3117,7 +3181,7 @@ impl AppState {
         }
 
         let config = self.export_config(out, audit);
-        let mut outcome = Outcome {
+        let outcome = Outcome {
             input: config.input.display().to_string(),
             input_sha256: self.input_sha256.clone(),
             pages: self.page_count(),
@@ -3130,11 +3194,16 @@ impl AppState {
             ..Default::default()
         };
 
-        let mut copy = (**doc).clone();
-        let blocked = self.blocked_regions();
-        redact_pipeline::apply(&mut copy, &redactions, &blocked, &config, &mut outcome)?;
-        outcome.blocked_details = redact_pipeline::describe_blocked(&blocked);
-        Ok(outcome)
+        Ok(ExportPlan {
+            // Der geladene Stand als **Abzug**: der `Arc` kostet nichts, und
+            // das Dokument bleibt für den Thread gültig, auch wenn inzwischen
+            // ein anderes geladen wird. Die teure Kopie macht `run`.
+            document: Arc::clone(doc),
+            redactions,
+            blocked: self.blocked_regions(),
+            config,
+            outcome,
+        })
     }
 
     // ---------------------------------------------------------- Nachprüfung

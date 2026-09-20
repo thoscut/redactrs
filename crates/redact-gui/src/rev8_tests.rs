@@ -114,6 +114,7 @@ fn r1_die_nachpruefung_nach_dem_export_ohne_fund() {
     assert!(mit_text > 0, "die Demo muss Treffer mit Text liefern");
 
     app.export_to(out.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
     let status = app.state.status.clone();
 
@@ -187,6 +188,7 @@ fn r2_die_nachpruefung_findet_ein_leck() {
     );
 
     app.export_to(out.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
     let status = app.state.status.clone();
 
@@ -243,6 +245,7 @@ fn r3_vorbehalt_und_handregionen_werden_wirklich_gemalt() {
     }
 
     app.export_to(out);
+    app.wait_for_export();
     app.wait_for_export_checks();
     let painted = painted_status(&mut app);
 
@@ -296,6 +299,7 @@ fn r3c_nur_handregionen_heisst_nichts_nachgeprueft() {
         .expect("angelegt");
 
     app.export_to(out);
+    app.wait_for_export();
     app.wait_for_export_checks();
     let status = app.state.status.clone();
     assert!(

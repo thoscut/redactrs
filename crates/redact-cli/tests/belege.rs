@@ -612,6 +612,60 @@ mod messwerte {
     pub const MEMMEM_JE_BEGRIFF_S: &str = "0,163";
     pub const HEUTE_1_S: &str = "5,01";
     pub const HEUTE_1000_S: &str = "5,99";
+
+    // --- Die zwei Dienstverweigerungen der Fix-Runde 7, nachgemessen ------
+    //
+    // Die Agenten der Runde 7 hatten diese Zahlen nur in die Doku **am
+    // Quelltext** geschrieben (`content.rs`, `redact.rs`); der CHANGELOG-Block
+    // sagte deshalb, *was* sich geändert hat, und nicht, um wie viel. Hier
+    // stehen sie am Baum dieser Runde nachgemessen, mit dem Lauf, aus dem sie
+    // stammen.
+
+    /// `BDC`-Klammern über Textoperationen: `B` verschachtelte Klammern über
+    /// `S` Textoperationen ergeben `B × S` Zuordnungen, aus einer Datei, die
+    /// dafür keinen Inhalt mitbringen muss. Die Zahl der Zuordnungen wird
+    /// **abgeleitet** (Produkt der beiden Faktoren), nicht abgeschrieben.
+    ///
+    /// Lauf (Debug, im Testprozess, zwei Läufe):
+    /// `R1_PAGES=1 R1_B=6000 R1_S=6000 cargo test -p redact-pdf --test
+    /// zg_r1_decke -- --ignored --nocapture --exact
+    /// mess_klammern_mal_textoperationen`
+    /// → `Datei 263475 B`, `scan_page 301,6 ms` bzw. `310,6 ms`,
+    /// `100000 Textzuordnungen`, `1 Warnung(en)`, `VmHWM 36352 kB`.
+    pub const TJ_KLAMMERN: usize = 6_000;
+    pub const TJ_OPERATIONEN: usize = 6_000;
+    pub const TJ_DATEI_BYTES: u64 = 263_475;
+    pub const TJ_SCAN_S: &str = "0,30–0,31";
+    pub const TJ_SPITZE_KB: u64 = 36_352;
+
+    /// Derselbe Fall, den [`DECKE_DATEI_BYTES`] und [`DECKE_SPITZE_KB`] als
+    /// Befund festhalten — jetzt **nach** der dokumentweiten Decke.
+    ///
+    /// Lauf (Debug, im Testprozess, zwei Läufe, der Extraktor übersprungen,
+    /// damit `VmHWM` den Redaktor allein trägt):
+    /// `R1_PAGES=1000 R1_B=100 R1_D=999 R1_SKIP_EXTRACT=1 cargo test -p
+    /// redact-pdf --test zg_r1_decke -- --ignored --nocapture --exact
+    /// mess_seiten_mal_paare`
+    /// → `Datei 224752 B`, `Redaktor 45,486 s` bzw. `45,639 s`,
+    /// `0 Warnung(en)`, `VmHWM 38532 kB`. Die 1 000 Seiten × 100 Klammern
+    /// sind genau `MAX_DEFERRED_MIRRORS` zurückgestellte Abschnitte, und
+    /// dass die Decke dort still bleibt und einen Schritt weiter nicht, hält
+    /// `zg_r1_decke::genau_an_der_dokumentweiten_decke_bleibt_es_still` fest.
+    pub const DECKE_REDAKTOR_S: &str = "45,5–45,6";
+    pub const DECKE_REDAKTOR_KB: u64 = 38_532;
+
+    /// Die Statuszeile mit den echten Stellen eines Laufs, **vor** der
+    /// Kürzung der Fix-Runde 7.
+    ///
+    /// Lauf (Debug): `cargo test -p redact-gui --lib
+    /// zg_r4_3_die_statuszeile_ist_als_ganzes_gedeckelt -- --nocapture`
+    /// → `der ganze Satz (1005 Zeichen)`. Die Doku am Quelltext
+    /// (`state.rs`, `zg_r4_tests.rs`) sagt dafür 981 und nennt dazu einen
+    /// Test, den es nicht mehr gibt
+    /// (`zg_r4_3_die_laengste_statuszeile_ist_wieder_ueber_804_zeichen`): die
+    /// Zahl stammt aus einer früheren Fassung der Messung. Gebunden ist, was
+    /// die Messung **heute** liefert.
+    pub const STATUSZEILE_ZEICHEN: usize = 1_005;
 }
 
 /// Die ausgeschriebene Zahl, wie die Doku kleine Zahlen schreibt.
@@ -1637,6 +1691,60 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // --- Die Messzahlen der beiden Dienstverweigerungen ------------------
+    //
+    // Der erste Weg, vor der Decke: das Produkt aus Klammern und
+    // Textoperationen wird **abgeleitet**, nicht abgeschrieben.
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "{} Klammern über {} `Tj` aus einer Datei von {} Byte ergaben {} Zuordnungen",
+            mit_tausendertrenner(m::TJ_KLAMMERN as u64),
+            mit_tausendertrenner(m::TJ_OPERATIONEN as u64),
+            mit_tausendertrenner(m::TJ_DATEI_BYTES),
+            mit_tausendertrenner((m::TJ_KLAMMERN * m::TJ_OPERATIONEN) as u64)
+        ),
+    );
+    // Derselbe Fall mit der Decke — die Zahl der Zuordnungen kommt aus dem
+    // Quelltext (`zuordnungen`), nicht aus der Doku.
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "bleibt dieselbe Datei bei {zuordnungen} Zuordnungen und einer Warnung, \
+             `scan_page` braucht dafür {} s, die Spitze liegt bei {} MB",
+            m::TJ_SCAN_S,
+            kb_in_mb(m::TJ_SPITZE_KB)
+        ),
+    );
+    // Der zweite Weg: dieselbe Eingabe wie im Befund der Einleitung, jetzt
+    // hinter der dokumentweiten Decke.
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "kosten die {} Seiten aus {} Byte den Redaktor {} s und {} MB statt {} MB, \
+             bei genau {} zurückgestellten Abschnitten",
+            m::DECKE_SEITEN,
+            mit_tausendertrenner(m::DECKE_DATEI_BYTES),
+            m::DECKE_REDAKTOR_S,
+            kb_in_mb(m::DECKE_REDAKTOR_KB),
+            mit_tausendertrenner(kb_in_mb(m::DECKE_SPITZE_KB)),
+            mit_tausendertrenner(dokumentdecke() as u64)
+        ),
+    );
+
+    // --- Und die Statuszeile, gemessen und gedeckelt ----------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "war mit den echten Stellen eines Laufs {} Zeichen lang",
+            mit_tausendertrenner(m::STATUSZEILE_ZEICHEN as u64)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!("auf höchstens {} Zeichen", statuszeilendecke()),
+    );
+
     aus
 }
 
@@ -1696,6 +1804,18 @@ fn zuordnungsdecke() -> usize {
         "crates/redact-pdf/src/content.rs",
         "MAX_MIRROR_FORM_PLACEMENTS",
     )
+}
+
+/// Die dokumentweite Decke der zurückgestellten Textspiegel — aus dem
+/// Quelltext des Redaktors, nicht abgeschrieben.
+fn dokumentdecke() -> usize {
+    konstante_aus("crates/redact-pdf/src/redact.rs", "MAX_DEFERRED_MIRRORS")
+}
+
+/// Wie viele Zeichen die Statuszeile der Oberfläche höchstens trägt — aus dem
+/// Quelltext der Oberfläche.
+fn statuszeilendecke() -> usize {
+    konstante_aus("crates/redact-gui/src/state.rs", "MAX_STATUS_CHARS")
 }
 
 /// Wie tief die Objektsicht des Orakels geht.

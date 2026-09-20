@@ -84,30 +84,90 @@
 //!    Startergebnis als gegeben nimmt. Für diese Marke rettet ein `cfg`
 //!    deshalb **nicht**; nur ein Ausweg zählt.
 //!
+//! # Die vierte Verschärfung: Zeichenkette oder Verwendung?
+//!
+//! Kommentare waren ausgenommen, Zeichenketten nicht — und daran schlug der
+//! Prüfer in dieser Runde auf einen **gebundenen Satz** an: `belege.rs` hält
+//! Sätze der Doku fest, und einer davon nannte den Namen des Unix-APIs, das
+//! oben behoben wurde. Umgangen wurde das, indem der Name aus dem Satz
+//! verschwand — die Doku beugte sich dem Prüfer, und das ist der falsche Weg
+//! herum.
+//!
+//! Zeichenketten *blind* auszunehmen wäre der falsche Ausweg zurück: dann
+//! wächst die blinde Fläche des Prüfers. Eine Verwendung kann sich nicht in
+//! einer Zeichenkette verstecken — eine Zeichenkette wird nicht ausgeführt —,
+//! aber ein Pfad, den `Command::new("…")` oder `Path::new("…")` weitergibt,
+//! **steht** in einem Literal und ist sehr wohl eine Verwendung. Ein Prüfer,
+//! der `"/proc/self/status"` in `read_to_string("/proc/self/status")` nicht mehr
+//! sieht, prüft nichts mehr.
+//!
+//! Unterschieden wird deshalb nach der **Stelle** der Marke im Literal
+//! ([`ist_verwendung`]):
+//!
+//! | Marke steht … | Beispiel | gilt als |
+//! |---|---|---|
+//! | im Code | `use std::os::unix::fs::…;` | Verwendung |
+//! | am Anfang des Inhalts | `Path::new("%SystemRoot%")` | Verwendung |
+//! | mitten im Inhalt | `format!("… {}mal std::os::unix::fs::symlink …", n)` | Erwähnung |
+//!
+//! Das ist die kleinste Regel, die beide Seiten trifft: eine Marke, vor der im
+//! selben Literal noch Text steht, ist Teil eines Satzes — Doku,
+//! Fehlermeldung, gebundener Satz. Eine Marke, mit der das Literal *anfängt*,
+//! **ist** die Einrichtung, die weitergegeben wird. Und die Marken, die selbst
+//! mit einem Anführungszeichen beginnen (`"/proc/`, `"C:\\Windows`), treffen
+//! ohnehin nur den Anfang eines Literals.
+//!
+//! Über eine Zeilengrenze trägt nur die ausdrückliche Fortsetzung mit `\` am
+//! Zeilenende ([`literalkarten`]) — und genau die braucht es, denn der gebundene
+//! Satz in `belege.rs` steht über drei Zeilen. Weiter trägt bewusst nichts: ein
+//! Zeichenliteral `'"'` oder eine rohe Zeichenkette endet nicht mit `\`, und ihr
+//! Irrtum bleibt deshalb auf seiner Zeile.
+//!
+//! Beide Seiten stehen als Proben im Baum:
+//!
+//! | Probe | vorher | jetzt |
+//! |---|---|---|
+//! | `Path::new("%SystemRoot%\\win.ini")` — Verwendung | rot | rot |
+//! | derselbe Name mitten in einem gebundenen Satz | rot | grün |
+//! | derselbe Satz über drei Zeilen fortgesetzt | rot | grün |
+//!
+//! # Was davon im Baum steht
+//!
 //! Die Gegenprüfung fand neun Stellen im Baum, die die geschärfte Regel
-//! verletzen und nicht `redact-cli` gehören. Drei davon sind behoben: zweimal
-//! `std::os::unix::fs::symlink` ohne `cfg` — kein Laufzeit-, sondern ein
-//! **Bau**fehler auf Windows, wo der CI-Job `cargo clippy --workspace
-//! --all-targets` und `cargo test --workspace` fährt — und einmal ein
-//! `/proc/self/status` mit `.expect(…)`, das ebendort zur Laufzeit panickt.
-//! Sechs bleiben: derselbe `mkfifo`-Fall, der an `cfg(unix)` hängt, aber am
-//! `PATH` scheitert. Sie stehen namentlich in [`ALTLASTEN`]; die Liste muss
-//! genau aufgehen — eine neue Verletzung macht den Test rot, eine behobene
-//! ebenso.
+//! verletzen und nicht `redact-cli` gehören. Drei davon sind in der Runde 7
+//! behoben: zweimal `std::os::unix::fs::symlink` ohne `cfg` — kein Laufzeit-,
+//! sondern ein **Bau**fehler auf Windows, wo der CI-Job `cargo clippy
+//! --workspace --all-targets` und `cargo test --workspace` fährt — und einmal
+//! ein `/proc/self/status` mit `.expect(…)`, das ebendort zur Laufzeit panickt.
+//!
+//! Die sechs `mkfifo`-Stellen tragen jetzt den Ausweg, den `belege.rs` für
+//! `python3` vormacht: `match … { Ok(…) => …, Err(e) => { Hinweis; return } }`.
+//! Fünf davon nennt [`BEHOBENE_MKFIFO`] namentlich, und
+//! [`die_fuenf_behobenen_mkfifo_stellen_haben_ihren_ausweg_und_sagen_ihn`] hält
+//! sie fest — samt der Zeile, die sagt, was ein übersprungener Test *nicht*
+//! geprüft hat. Ein stiller Übersprung wäre aus einer Prüfung eine Entwarnung
+//! geworden.
+//!
+//! Was noch offen ist, steht namentlich in [`ALTLASTEN`]; die Liste muss genau
+//! aufgehen — eine neue Verletzung macht den Test rot, eine behobene ebenso,
+//! und leer sein darf sie auch.
 //!
 //! Der Test liest den Quelltext, nicht das Programm — deshalb steht er hier
 //! und braucht kein Windows.
 //!
-//! Die neun Proben stehen als Quelltext-Schnipsel in
-//! [`die_neun_proben_der_gegenpruefung`] — dort, wo die Regel sie beißt, und
-//! nicht als Anhängsel an einer fremden Datei. Drei Gegenproben stehen daneben:
-//! derselbe Zugriff unter `cfg`, mit `.ok()` in derselben Anweisung, und der
+//! Die zwölf Proben stehen als Quelltext-Schnipsel in
+//! [`die_zwoelf_proben_der_gegenpruefung`] — dort, wo die Regel sie beißt, und
+//! nicht als Anhängsel an einer fremden Datei (neun aus der Runde 6, drei für
+//! die Zeichenketten dieser Runde). Drei Gegenproben stehen daneben: derselbe
+//! Zugriff unter `cfg`, mit `.ok()` in derselben Anweisung, und der
 //! `python3`-Weg mit `match … Err(e) => …`.
 //!
-//! Mutationsnachweis: jede der drei Verschärfungen einzeln zurückgenommen
+//! Mutationsnachweis: jede der vier Verschärfungen einzeln zurückgenommen
 //! (Ausweg im 8-Zeilen-Fenster statt in der Anweisung; Kommentare nur
-//! zeilenweise; `Command::new` unter `Schutz::CfgOderAusweg`) →
-//! `die_neun_proben_der_gegenpruefung` ist jeweils rot und nennt die Probe.
+//! zeilenweise; `Command::new` unter `Schutz::CfgOderAusweg`; [`ist_verwendung`]
+//! einmal ohne die Erwähnung und einmal blind gegen jedes Literal; der Übertrag
+//! in [`literalkarten`] gestrichen) →
+//! `die_zwoelf_proben_der_gegenpruefung` ist jeweils rot und nennt die Probe.
 //! Dazu: `ALTLASTEN` um einen Eintrag gekürzt → rot, um einen erfundenen
 //! erweitert → rot.
 
@@ -323,6 +383,112 @@ fn ohne_zeichenketten(zeile: &str) -> String {
     aus
 }
 
+/// Für jedes **Byte** einer Zeile: steht es im *Inhalt* einer Zeichenkette,
+/// und als wievieltes Zeichen dieses Inhalts?
+///
+/// `None` heißt Code — die Anführungszeichen selbst gehören dazu, denn eine
+/// Marke wie `"/proc/` beginnt mit dem öffnenden Anführungszeichen.
+///
+/// `uebertrag` ist der Stand am Ende der vorigen Zeile (siehe
+/// [`literalkarten`]); zurück kommt der Stand am Ende dieser.
+fn literalkarte(zeile: &str, uebertrag: Option<usize>) -> (Vec<Option<usize>>, Option<usize>) {
+    let mut karte: Vec<Option<usize>> = vec![None; zeile.len()];
+    let mut drin = uebertrag;
+    let mut zeichen = zeile.char_indices();
+    while let Some((b, c)) = zeichen.next() {
+        let Some(k) = drin else {
+            if c == '"' {
+                drin = Some(0);
+            }
+            continue;
+        };
+        if c == '"' {
+            drin = None;
+            continue;
+        }
+        karte[b..b + c.len_utf8()].fill(Some(k));
+        drin = Some(k + 1);
+        if c == '\\' {
+            // Maskiertes Zeichen: es schließt die Kette nicht.
+            if let Some((b2, c2)) = zeichen.next() {
+                karte[b2..b2 + c2.len_utf8()].fill(Some(k + 1));
+                drin = Some(k + 2);
+            }
+        }
+    }
+    (karte, drin)
+}
+
+/// Die Karten aller Zeilen — und der einzige Übertrag, der über eine
+/// Zeilengrenze trägt: die ausdrückliche Fortsetzung mit `\` am Zeilenende.
+///
+/// Der gebundene Satz in `belege.rs` ist genau so geschrieben — ein Literal
+/// über drei Zeilen, mit `\` fortgesetzt. Ohne Übertrag sähe der Prüfer die
+/// zweite Zeile als Code und schlüge dort wieder an; die Lieferung wäre halb.
+///
+/// Weiter trägt bewusst **nichts**. Ein `\` am Zeilenende kann in Rust nur in
+/// einem Literal stehen; ein Zeichenliteral wie `'"'` oder eine rohe
+/// Zeichenkette (`r#"…"#`) endet nicht so, und ihr Irrtum bleibt deshalb auf
+/// seiner Zeile. Das ist die Richtung, in die ein Prüfer irren darf — eine
+/// Marke bleibt sichtbar, statt zu verschwinden.
+fn literalkarten(zeilen: &[&str]) -> Vec<Vec<Option<usize>>> {
+    let mut alle = Vec::with_capacity(zeilen.len());
+    let mut uebertrag: Option<usize> = None;
+    for zeile in zeilen {
+        let (karte, offen) = literalkarte(zeile, uebertrag);
+        uebertrag = if zeile.trim_end().ends_with('\\') {
+            offen
+        } else {
+            None
+        };
+        alle.push(karte);
+    }
+    alle
+}
+
+/// Ist die Marke, die bei Byte `p` beginnt, eine **Verwendung** — oder nur eine
+/// **Erwähnung** in einem Text?
+///
+/// Das ist die Blindstelle, die diese Runde schließt. Kommentare waren schon
+/// ausgenommen ([`ohne_kommentare`]), Zeichenketten nicht: der gebundene Satz
+/// in `belege.rs`, der einen behobenen Befund beschreibt, schlug an, weil er
+/// den Namen des Unix-APIs nannte.
+///
+/// Zeichenketten *blind* auszunehmen wäre der falsche Ausweg: ein Pfad, den
+/// `Command::new("mkfifo")` oder `Path::new("%SystemRoot%")` weitergibt, steht
+/// in einem Literal und ist sehr wohl eine Verwendung. Die Unterscheidung
+/// hängt deshalb an der **Stelle** der Marke im Literal:
+///
+/// * Code (`None`) — oder das öffnende Anführungszeichen, mit dem eine Marke
+///   wie `"/proc/` selbst beginnt: **Verwendung**.
+/// * am Anfang des Inhalts (`Some(0)`) — das Literal *ist* die Einrichtung,
+///   `Path::new("%SystemRoot%")`: **Verwendung**.
+/// * mitten im Inhalt (`Some(k)`, `k > 0`) — vor der Marke steht Text, sie ist
+///   also Teil eines Satzes: **Erwähnung**.
+///
+/// Gebunden von den Proben „Verwendung im Zeichenketten-Argument“ (muss rot
+/// machen) und „Erwähnung im gebundenen Satz“ (darf nicht rot machen) in
+/// [`die_zwoelf_proben_der_gegenpruefung`].
+fn ist_verwendung(karte: &[Option<usize>], p: usize) -> bool {
+    !matches!(karte.get(p), Some(Some(k)) if *k > 0)
+}
+
+/// Die erste Marke der Zeile, die dort wirklich **verwendet** wird.
+///
+/// Die Reihenfolge ist die von [`HEIKEL`] — wie vorher; neu ist nur, dass eine
+/// Marke nicht zählt, wenn *jedes* ihrer Vorkommen in der Zeile bloß eine
+/// Erwähnung ist.
+fn verwendete_marke(zeile: &str, karte: &[Option<usize>]) -> Option<(&'static str, Schutz)> {
+    HEIKEL
+        .iter()
+        .find(|(t, _)| {
+            zeile
+                .match_indices(*t)
+                .any(|(p, _)| ist_verwendung(karte, p))
+        })
+        .map(|(t, s)| (*t, *s))
+}
+
 /// Endet die Anweisung mit dieser Zeile?
 fn schliesst(zeile: &str) -> bool {
     let s = zeile.trim_end();
@@ -412,37 +578,15 @@ fn kopf_hat_cfg(zeilen: &[&str], kopf: usize) -> bool {
 /// **genau**: eine neue Verletzung macht ihn rot, und eine behobene ebenso —
 /// dann ist die Zeile hier zu streichen.
 const ALTLASTEN: &[(&str, &str, &str)] = &[
-    // Sechsmal derselbe Fall: `Command::new("mkfifo")…status().expect(…)`
-    // unter `#[cfg(unix)]`. `cfg(unix)` sagt nichts über den `PATH`; auf einem
-    // schlanken Unix-Bild ohne `util-linux` panickt der Test, statt sich — wie
-    // `belege.rs` es für `python3` vormacht — mit einem Hinweis zu begnügen.
-    (
-        "crates/redact-booking/tests/loader_tests.rs",
-        "Command::new(\"",
-        "mkfifo ohne Ausweg",
-    ),
-    (
-        "crates/redact-cli/tests/check_leaks.rs",
-        "Command::new(\"",
-        "mkfifo ohne Ausweg",
-    ),
-    (
-        "crates/redact-cli/tests/hardening.rs",
-        "Command::new(\"",
-        "mkfifo ohne Ausweg",
-    ),
-    (
-        "crates/redact-core/src/read.rs",
-        "Command::new(\"",
-        "mkfifo ohne Ausweg",
-    ),
+    // Was von den sechs `mkfifo`-Stellen noch offen ist:
+    // `Command::new("mkfifo")…status().expect(…)` unter `#[cfg(unix)]`.
+    // `cfg(unix)` sagt nichts über den `PATH`; auf einem schlanken Unix-Bild
+    // ohne `util-linux` panickt der Test, statt sich — wie `belege.rs` es für
+    // `python3` vormacht — mit einem Hinweis zu begnügen. Die fünf anderen
+    // sind behoben und deshalb gestrichen; sie stehen in [`BEHOBENE_MKFIFO`]
+    // und werden dort festgehalten.
     (
         "crates/redact-gui/src/app.rs",
-        "Command::new(\"",
-        "mkfifo ohne Ausweg",
-    ),
-    (
-        "crates/redact-patterns/tests/config_limits.rs",
         "Command::new(\"",
         "mkfifo ohne Ausweg",
     ),
@@ -453,6 +597,20 @@ const ALTLASTEN: &[(&str, &str, &str)] = &[
     // `/proc/self/status` ohne Ausweg las (ein Laufzeitfehler ebendort). Der
     // Symlink steht jetzt unter `#[cfg(unix)]`, `proc_status` samt seinem
     // Messtest unter `#[cfg(target_os = "linux")]`.
+];
+
+/// Die fünf `mkfifo`-Stellen, die diese Runde behoben hat.
+///
+/// Sie starten das Werkzeug weiter — aber **mit** Ausweg, und sie sagen auf
+/// `stderr`, was sie deshalb nicht geprüft haben. Namentlich hier, weil
+/// [`ALTLASTEN`] sie nicht mehr deckt: ohne diese Liste wäre die Korrektur nur
+/// so lange da, wie niemand sie zurücknimmt.
+const BEHOBENE_MKFIFO: &[&str] = &[
+    "crates/redact-booking/tests/loader_tests.rs",
+    "crates/redact-cli/tests/check_leaks.rs",
+    "crates/redact-cli/tests/hardening.rs",
+    "crates/redact-core/src/read.rs",
+    "crates/redact-patterns/tests/config_limits.rs",
 ];
 
 /// Ein Pfad mit `/` als Trenner, egal auf welchem System er entstand.
@@ -508,6 +666,7 @@ fn verstoesse() -> (Vec<Verstoss>, usize) {
             .replace("\r\n", "\n");
         let text = ohne_kommentare(&roh);
         let zeilen: Vec<&str> = text.lines().collect();
+        let karten = literalkarten(&zeilen);
         let datei_gedeckt = zeilen.iter().any(|z| {
             let s = z.trim_start();
             s.starts_with("#![cfg(target_os")
@@ -524,11 +683,7 @@ fn verstoesse() -> (Vec<Verstoss>, usize) {
         );
 
         for (i, zeile) in zeilen.iter().enumerate() {
-            let Some((marke, schutz)) = HEIKEL
-                .iter()
-                .find(|(t, _)| zeile.contains(t))
-                .map(|(t, s)| (*t, *s))
-            else {
+            let Some((marke, schutz)) = verwendete_marke(zeile, &karten[i]) else {
                 continue;
             };
             geprueft += 1;
@@ -645,13 +800,19 @@ fn keine_systemeinrichtung_ohne_cfg_oder_ohne_ausweg() {
     );
 }
 
-/// Die Regel gegen sich selbst: die neun Proben der Gegenprüfung, hier als
+/// Die Regel gegen sich selbst: die zwölf Proben der Gegenprüfung, hier als
 /// Quelltext-Schnipsel statt als Anhängsel an eine fremde Datei.
 ///
-/// Das ist der Mutationsnachweis **im Baum**: wird eine der drei
+/// Neun aus der Runde 6, drei für die Zeichenketten dieser Runde — eine
+/// Verwendung im Zeichenketten-Argument (muss rot machen) und zwei Erwähnungen,
+/// die nicht rot machen dürfen: der gebundene Satz auf einer Zeile und derselbe
+/// Satz über drei Zeilen fortgesetzt, wie `belege.rs` ihn schreibt. Dazu drei
+/// Gegenproben, die zeigen, wie es richtig aussieht.
+///
+/// Das ist der Mutationsnachweis **im Baum**: wird eine der vier
 /// Verschärfungen zurückgenommen, wird dieser Test rot und nennt die Probe.
 #[test]
-fn die_neun_proben_der_gegenpruefung() {
+fn die_zwoelf_proben_der_gegenpruefung() {
     // (Name, Rumpf, erwartet: ist es ein Verstoß?)
     const PROBEN: &[(&str, &str, bool)] = &[
         (
@@ -699,6 +860,31 @@ fn die_neun_proben_der_gegenpruefung() {
             "fn f() {\n    let _s = std::process::Command::new(\"mkfifo\").arg(\"x\").status().expect(\"mkfifo startbar\");\n}\n",
             true,
         ),
+        // Die Blindstelle dieser Runde: Zeichenketten. Eine Marke, mit der das
+        // Literal *anfängt*, wird weitergegeben — das ist eine Verwendung, auch
+        // ohne Schrägstrich am Anfang.
+        (
+            "Verwendung im Zeichenketten-Argument",
+            "fn f() {\n    let p = std::path::Path::new(\"%SystemRoot%\\\\win.ini\");\n    let _t = std::fs::read_to_string(p).expect(\"nur Windows\");\n}\n",
+            true,
+        ),
+        // Und die Gegenseite: derselbe Name mitten in einem Satz, den ein Test
+        // an die Doku bindet. Das ist Text *über* die Regel, keine Verwendung —
+        // genau der Fehlalarm, der `belege.rs` den Namen aus dem Satz nahm.
+        (
+            "Erwähnung im gebundenen Satz",
+            "fn f() {\n    let _s = format!(\"{} Stellen verletzten die Regel, {}mal std::os::unix::fs::symlink ohne cfg\", 9, 2);\n}\n",
+            false,
+        ),
+        // Und derselbe Satz, wie `belege.rs` ihn wirklich schreibt: ein Literal
+        // über drei Zeilen, mit `\` fortgesetzt. Ohne den Übertrag in
+        // [`literalkarten`] sähe der Prüfer die zweite Zeile als Code und
+        // schlüge dort wieder an — die Lieferung wäre halb.
+        (
+            "Erwähnung im fortgesetzten Satz",
+            "fn f() {\n    let _s = format!(\n        \"{} Stellen im Baum verletzten die Regel; **{} davon** sind behoben: \\\n         {}mal `std::os::unix::fs::symlink` **ohne** `cfg`\",\n        9, 3, 2\n    );\n}\n",
+            false,
+        ),
         // Die Gegenrichtung: genau so ist es richtig (der `python3`-Weg aus
         // `belege.rs`), und genau so darf die Regel nicht anschlagen.
         (
@@ -722,13 +908,10 @@ fn die_neun_proben_der_gegenpruefung() {
     for (name, rumpf, erwartet) in PROBEN {
         let text = ohne_kommentare(&rumpf.replace("\r\n", "\n"));
         let zeilen: Vec<&str> = text.lines().collect();
+        let karten = literalkarten(&zeilen);
         let mut verstoss = false;
         for (i, zeile) in zeilen.iter().enumerate() {
-            let Some((_, schutz)) = HEIKEL
-                .iter()
-                .find(|(t, _)| zeile.contains(t))
-                .map(|(t, s)| (*t, *s))
-            else {
+            let Some((_, schutz)) = verwendete_marke(zeile, &karten[i]) else {
                 continue;
             };
             let satz = anweisung(&zeilen, i);
@@ -759,6 +942,17 @@ fn die_neun_proben_der_gegenpruefung() {
         falsch.len(),
         falsch.join("\n")
     );
+
+    // Die Zahl im Namen dieses Tests ist gebunden: zwölf Proben und drei
+    // Gegenproben. Ohne diese Zeile hätte der Name still veralten können — so
+    // wie „neun“ es tat, als die drei Gegenproben dazukamen.
+    assert_eq!(
+        PROBEN.len(),
+        12 + 3,
+        "der Name nennt zwölf Proben und die Doku drei Gegenproben — die Liste \
+         hat aber {} Einträge",
+        PROBEN.len()
+    );
 }
 
 /// Jede Altlast trägt ihren Grund, und der Grund stimmt noch: die Marke steht
@@ -780,15 +974,10 @@ fn jede_altlast_traegt_ihren_grund_und_ihren_fall() {
             "{datei} enthält „{marke}“ nicht mehr — Eintrag in ALTLASTEN streichen"
         );
     }
-    // Der `mkfifo`-Fall ist der große: er hängt am `PATH`, nicht am Ziel.
-    let mkfifo = ALTLASTEN
-        .iter()
-        .filter(|(_, m, _)| *m == "Command::new(\"")
-        .count();
-    assert!(
-        mkfifo >= 5,
-        "nur {mkfifo} `mkfifo`-Altlast(en) — dann ist die Begründung neu zu schreiben"
-    );
+    // Der `mkfifo`-Fall ist der große: er hängt am `PATH`, nicht am Ziel. Eine
+    // Zahl steht hier nicht mehr — die Liste darf auf null schrumpfen, und das
+    // ist der Sinn der Übung. Wieviel von ihr behoben ist, hält
+    // [`BEHOBENE_MKFIFO`] fest.
     for (datei, marke, _) in ALTLASTEN {
         if *marke != "Command::new(\"" {
             continue;
@@ -799,4 +988,53 @@ fn jede_altlast_traegt_ihren_grund_und_ihren_fall() {
             "{datei} startet kein `mkfifo` mehr — Eintrag in ALTLASTEN streichen"
         );
     }
+}
+
+/// Die fünf behobenen `mkfifo`-Stellen bleiben behoben — und bleiben **laut**.
+///
+/// [`ALTLASTEN`] deckt sie nicht mehr; ohne diesen Test wäre ein Rückfall auf
+/// `.expect("mkfifo startbar")` nur eine neue Verletzung unter vielen, und ein
+/// stiller Übersprung fällt überhaupt niemandem auf. Genau das ist die
+/// Fehlerklasse dieses Projekts: aus einer Prüfung wird eine Entwarnung.
+///
+/// Vier Dinge werden gehalten: das Werkzeug wird noch gestartet (sonst gehört
+/// die Zeile hier weg), sein Startergebnis geht über ein `match` (der Ausweg in
+/// derselben Anweisung), es wird **nicht** als gegeben genommen, und der
+/// Übersprung druckt eine Zeile.
+///
+/// Mutation (nachgewiesen): in `crates/redact-core/src/read.rs` das `match`
+/// durch `.expect("mkfifo startbar")` ersetzt → dieser Test rot, und nur er
+/// sowie `keine_systemeinrichtung_ohne_cfg_oder_ohne_ausweg`.
+#[test]
+fn die_fuenf_behobenen_mkfifo_stellen_haben_ihren_ausweg_und_sagen_ihn() {
+    for datei in BEHOBENE_MKFIFO {
+        let text = std::fs::read_to_string(repo_root().join(datei))
+            .unwrap_or_else(|e| panic!("{datei} lesbar: {e}"));
+        assert!(
+            text.contains("Command::new(\"mkfifo\")"),
+            "{datei} startet kein `mkfifo` mehr — dann gehört die Zeile hier weg"
+        );
+        assert!(
+            text.contains("match std::process::Command::new(\"mkfifo\")")
+                || text.contains("match Command::new(\"mkfifo\")"),
+            "{datei} führt das Startergebnis nicht mehr über ein `match` — dann gibt es \
+             keinen Ausweg in derselben Anweisung"
+        );
+        assert!(
+            !text.contains(".expect(\"mkfifo startbar\")"),
+            "{datei} nimmt das Startergebnis wieder als gegeben"
+        );
+        assert!(
+            text.contains("kein mkfifo im Pfad"),
+            "{datei} überspringt still — ein übersprungener Test muss sagen, was er \
+             nicht geprüft hat und warum"
+        );
+    }
+    assert!(
+        ALTLASTEN
+            .iter()
+            .all(|(d, _, _)| !BEHOBENE_MKFIFO.contains(d)),
+        "eine behobene Stelle steht noch in ALTLASTEN — dann deckt die Liste mehr, \
+         als es gibt"
+    );
 }

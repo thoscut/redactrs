@@ -140,6 +140,21 @@
 //! einer von **fünf** Gründen, die dort stehen können — die Aufzählung führt
 //! [`LeakCheck`].
 //!
+//! ## Der Ort einer Fundstelle
+//!
+//! Jede Fundstelle kommt zweimal: als **Satz** (`findings`) und als **Ort**
+//! ([`LeakCheck::sites`], ein [`LeakSite`] je Fund, gleiche Reihenfolge). Der
+//! Satz ist für Menschen — Kommandozeile, Oberfläche, `docs/pruefung.txt` —
+//! und bleibt Zeichen für Zeichen, wie er ist. Der Ort ist für Programme: er
+//! nennt die Sicht, die Seite (wo eine Sicht eine kennt, also Sicht 7) und die
+//! Objekt-Id (wo sie eine kennt).
+//!
+//! Der Grund ist eine Sicherheitsfolge, kein Komfort: die Oberfläche muss
+//! „gewollt stehen geblieben“ von „Schwärzung danebengegangen“ trennen. Solange
+//! der Ort nur im Satz stand, konnte sie ihn bloß aus einer Meldung herauslesen
+//! — und eine danebengegangene Schwärzung sah aus wie ein bewusst stehen
+//! gelassener Text. Aus einem Leck wurde „keine Aussage“.
+//!
 //! ## Fehlerrichtung
 //!
 //! Im Zweifel meldet der Detektor zu viel. Ein Fehlalarm lässt einen Test laut
@@ -256,6 +271,26 @@ pub struct LeakCheck {
     /// stehen gelassene Schreibweise derselben Normalform (Befund P5-2).
     /// Sie kostet nichts: gezählt wird beim Melden, nicht beim Suchen.
     pub literal: Vec<bool>,
+    /// Je Suchbegriff und je Fundstelle: **wo** sie liegt — maschinenlesbar,
+    /// neben ihrem Text in `findings`.
+    ///
+    /// `sites[n][i]` gehört zu `findings[n][i]`: gleiche Länge, gleiche
+    /// Reihenfolge, Eintrag für Eintrag (geprüft in
+    /// `tests/zh_a_ort_maschinenlesbar.rs`).
+    ///
+    /// **Warum das Feld hier steht.** Bis Fix-Runde 7 stand der Ort einer
+    /// Fundstelle nur in ihrem Text („Objekt 7 0/Popup/Contents“, „Seite 3“).
+    /// Die Oberfläche muss aber „gewollt stehen geblieben“ von „Schwärzung
+    /// danebengegangen“ trennen — und hatte dafür nur diesen Text, also nur
+    /// Raten. Damit sah eine danebengegangene Schwärzung aus wie ein bewusst
+    /// stehen gelassener Text, und aus einem Leck wurde „keine Aussage“
+    /// (Register #41, Vertrag V5). Jetzt liegt der Ort maschinenlesbar
+    /// daneben, so wie [`LeakCheck::literal`] die Schreibweise daneben legt.
+    ///
+    /// Der Text in `findings` ist davon **unberührt**: er ist Ausgabe
+    /// (Kommandozeile, Oberfläche, `docs/pruefung.txt`), und ein zusätzliches
+    /// Feld bricht keine Ausgabe.
+    pub sites: Vec<Vec<LeakSite>>,
     /// Was nicht durchsucht wurde, je Stelle ein Satz (Objekt, Grund) — die
     /// fünf möglichen Gründe stehen oben am Typ.
     pub unchecked: Vec<String>,
@@ -275,6 +310,82 @@ pub struct LeakCheck {
     /// je eine. `unchecked_places == 0` heißt deshalb genau dasselbe wie
     /// `unchecked.is_empty()`.
     pub unchecked_places: usize,
+}
+
+/// Welche der sieben Sichten des Modulkopfs einen Fund hatte.
+///
+/// Die Sicht sagt, **auf welcher Ebene** der Text noch steht, und das ist
+/// eine andere Auskunft als der Fund selbst: ein Fund in
+/// [`LeakView::FontDecoder`] steht auf dem Papier, einer in
+/// [`LeakView::RawFile`] in den Rohbytes (etwa einer Altrevision), einer in
+/// [`LeakView::StringObject`] in einem Feld, das kein Leser zu sehen bekommt.
+///
+/// Die Nummern sind die des Modulkopfs; [`LeakView::number`] gibt sie aus,
+/// damit eine Oberfläche „Sicht 3“ schreiben kann wie die Doku.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum LeakView {
+    /// Sicht 1: die rohen Dateibytes.
+    RawFile,
+    /// Sicht 2: ein roh gefundener `stream … endstream`-Block — gepackt wie
+    /// entpackt.
+    RawStream,
+    /// Sicht 3: ein Stream-Objekt des Objektgraphen, roh und über
+    /// [`crate::filters`] dekodiert.
+    Stream,
+    /// Sicht 4: ein Objekt **in** einem Objekt-Stream (`/ObjStm`).
+    ObjectStream,
+    /// Sicht 5: ein Zeichenketten- oder Namensobjekt des Objektgraphen,
+    /// Trailer eingeschlossen.
+    StringObject,
+    /// Sicht 6: die Verkettung aller Zeichenketten-Literale **in** einem
+    /// Datenblock — der Fund, den ein per `TJ` zerlegter Text nur so hergibt.
+    StringConcat,
+    /// Sicht 7: eine Seite, wie der eigene Schriftdekoder sie liest.
+    FontDecoder,
+}
+
+impl LeakView {
+    /// Die Nummer, unter der der Modulkopf diese Sicht führt.
+    pub fn number(self) -> u8 {
+        match self {
+            Self::RawFile => 1,
+            Self::RawStream => 2,
+            Self::Stream => 3,
+            Self::ObjectStream => 4,
+            Self::StringObject => 5,
+            Self::StringConcat => 6,
+            Self::FontDecoder => 7,
+        }
+    }
+}
+
+/// Der Ort einer Fundstelle, maschinenlesbar — neben ihrem Text.
+///
+/// Gefüllt wird, was die Sicht **weiß**; geraten wird nichts:
+///
+/// * `page` kennt nur [`LeakView::FontDecoder`]: allein diese Sicht läuft
+///   über Seiten. Die Sichten 1–6 laufen über Objekte, und ein Strom kann von
+///   mehreren Seiten benutzt werden — eine Seitenzahl daneben wäre eine
+///   Zusicherung, die an der nächsten Stelle nicht mehr gilt.
+/// * `object` kennt jede Sicht, die ein Objekt nennt: die Sichten aus dem
+///   Objektgraphen immer, die Rohsicht dann, wenn vor dem Block ein
+///   Objektkopf `N G obj` steht. Sicht 1 und Sicht 7 nennen keines.
+///
+/// Was hier `None` ist, heißt also „diese Sicht weiß es nicht“ — nicht „es
+/// gibt keine Seite“.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LeakSite {
+    /// Welche Sicht den Fund hatte.
+    pub view: LeakView,
+    /// Die Seite, **1-basiert wie im Text** der Fundstelle: „Seite 3“ ist
+    /// `Some(3)`. `None`, wenn die Sicht keine Seite kennt.
+    pub page: Option<usize>,
+    /// Objektnummer und Generation, wie `lopdf` sie zählt. `None`, wenn die
+    /// Sicht kein Objekt kennt.
+    ///
+    /// Bei [`LeakView::ObjectStream`] ist es das **enthaltene** Objekt — dort
+    /// steht der Text; welcher Container es trägt, sagt der Meldungstext.
+    pub object: Option<(u32, u16)>,
 }
 
 /// [`leaks_many`] mit einem Budget für entpackte Bytes.
@@ -337,10 +448,11 @@ pub fn leaks_many_within(
 ) -> LeakCheck {
     let mut probe = Probe::new(needles);
     if probe.needles.is_empty() {
-        let (findings, literal) = probe.into_hits();
+        let (findings, literal, sites) = probe.into_hits();
         return LeakCheck {
             findings,
             literal,
+            sites,
             unchecked: Vec::new(),
             unchecked_places: 0,
         };
@@ -394,10 +506,11 @@ pub fn leaks_many_within(
         }
     }
 
-    let (findings, literal) = probe.into_hits();
+    let (findings, literal, sites) = probe.into_hits();
     LeakCheck {
         findings,
         literal,
+        sites,
         unchecked,
         unchecked_places: places,
     }
@@ -702,15 +815,15 @@ impl Probe {
     }
 
     /// Byteweise Suche in `hay` — alle Kodierungen aller Begriffe in einem
-    /// Durchgang; `location` und `how` beschreiben die Fundstelle.
-    fn scan_bytes(&mut self, hay: &[u8], limit: usize, location: &str, how: &str) {
+    /// Durchgang; `site` und `how` beschreiben die Fundstelle.
+    fn scan_bytes(&mut self, hay: &[u8], limit: usize, site: Site<'_>, how: &str) {
         let found = self.bytes.positions(hay, limit);
         for (id, positions) in found.iter().enumerate() {
             let (n, v) = self.bytes.slots[id];
             let variant = self.needles[n].variants[v].0;
             for &pos in positions {
                 self.reports[n].hit_bytes(
-                    location,
+                    site,
                     &format!("{how}, {variant}"),
                     hay,
                     pos,
@@ -723,7 +836,7 @@ impl Probe {
     /// Erste Fundstelle je Begriff in dekodiertem Text — `text` steht für
     /// die Muster mit Leerraum (Muster-Id = Begriff), `squeezed` für die
     /// ohne. Zurück kommt je Begriff, ob der Text selbst getroffen hat.
-    fn scan_text_plain(&mut self, text: &str, location: &str, how: &str) -> Vec<bool> {
+    fn scan_text_plain(&mut self, text: &str, site: Site<'_>, how: &str) -> Vec<bool> {
         let found = self.text.positions(text.as_bytes(), 1);
         found
             .iter()
@@ -732,7 +845,7 @@ impl Probe {
                 let Some(&pos) = positions.first() else {
                     return false;
                 };
-                self.reports[n].hit_text(location, how, text, pos, self.text.lens[n], true);
+                self.reports[n].hit_text(site, how, text, pos, self.text.lens[n], true);
                 true
             })
             .collect()
@@ -743,7 +856,7 @@ impl Probe {
     fn scan_text_squeezed(
         &mut self,
         squeezed: &str,
-        location: &str,
+        site: Site<'_>,
         how: &str,
         only: impl Fn(usize) -> bool,
     ) {
@@ -754,29 +867,28 @@ impl Probe {
                 continue;
             }
             if let Some(&pos) = positions.first() {
-                self.reports[n].hit_text(
-                    location,
-                    how,
-                    squeezed,
-                    pos,
-                    self.squeezed.lens[id],
-                    false,
-                );
+                self.reports[n].hit_text(site, how, squeezed, pos, self.squeezed.lens[id], false);
             }
         }
     }
 
-    /// Die Fundstellen und die Wörtlich-Marken, je in der Reihenfolge der
-    /// Eingabe (leere Begriffe behalten ihren Platz: keine Funde, nicht
-    /// wörtlich).
-    fn into_hits(self) -> (Vec<Vec<String>>, Vec<bool>) {
+    /// Die Fundstellen, die Wörtlich-Marken und die Orte, je in der
+    /// Reihenfolge der Eingabe (leere Begriffe behalten ihren Platz: keine
+    /// Funde, nicht wörtlich).
+    ///
+    /// Orte und Fundstellen kommen Eintrag für Eintrag in derselben
+    /// Reihenfolge heraus, weil [`Report::push`] beide in einem Schritt
+    /// anhängt — siehe [`LeakCheck::sites`].
+    fn into_hits(self) -> (Vec<Vec<String>>, Vec<bool>, Vec<Vec<LeakSite>>) {
         let mut hits = vec![Vec::new(); self.total];
         let mut literal = vec![false; self.total];
+        let mut sites = vec![Vec::new(); self.total];
         for (slot, report) in self.slots.into_iter().zip(self.reports) {
             hits[slot] = report.hits;
             literal[slot] = report.literal;
+            sites[slot] = report.sites;
         }
-        (hits, literal)
+        (hits, literal, sites)
     }
 }
 
@@ -807,9 +919,74 @@ fn hex_ascii(bytes: &[u8], upper: bool) -> Vec<u8> {
 // Fundstellen sammeln
 // ---------------------------------------------------------------------------
 
+/// Wo ein Fund liegt: der Text für die Meldung **und** derselbe Ort
+/// maschinenlesbar.
+///
+/// Ein Bündel statt zweier Parameter, damit der Ort denselben Weg durch die
+/// Sichten nimmt wie der Text und nicht auf halber Strecke verloren geht.
+/// Was die Sicht nicht weiß, bleibt `None` — siehe [`LeakSite`].
+#[derive(Clone, Copy)]
+struct Site<'a> {
+    text: &'a str,
+    view: LeakView,
+    page: Option<usize>,
+    object: Option<(u32, u16)>,
+}
+
+impl<'a> Site<'a> {
+    fn new(text: &'a str, view: LeakView) -> Self {
+        Self {
+            text,
+            view,
+            page: None,
+            object: None,
+        }
+    }
+
+    /// Dieselbe Stelle, tiefer im Pfad — der Ort bleibt, der Text wächst.
+    fn with_text<'b>(self, text: &'b str) -> Site<'b> {
+        Site {
+            text,
+            view: self.view,
+            page: self.page,
+            object: self.object,
+        }
+    }
+
+    /// Ab hier liest eine andere Sicht.
+    fn with_view(self, view: LeakView) -> Self {
+        Self { view, ..self }
+    }
+
+    fn with_object(self, object: (u32, u16)) -> Self {
+        Self {
+            object: Some(object),
+            ..self
+        }
+    }
+
+    fn with_page(self, page: usize) -> Self {
+        Self {
+            page: Some(page),
+            ..self
+        }
+    }
+
+    /// Der Ort ohne den Meldungstext — das, was der Aufrufer bekommt.
+    fn without_text(self) -> LeakSite {
+        LeakSite {
+            view: self.view,
+            page: self.page,
+            object: self.object,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Report {
     hits: Vec<String>,
+    /// Zu jedem Eintrag in `hits` sein Ort — gleiche Länge, gleicher Index.
+    sites: Vec<LeakSite>,
     seen: BTreeSet<String>,
     /// Hat der Begriff **wörtlich** getroffen? Siehe [`LeakCheck::literal`].
     /// Wird auch gesetzt, wenn die Meldung selbst wegfällt (Doppelung oder
@@ -818,26 +995,33 @@ struct Report {
 }
 
 impl Report {
-    fn push(&mut self, message: String, literal: bool) {
+    fn push(&mut self, message: String, site: LeakSite, literal: bool) {
         self.literal |= literal;
         if self.hits.len() < MAX_HITS && self.seen.insert(message.clone()) {
             self.hits.push(message);
+            // Beides in einem Schritt: `sites[i]` gehört zu `hits[i]`, und
+            // das ist die Zusicherung von [`LeakCheck::sites`].
+            self.sites.push(site);
         }
     }
 
     /// Fund in einer Bytefolge — immer wörtlich: die Kodierungen eines
     /// Begriffs werden aus seinem Text gebildet, nicht aus der gequetschten
     /// Fassung.
-    fn hit_bytes(&mut self, location: &str, how: &str, hay: &[u8], pos: usize, len: usize) {
+    fn hit_bytes(&mut self, site: Site<'_>, how: &str, hay: &[u8], pos: usize, len: usize) {
         let ctx = printable_context(hay, pos, len);
-        self.push(format!("{location} [{how}]: …{ctx}…"), true);
+        self.push(
+            format!("{} [{how}]: …{ctx}…", site.text),
+            site.without_text(),
+            true,
+        );
     }
 
     /// Fund in bereits dekodiertem Text; `literal` sagt, ob der Text selbst
     /// getroffen hat oder nur seine Fassung ohne Leerraum.
     fn hit_text(
         &mut self,
-        location: &str,
+        site: Site<'_>,
         how: &str,
         hay: &str,
         pos: usize,
@@ -845,7 +1029,11 @@ impl Report {
         literal: bool,
     ) {
         let ctx = printable_context(hay.as_bytes(), pos, len);
-        self.push(format!("{location} [{how}]: …{ctx}…"), literal);
+        self.push(
+            format!("{} [{how}]: …{ctx}…", site.text),
+            site.without_text(),
+            literal,
+        );
     }
 }
 
@@ -875,7 +1063,7 @@ fn scan_raw_file(bytes: &[u8], probe: &mut Probe) {
         let variant = probe.needles[n].variants[v].0;
         for &pos in positions {
             probe.reports[n].hit_bytes(
-                &format!("Rohdatei @0x{pos:x}"),
+                Site::new(&format!("Rohdatei @0x{pos:x}"), LeakView::RawFile),
                 variant,
                 bytes,
                 pos,
@@ -890,15 +1078,24 @@ fn scan_raw_file(bytes: &[u8], probe: &mut Probe) {
 /// Historie inkrementeller Updates.
 fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) {
     for (offset, payload) in raw_stream_blocks(bytes) {
-        let base = format!(
-            "Rohdaten-Stream @0x{offset:x}{}",
-            object_label(bytes, offset)
-        );
-        scan_blob(payload, &format!("{base} (roh)"), probe);
+        let header = object_header(bytes, offset);
+        let base = format!("Rohdaten-Stream @0x{offset:x}{}", object_label(header));
+        // Der Objektkopf steht hier in **Rohbytes**, nicht im Objektgraphen:
+        // was er nicht hergibt (kein Kopf in Reichweite, eine Zahl, die in
+        // keinen `u32` passt), bleibt `None` statt geraten zu werden.
+        let mut site = Site::new(&base, LeakView::RawStream);
+        if let Some(id) = object_id(header) {
+            site = site.with_object(id);
+        }
+        scan_blob(payload, site.with_text(&format!("{base} (roh)")), probe);
         match inflate_raw(payload, budget.room()) {
             Ok(Some(inflated)) => {
                 budget.charge(inflated.len());
-                scan_blob(&inflated, &format!("{base} (inflate)"), probe);
+                scan_blob(
+                    &inflated,
+                    site.with_text(&format!("{base} (inflate)")),
+                    probe,
+                );
             }
             Ok(None) => {}
             Err(Oversize) => budget.skip(&base, payload.len()),
@@ -934,27 +1131,45 @@ fn raw_stream_blocks(bytes: &[u8]) -> Vec<(usize, &[u8])> {
     out
 }
 
-/// „ (Objekt N G)“, wenn vor dem Block ein Objektkopf `N G obj` steht —
-/// damit eine Meldung den Strom so nennt wie die Objektsichten. Leer, wenn
-/// keiner zu finden ist (Block mitten in Rohdaten, Kopf weiter weg als
-/// [`OBJECT_HEADER_LOOKBACK`]).
-fn object_label(bytes: &[u8], stream_offset: usize) -> String {
+/// Objektnummer und Generation aus dem Kopf `N G obj` vor einem rohen Strom
+/// — als **Ziffernfolgen**. `None`, wenn keiner zu finden ist (Block mitten
+/// in Rohdaten, Kopf weiter weg als [`OBJECT_HEADER_LOOKBACK`]).
+///
+/// Warum nicht gleich Zahlen: das Etikett [`object_label`] muss Zeichen für
+/// Zeichen dasselbe bleiben wie bisher, auch wenn eine Ziffernfolge in keinen
+/// `u32` passt. Die maschinenlesbare Fassung ([`object_id`]) gibt dann `None`
+/// zurück — der Text bleibt.
+fn object_header(bytes: &[u8], stream_offset: usize) -> Option<(&str, &str)> {
     let from = stream_offset.saturating_sub(OBJECT_HEADER_LOOKBACK);
     let window = &bytes[from..stream_offset];
-    let Some(pos) = memmem::rfind(window, b"obj") else {
-        return String::new();
-    };
+    let pos = memmem::rfind(window, b"obj")?;
     if window[..pos].ends_with(b"end") {
-        return String::new();
+        return None;
     }
     let (rest, generation) = trailing_number(window[..pos].trim_ascii_end());
     let (_, number) = trailing_number(rest.trim_ascii_end());
     match (number, generation) {
-        (Some(number), Some(generation)) if rest.len() < pos => {
-            format!(" (Objekt {number} {generation})")
-        }
-        _ => String::new(),
+        (Some(number), Some(generation)) if rest.len() < pos => Some((number, generation)),
+        _ => None,
     }
+}
+
+/// „ (Objekt N G)“ zu einem gefundenen Kopf — damit eine Meldung den Strom so
+/// nennt wie die Objektsichten. Leer, wenn keiner gefunden wurde.
+fn object_label(header: Option<(&str, &str)>) -> String {
+    match header {
+        Some((number, generation)) => format!(" (Objekt {number} {generation})"),
+        None => String::new(),
+    }
+}
+
+/// Derselbe Kopf maschinenlesbar für [`LeakSite::object`]. `None`, wenn keiner
+/// gefunden wurde **oder** eine der Ziffernfolgen nicht in ihren Zahlentyp
+/// passt: dann weiß diese Sicht die Objekt-Id nicht, und eine geratene wäre
+/// schlimmer als keine.
+fn object_id(header: Option<(&str, &str)>) -> Option<(u32, u16)> {
+    let (number, generation) = header?;
+    Some((number.parse().ok()?, generation.parse().ok()?))
 }
 
 /// Die Ziffernfolge am Ende von `s` und der Rest davor.
@@ -986,10 +1201,14 @@ fn inflate_raw(data: &[u8], limit: usize) -> Result<Option<Vec<u8>>, Oversize> {
 // ---------------------------------------------------------------------------
 
 fn scan_object_graph(doc: &Document, probe: &mut Probe, budget: &mut Budget) {
-    walk_dict(doc, &doc.trailer, "Trailer", probe, budget, 0);
+    // Der Trailer gehört zu keinem Objekt — also nennt seine Fundstelle auch
+    // keines.
+    let trailer = Site::new("Trailer", LeakView::StringObject);
+    walk_dict(doc, &doc.trailer, trailer, probe, budget, 0);
     for (id, object) in &doc.objects {
         let path = format!("Objekt {} {}", id.0, id.1);
-        walk(doc, object, &path, probe, budget, 0);
+        let site = Site::new(&path, LeakView::StringObject).with_object((id.0, id.1));
+        walk(doc, object, site, probe, budget, 0);
     }
 }
 
@@ -1028,11 +1247,12 @@ fn deep_message(path: &str) -> String {
 fn walk(
     doc: &Document,
     object: &Object,
-    path: &str,
+    site: Site<'_>,
     probe: &mut Probe,
     budget: &mut Budget,
     depth: usize,
 ) {
+    let path = site.text;
     if depth > MAX_DEPTH {
         return too_deep(path, object, budget);
     }
@@ -1042,18 +1262,25 @@ fn walk(
                 StringFormat::Literal => "Zeichenkette, literal",
                 StringFormat::Hexadecimal => "Zeichenkette, hex",
             };
-            scan_string(raw, path, how, probe);
+            scan_string(raw, site, how, probe);
         }
-        Object::Name(name) => scan_raw_bytes(name, path, "Name", probe),
+        Object::Name(name) => scan_raw_bytes(name, site, "Name", probe),
         Object::Array(items) => {
             for (i, item) in items.iter().enumerate() {
-                walk(doc, item, &format!("{path}[{i}]"), probe, budget, depth + 1);
+                walk(
+                    doc,
+                    item,
+                    site.with_text(&format!("{path}[{i}]")),
+                    probe,
+                    budget,
+                    depth + 1,
+                );
             }
         }
-        Object::Dictionary(dict) => walk_dict(doc, dict, path, probe, budget, depth),
+        Object::Dictionary(dict) => walk_dict(doc, dict, site, probe, budget, depth),
         Object::Stream(stream) => {
-            walk_dict(doc, &stream.dict, path, probe, budget, depth);
-            scan_stream(doc, stream, path, probe, budget, depth);
+            walk_dict(doc, &stream.dict, site, probe, budget, depth);
+            scan_stream(doc, stream, site, probe, budget, depth);
         }
         _ => {}
     }
@@ -1062,7 +1289,7 @@ fn walk(
 fn walk_dict(
     doc: &Document,
     dict: &Dictionary,
-    path: &str,
+    site: Site<'_>,
     probe: &mut Probe,
     budget: &mut Budget,
     depth: usize,
@@ -1072,12 +1299,13 @@ fn walk_dict(
     if depth > MAX_DEPTH {
         return;
     }
+    let path = site.text;
     for (key, value) in dict.iter() {
         let key = String::from_utf8_lossy(key);
         walk(
             doc,
             value,
-            &format!("{path}/{key}"),
+            site.with_text(&format!("{path}/{key}")),
             probe,
             budget,
             depth + 1,
@@ -1090,12 +1318,19 @@ fn walk_dict(
 fn scan_stream(
     doc: &Document,
     stream: &Stream,
-    path: &str,
+    site: Site<'_>,
     probe: &mut Probe,
     budget: &mut Budget,
     depth: usize,
 ) {
-    scan_blob(&stream.content, &format!("{path} <Stream, roh>"), probe);
+    let path = site.text;
+    // Ab hier liest Sicht 3: die Bytes des Stroms, nicht mehr sein Verzeichnis.
+    let content = site.with_view(LeakView::Stream);
+    scan_blob(
+        &stream.content,
+        content.with_text(&format!("{path} <Stream, roh>")),
+        probe,
+    );
 
     let decoded = match decode_stream(doc, stream, budget.room()) {
         Ok(view) => {
@@ -1106,7 +1341,11 @@ fn scan_stream(
             }
             view.data.map(|(label, data)| {
                 budget.charge(data.len());
-                scan_blob(&data, &format!("{path} <Stream, {label}>"), probe);
+                scan_blob(
+                    &data,
+                    content.with_text(&format!("{path} <Stream, {label}>")),
+                    probe,
+                );
                 data
             })
         }
@@ -1131,7 +1370,19 @@ fn scan_stream(
         if let Ok(object_stream) = ObjectStream::new(&mut plain) {
             for (id, object) in &object_stream.objects {
                 let inner = format!("{path} <ObjStm> → Objekt {} {}", id.0, id.1);
-                walk(doc, object, &inner, probe, budget, depth + 1);
+                // Sicht 4, und das Objekt ist das **enthaltene**: dort steht
+                // der Text. Welcher Container es trägt, sagt der Text.
+                let inside = site
+                    .with_view(LeakView::ObjectStream)
+                    .with_object((id.0, id.1));
+                walk(
+                    doc,
+                    object,
+                    inside.with_text(&inner),
+                    probe,
+                    budget,
+                    depth + 1,
+                );
             }
         }
     }
@@ -1275,8 +1526,8 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
 /// Durchsucht einen (dekodierten) Datenblock: erst byteweise in allen
 /// Kodierungen, dann die Verkettung aller darin enthaltenen
 /// Zeichenketten-Literale.
-fn scan_blob(blob: &[u8], location: &str, probe: &mut Probe) {
-    scan_raw_bytes(blob, location, "Inhalt", probe);
+fn scan_blob(blob: &[u8], site: Site<'_>, probe: &mut Probe) {
+    scan_raw_bytes(blob, site, "Inhalt", probe);
 
     // Verkettung und Leerraum-Fassung hängen allein am Datenblock: einmal
     // bilden, dann von jedem Suchbegriff benutzen.
@@ -1284,37 +1535,40 @@ fn scan_blob(blob: &[u8], location: &str, probe: &mut Probe) {
     if joined.is_empty() {
         return;
     }
-    probe.scan_text_plain(&joined, location, "Zeichenketten-Verkettung");
+    // Die Verkettung ist eine eigene Sicht (6) — derselbe Ort, ein anderer
+    // Blick darauf.
+    let concat = site.with_view(LeakView::StringConcat);
+    probe.scan_text_plain(&joined, concat, "Zeichenketten-Verkettung");
     if probe.any_squeezed {
         let squeezed = squeeze(&joined);
         probe.scan_text_squeezed(
             &squeezed,
-            location,
+            concat,
             "Zeichenketten-Verkettung, ohne Leerraum",
             |_| true,
         );
     }
 }
 
-fn scan_raw_bytes(hay: &[u8], location: &str, how: &str, probe: &mut Probe) {
-    probe.scan_bytes(hay, 4, location, how);
+fn scan_raw_bytes(hay: &[u8], site: Site<'_>, how: &str, probe: &mut Probe) {
+    probe.scan_bytes(hay, 4, site, how);
 }
 
 /// Zeichenketten-Objekt: sowohl dekodiert (PDFDocEncoding **oder** UTF-16BE)
 /// als auch roh vergleichen.
-fn scan_string(raw: &[u8], location: &str, how: &str, probe: &mut Probe) {
+fn scan_string(raw: &[u8], site: Site<'_>, how: &str, probe: &mut Probe) {
     // Dekodieren hängt allein an der Zeichenkette, nicht am Suchbegriff.
-    scan_text(&decode_pdf_string(raw), location, how, probe);
-    scan_raw_bytes(raw, location, how, probe);
+    scan_text(&decode_pdf_string(raw), site, how, probe);
+    scan_raw_bytes(raw, site, how, probe);
 }
 
 /// Bereits dekodierter Text: als Ganzes und, wo der Begriff Leerraum hat
 /// und als Ganzes nicht traf, ohne jeden Leerraum.
-fn scan_text(text: &str, location: &str, how: &str, probe: &mut Probe) {
-    let hit = probe.scan_text_plain(text, location, how);
+fn scan_text(text: &str, site: Site<'_>, how: &str, probe: &mut Probe) {
+    let hit = probe.scan_text_plain(text, site, how);
     if probe.any_squeezed {
         let squeezed = squeeze(text);
-        probe.scan_text_squeezed(&squeezed, location, &format!("{how}, ohne Leerraum"), |n| {
+        probe.scan_text_squeezed(&squeezed, site, &format!("{how}, ohne Leerraum"), |n| {
             !hit[n]
         });
     }
@@ -1363,9 +1617,12 @@ fn scan_decoded_text(doc: &Document, probe: &mut Probe) {
             .map(|run| run.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+        // Die einzige Sicht, die eine Seite kennt — und die einzige, deren
+        // Fund heißt: das steht auf dem Papier.
+        let page = page_runs[0].page + 1;
         scan_text(
             &text,
-            &format!("Seite {}", page_runs[0].page + 1),
+            Site::new(&format!("Seite {page}"), LeakView::FontDecoder).with_page(page),
             "Schriftdekoder",
             probe,
         );
@@ -1640,12 +1897,24 @@ mod tests {
         let pdf = b"%PDF-1.5\n12 0 obj\n<< /Length 3 >>\nstream\nabc\nendstream\nendobj\n";
         let blocks = raw_stream_blocks(pdf);
         assert_eq!(blocks.len(), 1);
-        assert_eq!(object_label(pdf, blocks[0].0), " (Objekt 12 0)");
+        let header = object_header(pdf, blocks[0].0);
+        assert_eq!(object_label(header), " (Objekt 12 0)");
+        // Derselbe Kopf maschinenlesbar — Text und Ort sagen dasselbe.
+        assert_eq!(object_id(header), Some((12, 0)));
         // Ohne Kopf (Block mitten in Rohdaten, oder nur ein `endobj` davor):
         // kein Etikett, keine Erfindung.
         let loose = b"%PDF-1.5\nendobj\nstream\nabc\nendstream\n";
         let blocks = raw_stream_blocks(loose);
-        assert_eq!(object_label(loose, blocks[0].0), "");
+        let header = object_header(loose, blocks[0].0);
+        assert_eq!(object_label(header), "");
+        assert_eq!(object_id(header), None);
+        // Eine Nummer, die in keinen `u32` passt: das Etikett bleibt, der
+        // maschinenlesbare Ort sagt „weiß ich nicht“ statt zu raten.
+        let huge = b"%PDF-1.5\n99999999999999 0 obj\nstream\nabc\nendstream\n";
+        let blocks = raw_stream_blocks(huge);
+        let header = object_header(huge, blocks[0].0);
+        assert_eq!(object_label(header), " (Objekt 99999999999999 0)");
+        assert_eq!(object_id(header), None);
     }
 
     #[test]
@@ -1812,7 +2081,7 @@ mod tests {
         // wie in `leaks_many`.
         let doc = Document::load_mem(&pdf).expect("Vorlage parsebar");
         scan_object_graph(&doc, &mut probe, &mut Budget::new(u64::MAX));
-        let (hits, _) = probe.into_hits();
+        let (hits, _, _) = probe.into_hits();
         assert_eq!(hits.len(), NEEDLES.len());
         assert!(
             hits.iter().any(|h| !h.is_empty()),

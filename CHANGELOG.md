@@ -140,11 +140,13 @@ blieben.
   Regression aus der Fix-Runde 6, die den Scan je Strom statt je Platzierung
   laufen ließ und die Umgebung dabei vergaß.
 * **Zwei Wege zur Dienstverweigerung, beide gedeckelt.** `BDC`-Klammern über
-  Textoperationen zählten gegen **keine** Decke. Und die Decke galt je
-  Seiten-Scan, obwohl mehrere Seiten auf denselben `/Contents`-Strom zeigen
-  dürfen — jede Seite zahlte sie voll aus, und der Redaktor hielt die Spiegel
-  aller Seiten bis zum Ende fest. Drei Zähler tragen jetzt zusammen eine
-  gemeinsame Decke je Seiten-Scan, keiner verbraucht den anderen; und weil die
+  Textoperationen zählten gegen **keine** Decke: 6 000 Klammern über 6 000
+  `Tj` aus einer Datei von 263 475 Byte ergaben 36 000 000 Zuordnungen. Und
+  die Decke galt je Seiten-Scan, obwohl mehrere Seiten auf denselben
+  `/Contents`-Strom zeigen dürfen — jede Seite zahlte sie voll aus, und der
+  Redaktor hielt die Spiegel aller Seiten bis zum Ende fest. Drei Zähler
+  tragen jetzt zusammen eine gemeinsame Decke je Seiten-Scan, keiner
+  verbraucht den anderen; und weil die
   Kosten nicht im Scan, sondern beim Festhalten der zurückgestellten Spiegel
   anfielen, steht die dokumentweite Decke dort (`MAX_DEFERRED_MIRRORS`).
   Zurückgestellt wird außerdem nur noch, was die späte Frage braucht — die
@@ -152,7 +154,12 @@ blieben.
   deren Pfade und ohne die Eigenschaftsliste, die den Spiegeltext trägt. Der
   Scan bleibt seitenweise, weil `scan_page` öffentlich und seitenweise ist:
   dokumentweit zu zählen hieße, dieselbe Seite je nach ihren Nachbarn zu
-  warnen oder nicht.
+  warnen oder nicht. Nachgemessen am Baum dieser Runde (Debug, im
+  Testprozess): mit der Decke bleibt dieselbe Datei bei 100 000 Zuordnungen
+  und einer Warnung, `scan_page` braucht dafür 0,30–0,31 s, die Spitze liegt
+  bei 36 MB; und mit ihr kosten die 1 000 Seiten aus 224 752 Byte den Redaktor
+  45,5–45,6 s und 38 MB statt 6 288 MB, bei genau 100 000 zurückgestellten
+  Abschnitten — der dokumentweiten Decke, an der es noch still bleibt.
 * **Ein `/Filter`-Wert, der gar kein Name ist, machte das Orakel stumm.**
   `null`, eine Zahl, eine Zeichenkette, ein Verweis ins Leere — für `lopdf`
   ist das alles „ungefiltert", und das Orakel gab über LZW-gepacktem Klartext
@@ -195,10 +202,11 @@ blieben.
   hielt es für ein Leck und meldete den Text als noch in der Ausgabe stehend.
   Gemerkt wird die Löschung jetzt an der Kennung der Region und nicht an ihrem
   Text, damit ein Rückgängig sie wirklich aufhebt. Und die Statuszeile war mit
-  den echten Stellen eines Laufs länger als jede Zeile, die noch gelesen wird,
-  weil die Fix-Runde 6 nur einen Bestandteil gekürzt hatte: gekürzt wird jetzt
-  die ganze Zeile, hinten — die sichere Richtung, denn der Fund steht vorn —,
-  und was nicht mehr hineinpasst, steht vollständig in den Warnungen.
+  den echten Stellen eines Laufs 1 005 Zeichen lang — länger als jede Zeile,
+  die noch gelesen wird —, weil die Fix-Runde 6 nur einen Bestandteil gekürzt
+  hatte: gekürzt wird jetzt die ganze Zeile, hinten — die sichere Richtung,
+  denn der Fund steht vorn — auf höchstens 400 Zeichen, und was nicht mehr
+  hineinpasst, steht vollständig in den Warnungen.
 * **Der Prüfer der Plattformregel war selbst plattformabhängig.** Das lokale
   Tor war grün, die CI rot — und zwar nur auf Windows, nur im Testschritt, und
   ausgerechnet an `keine_systemeinrichtung_ohne_cfg_oder_ohne_ausweg`. Er
@@ -214,13 +222,17 @@ blieben.
   baut die Windows-Schreibweise selbst und läuft deshalb auf jedem System.
   Mutation (die Vereinheitlichung entfernt): genau dieser Test rot, kein
   anderer.
-* **Offen: die Messzahlen dieser Punkte sind nicht gebunden.** Sie
-  stehen dort, wo die Agenten sie gemessen haben — in der Doku am Quelltext
-  von `content.rs`, `redact.rs`, `state.rs` und `meta.rs` —, aber nicht in
-  `messwerte`, und deshalb stehen sie hier nicht. Der Regeltest dieser Runde
-  verlangt für jede Zahl im Block einen gebundenen Satz, und er hat recht: was
-  hier als Zahl steht, ist eine Zusage. Bis sie gebunden sind, sagt dieser
-  Block, **was** sich geändert hat, und nicht, um wie viel.
+* **Teilweise offen: nicht jede Messzahl der Runde steht hier.** Gebunden ist,
+  was am Baum dieser Runde nachzumessen war — die beiden Dienstverweigerungen
+  und die Statuszeile, je mit dem Lauf, aus dem die Zahl stammt; `messwerte`
+  in `belege.rs` nennt ihn samt Profil. Nicht hier stehen die Zahlen des
+  Metadatenlaufs: sie stehen weiter in der Doku am Quelltext von `meta.rs`.
+  Und nicht hier stehen die Zahlen des **ungedeckelten** Zustands — was die
+  Korrektur unmöglich macht, gibt kein Lauf mehr her, und was kein Lauf mehr
+  hergibt, ist keine Zusage, sondern ein Beleg von damals; er bleibt am
+  Quelltext stehen, wo die Gegenprüfung ihn gemessen hat. Der Regeltest dieser
+  Runde verlangt für jede Zahl im Block einen gebundenen Satz, und er hat
+  recht: was hier als Zahl steht, ist eine Zusage.
 * **Offen und unerklärt: ein Test des Tores flattert.** Im ersten Gate-Lauf
   dieser Runde fiel der Test, der verlangt, dass eine neue Analyse die
   gelöschten Zeilen vergisst — die Aussage wäre, dass eine Löschung aus dem

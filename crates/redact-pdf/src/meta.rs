@@ -932,6 +932,18 @@ const ANNOTATION_LINK_KEYS: [&[u8]; 4] = [b"Popup", b"Parent", b"Kids", b"IRT"];
 /// hängen, die keine Träger sind — an einem `/StructElem` etwa —, und weil
 /// `crate::content` diese Liste als „Text, den die Annotation neben ihrem
 /// Erscheinungsbild führt“ liest.
+///
+/// **Und deshalb steht der `/Alt` eines Bildes hier nicht.** Er gehört weder in
+/// diese Liste noch in [`ANNOTATION_TEXT_KEYS`]: ein Bild ist kein Träger, es
+/// wird von diesem Lauf nicht erreicht, und in der Liste, die den
+/// Spiegelvergleich von `crate::content` steuert, erzeugte er strukturelle
+/// Fehlalarme (Befund #14: „/E, /Alt am Bild“). Dieser Lauf kennt auch keine
+/// Schwärzungsrechtecke und könnte das Bild, über dem geschwärzt wurde, nicht
+/// von dem Firmenlogo daneben unterscheiden — ein Dokument ohne Ersatztexte ist
+/// für blinde Leser unbrauchbar. Genommen wird er dort, wo die Pixel fallen:
+/// `crate::redact::clear_image_alternates` und der Spiegel darüber in
+/// `crate::redact::mirrors_to_clear` (Register #20, Beleg
+/// `zh_b_bildspiegel.rs`).
 const ALTERNATE_TEXT_KEYS: [&[u8]; 2] = [b"Alt", b"ActualText"];
 
 /// Beiwerk einer Annotation, das eigenen Klartext führt und nichts zeichnet —

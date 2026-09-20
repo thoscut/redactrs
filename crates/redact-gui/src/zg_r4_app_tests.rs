@@ -133,6 +133,7 @@ fn zweimal_dieselbe_datei_unter_zwei_namen(
         .regions
         .push(text_region(0, ueber(700.0), "GEHEIM-EINS"));
     app.export_to(first.clone());
+    app.wait_for_export();
     gate.wait_until_arrived();
     assert_eq!(app.checks.len(), 1);
 
@@ -142,6 +143,7 @@ fn zweimal_dieselbe_datei_unter_zwei_namen(
         .regions
         .push(text_region(0, daneben(), "GEHEIM-ZWEI"));
     app.export_to(second.clone());
+    app.wait_for_export();
     assert_eq!(
         std::fs::canonicalize(&first).unwrap(),
         std::fs::canonicalize(&second).unwrap(),
@@ -221,8 +223,10 @@ fn zg_r4_2_ein_punkt_punkt_im_pfad_beendet_die_alte_pruefung() {
         .regions
         .push(text_region(0, ueber(700.0), "GEHEIM-EINS"));
     app.export_to(first.clone());
+    app.wait_for_export();
     gate.wait_until_arrived();
     app.export_to(second.clone());
+    app.wait_for_export();
     println!("laufende Prüfungen: {}", app.checks.len());
     assert_eq!(app.checks.len(), 1);
     gate.release();
@@ -234,8 +238,10 @@ fn zg_r4_2_ein_punkt_punkt_im_pfad_beendet_die_alte_pruefung() {
     let gate = Arc::new(CheckGate::default());
     app.hold_check = Some(gate.clone());
     app.export_to(first.clone());
+    app.wait_for_export();
     gate.wait_until_arrived();
     app.export_to(real.join("zweite.pdf"));
+    app.wait_for_export();
     println!("zwei Dateien: {}", app.checks.len());
     assert_eq!(app.checks.len(), 2);
     gate.release();
@@ -262,9 +268,12 @@ fn zg_r4_2_a_b_a_und_dreimal_a() {
         .push(text_region(0, ueber(700.0), "GEHEIM-EINS"));
 
     app.export_to(a.clone());
+    app.wait_for_export();
     gate.wait_until_arrived();
     app.export_to(b.clone());
+    app.wait_for_export();
     app.export_to(a.clone());
+    app.wait_for_export();
     // Die Kennung ist der aufgelöste Pfad — hier derselbe Ordner, also nur
     // `canonicalize` über beide.
     let echt = |path: &Path| std::fs::canonicalize(path).unwrap();
@@ -273,11 +282,19 @@ fn zg_r4_2_a_b_a_und_dreimal_a() {
     assert_eq!(keys, vec![echt(&b).as_path(), echt(&a).as_path()]);
 
     app.export_to(a.clone());
+    app.wait_for_export();
     app.export_to(a.clone());
+    app.wait_for_export();
     let keys: Vec<&Path> = app.checks.iter().map(|c| c.key.as_path()).collect();
     println!("nach A, B, A, A, A: {keys:?}");
     assert_eq!(keys, vec![echt(&b).as_path(), echt(&a).as_path()]);
-    assert!(!ctx.has_requested_repaint(), "alle hängen noch am Haken");
+    // „Alle hängen noch am Haken“ heißt: kein Urteil ist da. Gefragt wird das
+    // jetzt direkt und nicht mehr am Neuzeichnen-Merker: seit Fix-Runde 8
+    // schreibt auch der Export auf einem Thread, und der fordert am Ende zu
+    // Recht ein Neuzeichnen an (sonst holte niemand sein Ergebnis ab). Der
+    // Merker kann deshalb nicht mehr unterscheiden, wer ihn gesetzt hat —
+    // `poll_export_checks() == 0` kann es.
+    assert_eq!(app.poll_export_checks(), 0, "alle hängen noch am Haken");
 
     gate.release();
     let (urteile, statuses) = collect_verdicts(&mut app);
@@ -319,6 +336,7 @@ fn zg_r4_2_gleicher_name_anderer_ordner_behaelt_die_leckwarnung() {
         .regions
         .push(text_region(0, daneben(), "GEHEIM-EINS"));
     app.export_to(x.join("a.pdf"));
+    app.wait_for_export();
     app.wait_for_export_checks();
     println!("nach x/a.pdf: {:?}", app.state.warnings);
     assert!(
@@ -333,6 +351,7 @@ fn zg_r4_2_gleicher_name_anderer_ordner_behaelt_die_leckwarnung() {
     // y/a.pdf: Rechteck trifft, die Ausgabe ist sauber.
     assert!(app.state.set_region_rect(0, ueber(700.0)));
     app.export_to(y.join("a.pdf"));
+    app.wait_for_export();
     println!("direkt nach y/a.pdf: {:?}", app.state.warnings);
     app.wait_for_export_checks();
     println!("nach y/a.pdf: {:?}", app.state.warnings);
@@ -352,6 +371,7 @@ fn zg_r4_2_gleicher_name_anderer_ordner_behaelt_die_leckwarnung() {
     // Und die **eigene** Warnung geht mit dem nächsten Export derselben
     // Datei: x/a.pdf noch einmal, diesmal sauber.
     app.export_to(x.join("a.pdf"));
+    app.wait_for_export();
     app.wait_for_export_checks();
     println!("nach x/a.pdf (sauber): {:?}", app.state.warnings);
     let bytes = std::fs::read(x.join("a.pdf")).unwrap();
@@ -382,9 +402,11 @@ fn zg_r4_2_gleicher_name_anderer_ordner_muesste_die_leckwarnung_behalten() {
         .regions
         .push(text_region(0, daneben(), "GEHEIM-EINS"));
     app.export_to(x.join("a.pdf"));
+    app.wait_for_export();
     app.wait_for_export_checks();
     assert!(app.state.set_region_rect(0, ueber(700.0)));
     app.export_to(y.join("a.pdf"));
+    app.wait_for_export();
     app.wait_for_export_checks();
     assert!(
         app.state
@@ -429,12 +451,14 @@ fn zg_r4_1_die_warnung_ueber_nicht_gesuchte_texte_kommt_und_geht_mit_dem_export(
     };
 
     app.export_to(out.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
     println!("1. Export (abgewählt): {:?}", app.state.warnings);
     assert_eq!(sagt_nichts(&app), 1);
 
     assert!(app.state.set_enabled(1, true));
     app.export_to(out.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
     println!("2. Export (beide geschwärzt): {:?}", app.state.warnings);
     assert_eq!(
@@ -445,8 +469,10 @@ fn zg_r4_1_die_warnung_ueber_nicht_gesuchte_texte_kommt_und_geht_mit_dem_export(
 
     assert!(app.state.set_enabled(1, false));
     app.export_to(out.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
     app.export_to(out.clone());
+    app.wait_for_export();
     app.wait_for_export_checks();
     println!("3.+4. Export (abgewählt): {:?}", app.state.warnings);
     assert_eq!(sagt_nichts(&app), 1, "einmal, nicht zweimal");
@@ -524,6 +550,7 @@ fn zg_r4_2_mess_was_eine_fallengelassene_pruefung_kostet() {
     let leer = proc_status("Threads:");
     let t0 = Instant::now();
     app.export_to(out.clone());
+    app.wait_for_export();
     let export = t0.elapsed();
     app.wait_for_export_checks();
     let einzeln = t0.elapsed();
@@ -611,6 +638,7 @@ fn zg_r4_2_der_haken_haelt_den_thread_wirklich() {
         .regions
         .push(text_region(0, ueber(700.0), "GEHEIM-EINS"));
     app.export_to(out.clone());
+    app.wait_for_export();
     gate.wait_until_arrived();
     // Eine Prüfung über zwei Zeilen dauert Millisekunden; 300 davon reichen,
     // damit ein nicht haltender Haken auffällt.
