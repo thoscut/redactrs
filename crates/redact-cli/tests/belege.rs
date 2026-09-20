@@ -556,8 +556,9 @@ mod messwerte {
     /// Altlast verblieben (`PLATTFORM_ALTLASTEN`, die `mkfifo`-Stellen).
     pub const PLATTFORM_VERLETZUNGEN: usize = 9;
     pub const PLATTFORM_BEHOBEN: usize = 3;
+    /// Die verbliebene Altlast SIND die `mkfifo`-Stellen — eine Zahl, eine
+    /// Stelle. Eine zweite Konstante daneben waere dieselbe Zahl zweimal.
     pub const PLATTFORM_ALTLASTEN: usize = 6;
-    pub const PLATTFORM_MKFIFO: usize = 6;
     /// So oft war der Windows-Job der CI an dieser Fehlerklasse rot.
     pub const WINDOWS_ROT: usize = 3;
     /// Von den behobenen Stellen die beiden mit `std::os::unix`.
