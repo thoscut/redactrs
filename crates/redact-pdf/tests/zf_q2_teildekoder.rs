@@ -11,9 +11,14 @@
 //!
 //! ```text
 //!                          vorher     nachher
-//! ohne /Filter             138 MB     138 MB
-//! /Filter /DCTDecode       205 MB     138 MB
+//! ohne /Filter             132 MB     132 MB
+//! /Filter /DCTDecode       196 MB     132 MB
 //! ```
+//!
+//! MB heißt hier 1024² Byte — die Messausgabe rechnete bis Fix-Runde 6 mit
+//! 1 000 000 und nannte dieselben Läufe 138 bzw. 205 MB (Fix-Runde 7, [`mb`]).
+//! Die Zeile „vorher“ ist am Stand vor Fix-Runde 6 nachgemessen (Klon vor dem
+//! ersten Filter wieder eingesetzt, danach zurückgenommen).
 //!
 //! Dazu passte die Zusicherung in `leaks_many_within` nicht: „Spitzenbelegung:
 //! ein Strom in Arbeit (höchstens Budget + 1 Byte)“. Der Klon hing nicht am
@@ -329,7 +334,7 @@ const MESS_KIND: &str = "Q2_MESS_SPEICHER_KIND";
 /// Byte in MB — 1024² Byte, wie überall in diesem Projekt (`Limits`,
 /// `--max-decompressed-mb`, die Meldungen des Laders). Die Messausgabe hier
 /// rechnete bis Fix-Runde 6 mit 1 000 000 und fiel dadurch um 4,9 % zu hoch
-/// aus: die gemessenen 205 / 138 MB sind 196 / 135 MB.
+/// aus: die gemessenen 205 / 138 MB sind nachgemessen 196 / 132 MB.
 fn mb(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
 }

@@ -517,12 +517,36 @@ fn zg_r4_2_mess_was_eine_fallengelassene_pruefung_kostet() {
     );
     println!("Statuszeile: {}", app.state.status);
 
-    // Fünf schnelle Exporte derselben Datei: vier Prüfungen fallen, laufen
-    // aber weiter.
+    // Was ein fallen gelassener Thread noch zu tun hat, am **oberen Rand der
+    // Decke**: 1 000 Begriffe über derselben Datei, gemessen ohne Thread.
+    let viele: Vec<String> = (0..redact_core::MAX_CHECK_NEEDLES)
+        .map(|i| format!("GEHEIM-{i:04}"))
+        .collect();
+    let plan = ExportCheckPlan {
+        kept_forms: vec![false; viele.len()],
+        kept_literal: vec![false; viele.len()],
+        needles: viele,
+        ..ExportCheckPlan::default()
+    };
+    let t0 = Instant::now();
+    let check = plan.clone().run(&out);
+    let einer = t0.elapsed();
+    println!(
+        "ein Lauf mit {} Begriffen: {einer:?} ({})",
+        plan.needles.len(),
+        check.sentence()
+    );
+
+    // Fünf davon in Folge, jede lässt die vorige fallen — sie laufen weiter.
     let vorher = proc_status("VmHWM:");
     let t0 = Instant::now();
     for _ in 0..5 {
-        app.export_to(out.clone());
+        app.start_export_check(
+            "Messung".to_string(),
+            plan.clone(),
+            out.clone(),
+            file_key(&out),
+        );
     }
     let gestartet = t0.elapsed();
     let threads = proc_status("Threads:");
@@ -531,12 +555,13 @@ fn zg_r4_2_mess_was_eine_fallengelassene_pruefung_kostet() {
     let bis_urteil = t0.elapsed();
     // Warten, bis auch die fallen gelassenen Threads aus sind.
     while proc_status("Threads:") > leer {
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(5));
     }
     let bis_alle_aus = t0.elapsed();
     let nachher = proc_status("VmHWM:");
     println!(
-        "fünf Exporte in {gestartet:?}; Threads danach: {threads} (Grundlast {leer})\n\
+        "fünf Prüfungen gestartet in {gestartet:?}; Threads danach: {threads} \
+         (Grundlast {leer})\n\
          letztes Urteil nach {bis_urteil:?}; alle Threads aus nach {bis_alle_aus:?}\n\
          VmHWM {} MB → {} MB (+{} MB)",
         vorher / 1024,

@@ -553,6 +553,8 @@ mod messwerte {
     pub const PLATTFORM_LUECKEN: usize = 6;
     pub const PLATTFORM_ALTLASTEN: usize = 9;
     pub const PLATTFORM_MKFIFO: usize = 6;
+    /// So oft war der Windows-Job der CI an dieser Fehlerklasse rot.
+    pub const WINDOWS_ROT: usize = 2;
     pub const PLATTFORM_UNIX_API: usize = 2;
     /// Der Lauf, der „52 Stelle(n)“ unter mehr Zeilen schrieb
     /// (`redact-pdf/tests/zg_r2_decke.rs`).
@@ -1569,6 +1571,13 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "an dem der Windows-Job schon {}mal rot war",
+            zahlwort(m::WINDOWS_ROT)
+        ),
+    );
     satz(
         "CHANGELOG.md",
         format!(

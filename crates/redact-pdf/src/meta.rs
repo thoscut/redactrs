@@ -1087,7 +1087,7 @@ fn clean_carrier(dict: &mut Dictionary, keep_dest: bool) -> Cleaned {
     }
     clear_alternates(dict, &mut cleaned.texts);
     for key in FILE_SPEC_KEYS {
-        take(dict, key, &mut cleaned.files);
+        take_file_spec(dict, key, &mut cleaned.files);
     }
     for key in FIELD_VALUE_KEYS {
         take(dict, key, &mut cleaned.values);
@@ -1167,6 +1167,28 @@ fn is_explicit_destination(doc: &Document, dest: &Object) -> bool {
 /// er trägt nichts, und ohne ihn ist die Datei um eine Merkwürdigkeit ärmer.
 fn take(dict: &mut Dictionary, key: &[u8], into: &mut Tally) -> bool {
     into.book(dict.remove(key))
+}
+
+/// Entfernt einen Dateiverweis und bucht ihn **je Filespec**.
+///
+/// `/AF` ist ein *Array* von Filespecs (PDF 2.0, 14.13). Für [`Tally`] wäre
+/// ein Array ein direkter Wert — mit dem Schlüssel weg, also gezählt. Das
+/// stimmt für das Array, nicht für die Dateien darin: hält ein zweiter
+/// Verweis den Filespec, steht die eingebettete Datei weiter in der Ausgabe,
+/// und der Bericht meldete eine Entfernung, die `--check-leaks` findet.
+/// Gebucht wird deshalb jedes Element; `/FS` (ein einzelner Filespec) geht
+/// unverändert durch.
+fn take_file_spec(dict: &mut Dictionary, key: &[u8], into: &mut Tally) -> bool {
+    match dict.remove(key) {
+        Some(Object::Array(items)) => {
+            let mut any = false;
+            for item in items {
+                any |= into.book(Some(item));
+            }
+            any
+        }
+        removed => into.book(removed),
+    }
 }
 
 /// Ein Zähler, der erst **nach** dem Aufräumen feststeht.
@@ -1452,7 +1474,7 @@ fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> Vec<Tally> 
             Some(id) => {
                 if let Ok(dict) = doc.get_dictionary_mut(id) {
                     for key in FILE_SPEC_KEYS {
-                        take(dict, key, &mut one);
+                        take_file_spec(dict, key, &mut one);
                     }
                 }
             }
@@ -1461,8 +1483,9 @@ fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> Vec<Tally> 
             // dahinter wirklich fällt, entscheidet erst das Aufräumen.
             None => {
                 if let Ok(dict) = item.as_dict() {
+                    let mut copy = dict.clone();
                     for key in FILE_SPEC_KEYS {
-                        one.book(value_of(dict, key).cloned());
+                        take_file_spec(&mut copy, key, &mut one);
                     }
                 }
             }
@@ -1511,7 +1534,7 @@ fn clear_object_metadata(
         };
         take(dict, b"Metadata", xmp);
         take(dict, b"PieceInfo", piece_info);
-        take(dict, b"AF", files);
+        take_file_spec(dict, b"AF", files);
     }
 }
 

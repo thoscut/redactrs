@@ -748,14 +748,17 @@ fn schreibt_material() {
         return;
     };
     let pages = env_usize("R1_PAGES", 200);
+    let b = env_usize("R1_B", 100);
+    let d = env_usize("R1_D", 999);
+    let sc = env_usize("R1_S", 1000);
     for (name, bytes) in [
         (
-            format!("seiten_{pages}_100x999.pdf"),
-            klammern_ueber_platzierungen(pages, 100, 999, true),
+            format!("seiten_{pages}_{b}x{d}.pdf"),
+            klammern_ueber_platzierungen(pages, b, d, true),
         ),
         (
-            format!("text_{pages}_1000x1000.pdf"),
-            klammern_ueber_text(pages, 1000, 1000, true),
+            format!("text_{pages}_{b}x{sc}.pdf"),
+            klammern_ueber_text(pages, b, sc, true),
         ),
         ("word_50.pdf".to_string(), word_artig(50)),
     ] {

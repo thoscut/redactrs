@@ -81,17 +81,34 @@
 //! * **Text in einem Rasterbild** und **Glyphen als Pfade** (Umrisse statt
 //!   Schrift): dort gibt es keine Codes, die man übersetzen könnte. Ein
 //!   Strom hinter `/DCTDecode`, `/JPXDecode`, `/CCITTFaxDecode` oder
-//!   `/JBIG2Decode` fällt darunter — allein wie am Ende einer Kette. Er
+//!   `/JBIG2Decode` fällt darunter — allein wie am **Ende** einer Kette. Er
 //!   erzeugt deshalb **keinen** Eintrag in [`LeakCheck::unchecked`]: sonst
 //!   käme jede Datei mit einem Foto als „unvollständig geprüft“ zurück, und
 //!   eine Grenze, die gewöhnliche Dateien abweist, ist genauso ein Fehler wie
-//!   eine Lücke. Das gilt an **jeder** Stelle der Kette: entscheidend ist der
-//!   Filter, an dem die Kette stehen blieb, nicht seine Position. Ein
-//!   Filtername, den niemand kennt, ist etwas anderes und steht sehr wohl in
-//!   `unchecked` — seit Fix-Runde 6 auch dann, wenn er das **erste** Glied
+//!   eine Lücke.
+//!
+//!   Steht hinter dem Bildfilter aber noch ein Glied, trägt diese Begründung
+//!   nicht: die Reihenfolge im `/Filter`-Array ist die Dekodierreihenfolge
+//!   (PDF 32000-1, 7.4.1), und die Ausgabe eines Bildfilters sind
+//!   Abtastwerte — kein Erzeuger hängt dahinter noch einen Filter. Dort liegt
+//!   also kein Bild, sondern ein Glied, das niemand angewandt hat:
+//!   `[/DCTDecode /FlateDecode]` deckte so einen Filter zu, den dieses
+//!   Programm **kennt**, und verkaufte den Bildfilternamen als meldungsfreie
+//!   Zone für beliebige Bytes (Befund R2-A, behoben in Fix-Runde 7). Die
+//!   Ausnahme gilt seitdem nur für den Bildfilter als **letztes** Glied;
+//!   `[/ASCII85Decode /DCTDecode]` — die Distiller-Kette, auf die sie zielt —
+//!   schweigt unverändert.
+//!
+//!   Ein Filtername, den niemand kennt, ist etwas anderes und steht sehr wohl
+//!   in `unchecked` — seit Fix-Runde 6 auch dann, wenn er das **erste** Glied
 //!   ist (`/Filter /FooDecode` kam vorher als „nicht gefunden“ mit
 //!   Rückgabewert 0 zurück, `/Filter [/FlateDecode /FooDecode]` mit 3;
-//!   Befund Q2-1/Q5).
+//!   Befund Q2-1/Q5). Ebenso ein Glied, das gar **kein Name** ist
+//!   (`[/LZWDecode null]`, ein Verweis ins Leere, eine Zahl, eine
+//!   Zeichenkette): bis Fix-Runde 6 verwarf `filters::filter_names` dafür die
+//!   ganze Kette, und der Strom las sich wie einer ohne `/Filter` — kein
+//!   Fund, keine Meldung, Rückgabewert 0, obwohl ein bekannter Filter daneben
+//!   stand (Befund R2-C).
 //! * **Was tiefer liegt als [`MAX_DEPTH`]** Ebenen im Objektgraphen. Der
 //!   Lader lässt 100 zu, diese Sicht läuft 32 — der Abbruch steht seit
 //!   Fix-Runde 5 in [`LeakCheck::unchecked`] mit dem Objektpfad. Vorher war
@@ -207,10 +224,14 @@ pub fn leaks_many(pdf_bytes: &[u8], needles: &[&str]) -> Vec<Vec<String>> {
 /// 3. **Verschachtelungstiefe [`MAX_DEPTH`] erreicht** — was tiefer im
 ///    Objektgraphen liegt, hat keine Sicht gelesen; die Zeile nennt den
 ///    Objektpfad.
-/// 4. **Die Filterkette blieb an einem unbekannten Namen stehen** —
-///    „nur bis Filter N von M dekodiert“ bzw. „gar nicht dekodiert“, wenn
-///    schon das erste Glied unbekannt ist. Ein Bildfilter zählt nicht dazu
-///    (benannter blinder Fleck, siehe Modulkopf).
+/// 4. **Die Filterkette blieb an einem Glied stehen, das sich nicht anwenden
+///    lässt** — „nur bis Filter N von M dekodiert“ bzw. „gar nicht
+///    dekodiert“, wenn es schon das erste Glied ist. Drei Formen: ein
+///    Filtername, den dieses Programm nicht kennt; ein Glied, das gar kein
+///    Name ist (`[/LZWDecode null]`, ein Verweis ins Leere, eine Zahl, eine
+///    Zeichenkette — Befund R2-C); und ein **Bildfilter, hinter dem die Kette
+///    weitergeht** (Befund R2-A). Der Bildfilter als **letztes** Glied zählt
+///    nicht dazu: benannter blinder Fleck, siehe Modulkopf.
 /// 5. **Sicht 7 (Schriftdekoder) nicht gelaufen**: sie entpackt ohne eigene
 ///    Grenze und läuft deshalb nur, wenn Sicht 3 jeden Strom entpacken
 ///    konnte.
@@ -295,13 +316,15 @@ pub struct LeakCheck {
 /// klonte `filters::decode_chain` sie, bevor es den ersten Filter kannte, und
 /// warf den Klon bei einem unbekannten ersten Glied wieder weg. Gemessen
 /// (Release, Kindprozess, `VmHWM`, 64-MiB-Strom, Budget 512 MiB,
-/// `tests/zf_q2_teildekoder.rs`): ohne `/Filter` 138 MB, mit
-/// `/Filter /DCTDecode` **205 MB** vorher und 138 MB nachher.
+/// `tests/zf_q2_teildekoder.rs`): ohne `/Filter` 132 MB, mit
+/// `/Filter /DCTDecode` **196 MB** vorher und 132 MB nachher. (MB ist hier
+/// wie überall 1024² Byte; bis Fix-Runde 6 rechnete die Messausgabe in
+/// Dezimal-MB und nannte dieselben Läufe 205 und 138 MB.)
 ///
 /// Das Budget ist eine Obergrenze für das, was **entpackt** wird, keine
 /// Zusage über die Größe des Prozesses: derselbe 64-MiB-Strom als
 /// `/FlateDecode`, dessen Bytes sich als roher Deflate-Strom auf gut das
-/// Doppelte aufblasen lassen, kommt bei 512 MiB Budget auf 621 MB — entpackte
+/// Doppelte aufblasen lassen, kommt bei 512 MiB Budget auf 593 MB — entpackte
 /// Bytes, ihre Verkettung, und zwei Sichten hintereinander. Wer das Budget
 /// hochdreht, kauft Speicher, nicht nur Erlaubnis.
 ///

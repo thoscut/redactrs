@@ -118,8 +118,8 @@ pub fn decoded_content_within(
 /// Stromgröße Speicher, die niemand bestellt hat und die `limit` nicht deckt:
 /// bis Fix-Runde 6 klonte diese Funktion die Rohbytes, **bevor** sie den
 /// ersten Filter kannte, und gab bei `/Filter /DCTDecode` 8 000 000 Byte
-/// zurück, obwohl `limit` 16 war (gemessen an einem 64-MiB-Strom: 205 MB
-/// statt 138 MB Spitzenbelegung, `tests/zf_q2_teildekoder.rs`).
+/// zurück, obwohl `limit` 16 war (gemessen an einem 64-MiB-Strom: 196 MB
+/// statt 132 MB Spitzenbelegung, `tests/zf_q2_teildekoder.rs`).
 ///
 /// # Warum nicht über [`decoded_content_within`]
 ///

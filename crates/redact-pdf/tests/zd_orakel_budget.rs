@@ -359,8 +359,9 @@ fn peak_rss_bytes() -> Option<u64> {
 /// Bis Fix-Runde 6 rechneten die Messausgaben hier `/ 1_000_000`, während
 /// jede Grenze (`--max-decompressed-mb`, `Limits`, die Fehlermeldungen des
 /// Laders) mit 1024² rechnet. Beide Zahlen standen als „MB“ nebeneinander;
-/// die gemessenen Werte fielen dadurch um 4,9 % zu hoch aus (205 statt 196,
-/// 138 statt 135, 621 statt 592).
+/// die gemessenen Werte fielen dadurch um 4,9 % zu hoch aus; nachgemessen
+/// (`zf_q2_teildekoder::q2_mess_speicher_ohne_klon`, Release) sind aus
+/// 205 / 138 / 621 MB **196 / 132 / 593 MB** geworden.
 fn mb(bytes: u64) -> u64 {
     bytes / MIB
 }

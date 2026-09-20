@@ -1301,8 +1301,30 @@ impl RedactApp {
     /// `send` findet niemanden mehr); die neue prüft dieselbe Datei und trägt
     /// ihr Urteil unter dem Präfix ein, zu dem es gehört. Verschwiegen wird
     /// nichts: Die Warnungen der ersten Ausgabe hat `note_export_warnings`
-    /// bereits durch die der zweiten ersetzt, denn sie hängen am selben
-    /// Dateinamen.
+    /// bereits durch die der zweiten ersetzt, denn sie hängen an derselben
+    /// Ausgabedatei ([`file_key`]).
+    ///
+    /// **Fallen gelassen heißt nicht abgebrochen** — und das bleibt so.
+    /// Der Thread der älteren Prüfung liest die Datei zu Ende, durchsucht sie,
+    /// sein `send` findet niemanden mehr, und sein [`RepaintOnDrop`] fordert
+    /// am Ende trotzdem ein Neuzeichnen an (eines zu viel, das egui mit dem
+    /// nächsten zusammenlegt). Bei N schnellen Exporten derselben Datei laufen
+    /// also N−1 vollständige Suchen umsonst weiter. Gemessen (Release,
+    /// Testprozess, `zg_r4_app_tests::zg_r4_2_mess_was_eine_fallengelassene_pruefung_kostet`):
+    /// an einer 300-seitigen Ausgabe (96 kB) kostet ein Lauf am oberen Rand
+    /// der Decke (1 000 Begriffe) **0,11 s**; fünf davon gleichzeitig sind
+    /// fünf Threads, nach 0,12 s steht das Urteil, nach 0,17 s sind alle aus,
+    /// und die Speicherspitze steigt um **19 MB** (rund 4 MB je Lauf). An der
+    /// größeren Vorlage aus `zb_mess_nachpruefung_je_begriff_gegen_einen_durchgang`
+    /// (305 Seiten, 1 079 kB) kostet ein Lauf rund **1 s**.
+    ///
+    /// Ein Abbruchsignal (`AtomicBool`, das die Suche ab und zu liest) ließe
+    /// sich **hier** nicht einlösen: die Suche ist ein einziger Aufruf von
+    /// [`redact_pdf::leaks_many_within`], und eine Fahne, die nur davor
+    /// gelesen wird, spart nichts — der Thread ist dort Mikrosekunden alt.
+    /// Es bräuchte die Fahne **in** `redact-pdf`; solange eine fallen
+    /// gelassene Prüfung eine Sekunde eines Kerns und ein paar MB kostet, ist
+    /// das den Umbau nicht wert.
     fn start_export_check(
         &mut self,
         prefix: String,
