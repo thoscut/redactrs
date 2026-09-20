@@ -536,8 +536,7 @@ impl ExportCheck {
     /// steht nicht mehr in der Ausgabe, und nur über ihn gibt der Satz eine
     /// Entwarnung (Befund R4-7).
     pub fn vanished(&self) -> usize {
-        self.checked
-            .saturating_sub(self.kept + self.leaking.len())
+        self.checked.saturating_sub(self.kept + self.leaking.len())
     }
 
     /// Der Satz für die Warnungen — `None`, wenn es nichts zu warnen gibt.
@@ -916,7 +915,7 @@ impl ExportCheckPlan {
                     unsearched: 0,
                     limit,
                     unchecked: Vec::new(),
-                }
+                };
             }
         };
         let checked = self.needles.len().min(limit);

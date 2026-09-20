@@ -551,10 +551,16 @@ mod messwerte {
     pub const PLATTFORM_PROBEN: usize = 9;
     pub const PLATTFORM_FEHLALARM: usize = 1;
     pub const PLATTFORM_LUECKEN: usize = 6;
-    pub const PLATTFORM_ALTLASTEN: usize = 9;
+    /// Verletzungen, die die Gegenpruefung fand (`PLATTFORM_VERLETZUNGEN`),
+    /// davon in der Fix-Runde 7 behoben (`PLATTFORM_BEHOBEN`) und als benannte
+    /// Altlast verblieben (`PLATTFORM_ALTLASTEN`, die `mkfifo`-Stellen).
+    pub const PLATTFORM_VERLETZUNGEN: usize = 9;
+    pub const PLATTFORM_BEHOBEN: usize = 3;
+    pub const PLATTFORM_ALTLASTEN: usize = 6;
     pub const PLATTFORM_MKFIFO: usize = 6;
     /// So oft war der Windows-Job der CI an dieser Fehlerklasse rot.
-    pub const WINDOWS_ROT: usize = 2;
+    pub const WINDOWS_ROT: usize = 3;
+    /// Von den behobenen Stellen die beiden mit `std::os::unix`.
     pub const PLATTFORM_UNIX_API: usize = 2;
     /// Der Lauf, der „52 Stelle(n)“ unter mehr Zeilen schrieb
     /// (`redact-pdf/tests/zg_r2_decke.rs`).
@@ -1574,6 +1580,13 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     satz(
         "CHANGELOG.md",
         format!(
+            "Die {} `mkfifo`-Stellen bleiben als benannte Altlast in der Liste",
+            zahlwort(m::PLATTFORM_ALTLASTEN)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
             "an dem der Windows-Job schon {}mal rot war",
             zahlwort(m::WINDOWS_ROT)
         ),
@@ -1596,11 +1609,11 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     satz(
         "CHANGELOG.md",
         format!(
-            "{} Stellen im Baum verletzen die geschärfte Regel und stehen namentlich \
-             als Altlast darin: {}mal `mkfifo`, {}mal ein `std::os::unix`-API **ohne** \
-             `cfg`",
-            zahlwort_gross(m::PLATTFORM_ALTLASTEN),
-            zahlwort(m::PLATTFORM_MKFIFO),
+            "{} Stellen im Baum verletzten die geschärfte Regel; **{} davon hätten \
+             den Windows-Lauf gebrochen und sind behoben**: {}mal \
+             `std::os::unix::fs::symlink` **ohne** `cfg`",
+            zahlwort_gross(m::PLATTFORM_VERLETZUNGEN),
+            zahlwort(m::PLATTFORM_BEHOBEN),
             zahlwort(m::PLATTFORM_UNIX_API)
         ),
     );
@@ -1921,11 +1934,6 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "die Definition der Einheit, keine gemessene Größe",
     ),
     (
-        "<!-- FIX-RUNDE-7:",
-        "der Platzhalter, in den der Orchestrator die Sätze der übrigen Agenten \
-         einträgt; er nennt keine Messung",
-    ),
-    (
         "„UTF-8, Latin-1/PDFDoc, UTF-16BE und als Hex-String“",
         "Namen von Kodierungen, keine gemessenen Größen",
     ),
@@ -1961,6 +1969,21 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "läuft einmal je Strom statt je Platzierung",
         "„einmal“ beschreibt die Häufigkeit eines Durchlaufs, keine Messung",
+    ),
+    // --- Fix-Runde 7: Anzahlen von Befunden, Stellen und Vorfaellen -------
+    // Keine davon misst das Programm; sie zaehlen, wovon der Abschnitt
+    // handelt. Wer sie aendert, aendert keine Zusage ueber das Verhalten.
+    (
+        "**Zwei Wege zur Dienstverweigerung, beide gedeckelt.**",
+        "zaehlt die beiden Befunde dieses Punktes, misst nichts am Programm",
+    ),
+    (
+        "Drei Zähler tragen jetzt zusammen",
+        "zaehlt Konstrukte im Quelltext (drei Konten unter einer Decke), keine Messung",
+    ),
+    (
+        "Fix-Runde 6",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messzahl",
     ),
 ];
 

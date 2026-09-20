@@ -84,14 +84,16 @@
 //!    Startergebnis als gegeben nimmt. Für diese Marke rettet ein `cfg`
 //!    deshalb **nicht**; nur ein Ausweg zählt.
 //!
-//! Neun Stellen im Baum verletzen die geschärfte Regel und gehören nicht
-//! `redact-cli`: sechsmal `mkfifo`, zweimal ein Unix-API **ohne**
-//! `cfg` in einem `#[cfg(test)]`-Modul der Oberfläche — und einmal, **neu in
-//! dieser Runde**, ein `/proc/self/status` mit `.expect(…)` ebendort. Die zweite Sorte ist
-//! kein Laufzeit-, sondern ein **Bau**fehler auf Windows — der dortige
-//! CI-Job fährt `cargo clippy --workspace --all-targets` und
-//! `cargo test --workspace`. Beide Sorten stehen namentlich in [`ALTLASTEN`];
-//! die Liste muss genau aufgehen.
+//! Die Gegenprüfung fand neun Stellen im Baum, die die geschärfte Regel
+//! verletzen und nicht `redact-cli` gehören. Drei davon sind behoben: zweimal
+//! `std::os::unix::fs::symlink` ohne `cfg` — kein Laufzeit-, sondern ein
+//! **Bau**fehler auf Windows, wo der CI-Job `cargo clippy --workspace
+//! --all-targets` und `cargo test --workspace` fährt — und einmal ein
+//! `/proc/self/status` mit `.expect(…)`, das ebendort zur Laufzeit panickt.
+//! Sechs bleiben: derselbe `mkfifo`-Fall, der an `cfg(unix)` hängt, aber am
+//! `PATH` scheitert. Sie stehen namentlich in [`ALTLASTEN`]; die Liste muss
+//! genau aufgehen — eine neue Verletzung macht den Test rot, eine behobene
+//! ebenso.
 //!
 //! Der Test liest den Quelltext, nicht das Programm — deshalb steht er hier
 //! und braucht kein Windows.
@@ -444,33 +446,13 @@ const ALTLASTEN: &[(&str, &str, &str)] = &[
         "Command::new(\"",
         "mkfifo ohne Ausweg",
     ),
-    // Und zweimal ein Unix-API **ohne** `cfg` in einem `#[cfg(test)]`-Modul.
-    // Das ist kein Laufzeit-, sondern ein **Bau**fehler auf Windows: der
-    // dortige CI-Job fährt `cargo clippy --workspace --all-targets` und
-    // `cargo test --workspace`, und `std::os::unix` gibt es dort nicht. Die
-    // Dateien gehören der Oberfläche (gemeldet als Vertrag der Fix-Runde 7).
-    (
-        "crates/redact-gui/src/zg_r4_app_tests.rs",
-        "std::os::unix::",
-        "Unix-API ohne cfg — bricht den Windows-Bau",
-    ),
-    (
-        "crates/redact-gui/src/zg_r4_tests.rs",
-        "std::os::unix::",
-        "Unix-API ohne cfg — bricht den Windows-Bau",
-    ),
-    // **Neu in der Fix-Runde 7**, und der Grund, aus dem es diese Regel gibt:
-    // `proc_status()` liest `/proc/self/status` ohne `cfg` und nimmt das
-    // Ergebnis als gegeben. Auf Windows fährt die CI `cargo test --workspace`,
-    // und dort gibt es kein `/proc` — derselbe Laufzeitfehler, an dem der Job
-    // schon zweimal rot war. Die Datei gehört der Oberfläche; gemeldet als
-    // Vertrag der Fix-Runde 7, zu beheben mit `#[cfg(target_os = "linux")]`
-    // über `proc_status` oder `.ok()` statt `.expect(…)`.
-    (
-        "crates/redact-gui/src/zg_r4_app_tests.rs",
-        "\"/proc/",
-        "neu in Runde 7: /proc ohne cfg und ohne Ausweg — panickt unter Windows",
-    ),
+    // Die drei Stellen der Oberfläche, die Agent E hier nur melden konnte,
+    // sind behoben und deshalb gestrichen: zweimal `std::os::unix::fs::symlink`
+    // ohne `cfg` (ein **Bau**fehler auf Windows, wo der CI-Job `cargo clippy
+    // --workspace --all-targets` fährt) und einmal `proc_status()`, das
+    // `/proc/self/status` ohne Ausweg las (ein Laufzeitfehler ebendort). Der
+    // Symlink steht jetzt unter `#[cfg(unix)]`, `proc_status` samt seinem
+    // Messtest unter `#[cfg(target_os = "linux")]`.
 ];
 
 /// Eine gefundene Verletzung: Datei (relativ), Zeile, Marke, Quelltext.

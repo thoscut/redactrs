@@ -222,9 +222,12 @@ fn befund_r2_a_bildfilter_vor_einem_packfilter_wird_gemeldet() {
     // Entpackt ist weiterhin nichts — aber die Stelle steht jetzt in der Liste.
     assert!(check.findings[0].is_empty(), "{:#?}", check.findings[0]);
     assert!(
-        check.unchecked.iter().any(|m| m.starts_with("Objekt 7 0 <Stream>:")
-            && m.contains("/DCTDecode ist ein Bildfilter")
-            && m.contains("(Glied 1 von 2)")),
+        check
+            .unchecked
+            .iter()
+            .any(|m| m.starts_with("Objekt 7 0 <Stream>:")
+                && m.contains("/DCTDecode ist ein Bildfilter")
+                && m.contains("(Glied 1 von 2)")),
         "{:#?}",
         check.unchecked
     );
@@ -272,7 +275,14 @@ fn r2_bildfilter_als_letztes_glied_schweigt_weiter() {
     assert!(check.unchecked.is_empty(), "{:#?}", check.unchecked);
     assert_eq!(check.unchecked_places, 0);
 
-    for allein in ["DCTDecode", "DCT", "JPXDecode", "CCITTFaxDecode", "CCF", "JBIG2Decode"] {
+    for allein in [
+        "DCTDecode",
+        "DCT",
+        "JPXDecode",
+        "CCITTFaxDecode",
+        "CCF",
+        "JBIG2Decode",
+    ] {
         let mut raw = vec![0xff, 0xd8];
         raw.extend_from_slice(&zlib(&text()));
         let check = pruefe(&pdf(name(allein), raw));

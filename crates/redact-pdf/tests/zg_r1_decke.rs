@@ -453,7 +453,12 @@ fn text_genau_an_der_decke_bleibt_still() {
 fn text_eine_zuordnung_ueber_der_decke_sagt_es() {
     let scan = scan_first(&klammern_ueber_text(1, 2, 50_001, false));
     assert_eq!(textzuordnungen(&scan), DECKE);
-    assert_eq!(text_warnungen(&scan.warnings).len(), 1, "{:?}", scan.warnings);
+    assert_eq!(
+        text_warnungen(&scan.warnings).len(),
+        1,
+        "{:?}",
+        scan.warnings
+    );
 }
 
 /// Die beiden Decken zehren nicht voneinander: dieselbe Seite trägt 100 000

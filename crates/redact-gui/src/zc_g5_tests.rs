@@ -431,7 +431,10 @@ fn g5b_leerer_text_und_tausend_gleiche() {
         !s.contains("stehen wörtlich auch in einer abgewählten"),
         "kein Vorbehalt über einen Text, der nicht da ist: {s}"
     );
-    assert!(s.starts_with("Nachprüfung: 1 von 2 gesuchten Text(en) steht NOCH"), "{s}");
+    assert!(
+        s.starts_with("Nachprüfung: 1 von 2 gesuchten Text(en) steht NOCH"),
+        "{s}"
+    );
 }
 
 // ===========================================================================

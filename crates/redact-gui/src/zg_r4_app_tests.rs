@@ -109,6 +109,10 @@ fn collect_verdicts(app: &mut RedactApp) -> (usize, Vec<String>) {
 ///
 /// Gibt `(app, gate, erster Pfad, zweiter Pfad)` zurück; beide Threads
 /// hängen am Haken.
+/// Braucht einen Symlink und steht deshalb unter `cfg`: unter Windows
+/// verlangt `symlink` Sonderrechte, und ein Test, der ohne sie panickt,
+/// bricht den dortigen Lauf.
+#[cfg(unix)]
 fn zweimal_dieselbe_datei_unter_zwei_namen(
     tag: &str,
 ) -> (RedactApp, Arc<CheckGate>, PathBuf, PathBuf) {
@@ -157,6 +161,7 @@ fn zweimal_dieselbe_datei_unter_zwei_namen(
 /// Bytes mit dem **alten** Plan (nur GEHEIM-EINS, und das ist in der neuen
 /// Datei geschwärzt) und meldete über den ersten Export eine Entwarnung.
 #[test]
+#[cfg(unix)]
 fn zg_r4_2_dieselbe_datei_unter_anderem_namen_beendet_die_alte_pruefung() {
     let (mut app, gate, first, second) = zweimal_dieselbe_datei_unter_zwei_namen("symlink-soll");
     println!("erster Pfad:  {}", first.display());
@@ -457,6 +462,13 @@ fn zg_r4_1_die_warnung_ueber_nicht_gesuchte_texte_kommt_und_geht_mit_dem_export(
 
 /// Ein Feld aus `/proc/self/status` (Linux) — `Threads:` zählt Threads,
 /// `VmHWM:` die Spitze des Arbeitsspeichers in kB.
+///
+/// Steht unter `cfg`, weil `/proc` eine Einrichtung genau dieses Systems ist:
+/// unter Windows fährt die CI `cargo test --workspace`, und dort gibt es kein
+/// `/proc` — derselbe Laufzeitfehler, an dem der Job in dieser Schleife schon
+/// dreimal rot war. Auf Linux bleibt die Messung streng (`expect`), woanders
+/// gibt es sie nicht.
+#[cfg(target_os = "linux")]
 fn proc_status(field: &str) -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
     status
@@ -483,6 +495,7 @@ fn proc_status(field: &str) -> u64 {
 /// `cargo test -p redact-gui --release zg_r4_2_mess -- --ignored --nocapture`
 #[test]
 #[ignore = "Messung: was eine fallen gelassene Nachprüfung kostet"]
+#[cfg(target_os = "linux")]
 fn zg_r4_2_mess_was_eine_fallengelassene_pruefung_kostet() {
     let dir = tmp("mess");
     let out = dir.join("out.pdf");
@@ -491,7 +504,12 @@ fn zg_r4_2_mess_was_eine_fallengelassene_pruefung_kostet() {
         .map(|p| {
             vec![
                 TextItem::new(72.0, 700.0, 10.0, format!("Seite {p} GEHEIM-EINS")),
-                TextItem::new(72.0, 660.0, 10.0, format!("Seite {p} GEHEIM-ZWEI und mehr Text, damit die Seite etwas wiegt")),
+                TextItem::new(
+                    72.0,
+                    660.0,
+                    10.0,
+                    format!("Seite {p} GEHEIM-ZWEI und mehr Text, damit die Seite etwas wiegt"),
+                ),
             ]
         })
         .collect();

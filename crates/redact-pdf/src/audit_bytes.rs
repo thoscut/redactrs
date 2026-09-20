@@ -1253,10 +1253,7 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
             let rest = if names[applied].is_empty() {
                 "ein Glied ohne Filternamen".to_string()
             } else {
-                format!(
-                    "/{} unbekannt",
-                    String::from_utf8_lossy(&names[applied])
-                )
+                format!("/{} unbekannt", String::from_utf8_lossy(&names[applied]))
             };
             Some((
                 format!(

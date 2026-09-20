@@ -394,7 +394,11 @@ fn zg_r4_1_loeschen_statt_abwaehlen_ist_kein_alarm_mehr() {
         check.warning()
     );
     assert_eq!(plan.needles, vec!["Betrag".to_string()]);
-    assert_eq!(plan.kept_literal, vec![true], "gelöscht ist stehen gelassen");
+    assert_eq!(
+        plan.kept_literal,
+        vec![true],
+        "gelöscht ist stehen gelassen"
+    );
     // Die vierte Zeile steht bewusst da — und ist der einzige Rest: der
     // Schriftdekoder sieht auf Seite 1 genau ein „Betrag“.
     let bytes = std::fs::read(&out).unwrap();
@@ -748,7 +752,10 @@ fn pruefe_satz(lage: Lage, check: &ExportCheck) -> Vec<String> {
     let status = check.status_line();
     muss(
         status.chars().count() <= MAX_STATUS_CHARS,
-        &format!("die Statuszeile ist {} Zeichen lang", status.chars().count()),
+        &format!(
+            "die Statuszeile ist {} Zeichen lang",
+            status.chars().count()
+        ),
     );
     if s.chars().count() > MAX_STATUS_CHARS {
         muss(
@@ -879,7 +886,10 @@ fn zg_r4_3_die_warnung_nennt_beide_gruende_auch_im_lauf() {
     let warning = nur_decke.warning().expect("unvollständig");
     println!("nur die Decke: {warning}");
     assert!(warning.starts_with("Nachprüfung unvollständig — 5 Text(e) wurden nicht gesucht"));
-    assert!(!warning.contains("stehen nicht mehr in der Ausgabe"), "{warning}");
+    assert!(
+        !warning.contains("stehen nicht mehr in der Ausgabe"),
+        "{warning}"
+    );
     let nur_gedeckt = ExportCheck {
         checked: 1,
         kept: 1,
@@ -890,7 +900,10 @@ fn zg_r4_3_die_warnung_nennt_beide_gruende_auch_im_lauf() {
     let warning = nur_gedeckt.warning().expect("unvollständig");
     println!("nur gedeckt:   {warning}");
     assert!(warning.starts_with("Nachprüfung unvollständig — über 1 Text(e) sagt sie nichts"));
-    assert!(!warning.contains("stehen nicht mehr in der Ausgabe"), "{warning}");
+    assert!(
+        !warning.contains("stehen nicht mehr in der Ausgabe"),
+        "{warning}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -946,19 +959,29 @@ fn zg_r4_2_der_pfadvergleich_taugt_nicht_als_kennung() {
         "ein führendes „./“ bleibt stehen"
     );
     let up = dir.join("..").join(dir.file_name().unwrap()).join("a.pdf");
-    let link = dir.join("link");
-    std::os::unix::fs::symlink(&dir, &link).unwrap();
-    let via_link = link.join("a.pdf");
-    for (name, other) in [("../", &up), ("Symlink", &via_link)] {
+    // Ein Symlink ist eine Einrichtung des Systems und steht deshalb unter
+    // `cfg`: unter Windows braucht `symlink` Sonderrechte, und ein Test, der
+    // ohne sie panickt, bricht den dortigen Lauf. Der `../`-Fall gilt überall
+    // und wird überall geprüft — die Aussage des Tests schrumpft auf Windows
+    // also, verschwindet aber nicht.
+    #[cfg(unix)]
+    let symlink_fall = {
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        Some(("Symlink", link.join("a.pdf")))
+    };
+    #[cfg(not(unix))]
+    let symlink_fall: Option<(&str, PathBuf)> = None;
+    for (name, other) in [Some(("../", up)), symlink_fall].into_iter().flatten() {
         let gleiche_datei =
-            std::fs::canonicalize(other).unwrap() == std::fs::canonicalize(&a).unwrap();
+            std::fs::canonicalize(&other).unwrap() == std::fs::canonicalize(&a).unwrap();
         println!(
             "{name}: {} — dieselbe Datei: {gleiche_datei}, dieselbe Kennung: {}",
             other.display(),
-            *other == a
+            other == a
         );
         assert!(gleiche_datei);
-        assert_ne!(*other, a, "der Pfadvergleich hält sie für zwei Dateien");
+        assert_ne!(other, a, "der Pfadvergleich hält sie für zwei Dateien");
     }
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1137,10 +1160,7 @@ fn zg_r4_3_bei_der_decke_null_widerspricht_sich_der_satz_nicht_mehr() {
     println!("Satz: {s}");
     assert_eq!((check.checked, check.skipped), (0, 2));
     assert!(s.contains("2 Text(e) wurden nicht gesucht"), "{s}");
-    assert!(
-        !s.contains("weitere"),
-        "„weitere“ ohne erste: {s}"
-    );
+    assert!(!s.contains("weitere"), "„weitere“ ohne erste: {s}");
     assert!(
         s.contains("Es wurde nichts gesucht."),
         "der Kopf muss sagen, dass nichts gesucht wurde: {s}"
@@ -1239,7 +1259,10 @@ fn zg_r4_3_die_statuszeile_ist_als_ganzes_gedeckelt() {
         gekuerzt <= MAX_STATUS_CHARS,
         "die Statuszeile ist {gekuerzt} Zeichen lang"
     );
-    assert!(status.ends_with("… (ganzer Satz in den Warnungen)"), "{status}");
+    assert!(
+        status.ends_with("… (ganzer Satz in den Warnungen)"),
+        "{status}"
+    );
     // Der Fund führt — und steht deshalb auch in der gekürzten Zeile.
     assert!(
         status.starts_with("Nachprüfung: 1 von 3 gesuchten Text(en) steht NOCH in der Ausgabe"),

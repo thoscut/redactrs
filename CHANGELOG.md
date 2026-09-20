@@ -105,21 +105,121 @@ blieben.
   Anweisung**, Kommentare sind wirklich ausgenommen, und ein fremdes Programm
   ist eine Einrichtung des Systems: `#[cfg(unix)]` sagt nichts über den `PATH`,
   und auf einem schlanken Unix-Bild ohne `util-linux` panickt ein Test, statt
-  sich mit einem Hinweis zu begnügen. Neun Stellen im Baum verletzen die
-  geschärfte Regel und stehen namentlich als Altlast darin: sechsmal `mkfifo`,
-  zweimal ein `std::os::unix`-API **ohne** `cfg` in einem `#[cfg(test)]`-Modul
-  der Oberfläche — das bricht nicht erst zur Laufzeit, sondern schon den
-  Windows-Bau, und der dortige CI-Job fährt `cargo clippy --workspace
-  --all-targets` und `cargo test --workspace` — und einmal ein
-  `/proc/self/status` mit `.expect(…)`, ebendort und **neu**: genau der
-  Laufzeitfehler, an dem der Windows-Job schon zweimal rot war.
+  sich mit einem Hinweis zu begnügen. Neun Stellen im Baum verletzten die
+  geschärfte Regel; **drei davon hätten den Windows-Lauf gebrochen und sind
+  behoben**: zweimal `std::os::unix::fs::symlink` **ohne** `cfg` in einem
+  `#[cfg(test)]`-Modul der Oberfläche — das bricht nicht erst zur Laufzeit,
+  sondern schon den Bau, und der dortige CI-Job fährt `cargo clippy
+  --workspace --all-targets` und `cargo test --workspace` — und einmal ein
+  `/proc/self/status` mit `.expect(…)` ebendort, genau der Laufzeitfehler, an
+  dem der Windows-Job schon dreimal rot war. Der Symlink
+  steht jetzt unter `#[cfg(unix)]`, der Messhelfer samt seinem Test unter
+  `#[cfg(target_os = "linux")]`. Die sechs `mkfifo`-Stellen bleiben als
+  benannte Altlast in der Liste: sie hängen an `cfg(unix)`, scheitern aber am
+  `PATH`, und das bricht kein Windows, sondern ein schlankes Unix-Bild ohne
+  `util-linux`.
 * **`--check-leaks` zählte Zeilen, nicht Stellen.** „52 Stelle(n) nicht geprüft“
   stand unter 50 einzeln genannten Zeilen, einer Summenzeile „7 weitere“ und
   einer über 57 Ströme — die Zahl war kleiner als das, was darüber stand. Gezählt
   wird jetzt `LeakCheck::unchecked_places`, und der Satz sagt, dass eine
   Summenzeile den Rest zusammenfasst, wenn es sehr viele sind.
 
-<!-- FIX-RUNDE-7: Sätze der Agenten A (Spiegel, Decken), B (Orakel, Filter, Lader), C (Metadaten), D (Oberfläche) — trägt der Orchestrator ein -->
+* **Ein Formular ohne eigenes `/Resources` ließ seinen Spiegel stehen.** Ein
+  Form-XObject darf das Ressourcenverzeichnis der Seite erben. Tat es das,
+  wurde der Textspiegel darüber gelesen, im Strom geleert und gemeldet — der
+  Klartext blieb aber im Verzeichnis der **Seite** stehen, wo niemand ihn
+  suchte: Rückgabewert null beim Schwärzen, danach findet `--check-leaks` die
+  IBAN. Geleert wird jetzt am Fundort statt am vermuteten Ort, und zwar in
+  jeder Lage, die die Gegenprüfung baute: geerbte Liste über mehrere
+  `/Pages`-Ebenen, direkt in der Seite stehende Liste, geteiltes
+  `/Resources`-Objekt (dort nur der getroffene Eintrag, die Nachbarseite
+  bleibt unberührt), `/Properties` als Verweis, Kachelmuster mit eigenem
+  Verzeichnis, und eine Zweitfassung, die einmal als Verweis und einmal direkt
+  steht — beide fallen. Dasselbe Formular unter mehreren Grafikumgebungen wird
+  jetzt in jeder abgelaufen; dass nur die erste geprüft wurde, war eine
+  Regression aus der Fix-Runde 6, die den Scan je Strom statt je Platzierung
+  laufen ließ und die Umgebung dabei vergaß.
+* **Zwei Wege zur Dienstverweigerung, beide gedeckelt.** `BDC`-Klammern über
+  Textoperationen zählten gegen **keine** Decke. Und die Decke galt je
+  Seiten-Scan, obwohl mehrere Seiten auf denselben `/Contents`-Strom zeigen
+  dürfen — jede Seite zahlte sie voll aus, und der Redaktor hielt die Spiegel
+  aller Seiten bis zum Ende fest. Drei Zähler tragen jetzt zusammen eine
+  gemeinsame Decke je Seiten-Scan, keiner verbraucht den anderen; und weil die
+  Kosten nicht im Scan, sondern beim Festhalten der zurückgestellten Spiegel
+  anfielen, steht die dokumentweite Decke dort (`MAX_DEFERRED_MIRRORS`).
+  Zurückgestellt wird außerdem nur noch, was die späte Frage braucht — die
+  Objekt-Ids der Formulare, einmal je Formular statt je Platzierung, ohne
+  deren Pfade und ohne die Eigenschaftsliste, die den Spiegeltext trägt. Der
+  Scan bleibt seitenweise, weil `scan_page` öffentlich und seitenweise ist:
+  dokumentweit zu zählen hieße, dieselbe Seite je nach ihren Nachbarn zu
+  warnen oder nicht.
+* **Ein `/Filter`-Wert, der gar kein Name ist, machte das Orakel stumm.**
+  `null`, eine Zahl, eine Zeichenkette, ein Verweis ins Leere — für `lopdf`
+  ist das alles „ungefiltert", und das Orakel gab über LZW-gepacktem Klartext
+  eine Entwarnung. Die kleinste Änderung, die das schließt: ein Glied, das
+  sich nicht zu einem Namen auflöst, steht als **leerer** Name in der Kette.
+  Ein leerer Name ist nie ein bekannter Filter, also bleibt die Kette dort
+  stehen wie an jedem anderen unbekannten Namen — die Stelle kommt in die
+  Liste „nicht geprüft", und der Rückgabewert sagt es. `/Filter null` dagegen
+  ist gar kein Filter und bleibt es.
+* **Der Bildfilter am Anfang einer Kette war ein Leck, keine Ausnahme.** Die
+  Fix-Runde 6 hatte zugesagt, die Bildfilter-Ausnahme gelte am
+  stehengebliebenen Glied. Der Lauf jeder Tabellenzeile durch das Binary
+  widerlegte das sofort: ein Packfilter **hinter** einem Bildfilter wurde
+  stillgeschwiegen, obwohl die Rohsicht den gepackten Text findet. Gemeldet
+  wird jetzt, wenn ein Bildfilter vor einem Packfilter steht; allein am Ende
+  der Kette bleibt er der benannte blinde Fleck.
+* **Klartextträger, die den Metadatenlauf überstanden**, keiner davon benannt:
+  ein `/FileAttachment`, das nur ein `/Popup` oder eine Antwort (`/IRT`) am
+  Leben hielt; eine zugeordnete Datei (`/AF`) am Katalog, an der Seite oder an
+  einer direkt eingebetteten Annotation — der Weg, über den ZUGFeRD seine
+  Rechnung einbettet; XMP an einem Bild-XObject; `/PieceInfo` an einem
+  Form-XObject; eine dreidimensionale Annotation mit ihrem Startskript; und
+  das `/RO` einer `/Redact`-Annotation. Alle fallen jetzt, und zwar so, dass
+  die Datei gültig bleibt: die Annotation behält ihren Schlüssel, die
+  Vermessung ihr Erscheinungsbild bytegleich, nur der Klartext ist weg.
+  Gemessen am ehrlichen Orakel, nicht am Bericht des Programms.
+* **Der Bericht meldete Entfernungen, die keine waren.** Gebucht wurde die
+  erste statt der aufgelösten Objekt-Id, wodurch eine Verweiskette eine
+  Entfernung über einen Text meldete, den `--check-leaks` danach noch fand;
+  und ein Ebenenname als Verweis fiel, während die Konsole „nichts zu
+  entfernen" druckte. Gezählt wird jetzt am aufgeräumten Dokument: gefallene
+  Schlüssel auf dasselbe Objekt zählen je Schlüssel, ein zweiter Halter
+  verhindert die Meldung, und was entfernt aber nicht sicher zuzuordnen ist,
+  bleibt bewusst zu klein — das ist die erlaubte Richtung.
+* **Die Oberfläche verschenkte eine sichere Entwarnung und gab einen harten
+  Fehlalarm.** Verschwundene Schreibweisen wurden nicht gezählt, obwohl
+  „nirgends mehr gefunden" die belastbarste Aussage ist, die diese Prüfung
+  treffen kann; sie steht jetzt als eigene Zahl im Satz. Eine Trefferzeile zu
+  **löschen** (Entf) ist derselbe Wunsch wie sie abzuwählen — die Nachprüfung
+  hielt es für ein Leck und meldete den Text als noch in der Ausgabe stehend.
+  Gemerkt wird die Löschung jetzt an der Kennung der Region und nicht an ihrem
+  Text, damit ein Rückgängig sie wirklich aufhebt. Und die Statuszeile war mit
+  den echten Stellen eines Laufs länger als jede Zeile, die noch gelesen wird,
+  weil die Fix-Runde 6 nur einen Bestandteil gekürzt hatte: gekürzt wird jetzt
+  die ganze Zeile, hinten — die sichere Richtung, denn der Fund steht vorn —,
+  und was nicht mehr hineinpasst, steht vollständig in den Warnungen.
+* **Offen: die Messzahlen dieser Punkte sind nicht gebunden.** Sie
+  stehen dort, wo die Agenten sie gemessen haben — in der Doku am Quelltext
+  von `content.rs`, `redact.rs`, `state.rs` und `meta.rs` —, aber nicht in
+  `messwerte`, und deshalb stehen sie hier nicht. Der Regeltest dieser Runde
+  verlangt für jede Zahl im Block einen gebundenen Satz, und er hat recht: was
+  hier als Zahl steht, ist eine Zusage. Bis sie gebunden sind, sagt dieser
+  Block, **was** sich geändert hat, und nicht, um wie viel.
+* **Offen und unerklärt: ein Test des Tores flattert.** Im ersten Gate-Lauf
+  dieser Runde fiel der Test, der verlangt, dass eine neue Analyse die
+  gelöschten Zeilen vergisst — die Aussage wäre, dass eine Löschung aus dem
+  vorigen Analyselauf im neuen einer danebengegangenen Schwärzung die Warnung
+  nimmt. In allen Läufen danach, einer davon über den ganzen Arbeitsraum, ist
+  er grün; die Korrektur, die er verlangt, steht nachweislich im Code
+  (`deleted_hits.clear()` unbedingt in `analyze`, dazu der Abgleich über die
+  Kennung der Region). Geprüft und verworfen wurden: eine Dateikollision
+  (`kept_literal` entsteht rein im Speicher aus einer lokalen `AppState`), die
+  Löscherinnerung (beim Fund nachweislich leer) und `set_region_rect` (ist
+  deterministisch). Die Ursache ist **unbekannt**. Der Test bleibt scharf und
+  unverändert — er hat in der Sache recht —, und der Punkt steht hier, weil
+  ein Tor, das ohne Codeänderung zufällig rot wird, als Tor genauso wertlos
+  ist wie eines, das zufällig grün bleibt.
 
 ### Fix-Runde 6: was die Gegenprüfung der Runde 5 noch fand
 

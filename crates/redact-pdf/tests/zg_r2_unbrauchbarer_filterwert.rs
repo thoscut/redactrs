@@ -186,14 +186,14 @@ fn befund_r2_c_ein_filterwert_der_kein_name_ist_wird_gemeldet() {
         let (bytes, id) = pdf(filter, raw);
         let check = pruefe(&bytes);
         match sicht {
-            Some(beschriftung) => assert!(
-                check.findings[0].iter().any(|m| m.starts_with(&format!(
-                    "Objekt {} {} <Stream, {beschriftung}",
-                    id.0, id.1
-                ))),
-                "{wie}: das bekannte Glied muss laufen und den Klartext freilegen: {:#?}",
-                check.findings[0]
-            ),
+            Some(beschriftung) => {
+                assert!(
+                    check.findings[0].iter().any(|m| m
+                        .starts_with(&format!("Objekt {} {} <Stream, {beschriftung}", id.0, id.1))),
+                    "{wie}: das bekannte Glied muss laufen und den Klartext freilegen: {:#?}",
+                    check.findings[0]
+                )
+            }
             None => assert!(
                 check.findings[0].is_empty(),
                 "{wie}: vor dem namenlosen Glied steht nichts, was entpacken könnte: {:#?}",
@@ -201,10 +201,9 @@ fn befund_r2_c_ein_filterwert_der_kein_name_ist_wird_gemeldet() {
             ),
         }
         assert!(
-            check.unchecked.iter().any(|m| m.starts_with(&format!(
-                "Objekt {} {} <Stream>:",
-                id.0, id.1
-            )) && m.contains("kein Filtername")),
+            check.unchecked.iter().any(|m| m
+                .starts_with(&format!("Objekt {} {} <Stream>:", id.0, id.1))
+                && m.contains("kein Filtername")),
             "{wie}: der Rest der Kette ist ungelesen und muss es sagen: {:#?}",
             check.unchecked
         );

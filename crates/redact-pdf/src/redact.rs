@@ -35,8 +35,7 @@ use redact_core::conflict::RectGrid;
 use redact_core::{Rect, RedactError, Redaction, Result};
 
 use crate::content::{
-    property_list_homes, MarkedTextRecord, MirrorHome, ShowItem, ShowRecord, StreamKey,
-    MIRROR_KEYS,
+    property_list_homes, MarkedTextRecord, MirrorHome, ShowItem, ShowRecord, StreamKey, MIRROR_KEYS,
 };
 use crate::image::InlineTarget;
 use crate::matrix::Matrix;

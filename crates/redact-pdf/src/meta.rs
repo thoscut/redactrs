@@ -1456,9 +1456,7 @@ fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> Vec<Tally> 
         // Die Id hinter dem Eintrag steht nur am unveränderten Dokument
         // fest; danach wird geschrieben.
         let target = match doc.dereference(&item) {
-            Ok((resolved, Object::Dictionary(dict)))
-                if matches!(dict.get(b"Subtype"), Ok(Object::Name(n)) if n == b"FileAttachment") =>
-            {
+            Ok((resolved, Object::Dictionary(dict))) if matches!(dict.get(b"Subtype"), Ok(Object::Name(n)) if n == b"FileAttachment") => {
                 Some(resolved)
             }
             _ => None,

@@ -264,10 +264,7 @@ fn gehaltener_dateianhang_verliert_seine_datei_und_der_bericht_sagt_es() {
         doc.get_dictionary(a).unwrap().get(b"FS").is_err(),
         "ihr /FS ist gefallen"
     );
-    assert!(
-        !doc.objects.contains_key(&filespec),
-        "der Filespec ist weg"
-    );
+    assert!(!doc.objects.contains_key(&filespec), "der Filespec ist weg");
     assert!(leaks(&out, SECRET).is_empty());
 }
 
