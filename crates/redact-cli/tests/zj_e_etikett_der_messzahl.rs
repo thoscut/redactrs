@@ -27,6 +27,10 @@
 //! Der Maßstab ist dabei absichtlich großzügig — es genügt *irgendein*
 //! Merkmal des Weges im selben Satz. Was hier auffällt, fällt deshalb nicht
 //! an einer engen Lesart auf.
+//!
+//! Eng ist er an **einer** Stelle, und zwar an der, an der die Großzügigkeit
+//! die Regel aufgehoben hätte: ein Profil („Release“) ist kein Ort. Siehe
+//! [`weg`].
 
 use std::path::PathBuf;
 
@@ -154,15 +158,25 @@ fn traegt_mess_groesse(satz: &str) -> Vec<String> {
 
 /// Welchen der drei erlaubten Wege nennt dieser Satz — wenn überhaupt einen?
 ///
-/// Großzügig gelesen: **ein** Merkmal genügt.
+/// Großzügig gelesen: **ein** Merkmal genügt. Zwei Stellen sind trotzdem eng,
+/// weil hier sonst genau das durchgeht, was die Regel verbietet:
+///
+/// * **Ein Profil ist kein Ort.** „(Release, …)“ stand einmal in der
+///   Binary-Liste. Ein im Testprozess erhobener Wert, der nur sein Profil
+///   nennt, hätte damit als Zahl des gebauten Binaries gegolten — das stille
+///   Umetikett, das der Vorspann ausdrücklich ausschließt („still eine
+///   Debug-Zahl als Binary-Zahl auszugeben ist keiner“). `Release` zählt
+///   deshalb nur noch als **Profil** beim zweiten Weg.
+/// * **Der Testprozess wird zuerst gefragt.** Nennt ein Satz ihn, ist er im
+///   Testprozess gemessen, und dann entscheidet allein, ob auch das Profil
+///   dasteht. Stünde die Binary-Frage davor, machte ein „am Binary“ in einem
+///   Nebensatz die Prüfung des Profils überflüssig.
 fn weg(satz: &str) -> Option<&'static str> {
-    const BINARY: [&str; 6] = [
+    const BINARY: [&str; 4] = [
         "gebauten Binary",
         "gebauten Binaries",
         "target/release/redact-rs",
         "am Binary",
-        "(Release",
-        "Release)",
     ];
     const TESTPROZESS: [&str; 3] = ["Testprozess", "im Testlauf", "eigener Prozess"];
     const ALTSTAND: [&str; 6] = [
@@ -174,15 +188,15 @@ fn weg(satz: &str) -> Option<&'static str> {
         "damals",
     ];
 
-    if BINARY.iter().any(|m| satz.contains(m)) {
-        return Some("Binary");
-    }
     if TESTPROZESS.iter().any(|m| satz.contains(m)) {
         // Der zweite Weg verlangt zusätzlich das Profil.
         if satz.contains("Debug") || satz.contains("Release") {
             return Some("Testprozess + Profil");
         }
         return None;
+    }
+    if BINARY.iter().any(|m| satz.contains(m)) {
+        return Some("Binary");
     }
     if ALTSTAND.iter().any(|m| satz.contains(m)) {
         return Some("alter Stand");

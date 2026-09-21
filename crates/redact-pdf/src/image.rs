@@ -69,7 +69,7 @@ use std::rc::Rc;
 
 use lopdf::content::Operation;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
-use redact_core::{Rect, RedactError, Redaction, Result};
+use redact_core::{Point, Rect, RedactError, Redaction, Result};
 
 use crate::content::{ContentSink, ImageEvent, SinkContext, StreamKey};
 use crate::matrix::Matrix;
@@ -152,6 +152,46 @@ pub struct ImageOutcome {
     /// können erst beim Neuschreiben des Stroms eingesetzt werden (siehe
     /// [`crate::redact`]).
     pub inline_replacements: BTreeMap<InlineTarget, BTreeMap<usize, Operation>>,
+    /// **Die Wahrheit über die gefallenen Bildpunkte, im Seitenstrom.** Je
+    /// Seite die Operationsindizes der `Do`/`BI`, unter denen dieser Lauf
+    /// wirklich Bildpunkte überschrieben hat ([`Work::filled`] ist gewachsen,
+    /// geprüft an den Ecken jeder Pixelzelle).
+    ///
+    /// Sie steht hier, weil nur diese Stelle sie kennt und weil außerhalb
+    /// etwas daran hängt: der Ersatztext eines Bildes (`/Alt`,
+    /// `/ActualText` — am Bilddictionary und am Marked-Content-Abschnitt
+    /// darüber) überlebt die Pixel-Schwärzung und trägt oft genau, was zu
+    /// sehen war. Er darf fallen, wenn die Bildpunkte gefallen sind — und
+    /// sonst nicht. Zweimal wurde diese Frage draußen *geschätzt*: an der
+    /// Hülle der Platzierung (zu groß — ein unversehrtes gedrehtes Bild verlor
+    /// seinen Ersatztext) und am Viereck der Platzierung (zu klein an der
+    /// Kante — ein Bild verlor seinen Bildpunkt und behielt seinen Spiegel).
+    /// Siehe [`crate::redact`].
+    ///
+    /// **Was auch hier steht, ohne Wahrheit zu sein:** eine Platzierung, deren
+    /// Bildpunkte sich gar nicht anfassen ließen (nicht dekodierbar, Maske
+    /// nicht übertragbar, kein eigenständiges Objekt — nur mit
+    /// [`ImageOptions::allow_undecodable`]). Dort weiß niemand, was fiel; dort
+    /// ist grob entschieden, und dort steht eine Warnung in
+    /// [`ImageOutcome::warnings`]. Grob entscheiden ist erlaubt, wenn es
+    /// gesagt wird; still grob entscheiden nicht.
+    pub page_image_hits: BTreeMap<ObjectId, BTreeSet<usize>>,
+    /// Dasselbe je Form-XObject: die Operationsindizes in **seinem** Strom.
+    ///
+    /// Vollständig, sobald [`redact_images`] zurückkommt — auch über
+    /// Seitengrenzen: ein Formular, dessen Bild erst von Seite 2 aus
+    /// geschwärzt wird, steht hier, bevor Seite 1 gelesen wird.
+    pub form_image_hits: BTreeMap<ObjectId, BTreeSet<usize>>,
+    /// Bild-XObjects, deren Dictionary diesen Lauf **überlebt**, obwohl eine
+    /// Schwärzung auf ihrer Fläche lag: ihre Pixel ließen sich nicht anfassen
+    /// (siehe [`ImageOptions::allow_undecodable`]), also wurde das Dictionary
+    /// nicht neu aufgebaut und `/Alt` und `/ActualText` stehen noch daran.
+    ///
+    /// Bei jedem anderen getroffenen Bild ist der Ersatztext am Dictionary mit
+    /// den Pixeln gefallen — [`encode_xobject`] baut das Dictionary aus den
+    /// Bildeigenschaften neu auf. Diese Liste ist deshalb genau die, die
+    /// [`crate::redact`] noch eigens räumen muss.
+    pub undecodable_images: BTreeSet<ObjectId>,
 }
 
 /// In welchem Strom ein zu ersetzendes Inline-Bild steht.
@@ -173,6 +213,14 @@ pub enum InlineTarget {
 /// Verändert das Dokument (Bild-XObjects und ggf. `/Resources`), rührt aber
 /// keinen Content-Stream an: die Inline-Bilder kommen als
 /// [`ImageOutcome::inline_replacements`] zurück.
+///
+/// **Gibt heraus, welche Bildpunkte wirklich gefallen sind.** Nur hier ist das
+/// bekannt — [`Work::covers`] prüft die vier Ecken *jeder* Pixelzelle im
+/// User-Space. Die Antwort steht in [`ImageOutcome::page_image_hits`],
+/// [`ImageOutcome::form_image_hits`] und [`ImageOutcome::undecodable_images`];
+/// an ihr entscheidet [`crate::redact`] über den Ersatztext des Bildes. Weil
+/// dieser Lauf *vor* der Seitenschleife steht, ist die Antwort fertig, bevor
+/// irgendein Ersatztext angefasst wird — die Reihenfolge, auf die es ankommt.
 pub fn redact_images(
     doc: &mut Document,
     redactions: &[Redaction],
@@ -295,40 +343,36 @@ fn write_work(
             outcome.redacted_images += 1;
         }
         Key::XObject(_, id) => {
-            let shared = image_pages.get(&id).map(BTreeSet::len).unwrap_or(1) > 1;
-            // Kopieren geht nur, wenn sich der Verweis isolieren lässt:
-            // in den Seitenressourcen immer, in einem Form-XObject nur,
-            // wenn dieses Formular allein von dieser Seite benutzt wird.
-            let isolable = work.streams.iter().all(|stream| match stream {
-                StreamKey::Page => true,
-                StreamKey::Form(form) => form_pages.get(form).map(BTreeSet::len) == Some(1),
-            });
             let stream = build_stream(doc, encode_xobject(&work));
-            if !shared {
-                doc.objects.insert(id, Object::Stream(stream));
-            } else if isolable {
-                let new_id = doc.add_object(Object::Stream(stream));
-                for source in &work.streams {
-                    match source {
-                        StreamKey::Page => repoint_page(doc, work.page_id, &work.name, new_id)?,
-                        StreamKey::Form(form) => {
-                            if !repoint_form(doc, *form, &work.name, new_id)? {
-                                repoint_page(doc, work.page_id, &work.name, new_id)?;
+            match fate(id, &work, image_pages, form_pages) {
+                Fate::Overwrite => {
+                    doc.objects.insert(id, Object::Stream(stream));
+                }
+                Fate::Copy(name) => {
+                    let new_id = doc.add_object(Object::Stream(stream));
+                    for source in &work.streams {
+                        match source {
+                            StreamKey::Page => repoint_page(doc, work.page_id, name, new_id)?,
+                            StreamKey::Form(form) => {
+                                if !repoint_form(doc, *form, name, new_id)? {
+                                    repoint_page(doc, work.page_id, name, new_id)?;
+                                }
                             }
                         }
                     }
+                    outcome.copied_images += 1;
                 }
-                outcome.copied_images += 1;
-            } else {
-                // Letzter Ausweg: überschreiben. Lieber zu viel
-                // geschwärzt als eine Datei, in der die Pixel bleiben.
-                doc.objects.insert(id, Object::Stream(stream));
-                outcome.warnings.push(format!(
-                    "Bild /{} steckt in einem Form-XObject, das mehrere Seiten benutzen. \
-                     Es wurde überschrieben — die Schwärzung wirkt deshalb auch auf die \
-                     anderen Seiten.",
-                    String::from_utf8_lossy(&work.name)
-                ));
+                Fate::OverwriteShared => {
+                    // Letzter Ausweg: überschreiben. Lieber zu viel
+                    // geschwärzt als eine Datei, in der die Pixel bleiben.
+                    doc.objects.insert(id, Object::Stream(stream));
+                    outcome.warnings.push(format!(
+                        "Bild /{} steckt in einem Form-XObject, das mehrere Seiten benutzen. \
+                         Es wurde überschrieben — die Schwärzung wirkt deshalb auch auf die \
+                         anderen Seiten.",
+                        String::from_utf8_lossy(&work.name)
+                    ));
+                }
             }
             outcome.redacted_images += 1;
         }
@@ -814,6 +858,185 @@ struct Work {
     mask: Option<Object>,
 }
 
+/// Vermerkt eine einzelne Platzierung als „hier sind Bildpunkte gefallen".
+///
+/// Der Vermerk geht in den Strom, in dem die Platzierung **steht** — nicht in
+/// den der Seite, die sie gezeichnet hat: ein Formular wird einmal neu
+/// geschrieben, und die Spiegel darin gehören ihm. Siehe
+/// [`ImageOutcome::page_image_hits`].
+fn note_placement(outcome: &mut ImageOutcome, page_id: ObjectId, placement: &Placement) {
+    match placement.stream {
+        StreamKey::Page => outcome.page_image_hits.entry(page_id).or_default(),
+        StreamKey::Form(form) => outcome.form_image_hits.entry(form).or_default(),
+    }
+    .insert(placement.op_index);
+}
+
+/// Was mit dem Bildobjekt geschieht, wenn seine Bildpunkte gefallen sind.
+///
+/// Die Frage wird an **zwei** Stellen gebraucht und darf deshalb nur einmal
+/// beantwortet werden: [`write_work`] schreibt danach, und [`fill_page`]
+/// vermerkt danach, über welchen Platzierungen der Ersatztext fällt. Standen
+/// dort zwei Antworten, fiel ein Spiegel über Bildpunkten, die unversehrt
+/// sichtbar bleiben (`zl_b_pendel_beide_richtungen`) — die Fehlerklasse
+/// „eine Zusage wird zur nächsten Aufrufstelle getragen, wo sie nicht gilt".
+enum Fate<'a> {
+    /// Das Objekt hängt an genau einer Seite: es wird überschrieben, und
+    /// **jede** Platzierung dieses Objekts zeigt danach die geschwärzten
+    /// Bildpunkte.
+    Overwrite,
+    /// Das Objekt hängt an mehreren Seiten und der Verweis lässt sich
+    /// isolieren: es wird kopiert, und der Ressourcenverweis wird unter genau
+    /// **diesem** Namen umgebogen ([`repoint_page`], [`repoint_form`]). Nur
+    /// Platzierungen dieses Namens zeigen die Kopie.
+    Copy(&'a [u8]),
+    /// Geteilt, aber nicht isolierbar — letzter Ausweg: überschreiben, und das
+    /// mit Warnung. Auch hier zeigt jede Platzierung die geschwärzten
+    /// Bildpunkte, und zwar auf allen Seiten.
+    OverwriteShared,
+}
+
+impl Fate<'_> {
+    /// Der Name, unter dem **allein** die geschwärzten Bildpunkte zu sehen
+    /// sind — `None`, wenn jede Platzierung dieses Objekts sie zeigt.
+    fn only_name(&self) -> Option<&[u8]> {
+        match self {
+            Fate::Copy(name) => Some(name),
+            Fate::Overwrite | Fate::OverwriteShared => None,
+        }
+    }
+}
+
+/// Entscheidet, wohin die geschwärzten Bildpunkte kommen. Ohne Nebenwirkung:
+/// die Entscheidung fällt zweimal (vermerken, schreiben) und muss beide Male
+/// dieselbe sein.
+fn fate<'a>(
+    id: ObjectId,
+    work: &'a Work,
+    image_pages: &BTreeMap<ObjectId, BTreeSet<usize>>,
+    form_pages: &BTreeMap<ObjectId, BTreeSet<usize>>,
+) -> Fate<'a> {
+    if image_pages.get(&id).map(BTreeSet::len).unwrap_or(1) <= 1 {
+        return Fate::Overwrite;
+    }
+    // Kopieren geht nur, wenn sich der Verweis isolieren lässt: in den
+    // Seitenressourcen immer, in einem Form-XObject nur, wenn dieses Formular
+    // allein von dieser Seite benutzt wird.
+    let isolable = work.streams.iter().all(|stream| match stream {
+        StreamKey::Page => true,
+        StreamKey::Form(form) => form_pages.get(form).map(BTreeSet::len) == Some(1),
+    });
+    if isolable {
+        Fate::Copy(&work.name)
+    } else {
+        Fate::OverwriteShared
+    }
+}
+
+/// Vermerkt jede Platzierung, die die geschwärzten Bildpunkte **zeigt** — nicht
+/// nur die, unter der die Schwärzung lag, und nicht mehr als das.
+///
+/// Geschwärzt werden die Bildpunkte *im Objekt*. Wird dasselbe Objekt auf
+/// derselben Seite ein zweites Mal gezeichnet, kommt es darauf an, wie es
+/// geschrieben wurde ([`fate`]):
+///
+/// * **überschrieben** — dann zeigen alle Platzierungen dieses Objekts die
+///   geschwärzten Bildpunkte, auch die, über der keine Zone lag. Der Spiegel
+///   dort beschreibt ein Bild, das verloren hat, und trägt möglicherweise
+///   genau das, was dort zu sehen war: er muss fallen. `only_name` ist `None`.
+/// * **kopiert** — dann biegt [`repoint_page`] genau **einen** Namen um. Ein
+///   zweiter Name desselben Objekts zeigt weiter das unversehrte Original;
+///   dessen Spiegel beschreibt sichtbare, ungeschwärzte Bildpunkte und muss
+///   stehen bleiben. `only_name` trägt den umgebogenen Namen.
+///
+/// Fiel der Spiegel auch im zweiten Fall, widersprach sich die Ausgabedatei:
+/// Spiegel weg **und** ungeschwärzte Bildpunkte auf derselben Seite sichtbar —
+/// Fehlalarm und Leck in einem (`zl_b_pendel_beide_richtungen`).
+///
+/// Eine Platzierung auf einer **anderen** Seite ist nie gemeint: dort steht bei
+/// einem geteilten Bild weiter das unversehrte Original ([`write_work`], Zweig
+/// [`Fate::Copy`]). `Key::XObject` trägt den Seitenindex, `placements` ist die
+/// Liste dieser Seite — beides hält das auseinander.
+///
+/// Ein Inline-Bild steht an genau einer Operation seines Stroms und hat keine
+/// Geschwister; ein Name kommt dort nicht vor.
+fn note_lost_pixels(
+    outcome: &mut ImageOutcome,
+    page_id: ObjectId,
+    placements: &[Placement],
+    key: Key,
+    only_name: Option<&[u8]>,
+) {
+    match key {
+        Key::Inline(InlineTarget::Page(id), op_index) => {
+            outcome
+                .page_image_hits
+                .entry(id)
+                .or_default()
+                .insert(op_index);
+        }
+        Key::Inline(InlineTarget::Form(id), op_index) => {
+            outcome
+                .form_image_hits
+                .entry(id)
+                .or_default()
+                .insert(op_index);
+        }
+        Key::XObject(_, id) => {
+            for placement in placements {
+                let Target::XObject {
+                    id: Some(own),
+                    name,
+                    ..
+                } = &placement.target
+                else {
+                    continue;
+                };
+                if *own != id {
+                    continue;
+                }
+                // Der Name entscheidet nur, wenn kopiert wurde. Wurde
+                // überschrieben, zeigt jeder Name die geschwärzten Bildpunkte.
+                if only_name.is_some_and(|only| only != name.as_slice()) {
+                    continue;
+                }
+                note_placement(outcome, page_id, placement);
+            }
+        }
+    }
+}
+
+/// Vermerkt ein Zielobjekt, dessen Bildpunkte sich **nicht anfassen** ließen.
+///
+/// Hier ist grob entschieden — und zwar in beide Richtungen ehrlich: die
+/// getroffenen Platzierungen gelten als getroffen (der Ersatztext darüber
+/// fällt, obwohl kein Bildpunkt fiel), und das Bilddictionary bleibt stehen
+/// (sein `/Alt` muss eigens geräumt werden). Erlaubt ist das nur, weil daneben
+/// eine Warnung steht; der Aufrufer, der sie erzeugt, ruft diese Funktion.
+///
+/// **Nur die getroffenen**, und nicht über [`note_lost_pixels`]. Dessen Frage
+/// lautet „welche Platzierungen zeigen die geschwärzten Bildpunkte?" — und
+/// geschwärzt ist hier keiner: das Objekt wird weder überschrieben noch
+/// kopiert. Eine unberührte Platzierung desselben Bildes zeigt danach
+/// buchstäblich dasselbe wie vorher; ihr Spiegel ist wahr, und sein Verlust
+/// hätte keinen Gegenwert. Über der getroffenen Platzierung dagegen sollte
+/// etwas verschwinden und verschwindet nicht — der Text darüber beschreibt
+/// möglicherweise genau das.
+fn note_undecided(
+    outcome: &mut ImageOutcome,
+    page_id: ObjectId,
+    placements: &[Placement],
+    entries: &[(usize, Vec<Zone>)],
+    key: Key,
+) {
+    for (index, _) in entries {
+        note_placement(outcome, page_id, &placements[*index]);
+    }
+    if let Key::XObject(_, id) = key {
+        outcome.undecodable_images.insert(id);
+    }
+}
+
 /// Schwärzt die Bilder **einer** Seite — und zwar nur die, die eine Zone
 /// wirklich schneidet.
 ///
@@ -840,10 +1063,17 @@ fn fill_page(
     let mut order: Vec<Key> = Vec::new();
     let mut groups: BTreeMap<Key, Vec<(usize, Vec<Zone>)>> = BTreeMap::new();
     for (index, placement) in placements.iter().enumerate() {
-        let bounds = ctm_bounds(&placement.ctm);
+        // Am VIERECK, nicht an der Hülle. Hinter diesem Filter stehen die
+        // note_*-Aufrufe, die entscheiden, ob der Ersatztext über einer
+        // Platzierung fällt — auch in den Zweigen, die grob entscheiden dürfen
+        // (unlesbares Bild, nicht übertragbare Maske, kein eigenständiges
+        // Objekt). Entschied der Filter an der Hülle, verlor ein gedrehtes
+        // unlesbares Bild seinen Ersatztext in der leeren Ecke: Fehlalarm der
+        // ersten Runde, eine Ebene weiter hinten. Siehe [`placement_quad`].
+        let quad = placement_quad(&placement.ctm);
         let touching: Vec<Zone> = zones
             .iter()
-            .filter(|z| bounds.intersects(&z.rect))
+            .filter(|z| cell_meets_rect(&quad, &z.rect))
             .copied()
             .collect();
         if touching.is_empty() {
@@ -858,6 +1088,11 @@ fn fill_page(
                 );
                 if options.allow_undecodable {
                     outcome.warnings.push(message);
+                    // Grob entschieden, aber gesagt: der Ersatztext über dieser
+                    // Platzierung fällt, obwohl kein Bildpunkt fiel. Ein
+                    // Dictionary zum Räumen gibt es hier nicht — das Bild ist
+                    // gar kein eigenständiges Objekt.
+                    note_placement(outcome, page_id, placement);
                     continue;
                 }
                 return Err(RedactError::Pdf(message));
@@ -899,6 +1134,7 @@ fn fill_page(
                     Ok(carry) => carry,
                     Err(reason) => {
                         mask_failure(options, outcome, &first.label(page_index), &reason)?;
+                        note_undecided(outcome, page_id, placements, &entries, key);
                         continue;
                     }
                 };
@@ -938,6 +1174,7 @@ fn fill_page(
                         Err(reason) => {
                             budget.cancel(reserved);
                             mask_failure(options, outcome, &first.label(page_index), &reason)?;
+                            note_undecided(outcome, page_id, placements, &entries, key);
                             continue;
                         }
                     },
@@ -955,9 +1192,23 @@ fn fill_page(
                     );
                     if options.allow_undecodable {
                         outcome.warnings.push(message);
+                        note_undecided(outcome, page_id, placements, &entries, key);
                         continue;
                     }
-                    return Err(RedactError::Pdf(message));
+                    // Der Fluchtweg wird **genannt** — aus demselben Grund wie
+                    // in [`mask_failure`]: ohne den Hinweis endet der Lauf mit
+                    // Rückgabewert 1 und ohne Ausgabedatei, und im Stapel fällt
+                    // die Datei ersatzlos aus. Ein `/JPXDecode`-Scan ist
+                    // gewöhnliches Material; wer ihn vorlegt, soll erfahren,
+                    // wie es weitergeht. Angehängt und nicht eingebaut: der
+                    // Wortlaut der **Warnung** steht als Schablone in
+                    // `redact_pipeline::coverage` und muss dort wiederzufinden
+                    // sein.
+                    return Err(RedactError::Pdf(format!(
+                        "{message} Mit --allow-undecodable-images läuft der Lauf trotzdem \
+                         durch: das Bild bleibt dann ungeschwärzt, und die Ausgabedatei \
+                         entsteht."
+                    )));
                 }
                 let work = Work {
                     width: raster.width,
@@ -975,10 +1226,34 @@ fn fill_page(
             }
         };
 
+        // Der Zähler **vor** dieser Seite: ein Inline-Bild in einem Formular
+        // kann von einer früheren Seite her schon gefüllt sein, und dort wurde
+        // es damals vermerkt. Gefragt ist, ob auf *dieser* Seite etwas fiel.
+        let filled_before = work.filled;
         for (index, touching) in &entries {
             let placement = &placements[*index];
             work.streams.insert(placement.stream);
             work.fill(&placement.ctm, touching);
+        }
+        // **Die Wahrheit, hier und nur hier:** sind Bildpunkte gefallen? Nicht
+        // „liegt das Rechteck auf der Fläche" — das ist die Schätzung, die
+        // zweimal falsch war (siehe [`ImageOutcome::page_image_hits`]).
+        if work.filled > filled_before {
+            // **Welche** Platzierungen zeigen sie? Dieselbe Frage, die
+            // [`write_work`] gleich darunter beantwortet, und dieselbe Antwort:
+            // sonst fällt ein Spiegel über Bildpunkten, die unversehrt sichtbar
+            // bleiben.
+            let decided = match key {
+                Key::XObject(_, id) => Some(fate(id, &work, image_pages, form_pages)),
+                Key::Inline(..) => None,
+            };
+            note_lost_pixels(
+                outcome,
+                page_id,
+                placements,
+                key,
+                decided.as_ref().and_then(Fate::only_name),
+            );
         }
 
         // Ein Inline-Bild in einem Form-XObject wird von der nächsten Seite
@@ -1245,11 +1520,21 @@ impl Work {
         ))
     }
 
-    /// Berührt die Fläche des Pixels `(x, y)` das Rechteck?
+    /// Berührt die **Fläche** des Pixels `(x, y)` das Rechteck?
     ///
-    /// Geprüft werden die vier Ecken der Pixelzelle im User-Space. Damit stimmt
-    /// die Zuordnung auch bei gedrehter oder gescherter CTM, und im Zweifel
-    /// wird ein Pixel zu viel geschwärzt statt eines zu wenig.
+    /// Geprüft wird die Pixelzelle als Viereck im User-Space gegen das
+    /// Rechteck, über die trennenden Achsen (siehe [`cell_meets_rect`]). Damit
+    /// stimmt die Zuordnung auch bei gedrehter oder gescherter CTM, und im
+    /// Zweifel wird ein Pixel zu viel geschwärzt statt eines zu wenig.
+    ///
+    /// **Früher wurden nur die vier Ecken der Zelle geprüft** (`rect.contains`
+    /// je Ecke). Das ließ genau den Fall fallen, in dem das Rechteck ganz
+    /// *innerhalb* einer Zelle liegt: ein grobes Bild groß gezogen — ein
+    /// 2 × 2-Bild auf 100 × 100 Punkte hat 50 Punkte große Zellen — und ein
+    /// kleineres Schwärzungsrechteck mitten darin. Keine Zellecke lag im
+    /// Rechteck, kein Bildpunkt fiel, und es gab keine Warnung: die Schwärzung
+    /// lag dort nur obenauf, und die Bildpunkte darunter blieben in der Datei.
+    /// Die Zusicherung „im Zweifel ein Pixel zu viel“ galt also gerade nicht.
     fn covers(&self, ctm: &Matrix, x: usize, y: usize, rect: &Rect) -> bool {
         let w = self.width as f64;
         let h = self.height as f64;
@@ -1257,13 +1542,83 @@ impl Work {
         let u1 = (x + 1) as f64 / w;
         let v0 = 1.0 - (y + 1) as f64 / h;
         let v1 = 1.0 - y as f64 / h;
-        [(u0, v0), (u1, v0), (u0, v1), (u1, v1)]
-            .iter()
-            .any(|(u, v)| rect.contains(ctm.apply(*u, *v)))
+        // Im Umlauf, damit die Kanten der Zelle Kanten bleiben.
+        let cell = [
+            ctm.apply(u0, v0),
+            ctm.apply(u1, v0),
+            ctm.apply(u1, v1),
+            ctm.apply(u0, v1),
+        ];
+        cell_meets_rect(&cell, rect)
     }
 }
 
+/// Überlappen sich die Fläche einer Pixelzelle und ein Schwärzungsrechteck?
+///
+/// Trennende Achsen: die beiden Achsen des Rechtecks und die vier
+/// Kantennormalen der Zelle. **Berührung zählt als Treffer** — anders als bei
+/// [`crate::content::ImagePlacement::covers`], das dieselbe Form gegen dieselbe
+/// Art Rechteck mit strengen Vergleichen prüft. Der Unterschied ist gewollt und
+/// er ist die sichere Richtung: hier wird geschwärzt, dort nur gefragt. Ein
+/// `NaN` in einer Projektion lässt beide Vergleiche falsch werden und gilt
+/// deshalb ebenfalls als Treffer.
+fn cell_meets_rect(cell: &[Point; 4], rect: &Rect) -> bool {
+    let corners = [
+        rect.ll,
+        Point::new(rect.ur.x, rect.ll.y),
+        rect.ur,
+        Point::new(rect.ll.x, rect.ur.y),
+    ];
+    let normal = |from: Point, to: Point| Point::new(from.y - to.y, to.x - from.x);
+    let axes = [
+        Point::new(1.0, 0.0),
+        Point::new(0.0, 1.0),
+        normal(cell[0], cell[1]),
+        normal(cell[1], cell[2]),
+        normal(cell[2], cell[3]),
+        normal(cell[3], cell[0]),
+    ];
+    for axis in axes {
+        // Eine entartete Kante trennt nichts; sie darf die Antwort nicht
+        // bestimmen.
+        if !axis.x.is_finite() || !axis.y.is_finite() || (axis.x == 0.0 && axis.y == 0.0) {
+            continue;
+        }
+        let (cmin, cmax) = crate::content::span(cell, axis);
+        let (rmin, rmax) = crate::content::span(&corners, axis);
+        if cmax < rmin || rmax < cmin {
+            return false;
+        }
+    }
+    true
+}
+
+/// Das **Viereck** einer Platzierung: das Einheitsquadrat durch die CTM.
+///
+/// Der Unterschied zur Hülle ([`ctm_bounds`]) ist der ganze Befund dieser
+/// Runde. Bei einem um 45 Grad gedrehten Bild ist die Hülle doppelt so groß wie
+/// das Bild, und in ihren vier Ecken liegt gar kein Bildpunkt. Wer dort
+/// entscheidet, nimmt einem unversehrten Bild seinen Ersatztext — das war der
+/// Fehlalarm der ersten Runde, und über den Umweg des Kandidatenfilters kam er
+/// in der dritten zurück.
+///
+/// Die Frage kostet nichts: sie ist reine Geometrie und braucht kein Byte des
+/// Bildes. Berührt das Viereck die Zone nicht, liegt **kein** Bildpunkt dieses
+/// Bildes unter der Schwärzung — lesbar oder nicht. Es gibt hier also keine
+/// Unwissenheit, über die man ehrlich sein müsste.
+fn placement_quad(ctm: &Matrix) -> [Point; 4] {
+    [
+        ctm.apply(0.0, 0.0),
+        ctm.apply(1.0, 0.0),
+        ctm.apply(1.0, 1.0),
+        ctm.apply(0.0, 1.0),
+    ]
+}
+
 /// Umschließendes Rechteck der Zielfläche einer Bild-CTM.
+///
+/// Nur noch Vorfilter: entschieden wird am Viereck ([`placement_quad`]) oder an
+/// der Pixelzelle ([`cell_meets_rect`]).
 fn ctm_bounds(ctm: &Matrix) -> Rect {
     let points = [
         ctm.apply(0.0, 0.0),

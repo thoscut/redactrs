@@ -125,33 +125,58 @@ fn vorspann(text: &str) -> (usize, usize) {
 
 /// Die Wortliste aus `belege::traegt_zahl` — **gelesen**, nicht abgeschrieben:
 /// eine zweite Abschrift würde still auseinanderlaufen.
-fn zahlworte_des_waechters() -> Vec<String> {
+fn zahlworte_des_waechters() -> (Vec<String>, Vec<String>) {
     let text = belege_quelltext();
     let ab = text
         .find("fn traegt_zahl(")
         .expect("`fn traegt_zahl` steht in belege.rs");
-    let liste = text[ab..]
-        .find("const ZAHLWORTE: [&str;")
-        .map(|i| ab + i)
-        .expect("`ZAHLWORTE` steht in `traegt_zahl`");
-    let bis = text[liste..]
-        .find("];")
-        .map(|i| liste + i)
-        .expect("die Liste endet");
-    let mut aus = Vec::new();
-    let mut rest = &text[liste..bis];
-    while let Some(a) = rest.find('"') {
-        let nach = &rest[a + 1..];
-        let e = nach.find('"').expect("geschlossenes Zeichenkettenliteral");
-        aus.push(nach[..e].to_string());
-        rest = &nach[e + 1..];
-    }
+    let eine_liste = |name: &str| -> Vec<String> {
+        let liste = text[ab..]
+            .find(name)
+            .map(|i| ab + i)
+            .unwrap_or_else(|| panic!("`{name}` steht in `traegt_zahl`"));
+        let bis = text[liste..]
+            .find("];")
+            .map(|i| liste + i)
+            .expect("die Liste endet");
+        let mut aus = Vec::new();
+        let mut rest = &text[liste..bis];
+        while let Some(a) = rest.find('"') {
+            let nach = &rest[a + 1..];
+            let e = nach.find('"').expect("geschlossenes Zeichenkettenliteral");
+            aus.push(nach[..e].to_string());
+            rest = &nach[e + 1..];
+        }
+        aus
+    };
+    let reihe = eine_liste("const ZAHLWORTE: [&str;");
+    let weitere = eine_liste("const WEITERE: [&str;");
     assert!(
-        aus.len() >= 20,
+        reihe.len() >= 20,
         "die Wortliste des Wächters ist geschrumpft — {} Wörter",
-        aus.len()
+        reihe.len()
     );
-    aus
+    (reihe, weitere)
+}
+
+/// Das Kriterium des Wächters, aus seinen **gelesenen** Listen nachgebaut:
+/// Ziffer, Wort aus der Reihe (auch als `…mal`-Form), oder ein Wort, das auf
+/// eines der Wörter der zweiten Liste endet („zweihundert“).
+fn sieht_zahl(reihe: &[String], weitere: &[String], wort: &str) -> bool {
+    let kern: String = wort
+        .chars()
+        .filter(|c| !"*`„“»«().,;:—–!?[]…\u{202f}".contains(*c))
+        .collect();
+    if kern.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    let klein = kern.to_lowercase();
+    let ohne_mal = klein.strip_suffix("mal").unwrap_or(&klein);
+    reihe.iter().any(|w| w == ohne_mal)
+        || weitere.iter().any(|w| w == ohne_mal)
+        || weitere
+            .iter()
+            .any(|w| ohne_mal.len() > w.len() && ohne_mal.ends_with(w.as_str()))
 }
 
 // ---------------------------------------------------------------------------
@@ -228,9 +253,9 @@ fn eine_erfundene_messzahl_im_vorspann_liegt_im_block() {
 
     let mut gefaelscht = String::with_capacity(text.len() + erfunden.len() + 2);
     gefaelscht.push_str(&text[..vor_bis]);
-    gefaelscht.push_str("\n");
+    gefaelscht.push('\n');
     gefaelscht.push_str(erfunden);
-    gefaelscht.push_str("\n");
+    gefaelscht.push('\n');
     gefaelscht.push_str(&text[vor_bis..]);
 
     let (block_von, block_bis) = schnitt_wie_belege(&gefaelscht);
@@ -247,54 +272,63 @@ fn eine_erfundene_messzahl_im_vorspann_liegt_im_block() {
 }
 
 // ---------------------------------------------------------------------------
-// Lücke 2 — die Form: ausgeschriebene Zahlen jenseits von „zwölf“
+// Lücke 2 — GESCHLOSSEN: die Reihe reicht jetzt über „zwölf“ hinaus
 // ---------------------------------------------------------------------------
 
-/// Die Wortliste des Wächters endet bei „zwölf“. Vier ausgeschriebene
-/// Messzahlen, die eine Runde 8 ohne Weiteres schreiben würde, sind für ihn
-/// keine Zahlen.
+/// **Die Lücke, und was an ihre Stelle getreten ist.** Die Wortliste des
+/// Wächters endete bei „zwölf“ und hatte „siebzehn“ von Hand nachgetragen — sie
+/// wuchs also genau dort, wo jemand hingesehen hatte. Fünf ausgeschriebene
+/// Mengen, die eine Runde 8 ohne Weiteres schreiben würde, waren für ihn keine
+/// Zahlen: „dreizehn“, „zwanzig“, „hundert“, „tausend“, „Dutzend“. Und der
+/// Wächter ist die **Gegenrichtung** zur Bindung: er behauptet, im Block der
+/// beiden letzten Fix-Runden stehe keine unbedeckte Zahl. Was er nicht als
+/// Zahl erkennt, meldet er nicht — die Lücke war also nicht, dass er zu viel
+/// meldet, sondern dass er stillschweigend zu wenig prüft.
+///
+/// Seit dieser Runde steht die Reihe vollständig da — bis „neunzehn“, die
+/// Zehner, „hundert“, „tausend“, „Dutzend“ —, und die `…mal`-Formen entstehen
+/// aus derselben Reihe statt aus einer zweiten Liste. Dieser Test hält das
+/// fest, und zwar am **Kriterium**, nicht an der Liste: gelesen werden beide
+/// Listen aus `belege.rs`, nachgebaut wird der Vergleich.
+///
+/// Mutation, die ihn rot macht: in `traegt_zahl` die Reihe wieder bei „zwölf“
+/// enden lassen (oder `WEITERE` leeren).
 #[test]
-fn ausgeschriebene_messzahlen_jenseits_von_zwoelf_sieht_der_waechter_nicht() {
-    let liste = zahlworte_des_waechters();
-    let hat = |w: &str| liste.iter().any(|x| x == w);
+fn die_reihe_des_waechters_reicht_ueber_zwoelf_hinaus() {
+    let (reihe, weitere) = zahlworte_des_waechters();
+    let sieht = |w: &str| sieht_zahl(&reihe, &weitere, w);
 
-    // Was er kennt — sonst prüfte dieser Test die falsche Liste.
+    // Was er kennen muss — sonst prüfte dieser Test die falsche Liste.
     for bekannt in ["zwei", "zwölf", "siebzehn", "siebenmal"] {
         assert!(
-            hat(bekannt),
-            "„{bekannt}“ fehlt — das ist nicht die Liste aus `traegt_zahl`"
+            sieht(bekannt),
+            "„{bekannt}“ sieht der Wächter nicht — das ist nicht das Kriterium \
+             aus `traegt_zahl`"
         );
     }
 
-    // Was er nicht kennt.
+    // Und was die Lücke war.
     let blind: Vec<&str> = ["dreizehn", "zwanzig", "hundert", "tausend", "Dutzend"]
         .into_iter()
-        .filter(|w| !hat(&w.to_lowercase()) && !hat(w))
+        .filter(|w| !sieht(w))
         .collect();
-    assert_eq!(
-        blind,
-        vec!["dreizehn", "zwanzig", "hundert", "tausend", "Dutzend"],
-        "die Wortliste ist gewachsen — Lücke 2 ist (teils) geschlossen, \
-         diese Datei gehört überarbeitet oder gelöscht"
+    assert!(
+        blind.is_empty(),
+        "der Wächter sieht diese ausgeschriebenen Mengen weiter nicht: {blind:?} — \
+         dann steht im Block der beiden letzten Fix-Runden womöglich eine \
+         unbedeckte Zahl, und `jede_zahl_der_letzten_runden_ist_gebunden` sagt \
+         trotzdem Ja"
     );
 
-    // Und ein Satz aus genau diesen Wörtern trägt für den Wächter keine Zahl.
-    // Nachgebaut ist nur das Kriterium, nicht die Liste: Ziffer oder Wort aus
-    // der gelesenen Liste.
-    let traegt_zahl = |wort: &str| -> bool {
-        let kern: String = wort
-            .chars()
-            .filter(|c| !"*`„“»«().,;:—–!?[]…\u{202f}".contains(*c))
-            .collect();
-        kern.chars().any(|c| c.is_ascii_digit()) || liste.iter().any(|w| *w == kern.to_lowercase())
-    };
+    // Derselbe Satz, an dem die Lücke vorgeführt wurde: jedes seiner fünf
+    // Mengenwörter ist jetzt eine Zahl.
     let satz = "Der Redaktor braucht dafür nur noch zwanzig Millisekunden statt \
                 dreizehn Sekunden, und die Spitze liegt bei einem Dutzend MB statt \
                 bei tausend.";
-    let gesehen: Vec<&str> = satz.split(' ').filter(|w| traegt_zahl(w)).collect();
-    assert!(
-        gesehen.is_empty(),
-        "der Wächter sieht in diesem Satz jetzt Zahlen ({gesehen:?}) — \
-         Lücke 2 ist geschlossen, diese Datei gehört gelöscht"
+    let gesehen: Vec<&str> = satz.split_whitespace().filter(|w| sieht(w)).collect();
+    assert_eq!(
+        gesehen,
+        vec!["zwanzig", "dreizehn", "Dutzend", "tausend."],
+        "genau die Mengenwörter dieses Satzes, keines mehr und keines weniger"
     );
 }

@@ -664,7 +664,8 @@ fn zd_mess_1000_begriffe_kosten_wie_einer() {
 /// derselbe Durchgang, wie er heute läuft (ein Automat, 1 000 Begriffe).
 ///
 /// Ergebnis (Release, 64 MiB, geteilte Maschine): 6 Muster je Begriff,
-/// 268 MB je Durchgang, `memmem` bei 9,9 GB/s → **0,163 s je Begriff, 163 s
+/// 256 MB je Durchgang — vier Blöcke à 64 MiB, MB wie überall 1024² Byte; hier
+/// stand „268 MB“, dieselbe Menge dezimal gerechnet —, `memmem` bei 9,9 GB/s → **0,163 s je Begriff, 163 s
 /// hochgerechnet auf 1 000**; heute 5,98 s. 163 s ist eine **untere**
 /// Schranke für den alten Gesamtwert (die Zeichenketten-Verkettung und die
 /// Textsichten fehlen darin), also kann „65,7 s“ nicht stimmen.

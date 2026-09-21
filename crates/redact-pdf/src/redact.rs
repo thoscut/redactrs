@@ -14,7 +14,9 @@
 //! 5. Überlappende Annotationen werden gelöscht (auch dort steht Text).
 //! 6. Der **Textspiegel** eines Marked-Content-Abschnitts (`/ActualText`,
 //!    `/Alt`, `/E`) wird geleert, sobald von den Glyphen darunter etwas
-//!    entfernt wurde ([`mirrors_to_clear`]).
+//!    entfernt wurde ([`mirrors_to_clear`]) — oder unter ihm Bildpunkte
+//!    gefallen sind. Ob sie fielen, sagt [`crate::image`]; hier wird es nicht
+//!    geschätzt (siehe [`crate::image::ImageOutcome::page_image_hits`]).
 //!
 //! Zeichen in Form-XObjects werden ebenfalls entfernt. Wird dasselbe XObject
 //! mehrfach platziert, wirkt die Entfernung notwendigerweise auf alle
@@ -105,8 +107,8 @@ pub struct RedactionReport {
     /// Ersatztexte, die **mit den Pixeln eines Bildes** gefallen sind.
     ///
     /// Gezählt werden **entfernte Schlüssel, nicht Absichten**: je
-    /// Marked-Content-Abschnitt, in dem eine geschwärzte Bildfläche liegt —
-    /// auch eine in einem Formular darunter —, jeder Spiegelschlüssel seiner
+    /// Marked-Content-Abschnitt, unter dem Bildpunkte gefallen sind — auch in
+    /// einem Formular darunter —, jeder Spiegelschlüssel seiner
     /// Eigenschaftsliste ([`crate::content::MIRROR_KEYS`]), und je
     /// geschwärztem Bild-XObject jedes `/Alt` und `/ActualText`, das an seinem
     /// Dictionary **noch stand**.
@@ -122,14 +124,19 @@ pub struct RedactionReport {
     /// dieser Seite aus fällt (siehe [`clear_image_alternates`]), und über ihn
     /// steht eine eigene Warnung.
     ///
-    /// **Was diese Zahl nicht behauptet.** Sie zählt die Abschnitte, deren
-    /// Bildfläche getroffen war ([`crate::content::ImagePlacement::covers`]) —
-    /// nicht die Bildpunkte. Wo eine Schwärzung die Fläche um weniger als eine
-    /// Pixelbreite überlappt, fällt der Spiegel, ohne dass [`crate::image`]
-    /// einen Bildpunkt überschreibt; dann steht hier eine Zahl neben
-    /// „Überschriebene Bilder: 0“. Die Hülle des Bildes wird dafür **nicht**
-    /// gefragt: bei einem gedrehten Bild liegt in ihren Ecken kein Bildpunkt,
-    /// und eine Schwärzung dort lässt Spiegel und Ersatztext stehen.
+    /// **Woran diese Zahl hängt: an gefallenen Bildpunkten.** Gezählt werden
+    /// die Abschnitte, unter denen [`crate::image`] wirklich Bildpunkte
+    /// überschrieben hat — die Antwort kommt aus dem Bildlauf selbst
+    /// ([`crate::image::ImageOutcome::page_image_hits`]) und nicht aus einer
+    /// Schätzung an der Platzierung. Weder die Hülle noch die Fläche der
+    /// Platzierung entscheidet hier noch: die Hülle nahm einem unversehrten
+    /// gedrehten Bild seinen Ersatztext, die Fläche ließ an ihrer Kante einen
+    /// Spiegel über gefallenen Bildpunkten stehen.
+    ///
+    /// **Die eine Ausnahme, und sie steht daneben.** Bei einem Bild, dessen
+    /// Pixel sich nicht anfassen ließen, weiß niemand, was fiel; dort wird grob
+    /// entschieden (der Ersatztext fällt), und dort steht eine eigene Warnung.
+    /// Grob entscheiden ist erlaubt, wenn es gesagt wird.
     ///
     /// **Warum das gezählt gehört.** Ein `/Figure <</Alt (…)>> BDC /Im0 Do
     /// EMC` ist die Standardform der Barrierefreiheit; steht dort, was auf dem
@@ -417,6 +424,39 @@ impl PdfRedactor {
             push_warning(&mut report, warning);
         }
         let inline_images = images.inline_replacements;
+        // Geschwärzte Bildflächen — die **Wahrheit** darüber, wo Bildpunkte
+        // gefallen sind, wie [`crate::image`] sie herausgibt. Sie ist
+        // vollständig, bevor die erste Seite gelesen wird: der Bildlauf steht
+        // über der Seitenschleife. Nur deshalb darf weiter unten ein Ersatztext
+        // fallen — er fällt nie vor dem Beweis, dass die Pixel fielen.
+        //
+        // Geschätzt wurde diese Frage zweimal, und beide Schätzungen waren
+        // falsch: die **Hülle** der Platzierung nahm einem unversehrten
+        // gedrehten Bild seinen Ersatztext (in den Hüllenecken liegt kein
+        // Bildpunkt), das **Viereck** der Platzierung
+        // ([`crate::content::ImagePlacement::covers`]) ließ an seiner Kante
+        // einen Spiegel über gefallenen Bildpunkten stehen (es entscheidet mit
+        // strengen Vergleichen, [`crate::image`] füllt mit dem Rand
+        // eingeschlossen) und nahm umgekehrt einem Bild den Ersatztext, dessen
+        // Bildpunkte sämtlich stehenblieben (ein Rechteck zwischen den
+        // Gitterlinien eines groben Bildes). Beides ist fort, weil die Frage
+        // nicht mehr gestellt, sondern beantwortet wird.
+        let form_image_hits = images.form_image_hits;
+        let page_image_hits_by_page = images.page_image_hits;
+        // Bild-XObjects, deren Dictionary den Lauf überlebt, obwohl eine
+        // Schwärzung auf ihrer Fläche lag: ihre Pixel ließen sich nicht
+        // anfassen, also blieb das Dictionary samt `/Alt` stehen. Ihr
+        // Ersatztext wird zuletzt geräumt (siehe [`clear_image_alternates`]).
+        //
+        // Bei jedem anderen getroffenen Bild ist er schon gefallen —
+        // [`crate::image`] baut das Dictionary jedes neu kodierten Bildes aus
+        // den Bildeigenschaften neu auf. Diese Liste kommt deshalb aus dem
+        // Bildlauf selbst und nicht aus dem Seiten-Scan: sie hängt weder an der
+        // Betriebsart noch daran, dass die Datei getaggt ist. Vorher brauchte
+        // sie ein `BDC` im Strom, weil `ScanResult::images` ihr Futter war — in
+        // einem gewöhnlichen, nicht getaggten PDF blieb der Ersatztext eines
+        // stehengebliebenen Bildes damit stehen.
+        let blacked_images = images.undecodable_images;
 
         let pages: Vec<ObjectId> = doc.get_pages().values().copied().collect();
         let mut form_plans: BTreeMap<ObjectId, BTreeMap<usize, Plan>> = BTreeMap::new();
@@ -438,30 +478,6 @@ impl PdfRedactor {
         // deshalb nicht im Strom, sondern im Objekt bereinigt werden.
         let mut property_objects: BTreeSet<ObjectId> = BTreeSet::new();
         let mut property_homes: BTreeSet<MirrorHome> = BTreeSet::new();
-        // Geschwärzte Bildflächen in Form-XObjects: gefunden beim Scan der
-        // Seite, gebraucht erst beim einmaligen Neuschreiben des Formulars —
-        // derselbe Weg wie [`form_marked`]. Je Formular die Operationsindizes
-        // seiner getroffenen Bildplatzierungen.
-        let mut form_image_hits: BTreeMap<ObjectId, BTreeSet<usize>> = BTreeMap::new();
-        // Bild-XObjects, deren Fläche eine Schwärzung trifft **und deren
-        // Dictionary den Lauf überleben kann**. Ihr `/Alt` und `/ActualText` am
-        // Dictionary selbst wird zuletzt geräumt (siehe
-        // [`clear_image_alternates`]).
-        let mut blacked_images: BTreeSet<ObjectId> = BTreeSet::new();
-        // Kann ein getroffenes Bild sein Dictionary überhaupt behalten? Nur
-        // dann, wenn ein Bild ungeschwärzt bleiben **darf**: `crate::image`
-        // baut das Dictionary jedes neu kodierten Bildes aus den
-        // Bildeigenschaften neu auf, der Ersatztext daran fällt also mit den
-        // Pixeln. Stehen bleibt es nur, wo die Pixel stehen bleiben — bei einem
-        // Bild, das sich nicht dekodieren lässt oder dessen Maske das
-        // Neukodieren nicht überstünde. Ohne `--allow-undecodable-images`
-        // bricht der Lauf dort ab; mit ihm läuft er weiter und **sagt** es.
-        //
-        // Das ist zugleich die Grenze für die grobe Richtung: nur dort weiß
-        // niemand, was wirklich fiel, und nur dort steht eine Warnung darüber.
-        // Woanders hieße „Ersatztext weg, weil die Fläche getroffen war“, einem
-        // unversehrten Bild seine Beschreibung zu nehmen.
-        let keep_image_dicts = self.allow_undecodable_images;
         let no_image_hits: BTreeSet<usize> = BTreeSet::new();
         // Dokumentweites Konto für [`PendingPage::deferred`] — siehe
         // [`MAX_DEFERRED_MIRRORS`].
@@ -567,35 +583,14 @@ impl PdfRedactor {
             // Einmal je Seite statt je Textoperation — siehe [`RectIndex`].
             let rect_index = RectIndex::new(&indexed_rects);
 
-            // Welche Bildplatzierungen dieser Seite verlieren ihre Pixel?
-            // Gefragt wird die **Fläche** gegen dieselben — schon um `padding`
-            // erweiterten — Rechtecke, mit denen [`crate::image`] entscheidet,
-            // welche Bilder es anfasst; nicht die Hülle
-            // ([`crate::content::ImagePlacement::covers`]). Gebraucht wird das
-            // für die Spiegel darüber (siehe [`mirrors_to_clear`]) und für den
-            // Ersatztext am Bild selbst.
-            let mut page_image_hits: BTreeSet<usize> = BTreeSet::new();
-            for placement in &scan.images {
-                if !rects.iter().any(|rect| placement.covers(rect)) {
-                    continue;
-                }
-                match placement.stream {
-                    StreamKey::Page => {
-                        page_image_hits.insert(placement.op_index);
-                    }
-                    StreamKey::Form(id) => {
-                        form_image_hits
-                            .entry(id)
-                            .or_default()
-                            .insert(placement.op_index);
-                    }
-                }
-                if keep_image_dicts {
-                    if let Some(id) = placement.id {
-                        blacked_images.insert(id);
-                    }
-                }
-            }
+            // Welche Bildplatzierungen im Strom **dieser** Seite haben wirklich
+            // Bildpunkte verloren? Nicht geschätzt, sondern abgelesen: die
+            // Antwort kommt aus [`crate::image`], das die Pixel selbst
+            // überschrieben hat. Gebraucht wird sie für die Spiegel darüber
+            // (siehe [`mirrors_to_clear`]).
+            let page_image_hits = page_image_hits_by_page
+                .get(page_id)
+                .unwrap_or(&no_image_hits);
 
             let mut page_plans: BTreeMap<usize, Plan> = BTreeMap::new();
 
@@ -624,7 +619,7 @@ impl PdfRedactor {
                 &page_plans,
                 &form_plans,
                 &form_image_hits,
-                &page_image_hits,
+                page_image_hits,
             );
             report.image_alt_texts_cleared += mirrors.image_alt_texts;
             for warning in std::mem::take(&mut mirrors.warnings) {
@@ -1496,17 +1491,21 @@ fn touches_form_image(
 ///   **spätere** Seite trifft, gilt dasselbe über
 ///   [`DeferredMirror::touched_by_image`].
 ///
-/// **Was „geschwärzt“ hier heißt — und was nicht.** Gefragt wird die
-/// **Fläche** der Platzierung ([`crate::content::ImagePlacement::covers`]),
-/// nicht ihre Hülle: die Hülle eines gedrehten Bildes ist größer als das Bild,
-/// und eine Schwärzung in ihrer leeren Ecke nimmt keinen Bildpunkt. Die
-/// Wahrheit über die Bildpunkte kennt allein [`crate::image`] (`Work::filled`,
-/// an den Ecken jeder Pixelzelle); diese Frage ist die nächstgrößere und
-/// verfehlt keinen Treffer. Übrig bleibt eine Überlappung von weniger als
-/// einer Pixelbreite — dann fällt der Spiegel, ohne dass ein Bildpunkt fiel.
-/// Und bleiben die Pixel stehen, weil sich das Bild nicht dekodieren ließ,
-/// fällt der Spiegel ebenfalls; dort steht über das Bild selbst eine Warnung,
-/// und ohne `--allow-undecodable-images` bricht der Lauf sogar ab.
+/// **Was „geschwärzt“ hier heißt.** Dass Bildpunkte gefallen sind — nicht,
+/// dass eine Fläche getroffen war. `image_hits` und `form_image_hits` kommen
+/// aus [`crate::image`], das die Pixel selbst überschrieben hat
+/// ([`crate::image::ImageOutcome::page_image_hits`]). Geschätzt wurde die Frage
+/// zweimal und war zweimal falsch: an der **Hülle** der Platzierung (in den
+/// Ecken eines gedrehten Bildes liegt kein Bildpunkt — ein unversehrtes Bild
+/// verlor seinen Spiegel) und an ihrer **Fläche** (an deren Kante fiel ein
+/// Bildpunkt und der Spiegel blieb stehen; und ein Rechteck zwischen den
+/// Gitterlinien eines groben Bildes nahm den Spiegel, ohne dass ein Bildpunkt
+/// fiel).
+///
+/// Die eine grobe Stelle bleibt und **steht daneben**: bleiben die Pixel
+/// stehen, weil sich das Bild nicht dekodieren ließ, fällt der Spiegel
+/// trotzdem. Dort weiß niemand, was fiel; dort steht über das Bild selbst eine
+/// Warnung, und ohne `--allow-undecodable-images` bricht der Lauf sogar ab.
 #[allow(clippy::too_many_arguments)]
 fn mirrors_to_clear(
     doc: &Document,
@@ -1752,32 +1751,34 @@ fn clear_mirror_object(doc: &mut Document, id: ObjectId) {
 /// Diese Stelle greift also dort, wo das Dictionary **stehen bleibt** — bei
 /// einem Bild, dessen Pixel nicht überschrieben wurden, weil es sich nicht
 /// dekodieren ließ oder seine Maske das Neukodieren nicht überstanden hätte.
-/// Genau das ist auch der Grund, warum der Aufrufer sie nur mit
-/// `--allow-undecodable-images` füttert: ohne dieses Zugeständnis bricht ein
-/// solcher Lauf ab, und jedes andere getroffene Bild ist neu geschrieben.
+/// Genau diese Bilder benennt [`crate::image`] selbst
+/// ([`crate::image::ImageOutcome::undecodable_images`]), und nur sie kommen
+/// hierher.
 ///
-/// **Dort wird grob entschieden — und was das genau heißt.** Was von einem
+/// **Dass die Liste von dort kommt, ist der Punkt.** Ihr Futter war einmal
+/// `ScanResult::images`, gefiltert mit `--allow-undecodable-images`. Das hing an
+/// zwei Dingen, die nichts mit der Sache zu tun haben: an der Betriebsart und
+/// daran, dass die Datei **getaggt** ist — ohne ein `BDC` im Strom verwarf der
+/// Scan die Platzierung, und in einem gewöhnlichen, nicht getaggten PDF blieb
+/// der Ersatztext eines stehengebliebenen Bildes stehen
+/// (`zi_b_spiegel_ueber_formular::unlesbares_bild_ohne_marked_content_\
+/// behaelt_seinen_ersatztext`). Jetzt hängt sie am Bildlauf, der die Pixel
+/// selbst angefasst hat.
+///
+/// **Hier wird grob entschieden — und was das genau heißt.** Was von einem
 /// unlesbaren Bild wirklich unter der Schwärzung lag, weiß niemand: es ließ sich
-/// nicht auspacken. Der Ersatztext fällt deshalb schon, wenn die **Fläche**
-/// getroffen war ([`crate::content::ImagePlacement::covers`]); über das Bild
-/// selbst steht dann eine Warnung, die es benennt.
+/// nicht auspacken. Der Ersatztext fällt deshalb schon, wenn die **Hülle** der
+/// Platzierung getroffen war; über das Bild selbst steht dann eine Warnung, die
+/// es benennt. Das ist der Unterschied, auf den es ankommt: grob entscheiden
+/// ist erlaubt, wenn es gesagt wird.
 ///
-/// Diese Grobheit trifft in derselben Betriebsart auch zwei Bilder, über die
-/// **keine** Warnung steht, und das gehört gesagt:
-///
-/// * ein Bild, dessen Fläche getroffen ist, dessen Bildpunkte aber alle
-///   *zwischen* den Ecken der Pixelzellen liegen — die Zelle ist dann größer
-///   als das Schwärzungsrechteck (ein 2 x 2 Bild auf 100 Punkte gezogen;
-///   `zh2_b_bildfrage::rechteck_zwischen_den_gitterlinien_nimmt_den_spiegel`);
-/// * ein unlesbares Bild, das **mehrere Seiten** benutzen: `crate::image` legt
-///   keine Kopie an, also verlieren alle Seiten die Beschreibung, nicht nur die
-///   geschwärzte (`…::geteiltes_unlesbares_bild_verliert_seinen_ersatztext_///   fuer_beide_seiten`).
-///
-/// Beides endet, sobald [`crate::image`] je Platzierung berichtet, ob dort
-/// Bildpunkte fielen. Bis dahin ist es der Preis von
-/// `--allow-undecodable-images`, und **ohne** dieses Zugeständnis wird diese
-/// Stelle gar nicht gefüttert: dann behält jedes Bild, dessen Bildpunkte nicht
-/// gefallen sind, seine Beschreibung.
+/// Ein unlesbares Bild, das **mehrere Seiten** benutzen, verliert seine
+/// Beschreibung für alle: `crate::image` legt für ein Bild, das es nicht anfasst,
+/// keine Kopie an (`zh2_b_bildfrage::geteiltes_unlesbares_bild_verliert_\
+/// seinen_ersatztext_fuer_beide_seiten`). Auch das ist der Preis von
+/// `--allow-undecodable-images`; **ohne** dieses Zugeständnis bricht ein solcher
+/// Lauf ohnehin ab, diese Liste bleibt leer, und jedes Bild, dessen Bildpunkte
+/// nicht gefallen sind, behält seine Beschreibung.
 fn clear_image_alternates(doc: &mut Document, id: ObjectId) -> usize {
     let dict = match doc.objects.get_mut(&id) {
         Some(Object::Stream(stream)) => &mut stream.dict,

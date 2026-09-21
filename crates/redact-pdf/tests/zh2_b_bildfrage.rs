@@ -711,45 +711,117 @@ fn geteiltes_unlesbares_bild_verliert_seinen_ersatztext_fuer_beide_seiten() {
     );
 }
 
+/// **Ein unlesbares Bild, zweimal auf einer Seite: nur die getroffene
+/// Platzierung verliert ihren Spiegel.**
+///
+/// `note_undecided` vermerkte *jede* Platzierung des Objekts auf der Seite, mit
+/// derselben Begründung wie `note_lost_pixels`: das Objekt zeige jetzt
+/// geschwärzte Bildpunkte, also auch dort, wo keine Zone lag. Die Begründung
+/// greift hier gerade **nicht**. Unlesbar heißt, dass *kein* Bildpunkt fällt:
+/// das Objekt wird weder überschrieben noch kopiert, und die zweite Platzierung
+/// zeigt buchstäblich dasselbe Bild wie vor dem Lauf. Ihr Spiegel ist wahr, sein
+/// Verlust hat keinen Gegenwert — Fehlalarm, und zwar derselbe, den
+/// `zl_b_pendel_beide_richtungen` eine Ebene weiter vorn gefunden hat.
+///
+/// Die **getroffene** Platzierung verliert ihren Spiegel weiter: dort sollte
+/// etwas verschwinden und verschwindet nicht, und der Text darüber beschreibt
+/// möglicherweise genau das. Das ist die grobe Entscheidung, für die
+/// `--allow-undecodable-images` einsteht, und sie steht neben einer Warnung.
+///
+/// Das `/Alt` am **Bilddictionary** fällt davon unberührt weiter für beide: es
+/// hängt an der Objekt-Id und ist nicht je Platzierung zu haben — siehe
+/// `geteiltes_unlesbares_bild_verliert_seinen_ersatztext_fuer_beide_seiten`.
+/// Hier trägt das Dictionary deshalb gar kein `/Alt`, damit die Zahl allein die
+/// Spiegel im Strom zählt.
+///
+/// Mutation, die diesen Test rot macht: in `note_undecided` wieder alle
+/// Platzierungen vermerken (`note_lost_pixels(outcome, page_id, placements,
+/// key, None)` statt der Schleife über die getroffenen).
+#[test]
+fn unlesbares_bild_zweimal_auf_einer_seite_verliert_nur_den_getroffenen_spiegel() {
+    let mut doc = Document::with_version("1.5");
+    let logo_id = doc.add_object(Object::Stream(unlesbares_bild()));
+    let resources_id = doc.add_object(dictionary! {
+        "XObject" => dictionary! { "Logo" => logo_id },
+    });
+    // Zwei Platzierungen desselben Objekts, jede unter ihrem eigenen Spiegel.
+    // Die Schwärzung liegt über der ersten, bei (50,600)-(150,700); die zweite
+    // steht bei (400,600) und wird von ihr nicht berührt.
+    let content = format!(
+        "/Figure <</Alt ({GEHEIM})>> BDC
+q 100 0 0 100 50 600 cm /Logo Do Q
+EMC
+/Figure <</Alt ({HARMLOS})>> BDC
+q 100 0 0 100 400 600 cm /Logo Do Q
+EMC
+"
+    );
+    let (mut doc, _) = eine_seite(doc, resources_id, content.into_bytes());
+    let (report, out) = schwaerze_mit(&mut doc, &[schwaerzung(0, ueber_dem_bild())], true);
+
+    assert_eq!(
+        report.redacted_images, 0,
+        "Vorbedingung: kein Bildpunkt fällt (das Bild ist unlesbar) — {:?}",
+        report.warnings
+    );
+    assert!(
+        report.warnings.iter().any(|w| w.contains("dekodieren")),
+        "Vorbedingung: der Verlust ohne Gegenwert wird gesagt — {:?}",
+        report.warnings
+    );
+    assert!(
+        leaks(&out, GEHEIM).is_empty(),
+        "der Spiegel über der getroffenen Platzierung fällt: {:?}",
+        leaks(&out, GEHEIM)
+    );
+    assert!(
+        !leaks(&out, HARMLOS).is_empty(),
+        "der Spiegel über der unberührten Platzierung bleibt stehen — die Bildpunkte, \
+         die sie zeichnet, sind dieselben wie vorher"
+    );
+    assert_eq!(
+        report.image_alt_texts_cleared, 1,
+        "genau einer, nicht beide"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Der feine Rest: die Fläche ist nicht das Pixelgitter
 // ---------------------------------------------------------------------------
 
-/// **Was von der groben Richtung übrig bleibt, und wie weit.** Entschieden wird
-/// an der **Fläche** der Platzierung; die Wahrheit über die Bildpunkte kennt nur
-/// `crate::image` (`Work::filled`, an den Ecken jeder Pixelzelle). Dazwischen
-/// liegt ein Rest: ein Schwärzungsrechteck, das ganz **zwischen** den
-/// Gitterlinien eines Bildes liegt, trifft die Fläche, aber keine Zellecke.
+/// **Der feine Rest ist keiner mehr.** Entschieden wurde einmal an der *Fläche*
+/// der Platzierung und an den vier *Ecken* jeder Pixelzelle. Dazwischen lag ein
+/// Rest: ein Schwärzungsrechteck, das ganz **zwischen** den Gitterlinien eines
+/// Bildes liegt, traf die Fläche, aber keine Zellecke. `redacted_images` blieb
+/// 0, es gab keine Warnung — und der Spiegel fiel trotzdem. Fehlalarm und Leck
+/// in einem, und genau so stand der Fall hier beziffert, mit dem Satz „behoben
+/// ist er erst, wenn `crate::image` je Platzierung berichtet, ob dort
+/// Bildpunkte fielen".
 ///
-/// Hier ist er, konstruiert: ein **2 x 2** Bild auf 100 x 100 Punkte gezogen —
-/// eine Bildzelle ist 50 Punkte groß. Das Rechteck (145,645)-(149,649) liegt
-/// mitten im Bild und zwischen allen Gitterpunkten (x ∈ {50,100,150},
-/// y ∈ {600,650,700}). `redacted_images` bleibt 0, es gibt keine Warnung — und
-/// der Spiegel fällt trotzdem.
+/// Das tut es jetzt. Derselbe Fall, und er geht anders aus: ein **2 x 2** Bild
+/// auf 100 x 100 Punkte gezogen — eine Bildzelle ist 50 Punkte groß. Das
+/// Rechteck (145,645)-(149,649) liegt mitten im Bild und zwischen allen
+/// Gitterpunkten (x ∈ {50,100,150}, y ∈ {600,650,700}), also ganz **in** einer
+/// Zelle, ohne eine ihrer Ecken zu enthalten. Die Flächenprüfung je Zelle
+/// (`cell_meets_rect`, trennende Achsen statt Ecken) trifft sie: ein Bildpunkt
+/// fällt, das Bild wird neu geschrieben, und der Spiegel darüber fällt mit
+/// Recht.
 ///
-/// **Wie weit das reicht.** Das Rechteck muss kleiner sein als eine Bildzelle im
-/// User-Space. Bei einem gewöhnlichen Scan (300 dpi auf 72 dpi platziert) ist
-/// eine Zelle ein Viertelpunkt groß; kein Schwärzungsrechteck ist das. Der Fall
-/// braucht ein sehr grobes, sehr groß gezogenes Bild. Er steht hier, damit er
-/// nicht überrascht; behoben ist er erst, wenn `crate::image` je Platzierung
-/// berichtet, ob dort Bildpunkte fielen.
+/// **Der `/Alt` am Bilddictionary fällt mit, ohne Zugeständnis.** Das neu
+/// kodierte Bild entsteht aus einem frischen Dictionary (`encode_xobject`); ein
+/// `/Alt` der Eingabe wird dort nicht wieder eingetragen. Deshalb steht in
+/// beiden Betriebsarten dieselbe Zahl, und `--allow-undecodable-images` ändert
+/// hier nichts: das Bild ließ sich dekodieren. Das Zugeständnis steht trotzdem
+/// als Schleife da — es war die Stelle, an der die beiden Betriebsarten früher
+/// auseinanderliefen.
 ///
-/// **Und wo er nicht gilt: im Regelbetrieb bleibt das `/Alt` am
-/// Bilddictionary.** Es hängt an einer Objekt-Id und damit an *jeder* Seite, die
-/// das Bild benutzt — der teurere Verlust. Deshalb greift
-/// `clear_image_alternates` nur dort, wo ein getroffenes Bild sein Dictionary
-/// überhaupt behalten kann: mit `--allow-undecodable-images`. Ohne das
-/// Zugeständnis kommt der Rest also gar nicht an das `/Alt`; mit ihm nimmt er es
-/// mit, und **das** ist der Preis dieser Betriebsart, der hier beziffert
-/// dasteht.
-///
-/// Mutation, die die erste Hälfte dieses Tests rot macht: in der Seitenschleife
-/// das `if keep_image_dicts { … }` um `blacked_images.insert(id)` weglassen.
+/// Mutation, die diesen Test rot macht: in `cell_meets_rect` die trennenden
+/// Achsen durch die alte Vier-Ecken-Prüfung ersetzen (liegt eine Zellecke im
+/// Rechteck?). Dann fällt kein Bildpunkt und `redacted_images` ist 0. Gelaufen:
+/// 25 Tests in fünf Dateien werden davon rot, dieser darunter.
 #[test]
-fn rechteck_zwischen_den_gitterlinien_nimmt_den_spiegel() {
-    // (Zugeständnis, erwartete Zahl, /Alt am Bild danach)
-    for (allow_undecodable, gezaehlt, alt_bleibt) in [(false, 1usize, true), (true, 2usize, false)]
-    {
+fn rechteck_ganz_zwischen_den_gitterlinien_schwaerzt_seine_zelle() {
+    for allow_undecodable in [false, true] {
         let mut doc = Document::with_version("1.5");
         let mut grob = bild(2, 2);
         grob.dict.set("Alt", Object::string_literal(HARMLOS));
@@ -770,29 +842,32 @@ EMC
             allow_undecodable,
         );
         assert_eq!(
-            report.redacted_images, 0,
-            "Vorbedingung: kein Bildpunkt fällt (allow_undecodable = {allow_undecodable}) — {:?}",
+            report.redacted_images, 1,
+            "der Bildpunkt unter dem Rechteck fällt (allow_undecodable = \
+             {allow_undecodable}) — {:?}",
             report.warnings
         );
         assert!(
             nur_ocr_hinweis(&report),
-            "und niemand sagt etwas darüber: {:?}",
+            "und niemand muss etwas einräumen: {:?}",
             report.warnings
         );
         assert_eq!(
-            report.image_alt_texts_cleared, gezaehlt,
-            "der feine Rest, beziffert (allow_undecodable = {allow_undecodable})"
+            report.image_alt_texts_cleared, 1,
+            "genau der eine Spiegel über der Platzierung (allow_undecodable = \
+             {allow_undecodable})"
         );
-        // Der Spiegel im Strom fällt in beiden Betriebsarten.
+        // Er fällt — und diesmal ist das die Wahrheit über die Bildpunkte.
         assert!(
             leaks(&out, &format!("/Figure <</Alt({HARMLOS})>> BDC")).is_empty(),
-            "der Spiegel fällt — das ist der bekannte feine Rest"
+            "der Spiegel fällt, weil ein Bildpunkt fiel"
         );
         let aus = load_from_bytes(&out).expect("Ausgabe lädt");
         assert_eq!(
-            alt_am_objekt(&aus, im0).is_some(),
-            alt_bleibt,
-            "/Alt am Bilddictionary (allow_undecodable = {allow_undecodable})"
+            alt_am_objekt(&aus, im0),
+            None,
+            "/Alt am Bilddictionary: das neu kodierte Bild trägt es nicht mehr \
+             (allow_undecodable = {allow_undecodable})"
         );
     }
 }

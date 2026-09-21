@@ -1032,7 +1032,7 @@ impl Budget {
     /// `B` verschachtelte `BDC`-Klammern über `D` Platzierungen ergeben
     /// `B × D` Paare, und die entstehen, bevor die Schließung überhaupt
     /// gefragt wird. Vorher hing an dieser Stelle keine Schranke — gemessen
-    /// 2 306 MB und 41,7 s aus einer Datei von 276 kB mit elf Objekten.
+    /// 2 306 MB und 41,7 s aus einer Datei von 276 kB mit neun Objekten.
     fn mirror_pairs(&mut self, want: usize) -> usize {
         let granted = want.min(self.mirror_pairs);
         self.mirror_pairs -= granted;
@@ -1412,15 +1412,23 @@ impl ImagePlacement {
     /// (das ist genau die Hüllenfrage) und die vier Kantennormalen des
     /// Vierecks.
     ///
-    /// **Wie genau das ist.** Die Wahrheit darüber, ob wirklich Bildpunkte
-    /// gefallen sind, kennt nur [`crate::image`] (`Work::filled`, geprüft an
-    /// den Ecken **jeder Pixelzelle**). Diese Frage hier ist die
-    /// nächstgrößere: wo `filled > 0` gilt, liegt eine Zellecke im Rechteck
-    /// und damit auch das Viereck darin — ein Bild, das Bildpunkte verliert,
-    /// wird also nie übersehen. Umgekehrt bleibt ein Rest: ein Rechteck, das
-    /// die Fläche um weniger als eine Pixelbreite überlappt, gilt hier als
-    /// Treffer, während dort kein Bildpunkt fällt. Das ist die grobe Richtung
-    /// im Kleinen und wird **gesagt**, nicht behauptet weg.
+    /// **Was diese Frage nicht ist: die Wahrheit über die Bildpunkte.** Die
+    /// kennt nur [`crate::image`] und gibt sie dort heraus
+    /// ([`crate::image::ImageOutcome::page_image_hits`]); über den Ersatztext
+    /// eines Bildes wird deshalb dort entschieden und nicht hier.
+    ///
+    /// Hier stand einmal die Zusicherung, wo `filled > 0` gelte, liege eine
+    /// Zellecke im Rechteck und damit auch das Viereck darin — ein Bild, das
+    /// Bildpunkte verliert, werde also nie übersehen. **Sie war falsch und ist
+    /// gestrichen.** Diese Frage vergleicht streng (Berührung zählt nicht),
+    /// [`crate::image`] füllt mit dem Rand eingeschlossen; wo eine Zellecke
+    /// genau auf dem Rand des Rechtecks liegt, fiel der Bildpunkt und diese
+    /// Frage verneinte (`zj_b_flaeche_gegen_bildpunkt`). In der anderen
+    /// Richtung blieb ebenfalls ein Rest: ein Rechteck, das die Fläche um
+    /// weniger als eine Pixelzelle überlappt, gilt hier als Treffer.
+    ///
+    /// Die Frage bleibt, weil sie billig und ohne Dekodieren zu haben ist —
+    /// als Auskunft über eine Platzierung, nicht als Ersatz für die Wahrheit.
     ///
     /// Ein entartetes Viereck (die CTM ist nicht umkehrbar, oder eine
     /// Koordinate ist unbrauchbar) trifft nichts: `crate::image` kann dort
@@ -1462,7 +1470,11 @@ impl ImagePlacement {
 }
 
 /// Projektion von vier Punkten auf eine Achse — kleinster und größter Wert.
-fn span(points: &[Point; 4], axis: Point) -> (f64, f64) {
+///
+/// Auch [`crate::image`] fragt so: dort wird die Fläche **einer Pixelzelle**
+/// gegen ein Schwärzungsrechteck geprüft. Dieselbe Frage, dieselbe Antwort —
+/// zwei Fassungen davon wären zwei Gelegenheiten, verschieden zu antworten.
+pub(crate) fn span(points: &[Point; 4], axis: Point) -> (f64, f64) {
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
     for point in points {

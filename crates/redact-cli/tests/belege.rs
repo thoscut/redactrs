@@ -596,6 +596,21 @@ mod messwerte {
     pub const LESEZEICHEN_GEMELDET: usize = 1;
 
     // --- Kosten der ehrlichen Zählung (Fix-Runde 6) -----------------------
+    /// Lauf **im Testprozess**, Profil **Release** (Weg 2 der Liste oben):
+    /// `strip_metadata` liegt im Baustein, das Material entsteht im Speicher
+    /// und keine Kommandozeile zeigt es
+    /// (`zg_r3_kosten::zweihunderttausend_annotationen_mit_verweis_contents_in_sekunden`).
+    ///
+    /// Das Profil ist **nachgewiesen, nicht geraten**: derselbe Test in Debug
+    /// braucht hier 6,02 / 6,05 / 6,08 s (drei Läufe dieser Runde), also das
+    /// Achtfache — aus einem Debug-Lauf kann [`ANNOT_NACHHER_MS`] nicht
+    /// stammen. Der Absolutwert ist nicht wiederholbar: ein Release-Lauf
+    /// desselben Tests kam hier auf 1,148 / 1,151 s, allerdings aus dem
+    /// Release-Testbinär vom Stand des Gates der Runde 6 (`meta.rs` hat sich
+    /// seither geändert) und auf einer Maschine, auf der gleichzeitig gebaut
+    /// wurde. `SECURITY.md` sagt es für jede Zeit dieses Projekts: eine
+    /// geteilte Maschine ist kein Messgerät. Gebunden ist deshalb die
+    /// aufgezeichnete Spanne, und der Satz nennt jetzt ihren Weg.
     pub const ANNOTATIONEN: &str = "200 000";
     pub const ANNOT_NACHHER_MS: &str = "767–791";
     pub const ANNOT_VORHER_MS: &str = "746";
@@ -617,7 +632,19 @@ mod messwerte {
     // --- Die widerlegte Kostenzahl „1 000 Begriffe 65,7 s“ ----------------
     pub const ALTE_KOSTENZAHL_S: &str = "65,7";
     pub const MUSTER_JE_BEGRIFF_ALT: usize = 6;
-    pub const DURCHGANG_MB: usize = 268;
+    /// Wie viele Blöcke jedes Muster der alten Suche an einer Datei mit einem
+    /// 64-MiB-Strom durchlief: Rohdatei, roher Stromblock gepackt und
+    /// entpackt, derselbe Strom über den Objektgraphen dekodiert.
+    pub const DURCHGANG_BLOECKE: usize = 4;
+    /// **Abgeleitet, nicht abgeschrieben** — und deshalb in 1024²-MB, wie der
+    /// Vorspann es für jedes MB dieses Projekts festlegt. Hier stand „268“:
+    /// dieselbe Menge dezimal gerechnet, derselbe Fehler, den der Block seiner
+    /// Nachbarzahl („205 MB vorher, 138 MB nachher, dort in Dezimal-MB
+    /// gezählt“) ausdrücklich anschreibt. `audit_bytes.rs` nennt die Menge
+    /// seit dieser Runde ebenso, und
+    /// `zl_e_gegenwartszahl_ohne_weg::die_mb_je_durchgang_steht_in_beiden_dateien_gleich`
+    /// hält die beiden Stellen zusammen.
+    pub const DURCHGANG_MB: usize = DURCHGANG_BLOECKE * KLON_STROM_MIB;
     pub const MEMMEM_GB_S: &str = "9,9";
     pub const MEMMEM_JE_BEGRIFF_S: &str = "0,163";
     pub const HEUTE_1_S: &str = "5,01";
@@ -783,6 +810,19 @@ mod messwerte {
     pub const UNGEDECKELT_EXTRAKTOR_S: &str = "31,1";
     pub const UNGEDECKELT_REDAKTOR_S: &str = "105";
     pub const UNGEDECKELT_LISTEN_MB: &str = "3 320";
+
+    /// Der Stand, an dem die Zahlen des Zustands **vor der Fix-Runde 6**
+    /// stehen: der letzte Baum, in dem die Decke unter den Textspiegeln
+    /// Formularplatzierungen zählte und nicht Zuordnungen. Dort lief die
+    /// Spiegel-Bombe ([`SPIEGEL_BOMBE_KB`] → [`SPIEGEL_BOMBE_S`] /
+    /// [`SPIEGEL_BOMBE_MB`]) ohne Schranke.
+    ///
+    /// Prüfbar mit einem Griff:
+    /// `git show fedcabe:crates/redact-pdf/src/content.rs | grep -c
+    /// "Zuordnungen zwischen einem Spiegel"` → `0`; an `HEAD` steht die Decke
+    /// dort. Diese Zahlen gibt kein Lauf an diesem Baum mehr her; die Sätze
+    /// nennen deshalb diesen Stand, nach der Regel oben.
+    pub const VOR_RUNDE6_STAND: &str = "fedcabe";
 
     /// Die Zahl der neuen Messzahlen der Fix-Runde 7, die die Gegenprüfung
     /// als Testprozess-Messungen beanstandete — und die Zahl derer, die es
@@ -1414,8 +1454,8 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         "CHANGELOG.md",
         format!(
             "dieselbe Datei am gebauten Binary **{} s und {} MB** (Release, \
-             Rückgabewert {RC_LECK}); im Testprozess, der nur den Extraktor fährt, \
-             {} s und {} MB; ohne `/ActualText` brauchte sie immer {} s",
+             Rückgabewert {RC_LECK}); im Testprozess (Debug), der nur den Extraktor \
+             fährt, {} s und {} MB; ohne `/ActualText` brauchte sie immer {} s",
             m::SPIEGEL_RELEASE_S,
             kb_in_mb(m::SPIEGEL_RELEASE_KB),
             m::SPIEGEL_TESTPROZESS_S,
@@ -1499,8 +1539,8 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     satz(
         "CHANGELOG.md",
         format!(
-            "gemessen im Testprozess ({}-MiB-Strom, `/DCTDecode`, Budget {} MiB) \
-             **{} MB vorher, {} MB nachher**",
+            "gemessen im Testprozess (Release, {}-MiB-Strom, `/DCTDecode`, Budget \
+             {} MiB) **{} MB vorher, {} MB nachher**",
             m::KLON_STROM_MIB,
             m::KLON_BUDGET_MIB,
             m::KLON_VORHER_MB,
@@ -1511,14 +1551,17 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         "CHANGELOG.md",
         format!(
             "Die alte Kostenzahl „{} Begriffe {} s“ ist widerlegt und durch eine \
-             nachstellbare Rechnung ersetzt: {} Muster je Begriff über {} MB je \
-             Durchgang, `memmem` {} GB/s → {} s je Begriff, rund **{} s für {} \
-             Begriffe als untere Schranke**; heute {} s (1 Begriff) gegen {} s \
-             ({})",
+             nachstellbare Rechnung ersetzt, gemessen im Testprozess (Release): {} \
+             Muster je Begriff über {} MB je Durchgang — {} Blöcke à {} MiB, MB \
+             wie überall 1024² Byte —, `memmem` {} GB/s → {} s je Begriff, rund \
+             **{} s für {} Begriffe als untere Schranke**; heute {} s \
+             (1 Begriff) gegen {} s ({})",
             mit_tausendertrenner(redact_core::MAX_CHECK_NEEDLES as u64),
             m::ALTE_KOSTENZAHL_S,
             m::MUSTER_JE_BEGRIFF_ALT,
             m::DURCHGANG_MB,
+            zahlwort(m::DURCHGANG_BLOECKE),
+            m::KLON_STROM_MIB,
             m::MEMMEM_GB_S,
             m::MEMMEM_JE_BEGRIFF_S,
             untere_schranke_s(),
@@ -1680,12 +1723,13 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         "CHANGELOG.md",
         format!(
             "die je Seite statt je Dokument zählt ({} Seiten aus einer Datei von {} \
-             Byte belegten beim Schwärzen {} MB) —, {} Befunde an der Oberfläche und \
-             die Erkenntnis, dass von {} einzeln mutierten Zahlen der Doku weiter {} \
-             grün blieben",
+             Byte belegten beim Schwärzen {} MB, ungedeckelt am Stand `{}`) —, {} \
+             Befunde an der Oberfläche und die Erkenntnis, dass von {} einzeln \
+             mutierten Zahlen der Doku weiter {} grün blieben",
             m::DECKE_SEITEN,
             mit_tausendertrenner(m::DECKE_DATEI_BYTES),
             mit_tausendertrenner(kb_in_mb(m::DECKE_SPITZE_KB)),
+            m::UNGEDECKELT_STAND,
             zahlwort(m::BEFUNDE_OBERFLAECHE_7),
             m::GEGEN6_STELLEN,
             m::GEGEN6_GRUEN
@@ -1705,7 +1749,8 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         "CHANGELOG.md",
         format!(
             "**{} Zahlen in der Doku waren falsch, alle nachgemessen.** „{} s und {} \
-             MB“ für die entschärfte Spiegel-Bombe stammten aus dem **Testprozess**",
+             MB“ für die entschärfte Spiegel-Bombe stammten aus dem **Testprozess** \
+             (Debug)",
             zahlwort_gross(m::FALSCHE_ZAHLEN_7),
             m::SPIEGEL_TESTPROZESS_S,
             m::SPIEGEL_TESTPROZESS_MB
@@ -1940,6 +1985,19 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // Dieselbe Regel, zweiter Fall: die Spiegel-Bombe der Runde 6. Drei Sätze
+    // des Blocks nennen denselben Stand — die Einleitung der Runde 6, der
+    // Punkt zur getaggten Seite und das „vorher“ des Stromklons. Ein
+    // gebundener Wortlaut deckt alle drei; wer den Stand austauscht, ändert
+    // eine Zusage, und dieser Satz merkt es.
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "am Stand `{}`, dem letzten Baum vor den Korrekturen der Runde 6",
+            m::VOR_RUNDE6_STAND
+        ),
+    );
+
     // --- Die Nachbesserung selbst: was gehalten hat und was nicht ---------
     satz(
         "CHANGELOG.md",
@@ -1960,8 +2018,8 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     satz(
         "CHANGELOG.md",
         format!(
-            "standen {} s und {} MB, zwei neue Läufe desselben Befehls gaben aber \
-             {} s und {} kB sowie {} s und {} kB",
+            "standen {} s und {} MB, zwei neue Läufe desselben Befehls im \
+             Testprozess (Debug) gaben aber {} s und {} kB sowie {} s und {} kB",
             m::WIDERLEGT_DECKE_S,
             m::WIDERLEGT_DECKE_MB,
             m::NEU_DECKE_S1,
@@ -2471,11 +2529,21 @@ fn kern(wort: &str) -> (usize, usize) {
 }
 
 /// Trägt dieses Wort eine Zahl — als Ziffer oder ausgeschrieben?
+///
+/// Die Liste ging einmal bis „zwölf“ und hatte „siebzehn“ von Hand
+/// nachgetragen — sie wuchs also genau dort, wo jemand hinsah. Eine Zahl wie
+/// „achtzehn Stellen“ wäre daneben still liegen geblieben, und still liegen
+/// bleiben ist in diesem Test das eine, was nicht passieren darf: er ist die
+/// Gegenrichtung zu [`die_zahlen_der_doku_sind_gebunden`] und behauptet, im
+/// Block sei **keine** Zahl unbedeckt. Deshalb steht die Reihe jetzt vollständig
+/// da — bis „neunzehn“, die Zehner, „hundert“ und „tausend“ — und die
+/// `…mal`-Formen entstehen aus derselben Reihe statt aus einer zweiten Liste.
 fn traegt_zahl(wort: &str) -> bool {
-    // Kardinalzahlen und ihre `…mal`-Formen. **Nicht** die Ordnungszahlen
-    // („der vierte“): die stehen hier für einen Platz in einer Liste und nicht
-    // für eine Messung.
-    const ZAHLWORTE: [&str; 23] = [
+    // Kardinalzahlen. **Nicht** die Ordnungszahlen („der vierte“): die stehen
+    // hier für einen Platz in einer Liste und nicht für eine Messung. „eins“
+    // fehlt mit Absicht — „ein“ und „eine“ sind der unbestimmte Artikel und
+    // stünden in jedem zweiten Satz.
+    const ZAHLWORTE: [&str; 24] = [
         "zwei",
         "drei",
         "vier",
@@ -2487,19 +2555,27 @@ fn traegt_zahl(wort: &str) -> bool {
         "zehn",
         "elf",
         "zwölf",
+        "dreizehn",
+        "vierzehn",
+        "fünfzehn",
+        "sechzehn",
         "siebzehn",
-        "zweimal",
-        "dreimal",
-        "viermal",
-        "fünfmal",
-        "sechsmal",
-        "siebenmal",
-        "achtmal",
-        "neunmal",
-        "zehnmal",
-        "elfmal",
-        "zwölfmal",
+        "achtzehn",
+        "neunzehn",
+        "zwanzig",
+        "dreißig",
+        "vierzig",
+        "fünfzig",
+        "sechzig",
+        "siebzig",
     ];
+    // Der Rest der Reihe. Zwei Listen, weil `achtzig`/`neunzig`/`hundert`/
+    // `tausend` auch als Bestandteil zusammengesetzter Zahlwörter vorkommen
+    // („zweihundert“) — dort greift die Endungsprüfung weiter unten.
+    // `dutzend` ist keine Kardinalzahl, aber eine Menge, die ein Satz statt
+    // einer Zahl schreiben kann („ein Dutzend Objekte“) — und genau darum geht
+    // es hier.
+    const WEITERE: [&str; 5] = ["achtzig", "neunzig", "hundert", "tausend", "dutzend"];
     let kern: String = wort
         .chars()
         .filter(|c| !"*`„“»«().,;:—–!?[]…\u{202f}".contains(*c))
@@ -2508,7 +2584,14 @@ fn traegt_zahl(wort: &str) -> bool {
         return true;
     }
     let klein = kern.to_lowercase();
-    ZAHLWORTE.contains(&klein.as_str())
+    // `…mal` aus derselben Reihe: „siebenmal“, nicht „siebenmal“ als eigener
+    // Eintrag. „siebenmal“ und „sieben“ unterscheiden sich nur um das Suffix.
+    let ohne_mal = klein.strip_suffix("mal").unwrap_or(&klein);
+    ZAHLWORTE.contains(&ohne_mal)
+        || WEITERE.contains(&ohne_mal)
+        || WEITERE
+            .iter()
+            .any(|w| ohne_mal.len() > w.len() && ohne_mal.ends_with(w))
 }
 
 /// **Die Bindung, andersherum.** Keine Zahl im Block der beiden letzten

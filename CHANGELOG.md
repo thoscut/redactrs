@@ -71,9 +71,9 @@ dasselbe Formular unter zwei Grafikumgebungen, ein `/Filter`-Wert, der gar kein
 Name ist, und sechs Klartextträger am Beiwerk einer Annotation. Dazu zwei
 Dienstverweigerungen — `BDC`-Klammern × Textoperationen ohne jede Decke, und eine
 Decke, die je Seite statt je Dokument zählt (1 000 Seiten aus einer Datei von
-224 752 Byte belegten beim Schwärzen 6 288 MB) —, acht Befunde an der Oberfläche
-und die Erkenntnis, dass von 76 einzeln mutierten Zahlen der Doku weiter 58 grün
-blieben.
+224 752 Byte belegten beim Schwärzen 6 288 MB, ungedeckelt am Stand `308ef38`) —,
+acht Befunde an der Oberfläche und die Erkenntnis, dass von 76 einzeln mutierten
+Zahlen der Doku weiter 58 grün blieben.
 
 * **Jetzt ist jede Zahl gebunden, nicht nur die, an die jemand dachte.** Die
   Fix-Runde 6 hat die Messzahlen der Doku an einen Testdatensatz gebunden — und
@@ -90,9 +90,10 @@ blieben.
   Zahl der benannten Stellen und die Zahl der Filterketten stehen nur noch an
   je einer Stelle.
 * **Sechs Zahlen in der Doku waren falsch, alle nachgemessen.** „0,56 s und
-  38 MB“ für die entschärfte Spiegel-Bombe stammten aus dem **Testprozess**, der
-  nur den Extraktor fährt, nicht aus einem Lauf des Binaries; am gebauten Binary
-  sind es 0,15–0,18 s und 40 MB (Release) bzw. 1,58–1,68 s und 52 MB (Debug),
+  38 MB“ für die entschärfte Spiegel-Bombe stammten aus dem **Testprozess**
+  (Debug), der nur den Extraktor fährt, nicht aus einem Lauf des Binaries; am
+  gebauten Binary sind es 0,15–0,18 s und 40 MB (Release) bzw. 1,58–1,68 s und
+  52 MB (Debug),
   beide mit Rückgabewert 3. Dieselbe Datei hat **neun** Objekte, nicht elf. Die README
   versprach „bis zu 10 000 Muster“ für 1 000 Begriffe und zählte im selben Satz
   elf auf — `Probe::new` legt bis zu zwölf je Begriff an, also 12 000.
@@ -270,10 +271,11 @@ blieben.
   Spitze und `zg_r1_decke::schreibt_material` für das Material.
 
   Dabei fiel eine der drei: für den Redaktor hinter der dokumentweiten Decke
-  standen 45,5–45,6 s und 38 MB, zwei neue Läufe desselben Befehls gaben aber
-  45,001 s und 39 404 kB sowie 45,289 s und 39 384 kB — beide Zeiten unter der
-  Spanne, beide Spitzen darüber. Ein Zehntel Spanne über eine Messung dieser
-  Länge auf einer geteilten Maschine ist keine Zusage; sie ist gestrichen,
+  standen 45,5–45,6 s und 38 MB, zwei neue Läufe desselben Befehls im
+  Testprozess (Debug) gaben aber 45,001 s und 39 404 kB sowie 45,289 s und
+  39 384 kB — beide Zeiten unter der Spanne, beide Spitzen darüber. Ein Zehntel
+  Spanne über eine Messung dieser Länge auf einer geteilten Maschine ist keine
+  Zusage; sie ist gestrichen,
   nicht verschoben, und an ihre Stelle tritt der Lauf am Binary. Die anderen
   hielten, beide Male auf die Stelle genau.
 
@@ -316,7 +318,9 @@ blieben.
 
 Fünf Gegenprüfer lasen die Korrekturen der Runde 5 mit eigenem Material gegen.
 **Drei schwere Befunde** blieben: eine getaggte Seite von 276 kB, die 41,7 s
-und 2,3 GB Arbeitsspeicher kostete, ohne dass eine Decke griff; ein unbekannter
+und 2,3 GB Arbeitsspeicher kostete, ohne dass eine Decke griff (gemessen im
+Testprozess, Profil Debug, am Stand `fedcabe`, dem letzten Baum vor den
+Korrekturen der Runde 6 — heute nicht mehr zu messen); ein unbekannter
 Filtername **an erster Stelle** einer Kette, der das Leck-Orakel stumm machte
 („nicht gefunden“, Rückgabewert 0, über einen Strom, den keine Sicht gelesen
 hatte); und ein wörtlich gleicher abgewählter Text, der eine danebengegangene
@@ -388,18 +392,24 @@ wurde.
   `MAX_NAMED_PLACES = 3` höchstens drei nennt und den Rest zählt. Und die
   Bombentabelle mischte Einheiten: derselbe Messwert stand im Fließtext als
   „2 172 628 kB ≈ 2,1 GiB“ (durch 1024²) und in der Tabelle als „2 173 MB“
-  (durch 1000). MB heißt in diesem Projekt 1024² Byte; die Tabelle nennt jetzt
-  **2 122 MB** und **3 145 MB** und sagt, aus welcher Zahl sie das rechnet.
+  (durch 1000), beide Umrechnungen aus derselben Spitze eines Laufs am gebauten
+  Binary (Release). MB heißt in diesem Projekt 1024² Byte; die Tabelle nennt
+  jetzt **2 122 MB** und **3 145 MB** und sagt, aus welcher Zahl sie das
+  rechnet: aus den kB-Spitzen, die ein Lauf am gebauten Binary (Release)
+  ausgewiesen hat.
 
 * **Eine getaggte Seite konnte den Rechner blockieren.** Verschachtelte
   `BDC`-Klammern mit Textspiegel über denselben `Do` ließen die Zuordnung
   Spiegel→Formular als Produkt wachsen: eine Datei von 276 kB mit **neun**
   Objekten belegte 2 306 MB und lief 41,7 s, ohne Warnung und ohne dass irgendeine
-  Decke griff — die Liste entstand vor der ersten gezählten Zeichenoperation.
+  Decke griff — die Liste entstand vor der ersten gezählten Zeichenoperation;
+  gemessen im Testprozess, Profil Debug, am Stand `fedcabe`, dem letzten Baum
+  vor den Korrekturen der Runde 6 — heute nicht mehr zu messen.
   Der Aufbau ist jetzt gedeckelt und läuft einmal je Strom statt je Platzierung:
   dieselbe Datei am gebauten Binary **0,15–0,18 s und 40 MB** (Release,
-  Rückgabewert 3); im Testprozess, der nur den Extraktor fährt, 0,56 s und
-  38 MB; ohne `/ActualText` brauchte sie immer 0,15 s. Die Decke unter den Textspiegeln zählt jetzt
+  Rückgabewert 3); im Testprozess (Debug), der nur den Extraktor fährt, 0,56 s
+  und 38 MB; ohne `/ActualText` brauchte sie immer 0,15 s. Die Decke unter den
+  Textspiegeln zählt jetzt
   **Zuordnungen zwischen einem Spiegel und einer Formularplatzierung**:
   höchstens 100 000 beim Aufbau und 100 000 beim Aufklappen, je Seiten-Scan
   (zusammen rund 16 MB). Wird sie erreicht **und dabei etwas weggelassen**, sagt
@@ -425,11 +435,15 @@ wurde.
   (Dass der Bildfilter das **an jeder Stelle** der Kette tat, war zu viel
   versprochen — siehe Fix-Runde 7.) Das Orakel klonte außerdem die Rohbytes eines Stroms, bevor es den
   ersten Filter kannte, und warf den Klon bei einem unbekannten Filter wieder weg:
-  gemessen im Testprozess (64-MiB-Strom, `/DCTDecode`, Budget 512 MiB)
-  **205 MB vorher, 138 MB nachher**, dort in Dezimal-MB gezählt. Die alte Kostenzahl „1 000 Begriffe 65,7 s“ ist widerlegt und durch
-  eine nachstellbare Rechnung ersetzt: 6 Muster je Begriff über 268 MB je
-  Durchgang, `memmem` 9,9 GB/s → 0,163 s je Begriff, rund **163 s für 1 000
-  Begriffe als untere Schranke**; heute 5,01 s (1 Begriff) gegen 5,99 s (1 000).
+  gemessen im Testprozess (Release, 64-MiB-Strom, `/DCTDecode`, Budget 512 MiB)
+  **205 MB vorher, 138 MB nachher**, dort in Dezimal-MB gezählt; das „vorher“
+  ist am Stand `fedcabe`, dem letzten Baum vor den Korrekturen der Runde 6,
+  nachgemessen. Die alte Kostenzahl „1 000 Begriffe 65,7 s“ ist widerlegt und durch
+  eine nachstellbare Rechnung ersetzt, gemessen im Testprozess (Release): 6
+  Muster je Begriff über 256 MB je Durchgang — vier Blöcke à 64 MiB, MB wie
+  überall 1024² Byte —, `memmem` 9,9 GB/s → 0,163 s je Begriff, rund **163 s
+  für 1 000 Begriffe als untere Schranke**; heute 5,01 s (1 Begriff) gegen
+  5,99 s (1 000).
 * **Vier Klartextlecks an Annotationsnachbarn.** Der Dateiname einer
   Movie-Annotation (`/Movie /F`), die Maßangaben einer Vermessung (`/Measure`,
   mit Text in `/R`, `/U`, `/RT`, `/RD`, `/PS`, `/SS`) und eine eingebettete
@@ -447,9 +461,9 @@ wurde.
   hinter einem entfernten Schlüssel ein Verweis, zählt er nur, wenn das Objekt
   dahinter nach dem Aufräumen wirklich fehlt: „1 Lesezeichen entfernt“ über
   einen `/Title 4 0 R`, den ein zweiter Halter am Leben hielt, war eine
-  Falschmeldung. Kosten gemessen am ungünstigsten Material (200 000 Annotationen
-  mit `/Contents` als Verweis): 767–791 ms statt 746 ms, kein zusätzlicher
-  Speicher.
+  Falschmeldung. Kosten gemessen im Testprozess (Release) am ungünstigsten
+  Material (200 000 Annotationen mit `/Contents` als Verweis): 767–791 ms statt
+  746 ms, kein zusätzlicher Speicher.
 * **Oberfläche: „zählen deshalb nicht als Leck“ war die falsche Aussage.** Steht
   ein geschwärzter Text **wörtlich** auch in einer bewusst stehen gelassenen
   Zeile, wird er nicht gesucht — die Statuszeile verkaufte das als Ergebnis und
