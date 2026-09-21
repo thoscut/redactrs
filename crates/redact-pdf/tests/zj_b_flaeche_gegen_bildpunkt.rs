@@ -77,9 +77,8 @@ fn seite_mit_gedrehtem_bild() -> (Document, ObjectId, ObjectId) {
     let resources_id = doc.add_object(dictionary! {
         "XObject" => dictionary! { "Im0" => bild_id },
     });
-    let content = format!(
-        "/Figure <</Alt ({SPIEGEL})>> BDC\nq 200 100 -100 200 300 400 cm /Im0 Do Q\nEMC\n"
-    );
+    let content =
+        format!("/Figure <</Alt ({SPIEGEL})>> BDC\nq 200 100 -100 200 300 400 cm /Im0 Do Q\nEMC\n");
     let content_id = doc.add_object(Stream::new(dictionary! {}, content.into_bytes()));
     let pages_id = doc.new_object_id();
     let page_id = doc.add_object(dictionary! {

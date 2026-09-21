@@ -120,10 +120,7 @@ fn app_with(bytes: &[u8]) -> RedactApp {
 fn warte_aufs_gatter(gate: &Arc<CheckGate>, was: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !gate.arrived() {
-        assert!(
-            Instant::now() < deadline,
-            "{was}: am Gatter kam niemand an"
-        );
+        assert!(Instant::now() < deadline, "{was}: am Gatter kam niemand an");
         std::thread::sleep(Duration::from_millis(2));
     }
 }
@@ -198,7 +195,10 @@ fn zh2_c_ein_symlink_als_ziel_nimmt_dem_leck_nicht_die_stimme() {
     let vorher = std::fs::read(&out).unwrap();
     app.export_to(link.clone());
     app.wait_for_export();
-    println!("Statuszeile nach dem Export auf den Link: {}", app.state.status);
+    println!(
+        "Statuszeile nach dem Export auf den Link: {}",
+        app.state.status
+    );
 
     // redact-rs schreibt nicht durch Links hindurch — kein Byte hat sich
     // geändert.
@@ -362,8 +362,10 @@ fn zh2_c_neue_bytes_werfen_das_urteil_ueber_die_alten_weg() {
         app.state.status
     );
     assert!(
-        !app.state.warnings.iter().any(|w| w.contains("out.pdf:")
-            && w.contains("nicht mehr in der Ausgabe")),
+        !app.state
+            .warnings
+            .iter()
+            .any(|w| w.contains("out.pdf:") && w.contains("nicht mehr in der Ausgabe")),
         "{:?}",
         app.state.warnings
     );

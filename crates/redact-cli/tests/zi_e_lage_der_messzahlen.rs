@@ -76,12 +76,20 @@ fn schnitt_wie_belege(text: &str) -> (usize, usize) {
     let ab = quelle
         .find("fn changelog_block()")
         .expect("`fn changelog_block` steht in belege.rs");
-    let rumpf = &quelle[ab..ab + 900.min(quelle.len() - ab)];
+    // 1 800 Zeichen, nicht 900: der Rumpf von `changelog_block` traegt seit
+    // dieser Runde die Begruendung des Schnitts als Kommentar, und die
+    // entscheidende Zeile stand sonst jenseits des Fensters — der Nachbau haette
+    // eine geschlossene Luecke fuer offen gehalten.
+    let rumpf = &quelle[ab..ab + 1_800.min(quelle.len() - ab)];
+    // Lücke 1 IST geschlossen: `changelog_block` schneidet seit dieser Runde ab
+    // `## Unveröffentlicht`, nicht mehr ab der ersten `### Fix-Runde`. Der
+    // Nachbau hier liest das aus dem Quelltext, statt es anzunehmen — fällt das
+    // Original zurück, wird diese Zusicherung rot.
     assert!(
-        rumpf.contains("glatt(&text[ueberschriften[0]..ueberschriften[2]])"),
-        "`changelog_block` schneidet nicht mehr ab `ueberschriften[0]` — \
-         Lücke 1 ist angefasst, dieser Nachbau gilt nicht mehr und diese Datei \
-         gehört überarbeitet oder gelöscht"
+        rumpf.contains("glatt(&text[anfang..ueberschriften[2]])")
+            && rumpf.contains("## Unveröffentlicht"),
+        "`changelog_block` schneidet nicht mehr ab `## Unveröffentlicht` — die \
+         Lücke, die diese Datei belegt hat, ist wieder offen"
     );
 
     let ueberschriften: Vec<usize> = text
@@ -92,21 +100,27 @@ fn schnitt_wie_belege(text: &str) -> (usize, usize) {
         ueberschriften.len() >= 3,
         "weniger als drei Fix-Runden im CHANGELOG"
     );
-    (ueberschriften[0], ueberschriften[2])
+    let anfang = text
+        .find("\n## Unveröffentlicht")
+        .map_or(ueberschriften[0], |i| i + 1);
+    (anfang, ueberschriften[2])
 }
 
 /// Der Vorspann des Abschnitts `## Unveröffentlicht`: von seiner Überschrift
 /// bis zur ersten `### Fix-Runde`.
 fn vorspann(text: &str) -> (usize, usize) {
+    // Dieselbe Kante wie der Schnitt in `belege::changelog_block`: HINTER dem
+    // Zeilenumbruch. Ein Unterschied von einem Byte liesse den Vergleich unten
+    // scheitern, ohne dass an der Sache etwas faul waere.
     let von = text
         .find("\n## Unveröffentlicht")
+        .map(|i| i + 1)
         .expect("Abschnitt `## Unveröffentlicht` steht im CHANGELOG");
-    let (block_von, _) = schnitt_wie_belege(text);
-    assert!(
-        von < block_von,
-        "der Vorspann liegt vor der ersten Fix-Runde"
-    );
-    (von, block_von)
+    let bis = text[von..]
+        .find("\n### Fix-Runde ")
+        .map(|i| von + i)
+        .expect("nach dem Vorspann kommt eine Fix-Runde");
+    (von, bis)
 }
 
 /// Die Wortliste aus `belege::traegt_zahl` — **gelesen**, nicht abgeschrieben:
@@ -141,84 +155,94 @@ fn zahlworte_des_waechters() -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Lücke 1 — die Lage: der Vorspann der Release-Notizen wird nicht geprüft
+// Lücke 1 — GESCHLOSSEN: der Vorspann der Release-Notizen wird mitgeprüft
 // ---------------------------------------------------------------------------
 
-/// Der Vorspann von `## Unveröffentlicht` trägt Zahlen, und der geprüfte
-/// Block fängt erst dahinter an.
+/// **Der Vorspann liegt IM geprüften Block.** Vorher lag er davor.
+///
+/// Diese Datei hat die Lücke belegt: `changelog_block` schnitt ab der ersten
+/// `### Fix-Runde`, und der Vorspann von `## Unveröffentlicht` blieb außen —
+/// obwohl dort die Zahlen stehen, die den ganzen Abschnitt zusammenfassen
+/// („sieben Fix-Runden“, „vier stille Lecks“). Eine Zahl, die eine
+/// Zusammenfassung trägt, ist so viel eine Zusage wie eine im Text.
+///
+/// Der Schnitt beginnt jetzt am Abschnitt. Der Test steht weiter hier, nur mit
+/// gedrehter Aussage: er hält die Lücke ZU. Fällt der Schnitt zurück, wird
+/// `schnitt_wie_belege` rot (es liest den Quelltext von `belege.rs`), und wenn
+/// jemand den Vorspann verschiebt, wird diese Zusicherung rot.
 #[test]
-fn der_vorspann_der_release_notizen_liegt_ausserhalb_des_geprueften_blocks() {
+fn der_vorspann_der_release_notizen_liegt_im_geprueften_block() {
     let text = changelog();
     let (vor_von, vor_bis) = vorspann(&text);
     let (block_von, block_bis) = schnitt_wie_belege(&text);
 
-    // Der Vorspann liegt vollständig **vor** dem geprüften Block.
     assert!(
-        vor_bis <= block_von,
-        "der Vorspann reicht in den geprüften Block"
+        block_von <= vor_von && vor_bis <= block_bis,
+        "der Vorspann ({vor_von}..{vor_bis}) liegt nicht im geprüften Block \
+         ({block_von}..{block_bis}) — die Lücke ist wieder offen"
     );
-    assert!(block_von < block_bis);
 
     let vor = glatt(&text[vor_von..vor_bis]);
-
-    // Er trägt Zahlen — und zwar Zusagen über das Programm, nicht bloß eine
-    // Fassungsnummer.
+    assert!(
+        vor.chars().any(|c| c.is_ascii_digit()),
+        "der Vorspann trägt keine Ziffer mehr — dann prüft dieser Test nichts: {vor}"
+    );
     assert!(
         vor.contains("Sieben Fix-Runden"),
         "der Vorspann zählt die Runden nicht mehr: {vor}"
     );
-    assert!(
-        vor.contains("fallen vier stille Lecks"),
-        "der Vorspann zählt die Lecks nicht mehr: {vor}"
-    );
-    assert!(
-        vor.chars().any(|c| c.is_ascii_digit()),
-        "der Vorspann trägt keine Ziffer mehr: {vor}"
-    );
 
-    // Und er trägt die pauschale Zusage, an der der Block gemessen werden
-    // müsste — ungeprüft, weil sie außerhalb liegt. Die fünf Sätze der Runde
-    // 7 stammen ausdrücklich aus einem **Debug-Testprozess**, nicht aus dem
-    // gebauten Binary; einer („100 000 Zuordnungen“) sogar aus einer
-    // Konstanten des Quelltexts.
+    // Und die pauschale Zusage, die hier stand, ist weg: sie war falsch (alle
+    // drei Messzahlen der Runde 7 stammten aus einem Debug-Testprozess). An
+    // ihrer Stelle steht ein Maßstab, der sagt, woher eine Zahl kommen muss.
+    // Nicht am Vorkommen, sondern an der AUSSAGE prüfen: der Vorspann ZITIERT
+    // die alte pauschale Zusage, um zu sagen, dass sie keine war. Ein
+    // `!contains` schlug hier auf das Zitat an — dieselbe Fehlerklasse, an der
+    // in dieser Schleife schon die Plattformregel hing (sie las ihr eigenes
+    // Zitat als Verwendung). Geprüft wird deshalb, dass die Widerlegung
+    // dabeisteht und dass der Maßstab, der an ihre Stelle getreten ist, dasteht.
+    if let Some(i) = vor.find("jede Angabe hier stammt aus einem Lauf des gebauten Binaries") {
+        let danach = &vor[i..];
+        assert!(
+            danach.contains("war keine"),
+            "die alte pauschale Zusage steht da, ohne widerlegt zu werden: {danach}"
+        );
+    }
     assert!(
-        vor.contains(
-            "jede Angabe hier stammt aus einem Lauf des gebauten Binaries, nicht aus \
-                      dem Quelltext"
-        ),
-        "die pauschale Zusage des Vorspanns lautet anders: {vor}"
-    );
-    let block = glatt(&text[block_von..block_bis]);
-    assert!(
-        block.contains("Nachgemessen am Baum dieser Runde (Debug, im Testprozess)"),
-        "der Block nennt den Ort der neuen Messungen nicht mehr"
+        vor.contains("Eine Messzahl stammt aus einem Lauf des **gebauten Binaries**"),
+        "der Maßstab für eine Messzahl fehlt im Vorspann: {vor}"
     );
 }
 
-/// Eine erfundene Messzahl im Vorspann bleibt dem Schnitt verborgen — sie
-/// landet nie im Block, den der Wächter abdeckt.
+/// **Eine erfundene Messzahl im Vorspann landet jetzt im Block.**
+///
+/// Die Gegenprobe zur Lage: vorher entging eine Zahl im Vorspann der Prüfung
+/// vollständig. Der Test baut sie in eine Kopie des Textes ein und verlangt,
+/// dass der Schnitt sie erfasst — damit `jede_zahl_der_letzten_runden_ist_gebunden`
+/// sie sehen KANN.
 #[test]
-fn eine_erfundene_messzahl_im_vorspann_kommt_im_block_nicht_vor() {
+fn eine_erfundene_messzahl_im_vorspann_liegt_im_block() {
     let text = changelog();
-    let (_, vor_bis) = vorspann(&text);
+    let (vor_von, vor_bis) = vorspann(&text);
+    let erfunden = "Dieser Satz nennt 4 711 MB und ist an nichts gebunden.";
 
-    const ERFUNDEN: &str = "\nDer Redaktor braucht dafür 12,5 s und belegt 99 MB.\n";
-    let mut gefaelscht = String::with_capacity(text.len() + ERFUNDEN.len());
+    let mut gefaelscht = String::with_capacity(text.len() + erfunden.len() + 2);
     gefaelscht.push_str(&text[..vor_bis]);
-    gefaelscht.push_str(ERFUNDEN);
+    gefaelscht.push_str("\n");
+    gefaelscht.push_str(erfunden);
+    gefaelscht.push_str("\n");
     gefaelscht.push_str(&text[vor_bis..]);
 
-    let (von, bis) = schnitt_wie_belege(&gefaelscht);
-    let block = glatt(&gefaelscht[von..bis]);
+    let (block_von, block_bis) = schnitt_wie_belege(&gefaelscht);
+    let block = glatt(&gefaelscht[block_von..block_bis]);
     assert!(
-        !block.contains("12,5 s"),
-        "der Schnitt sieht den Vorspann jetzt — Lücke 1 ist geschlossen, \
-         diese Datei gehört gelöscht"
+        block.contains("4 711 MB"),
+        "die erfundene Zahl liegt außerhalb des geprüften Blocks — dann sieht der \
+         Wächter sie nicht"
     );
     assert!(
-        !block.contains("99 MB"),
-        "der Schnitt sieht den Vorspann jetzt — Lücke 1 ist geschlossen, \
-         diese Datei gehört gelöscht"
+        block_von <= vor_von,
+        "der Block beginnt hinter dem Vorspann"
     );
 }
 

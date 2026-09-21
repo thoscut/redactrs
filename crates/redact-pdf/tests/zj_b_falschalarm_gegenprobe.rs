@@ -205,8 +205,11 @@ fn nachbarabschnitt_im_selben_formular_behaelt_seinen_spiegel() {
             "XObject" => dictionary! { "Fm0" => form },
         });
         let (mut doc, _) = eine_seite(doc, resources_id, b"q /Fm0 Do Q\n".to_vec());
-        let (report, out) =
-            schwaerze_mit(&mut doc, &[schwaerzung(0, ueber_bild_a())], allow_undecodable);
+        let (report, out) = schwaerze_mit(
+            &mut doc,
+            &[schwaerzung(0, ueber_bild_a())],
+            allow_undecodable,
+        );
 
         assert_eq!(
             report.redacted_images, 1,

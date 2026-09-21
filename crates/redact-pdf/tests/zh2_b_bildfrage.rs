@@ -101,10 +101,7 @@ fn eine_seite(mut doc: Document, resources_id: ObjectId, content: Vec<u8>) -> (D
     (doc, page_id)
 }
 
-fn zwei_seiten(
-    mut doc: Document,
-    seiten: &[(ObjectId, Vec<u8>)],
-) -> (Document, Vec<ObjectId>) {
+fn zwei_seiten(mut doc: Document, seiten: &[(ObjectId, Vec<u8>)]) -> (Document, Vec<ObjectId>) {
     let pages_id = doc.new_object_id();
     let mut ids = Vec::new();
     for (resources_id, content) in seiten {
@@ -335,7 +332,10 @@ fn formular_ohne_treffer_behaelt_seinen_spiegel() {
     let content = format!("/Figure <</Alt ({HARMLOS})>> BDC\nq /Fm0 Do Q\nEMC\n");
     let (mut doc, _) = eine_seite(doc, resources_id, content.into_bytes());
     // Das Bild liegt bei (50,600)-(150,700).
-    let (report, out) = schwaerze(&mut doc, &[schwaerzung(0, Rect::new(400.0, 100.0, 450.0, 150.0))]);
+    let (report, out) = schwaerze(
+        &mut doc,
+        &[schwaerzung(0, Rect::new(400.0, 100.0, 450.0, 150.0))],
+    );
     assert_eq!(report.redacted_images, 0, "kein Bild wird angefasst");
     assert_eq!(report.image_alt_texts_cleared, 0);
     assert!(
@@ -556,7 +556,10 @@ fn gedrehtes_bild_mitten_in_der_raute_verliert_alles() {
     );
     let (mut doc, _) = eine_seite(doc, resources_id, content.into_bytes());
     // (290,460)-(310,480) liegt ganz in der Raute um (300, 470.7).
-    let (report, out) = schwaerze(&mut doc, &[schwaerzung(0, Rect::new(290.0, 460.0, 310.0, 480.0))]);
+    let (report, out) = schwaerze(
+        &mut doc,
+        &[schwaerzung(0, Rect::new(290.0, 460.0, 310.0, 480.0))],
+    );
     assert_eq!(
         report.redacted_images, 1,
         "Vorbedingung: Bildpunkte fallen — {:?}",
@@ -591,7 +594,10 @@ fn gedrehtes_bild_im_formular_behaelt_in_der_huellenecke_seinen_spiegel() {
     });
     let content = format!("/Figure <</Alt ({HARMLOS})>> BDC\nq /Fm0 Do Q\nEMC\n");
     let (mut doc, _) = eine_seite(doc, resources_id, content.into_bytes());
-    let (report, out) = schwaerze(&mut doc, &[schwaerzung(0, Rect::new(231.0, 401.0, 250.0, 420.0))]);
+    let (report, out) = schwaerze(
+        &mut doc,
+        &[schwaerzung(0, Rect::new(231.0, 401.0, 250.0, 420.0))],
+    );
     assert_eq!(report.redacted_images, 0, "kein Bildpunkt fällt");
     assert_eq!(report.image_alt_texts_cleared, 0);
     assert!(
@@ -625,10 +631,12 @@ fn geteiltes_logo_behaelt_auf_der_unberuehrten_seite_seinen_ersatztext() {
     let res2 = doc.add_object(dictionary! {
         "XObject" => dictionary! { "Logo" => logo_id },
     });
-    let inhalt = format!("/Figure <</Alt ({HARMLOS})>> BDC
+    let inhalt = format!(
+        "/Figure <</Alt ({HARMLOS})>> BDC
 q 100 0 0 100 50 600 cm /Logo Do Q
 EMC
-");
+"
+    );
     let (mut doc, seiten) = zwei_seiten(
         doc,
         &[
@@ -637,7 +645,10 @@ EMC
         ],
     );
     let (report, out) = schwaerze_mit(&mut doc, &[schwaerzung(0, ueber_dem_bild())], true);
-    assert_eq!(report.redacted_images, 1, "Vorbedingung: ein Bild verliert Pixel");
+    assert_eq!(
+        report.redacted_images, 1,
+        "Vorbedingung: ein Bild verliert Pixel"
+    );
     assert_eq!(
         report.copied_images, 1,
         "Vorbedingung: das geteilte Bild wird kopiert"
@@ -681,7 +692,8 @@ fn geteiltes_unlesbares_bild_verliert_seinen_ersatztext_fuer_beide_seiten() {
         "XObject" => dictionary! { "Logo" => logo_id },
     });
     let inhalt = b"q 100 0 0 100 50 600 cm /Logo Do Q
-".to_vec();
+"
+    .to_vec();
     let (mut doc, _) = zwei_seiten(doc, &[(res1, inhalt.clone()), (res2, inhalt)]);
     let (report, out) = schwaerze_mit(&mut doc, &[schwaerzung(0, ueber_dem_bild())], true);
     assert_eq!(report.redacted_images, 0, "die Pixel bleiben (unlesbar)");
@@ -692,7 +704,11 @@ fn geteiltes_unlesbares_bild_verliert_seinen_ersatztext_fuer_beide_seiten() {
     );
     assert_eq!(report.image_alt_texts_cleared, 1, "das /Alt am Dictionary");
     assert_eq!(alt_am_objekt(&doc, logo_id), None);
-    assert!(leaks(&out, HARMLOS).is_empty(), "{:?}", leaks(&out, HARMLOS));
+    assert!(
+        leaks(&out, HARMLOS).is_empty(),
+        "{:?}",
+        leaks(&out, HARMLOS)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -732,8 +748,7 @@ fn geteiltes_unlesbares_bild_verliert_seinen_ersatztext_fuer_beide_seiten() {
 #[test]
 fn rechteck_zwischen_den_gitterlinien_nimmt_den_spiegel() {
     // (Zugeständnis, erwartete Zahl, /Alt am Bild danach)
-    for (allow_undecodable, gezaehlt, alt_bleibt) in
-        [(false, 1usize, true), (true, 2usize, false)]
+    for (allow_undecodable, gezaehlt, alt_bleibt) in [(false, 1usize, true), (true, 2usize, false)]
     {
         let mut doc = Document::with_version("1.5");
         let mut grob = bild(2, 2);
@@ -824,7 +839,10 @@ fn mess_bildplatzierungen_ohne_spiegel() {
         let start = std::time::Instant::now();
         let report = PdfRedactor::with_padding(0.0)
             .allowing_undecodable_images(true)
-            .apply_with_report(&mut doc, &[schwaerzung(0, Rect::new(10.0, 10.0, 20.0, 20.0))])
+            .apply_with_report(
+                &mut doc,
+                &[schwaerzung(0, Rect::new(10.0, 10.0, 20.0, 20.0))],
+            )
             .expect("Lauf");
         println!(
             "{anzahl} Platzierungen ohne Spiegel: {:?}, überschriebene Bilder {}",

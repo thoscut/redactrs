@@ -84,8 +84,7 @@ fn aufgeloest_zeigen_beide_auf_dieselbe_datei() {
     std::fs::write(dir.join("out.pdf"), b"x").expect("Datei");
 
     let gerade = std::fs::canonicalize(dir.join("out.pdf")).expect("gerade");
-    let umweg =
-        std::fs::canonicalize(dir.join("unten").join("..").join("out.pdf")).expect("Umweg");
+    let umweg = std::fs::canonicalize(dir.join("unten").join("..").join("out.pdf")).expect("Umweg");
     assert_eq!(gerade, umweg);
 
     // So, wie `writing_key` es tut: nur das Verzeichnis auflösen, den Namen

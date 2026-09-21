@@ -44,7 +44,12 @@ fn tmp(tag: &str) -> PathBuf {
 }
 
 fn ein_geheimnis() -> Vec<u8> {
-    build_pdf(&[vec![TextItem::new(72.0, 700.0, 10.0, "Zeile A GEHEIM-EINS")]])
+    build_pdf(&[vec![TextItem::new(
+        72.0,
+        700.0,
+        10.0,
+        "Zeile A GEHEIM-EINS",
+    )]])
 }
 
 /// Ein Rechteck, unter dem nichts liegt: der Lauf gilt als geschwärzt, der
@@ -71,6 +76,8 @@ fn geladen(dir: &Path, config: Config) -> AppState {
     state
 }
 
+/// Nur der Symlink-Test braucht sie, und der laeuft nur auf Unix.
+#[cfg(unix)]
 fn leckt(path: &Path) -> bool {
     let bytes = std::fs::read(path).unwrap();
     !redact_pdf::leaks(&bytes, GEHEIM).is_empty()
@@ -90,7 +97,16 @@ fn leckt(path: &Path) -> bool {
 /// * `plan_export(link.pdf)` geht durch (der Schnitt wird also erreicht), und
 ///   erst `run()` scheitert am Symlink — kein Byte geschrieben, out.pdf
 ///   unverändert und weiter leckend.
+///
+/// Steht unter `cfg(unix)`, weil der Symlink der Gegenstand dieses Tests ist
+/// und `std::os::unix` auf Windows nicht existiert — das bricht dort nicht zur
+/// Laufzeit, sondern den **Bau**, und der Windows-Job der CI fährt
+/// `cargo clippy --workspace --all-targets`. Ein Baufehler lässt sich, anders
+/// als eine Laufzeitverletzung, NICHT in der Altlast-Liste von
+/// `zf_q5_plattformzusagen` parken: die Liste macht den Regeltest grün, der Bau
+/// fällt trotzdem. Das war der fünfte Rotgang dieser Klasse in dieser Schleife.
 #[test]
+#[cfg(unix)]
 fn zi_c_ein_symlink_als_ziel_traegt_die_kennung_der_verlinkten_datei() {
     let dir = tmp("symlink");
     let state = geladen(&dir, Config::default());
@@ -123,7 +139,9 @@ fn zi_c_ein_symlink_als_ziel_traegt_die_kennung_der_verlinkten_datei() {
     let plan = state
         .plan_export(&link, Some(&audit_link))
         .expect("plan_export lehnt einen Symlink NICHT ab — der Schnitt wird erreicht");
-    let err = plan.run().expect_err("write_file schreibt nicht durch Links");
+    let err = plan
+        .run()
+        .expect_err("write_file schreibt nicht durch Links");
     let text = err.to_string();
     assert!(
         text.contains("symbolischer Link"),
@@ -131,9 +149,19 @@ fn zi_c_ein_symlink_als_ziel_traegt_die_kennung_der_verlinkten_datei() {
     );
 
     // Und die Folge: out.pdf ist unangetastet und leckt weiter.
-    assert_eq!(std::fs::read(&out).unwrap(), vorher, "out.pdf wurde berührt");
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        vorher,
+        "out.pdf wurde berührt"
+    );
     assert!(leckt(&out), "out.pdf leckt weiter — ihr Urteil fehlt");
-    assert!(!link.exists() || std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert!(
+        !link.exists()
+            || std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -203,7 +231,10 @@ fn zi_c_zwei_gleichzeitige_exporte_teilen_ein_audit_log() {
     assert!(b.exists() && c.exists(), "beide Ausgaben fehlen nicht");
     // Beide Meldungen nennen dasselbe Log …
     assert_eq!(ob.audit_log, oc.audit_log);
-    assert_eq!(ob.audit_log.as_deref(), Some(log.display().to_string().as_str()));
+    assert_eq!(
+        ob.audit_log.as_deref(),
+        Some(log.display().to_string().as_str())
+    );
 
     // … beschrieben ist aber nur einer der beiden Läufe.
     let text = std::fs::read_to_string(&log).unwrap();

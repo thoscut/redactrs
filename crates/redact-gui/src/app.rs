@@ -1534,7 +1534,8 @@ impl RedactApp {
             .map(|pending| pending.writing.clone())
             .collect();
         if !written.is_empty() {
-            self.checks.retain(|pending| !written.contains(&pending.key));
+            self.checks
+                .retain(|pending| !written.contains(&pending.key));
         }
         let mut done: Vec<(PendingExport, Option<redact_core::Result<Outcome>>)> = Vec::new();
         let mut still = Vec::new();
@@ -5223,15 +5224,26 @@ mod tests {
     fn a_named_pipe_chosen_in_the_dialog_does_not_freeze_the_window() {
         let dir = temp_dir("pipe-review");
         let path = dir.join("pipe.json");
-        let ok = match std::process::Command::new("mkfifo").arg(&path).status() {
-            Ok(status) => status,
-            Err(e) => {
-                eprintln!("kein mkfifo im Pfad ({e}) — die Pipe bleibt hier ungeprüft");
-                std::fs::remove_dir_all(&dir).ok();
-                return;
-            }
+        // Jeder nicht erfolgreiche Ausgang ist derselbe Fall wie „nicht
+        // startbar“: dann gibt es KEINE Pipe, also nichts zu prüfen. Ein
+        // BusyBox-Bild hat den Namen im Pfad und das Applet nicht (Ausgang
+        // 127); ein Ziel ohne FIFO-Unterstützung und eine seccomp-Verweigerung
+        // von mknod enden ebenso. Ein harter assert liesse den Lauf dort
+        // platzen, obwohl am Programm nichts falsch ist.
+        let fehlt = match std::process::Command::new("mkfifo").arg(&path).status() {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(format!("mkfifo endete mit {status}")),
+            Err(e) => Some(format!("kein mkfifo im Pfad: {e}")),
         };
-        assert!(ok.success(), "mkfifo ist fehlgeschlagen");
+        if let Some(grund) = fehlt {
+            eprintln!(
+                "keine benannte Pipe angelegt ({grund}) — dass die Oberfläche eine \
+                 benannte Pipe als Review-Datei ablehnt, statt an ihr zu hängen, \
+                 bleibt hier ungeprüft"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
 
         // `RedactApp` bleibt in seinem Faden — nur die Meldung kommt zurück.
         let (sender, receiver) = std::sync::mpsc::channel();

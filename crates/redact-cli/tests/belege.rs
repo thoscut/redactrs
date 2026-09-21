@@ -2386,6 +2386,29 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Fix-Runde 6",
         "Verweis auf einen Abschnitt dieser Datei, keine Messzahl",
     ),
+    // --- Der Vorspann der Release-Notizen ---------------------------------
+    // Er liegt seit zi_e_lage_der_messzahlen IM geprueften Block. Was dort an
+    // Zahlen steht, zaehlt oder benennt - gemessen wird nichts davon.
+    (
+        "Bereich: `git log v0.6.0..HEAD`.",
+        "die Spanne der Release-Notizen; ein Git-Bereich, keine gemessene Groesse",
+    ),
+    (
+        "Sieben Fix-Runden seit 0.6.0",
+        "zaehlt die Abschnitte dieser Datei und nennt den Vorgaenger-Tag, keine Messung",
+    ),
+    (
+        "Zuletzt (Runde 7) fallen vier stille Lecks am Rand des Formularwesens, zwei Wege",
+        "zaehlt die Befunde der Runde und nennt ihre Nummer, keine gemessene Groesse",
+    ),
+    (
+        "alle drei neuen Messzahlen der Runde 7",
+        "zaehlt die Messzahlen und nennt die Runde - die Zahlen selbst stehen weiter unten",
+    ),
+    (
+        "MB heißt 1024 Byte zum Quadrat",
+        "die Definition der Einheit, in der gemessen wird; selbst keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
@@ -2404,7 +2427,21 @@ fn changelog_block() -> String {
         "weniger als drei Fix-Runden im CHANGELOG — der Block lässt sich nicht \
          schneiden"
     );
-    glatt(&text[ueberschriften[0]..ueberschriften[2]])
+    // Der Schnitt beginnt bei `## Unveröffentlicht`, nicht bei der ersten
+    // `### Fix-Runde`: der VORSPANN der Release-Notizen lag sonst ausserhalb des
+    // geprueften Bereichs, und genau dort stehen die Zahlen, die den Abschnitt
+    // zusammenfassen („sieben Fix-Runden“, „vier stille Lecks“). Eine Zahl, die
+    // eine Zusammenfassung traegt, ist so viel eine Zusage wie eine im Text —
+    // und sie war ungebunden. Beleg: `zi_e_lage_der_messzahlen`.
+    let anfang = text
+        .find("\n## Unveröffentlicht")
+        .map_or(ueberschriften[0], |i| i + 1);
+    assert!(
+        anfang < ueberschriften[0],
+        "der Vorspann liegt vor der ersten Fix-Runde — sonst schneidet der Block \
+         ihn wieder weg"
+    );
+    glatt(&text[anfang..ueberschriften[2]])
 }
 
 /// Markiert jedes Vorkommen von `muster` in `block` als gedeckt.

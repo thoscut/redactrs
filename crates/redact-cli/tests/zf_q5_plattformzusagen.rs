@@ -775,16 +775,19 @@ const ALTLASTEN: &[(&str, &str, &str)] = &[
     // ihm geschieht; für die eigenen fünf Stellen hält das
     // [`die_fuenf_behobenen_mkfifo_stellen_haben_ihren_ausweg_und_sagen_ihn`]
     // — `app.rs` gehört der Oberfläche und ist als Vertrag gemeldet.
-    // Ein **Beleg der Gegenprüfung** (Register #19), absichtlich rot abgelegt —
-    // und dabei selbst ein Windows-Baufehler: `std::os::unix::fs::symlink` ohne
-    // `cfg`. Die Datei gehört `redact-gui`; hier steht sie, damit die Regel
-    // scharf bleibt, ohne eine fremde Datei zu ändern. Wird sie unter ein
-    // `cfg(unix)` gestellt, ist diese Zeile zu streichen — der Test sagt es.
-    (
-        "crates/redact-gui/tests/zi_c_verworfenes_urteil.rs",
-        "std::os::unix::",
-        "Unix-API ohne cfg — Baufehler auf Windows, gehört redact-gui",
-    ),
+    // HIER STAND crates/redact-gui/tests/zi_c_verworfenes_urteil.rs mit
+    // `std::os::unix::fs::symlink` ohne `cfg` — und das war ein Fehler dieser
+    // Liste, nicht nur der Datei. Eine LAUFZEIT-Verletzung lässt sich hier
+    // ehrlich parken: der Lauf findet sie, die Zeile sagt warum, niemand wird
+    // getäuscht. Ein **Baufehler** nicht: die Zeile macht diesen Regeltest
+    // grün, während `cargo clippy --workspace --all-targets --target
+    // x86_64-pc-windows-gnu` an derselben Stelle mit E0433 fällt — und genau
+    // das ist der Job, an dem der Windows-Lauf in dieser Schleife fünfmal rot
+    // war. Die Stelle steht jetzt unter `cfg(unix)`; die Zeile ist gestrichen.
+    //
+    // REGEL, die daraus folgt: was den BAU eines Ziels bricht, gehört nie in
+    // diese Liste, sondern unter ein `cfg`. Geparkt wird nur, was zur Laufzeit
+    // auffällt.
     // Die drei Stellen der Oberfläche, die Agent E hier nur melden konnte,
     // sind behoben und deshalb gestrichen: zweimal `std::os::unix::fs::symlink`
     // ohne `cfg` (ein **Bau**fehler auf Windows, wo der CI-Job `cargo clippy

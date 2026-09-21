@@ -63,7 +63,12 @@ fn tmp(tag: &str) -> PathBuf {
 }
 
 fn ein_geheimnis() -> Vec<u8> {
-    build_pdf(&[vec![TextItem::new(72.0, 700.0, 10.0, "Zeile A GEHEIM-EINS")]])
+    build_pdf(&[vec![TextItem::new(
+        72.0,
+        700.0,
+        10.0,
+        "Zeile A GEHEIM-EINS",
+    )]])
 }
 
 /// Ein Rechteck, unter dem nichts liegt: der Lauf gilt als geschwärzt, der
@@ -102,9 +107,54 @@ fn geladen(dir: &Path, config: Config, rect: Rect) -> AppState {
 
 /// Die Dateiidentität — `rename` legt eine neue an, und genau daran hängt die
 /// Aussage „die Bytes von vorhin gibt es nicht mehr".
+///
+/// Steht unter `cfg`, weil die Inode-Nummer eine Einrichtung genau dieses
+/// Systems ist: `std::os::unix` gibt es auf Windows nicht, und dort bricht das
+/// nicht zur Laufzeit, sondern schon den **Bau** — der dortige CI-Job fährt
+/// `cargo clippy --workspace --all-targets`. Genau daran war er in dieser
+/// Schleife fünfmal rot; diese Datei war der fünfte Fall, und zwar ausgerechnet
+/// ein Beleg der Gegenprüfung, die diese Klasse jagt.
+///
+/// Auf anderen Systemen bleibt das Glied ungeprüft — [`ersetzt`] sagt es dann
+/// auf `stderr`, statt still durchzulaufen.
+#[cfg(unix)]
 fn inode(path: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).unwrap().ino()
+}
+
+/// Hat `rename` die Datei wirklich ersetzt? Auf Unix an der Inode-Nummer
+/// entschieden; woanders nicht entscheidbar, und dann wird es gesagt.
+fn ersetzt(path: &Path, vorher: Option<u64>) -> bool {
+    #[cfg(unix)]
+    {
+        match vorher {
+            Some(alt) => inode(path) != alt,
+            None => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, vorher);
+        eprintln!(
+            "ohne Inode-Nummer ist nicht entscheidbar, ob `rename` die Datei ersetzt hat \
+             — dieses Glied der Beweiskette bleibt hier ungeprüft"
+        );
+        true
+    }
+}
+
+/// Die Inode-Nummer, wo es eine gibt.
+fn inode_falls_moeglich(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        Some(inode(path))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 fn leckt(bytes: &[u8]) -> bool {
@@ -159,7 +209,7 @@ fn zj_c_bytes_geschrieben_lauf_gescheitert_kein_urteil() {
     let out = dir.join("out.pdf");
     erster_export_mit_leck(&dir, &out);
     let vorher = std::fs::read(&out).unwrap();
-    let inode_vorher = inode(&out);
+    let inode_vorher = inode_falls_moeglich(&out);
 
     // Zweiter Export **derselben** Datei, Log nicht schreibbar.
     let log = langer_logname(&dir);
@@ -178,15 +228,16 @@ fn zj_c_bytes_geschrieben_lauf_gescheitert_kein_urteil() {
         .plan_export(&out, Some(&log))
         .expect("plan_export lehnt nicht ab — der Export läuft an");
     let (wrote, result) = plan.run_reporting();
-    let fehler = result.expect_err("das Log kann nicht geschrieben werden").to_string();
+    let fehler = result
+        .expect_err("das Log kann nicht geschrieben werden")
+        .to_string();
     println!("Fehler des Laufs: {fehler}");
     println!("Fahne `wrote`: {wrote}");
 
     // Glied 1: die Datei trägt NEUE Bytes und leckt.
     let nachher = std::fs::read(&out).unwrap();
-    assert_ne!(
-        inode(&out),
-        inode_vorher,
+    assert!(
+        ersetzt(&out, inode_vorher),
         "die Datei muss ersetzt worden sein (rename) — sonst prüft dieser Test etwas anderes"
     );
     assert_ne!(
@@ -204,9 +255,7 @@ fn zj_c_bytes_geschrieben_lauf_gescheitert_kein_urteil() {
     );
 
     // Glied 3: das Urteil wäre da gewesen.
-    let urteil = state
-        .plan_export_check(&state.hit_summary())
-        .run(&out);
+    let urteil = state.plan_export_check(&state.hit_summary()).run(&out);
     let warnung = urteil
         .warning()
         .expect("die Nachprüfung der neuen Bytes hätte gewarnt");
@@ -250,8 +299,7 @@ fn zj_c_sauber_geschrieben_lauf_gescheitert_warnung_bleibt() {
     let (wrote, result) = state
         .plan_export(&out, Some(&log))
         .expect("Plan")
-        .run_reporting()
-        ;
+        .run_reporting();
     assert!(result.is_err(), "das Log muss scheitern");
     assert!(wrote, "geschrieben wurde trotzdem");
 
@@ -299,7 +347,10 @@ fn zj_c_gegenprobe_gewoehnliches_log_geht_durch() {
         .run_reporting();
     let outcome = result.expect("gewöhnlicher Log-Pfad: der Lauf geht durch");
     assert!(wrote);
-    assert_eq!(outcome.audit_log.as_deref(), Some(log.display().to_string().as_str()));
+    assert_eq!(
+        outcome.audit_log.as_deref(),
+        Some(log.display().to_string().as_str())
+    );
     assert!(log.exists(), "das Log steht");
 
     std::fs::remove_dir_all(&dir).ok();

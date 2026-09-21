@@ -436,7 +436,7 @@ fn spiegel_auf_seite_eins_bild_von_seite_zwei_geschwaerzt() {
     let report = PdfRedactor::with_padding(0.0)
         .apply_with_report(&mut doc, &list)
         .expect("Schwärzung läuft");
-    let out = save_to_bytes(&mut doc).expect("Speichern");
+    let out = save_to_bytes(&doc).expect("Speichern");
     assert_eq!(report.redacted_images, 1, "die Pixel fallen wirklich");
     assert!(
         leaks(&out, GEHEIM).is_empty(),

@@ -43,7 +43,12 @@ fn tmp(tag: &str) -> PathBuf {
 }
 
 fn ein_geheimnis() -> Vec<u8> {
-    build_pdf(&[vec![TextItem::new(72.0, 700.0, 10.0, "Zeile A GEHEIM-EINS")]])
+    build_pdf(&[vec![TextItem::new(
+        72.0,
+        700.0,
+        10.0,
+        "Zeile A GEHEIM-EINS",
+    )]])
 }
 
 /// Ein Rechteck über der Zeile — es trifft, die Ausgabe ist sauber.
@@ -89,7 +94,10 @@ fn zj_c_gewoehnlicher_export_meldet_geschrieben_und_gelungen() {
     assert!(geschrieben, "die Datei steht da — die Fahne muss das sagen");
     let outcome = ergebnis.expect("gewöhnlicher Export");
     assert_eq!(outcome.drawn_rects, 1);
-    assert!(out.exists() && audit.exists(), "Ausgabe und Log fehlen nicht");
+    assert!(
+        out.exists() && audit.exists(),
+        "Ausgabe und Log fehlen nicht"
+    );
 
     // Das Orakel, nicht der Bericht: hier leckt nichts.
     let bytes = std::fs::read(&out).unwrap();
@@ -304,7 +312,10 @@ fn zj_c_vor_dem_anlegen_des_ordners_ist_die_kennung_eine_andere() {
 
     // Das tut `check_target` — und zwar erst im Export-Thread.
     let target = check_target(&ziel, &WriteOptions::new().force(true)).expect("Ziel");
-    assert!(ziel.parent().unwrap().exists(), "check_target hat ihn angelegt");
+    assert!(
+        ziel.parent().unwrap().exists(),
+        "check_target hat ihn angelegt"
+    );
 
     let nach_dem_schreiben = wie_writing_key(&ziel);
 
