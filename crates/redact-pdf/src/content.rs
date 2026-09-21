@@ -1383,7 +1383,98 @@ pub struct ImagePlacement {
     pub id: Option<ObjectId>,
     /// Die Hülle der Zielfläche im User-Space — das Einheitsquadrat des
     /// Bildes durch die CTM (PDF 32000-1, 8.9.5.2).
+    ///
+    /// **Die Hülle ist nicht die Fläche.** Bei einer gedrehten CTM ist sie
+    /// größer als das Bild, und in ihren Ecken liegt kein Bildpunkt. Wer
+    /// fragen will, ob eine Schwärzung das Bild trifft, nimmt deshalb
+    /// [`ImagePlacement::covers`] und nicht dieses Rechteck; hier steht nur
+    /// die billige Vorauswahl.
     pub bounds: Rect,
+    /// Die vier Ecken der Zielfläche im User-Space, im Umlauf
+    /// `(0,0) (1,0) (1,1) (0,1)` des Einheitsquadrats.
+    pub quad: [Point; 4],
+}
+
+impl ImagePlacement {
+    /// Trifft `rect` die **Fläche** dieser Platzierung?
+    ///
+    /// Nicht ihre Hülle: bei einem um 45° gedrehten Bild ist die Hülle doppelt
+    /// so groß wie das Bild, und in ihren vier Ecken steht kein Bildpunkt,
+    /// sondern gewöhnlich Text. Eine Schwärzung dort nimmt dem Bild keinen
+    /// Bildpunkt — [`crate::image`] fasst es nicht an, `redacted_images`
+    /// bleibt 0, und es gibt keine Warnung. Wer an der Hülle entschied, nahm
+    /// dem unversehrten Bild trotzdem seinen Ersatztext und dem Abschnitt
+    /// darüber seinen Spiegel: Barrierefreiheit weg, kein Bildpunkt gewonnen,
+    /// kein Wort darüber.
+    ///
+    /// Gefragt wird deshalb das **konvexe Viereck** gegen das achsenparallele
+    /// Rechteck, über die trennenden Achsen: die beiden Achsen des Rechtecks
+    /// (das ist genau die Hüllenfrage) und die vier Kantennormalen des
+    /// Vierecks.
+    ///
+    /// **Wie genau das ist.** Die Wahrheit darüber, ob wirklich Bildpunkte
+    /// gefallen sind, kennt nur [`crate::image`] (`Work::filled`, geprüft an
+    /// den Ecken **jeder Pixelzelle**). Diese Frage hier ist die
+    /// nächstgrößere: wo `filled > 0` gilt, liegt eine Zellecke im Rechteck
+    /// und damit auch das Viereck darin — ein Bild, das Bildpunkte verliert,
+    /// wird also nie übersehen. Umgekehrt bleibt ein Rest: ein Rechteck, das
+    /// die Fläche um weniger als eine Pixelbreite überlappt, gilt hier als
+    /// Treffer, während dort kein Bildpunkt fällt. Das ist die grobe Richtung
+    /// im Kleinen und wird **gesagt**, nicht behauptet weg.
+    ///
+    /// Ein entartetes Viereck (die CTM ist nicht umkehrbar, oder eine
+    /// Koordinate ist unbrauchbar) trifft nichts: `crate::image` kann dort
+    /// nicht einmal rückwärts rechnen und füllt keinen Bildpunkt.
+    pub fn covers(&self, rect: &Rect) -> bool {
+        // Die beiden Achsen des Rechtecks — und zugleich der billige
+        // Vorfilter, der die meisten Platzierungen hier schon verlässt.
+        if !self.bounds.intersects(rect) {
+            return false;
+        }
+        let corners = [
+            rect.ll,
+            Point::new(rect.ur.x, rect.ll.y),
+            rect.ur,
+            Point::new(rect.ll.x, rect.ur.y),
+        ];
+        for index in 0..4 {
+            let from = self.quad[index];
+            let to = self.quad[(index + 1) % 4];
+            // Normale der Kante; bei einer entarteten Kante ist sie (0,0).
+            let axis = Point::new(from.y - to.y, to.x - from.x);
+            if !axis.x.is_finite() || !axis.y.is_finite() {
+                return false;
+            }
+            if axis.x == 0.0 && axis.y == 0.0 {
+                return false;
+            }
+            let (qmin, qmax) = span(&self.quad, axis);
+            let (rmin, rmax) = span(&corners, axis);
+            // Wie [`Rect::intersects`]: Berührung zählt nicht. Ein NaN in der
+            // Projektion lässt beide Vergleiche falsch werden — deshalb steht
+            // die Entscheidung positiv formuliert.
+            if !(qmax > rmin && rmax > qmin) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Projektion von vier Punkten auf eine Achse — kleinster und größter Wert.
+fn span(points: &[Point; 4], axis: Point) -> (f64, f64) {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for point in points {
+        let value = point.x * axis.x + point.y * axis.y;
+        if value < min {
+            min = value;
+        }
+        if value > max {
+            max = value;
+        }
+    }
+    (min, max)
 }
 
 /// Ergebnis eines Seiten-Scans.
@@ -1392,22 +1483,25 @@ pub struct ScanResult {
     pub shows: Vec<ShowRecord>,
     /// Marked-Content-Abschnitte mit Textspiegel.
     pub marked: Vec<MarkedTextRecord>,
-    /// Bildplatzierungen **in Strömen, über denen ein Textspiegel steht** —
-    /// je Platzierung ihr Fundort im Strom und ihre Fläche im User-Space.
+    /// **Jede** Bildplatzierung dieser Seite — je Platzierung ihr Fundort im
+    /// Strom und ihre Fläche im User-Space.
     ///
-    /// Gebraucht wird genau eine Frage: liegt in diesem
-    /// Marked-Content-Abschnitt ein Bild, dessen Pixel eine Schwärzung
-    /// überschreibt? Dann ist der Spiegel darüber (`/Alt` bei `/Figure`:
-    /// „Kontoauszug, IBAN …“) genauso falsch wie ein Spiegel über
-    /// verschwundenen Glyphen — und bis zu dieser Fassung blieb er stehen
-    /// (Register #20).
+    /// Gebraucht werden zwei Fragen. Liegt in diesem Marked-Content-Abschnitt
+    /// ein Bild, dessen Pixel eine Schwärzung überschreibt? Dann ist der
+    /// Spiegel darüber (`/Alt` bei `/Figure`: „Kontoauszug, IBAN …“) genauso
+    /// falsch wie ein Spiegel über verschwundenen Glyphen (Register #20). Und:
+    /// welchem Bild-XObject gehört die Platzierung? Daran hängt der Ersatztext
+    /// am Bilddictionary selbst.
     ///
-    /// **Nur in Strömen mit Spiegel.** Eine Datei ohne Textspiegel liefert hier
-    /// nichts, kostet also nichts; das ist der Normalfall. Gefüllt wird beim
-    /// Durchlauf, also **je Platzierung**: ein zwanzigmal gezeichnetes
-    /// Formular bringt seine Bilder zwanzigmal mit, jedes Mal mit seiner
-    /// eigenen CTM. Genau so muss es sein — ein Bild kann an einer Stelle
-    /// geschwärzt werden und an einer anderen nicht.
+    /// **Ohne Filter, und warum der frühere falsch war.** Die Liste wurde
+    /// einmal nur „in Strömen, über denen ein Textspiegel steht“ gefüllt. Das
+    /// verfehlte beide Fragen: der Spiegel steht regelmäßig in einem anderen
+    /// Strom als das Bild (`… BDC /Fm0 Do EMC` im Seitenstrom, `/Im0 Do` in
+    /// `Fm0`), und die zweite Frage stellt sich auch in einer Datei ganz ohne
+    /// Marked Content. Gefüllt wird beim Durchlauf, also **je Platzierung**:
+    /// ein zwanzigmal gezeichnetes Formular bringt seine Bilder zwanzigmal
+    /// mit, jedes Mal mit seiner eigenen CTM. Genau so muss es sein — ein Bild
+    /// kann an einer Stelle geschwärzt werden und an einer anderen nicht.
     ///
     /// **Keine eigene Decke, und warum keine nötig ist.** Die Liste wächst
     /// *linear* in den Platzierungen — eine je `Do`/`BI` —, und jede davon ist
@@ -1440,13 +1534,6 @@ pub struct ScanResult {
     /// Abschnitte mit, und ein mehrfach platziertes Formular liefert sie
     /// mehrfach.
     seen_marked: HashSet<(StreamKey, usize)>,
-    /// Ströme, in denen ein Textspiegel steht — der Filter vor
-    /// [`ScanResult::images`].
-    ///
-    /// Gesetzt wird er, bevor der Strom überhaupt durchlaufen ist:
-    /// [`scan_marked_text`] läuft am Anfang von [`scan_operations`], also vor
-    /// der ersten Bildplatzierung desselben Stroms.
-    mirror_streams: HashSet<StreamKey>,
     /// Dasselbe für [`ScanResult::warnings`].
     ///
     /// Die Entdopplung war schon immer zugesagt; sie lief nur über
@@ -1590,13 +1677,17 @@ impl ContentSink for ScanResult {
         true
     }
 
-    /// Eine Bildplatzierung, aber nur in einem Strom, über dem ein Textspiegel
-    /// steht. Alles andere wird nicht gehalten: eine Datei ohne Spiegel
-    /// bezahlt für diese Liste nichts.
+    /// Jede Bildplatzierung — auch in einem Strom ohne Textspiegel darüber.
+    ///
+    /// Der frühere Filter „nur in Strömen mit Spiegel“ sparte nichts Nennbares
+    /// und war zweimal falsch. Erstens steht der Spiegel oft in einem
+    /// **anderen** Strom als das Bild: `/Figure <</Alt …>> BDC /Fm0 Do EMC` im
+    /// Seitenstrom, `/Im0 Do` in `Fm0` — die Platzierung fiel durch den Filter,
+    /// der Spiegel blieb mit dem Klartext stehen. Zweitens braucht der
+    /// Ersatztext **am Bilddictionary** die Liste auch in einer Datei ganz ohne
+    /// Marked Content; eine Seite ohne `BDC` lieferte nichts, und das `/Alt`
+    /// eines unlesbaren Bildes blieb stehen.
     fn image(&mut self, cx: &SinkContext, event: &ImageEvent) {
-        if !self.mirror_streams.contains(&cx.stream) {
-            return;
-        }
         let id = event
             .name
             .and_then(|name| image_id_of(cx.doc, cx.resources, name));
@@ -1605,6 +1696,7 @@ impl ContentSink for ScanResult {
             op_index: cx.op_index,
             id,
             bounds: unit_square_bounds(&event.ctm),
+            quad: unit_square_quad(&event.ctm),
         });
     }
 
@@ -1626,7 +1718,6 @@ impl ContentSink for ScanResult {
         // Ein mehrfach platziertes Form-XObject wird mehrfach durchlaufen; sein
         // Strom wird aber nur **einmal** neu geschrieben. Derselbe Spiegel darf
         // deshalb nicht mehrfach in der Liste stehen.
-        self.mirror_streams.insert(record.stream);
         if !self.seen_marked.insert((record.stream, record.op_index)) {
             return;
         }
@@ -2998,17 +3089,26 @@ fn image_id_of(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> O
 /// Ecken, nicht zwei: bei einer gedrehten oder gescherten CTM sind die beiden
 /// anderen die äußeren.
 fn unit_square_bounds(ctm: &Matrix) -> Rect {
-    let corners = [
-        ctm.apply(0.0, 0.0),
-        ctm.apply(1.0, 0.0),
-        ctm.apply(0.0, 1.0),
-        ctm.apply(1.0, 1.0),
-    ];
+    let corners = unit_square_quad(ctm);
     let mut bounds = Rect::from_corners(corners[0], corners[1]);
     for corner in &corners[2..] {
         bounds = bounds.union(&Rect::from_corners(*corner, *corner));
     }
     bounds
+}
+
+/// Die vier Ecken des transformierten Einheitsquadrats, **im Umlauf**.
+///
+/// Die Reihenfolge ist `(0,0) (1,0) (1,1) (0,1)` und nicht die Aufzählung des
+/// Quadrats: [`ImagePlacement::covers`] läuft die Kanten des Vierecks ab, und
+/// eine über Kreuz verbundene Ecke ergäbe kein Viereck.
+fn unit_square_quad(ctm: &Matrix) -> [Point; 4] {
+    [
+        ctm.apply(0.0, 0.0),
+        ctm.apply(1.0, 0.0),
+        ctm.apply(1.0, 1.0),
+        ctm.apply(0.0, 1.0),
+    ]
 }
 
 /// Trägt die Eigenschaftsliste eines `BDC`/`DP` einen Textspiegel?

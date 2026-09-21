@@ -294,26 +294,35 @@ mod tests {
     /// `expect("mkfifo startbar")` den Testlauf platzen, obwohl am Programm nichts
     /// falsch war — derselbe Fehler, den `belege.rs` bei `python3` schon
     /// vermeidet: fehlt das Werkzeug, ist hier nichts zu prüfen, und der Test
-    /// **sagt das** und endet grün. Ein **vorhandenes** `mkfifo`, das scheitert,
-    /// bleibt dagegen ein Fehler: dann gibt es die Pipe, und die Prüfung wäre
-    /// klammheimlich ausgefallen.
+    /// **sagt das** und endet grün.
+    ///
+    /// Dasselbe gilt für **jeden** Ausgang außer null — und das ist die Korrektur
+    /// der Korrektur. Der Anlassfall selbst war damit nicht gedeckt: auf einem
+    /// BusyBox-Bild steht der Name als Symlink im `PATH` und das Applet fehlt;
+    /// `status()` liefert `Ok(exit status: 127)` und nicht `Err`. Ein Ziel ohne
+    /// FIFOs (vfat, ein 9p-Bindmount), eine Verweigerung von `mknod` durch
+    /// seccomp oder ein BusyBox-Wrapper tun es ebenso. Scheitert `mkfifo`, gibt es
+    /// **keine** Pipe — es ist genauso nichts zu prüfen wie bei fehlendem
+    /// Werkzeug, und ein harter `assert` auf das Startergebnis wäre derselbe
+    /// Fehler eine Ebene höher.
     #[cfg(unix)]
     #[test]
     fn a_named_pipe_is_refused_without_opening_it() {
         let dir = tempdir("pipe");
         let path = dir.join("pipe.csv");
-        let ok = match std::process::Command::new("mkfifo").arg(&path).status() {
-            Ok(status) => status,
-            Err(e) => {
-                eprintln!(
-                    "kein mkfifo im Pfad ({e}) — dass `read_limited` eine benannte \
-                     Pipe ablehnt, bleibt hier ungeprüft"
-                );
-                std::fs::remove_dir_all(&dir).ok();
-                return;
-            }
+        let fehlt = match std::process::Command::new("mkfifo").arg(&path).status() {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(format!("mkfifo endete mit {status}")),
+            Err(e) => Some(format!("kein mkfifo im Pfad: {e}")),
         };
-        assert!(ok.success(), "mkfifo ist fehlgeschlagen");
+        if let Some(grund) = fehlt {
+            eprintln!(
+                "keine benannte Pipe angelegt ({grund}) — dass `read_limited` eine \
+                 benannte Pipe ablehnt, bleibt hier ungeprüft"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
 
         let error = read_limited(&path, MAX_AUX_FILE_BYTES, HINT)
             .expect_err("eine Pipe ist keine Hilfsdatei");

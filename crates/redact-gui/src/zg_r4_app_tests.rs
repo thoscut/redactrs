@@ -590,7 +590,7 @@ fn zg_r4_2_mess_was_eine_fallengelassene_pruefung_kostet() {
             "Messung".to_string(),
             plan.clone(),
             out.clone(),
-            file_key(&out),
+            writing_key(&out),
         );
     }
     let gestartet = t0.elapsed();

@@ -866,17 +866,50 @@ impl ExportPlan {
     /// [`AppState::export`] stand; verschoben ist nur, *wo* er läuft. Damit
     /// bleibt die Ausgabe Byte für Byte dieselbe wie die der Kommandozeile
     /// (`cli_and_gui_agree`).
-    pub fn run(mut self) -> Result<Outcome> {
+    pub fn run(self) -> Result<Outcome> {
+        self.run_reporting().1
+    }
+
+    /// Wie [`ExportPlan::run`], sagt aber zusätzlich, **ob die Ausgabedatei
+    /// entstanden ist**.
+    ///
+    /// Die Oberfläche braucht genau diese Auskunft und keine andere: das
+    /// Urteil einer laufenden Nachprüfung gehört zu den Bytes, die zum
+    /// Prüfzeitpunkt auf der Platte lagen, und es wird in dem Moment
+    /// gegenstandslos, in dem **neue** Bytes dieser Datei entstehen — nicht
+    /// schon, wenn jemand welche schreiben will. Siehe
+    /// [`crate::app::RedactApp::poll_exports`].
+    ///
+    /// **Die Fahne ist nicht `result.is_ok()`**, und das ist der Punkt:
+    /// [`redact_pipeline::apply`] schreibt die PDF-Datei (Schritt 11) **vor**
+    /// dem Audit-Log (Schritt 12). Scheitert das Log, kommt ein `Err` hinter
+    /// fertigen Bytes. Gelesen wird deshalb [`Outcome::output`] — das setzt
+    /// `apply` genau dann, wenn die Datei steht, und weil das Log über `&mut`
+    /// läuft, bleibt der Eintrag auch im Fehlerfall stehen.
+    ///
+    /// Umgekehrt heißt `false` wirklich „kein Byte“: ein Symlink als Ziel, ein
+    /// nicht beschreibbares Verzeichnis, eine volle Platte — alles das endet
+    /// vor Schritt 11, und dann ist ein älteres Urteil über diese Datei
+    /// weiterhin eines über die Bytes, die dort liegen.
+    pub fn run_reporting(mut self) -> (bool, Result<Outcome>) {
         let mut copy = (*self.document).clone();
-        redact_pipeline::apply(
+        let applied = redact_pipeline::apply(
             &mut copy,
             &self.redactions,
             &self.blocked,
             &self.config,
             &mut self.outcome,
-        )?;
-        self.outcome.blocked_details = redact_pipeline::describe_blocked(&self.blocked);
-        Ok(self.outcome)
+        );
+        // **Vor** dem `?`: die Frage ist, ob die Datei steht, nicht, ob der
+        // ganze Lauf geglückt ist.
+        let wrote = self.outcome.output.is_some();
+        match applied {
+            Ok(()) => {
+                self.outcome.blocked_details = redact_pipeline::describe_blocked(&self.blocked);
+                (wrote, Ok(self.outcome))
+            }
+            Err(e) => (wrote, Err(e)),
+        }
     }
 }
 

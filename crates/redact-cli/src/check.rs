@@ -261,6 +261,15 @@ fn read_stdin_needles() -> Result<Vec<String>> {
 /// Oberfläche „gewollt stehen geblieben“ von „Schwärzung danebengegangen“
 /// trennen kann, ohne den Meldungstext zu raten.
 ///
+/// Die Id kommt dort mit ihrer **Herkunft** (`LeakSite::object_source`), und
+/// das gehört zu dieser Trennung: die Rohsichten lesen sie aus dem Objektkopf
+/// in den Rohbytes und prüfen sie **nicht** gegen das geladene Dokument. An
+/// einer Datei mit inkrementellem Update — jedes „Speichern“ schreibt eines —
+/// liegt der Klartext in der alten Revision, während unter derselben Nummer
+/// im geladenen Dokument das neue, geschwärzte Objekt steht. Wer mit der Id
+/// ins Dokument greift, nimmt deshalb `LeakSite::document_object`; wer die
+/// Historie untersucht, nimmt die Rohsicht-Id samt dem Offset aus dem Satz.
+///
 /// Die Kommandozeile gibt ihn **nicht** aus, und das ist Absicht: diese
 /// Ausgabe ist ein Vertrag. `docs/pruefung.txt` hält sie Byte für Byte fest
 /// (`tests/belege.rs`, `die_fundstellen_in_pruefung_txt_sind_die_des_gebauten_binaries`),

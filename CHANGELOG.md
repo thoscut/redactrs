@@ -34,12 +34,34 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 Bereich: `git log v0.6.0..HEAD`.
 
 Sieben Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
-und Doku mit demselben Maßstab: jede Angabe hier stammt aus einem Lauf des
-gebauten Binaries, nicht aus dem Quelltext. Zuletzt (Runde 7) fallen vier
+und Doku mit demselben Maßstab. Zuletzt (Runde 7) fallen vier
 stille Lecks am Rand des Formularwesens, zwei Wege, auf denen eine kleine Datei
 den Rechner belegen konnte, sind gedeckelt — und **jede** Zahl der beiden
 jüngsten Abschnitte dieser Datei ist an einen Lauf, eine Konstante oder eine
 aufgezeichnete Messung gebunden, nicht nur die, an die jemand dachte.
+
+Der Maßstab für eine Messzahl, ausgeschrieben — die pauschale Zusage, die hier
+stand („jede Angabe hier stammt aus einem Lauf des gebauten Binaries“), war
+keine: alle drei neuen Messzahlen der Runde 7 stammten aus einem Testprozess,
+und kein Lauf des Binaries stand dahinter. Statt ihrer gilt:
+
+* Eine Messzahl stammt aus einem Lauf des **gebauten Binaries**
+  (`target/release/redact-rs`); Zeit und Spitzenspeicher kommen von
+  `/usr/bin/time -v`, MB heißt 1024 Byte zum Quadrat.
+* Zeigt die Kommandozeile die Größe nicht, weil sie im Innern eines Bausteins
+  liegt oder der Oberfläche gehört, dann sagt **der Satz selbst**, dass im
+  Testprozess gemessen wurde, und nennt das Profil. Ein zweiter Weg, kein
+  Schlupfloch: still eine Debug-Zahl als Binary-Zahl auszugeben ist keiner.
+* Eine Zahl, die den Zustand **vor** einer Korrektur beziffert, ist danach
+  nicht mehr messbar. Sie sagt deshalb, dass sie den alten Zustand
+  beschreibt, und nennt den Stand, an dem er liegt — nachvollziehbar durch
+  Auschecken, auch wenn nicht wiederholbar.
+* Was sich ableiten lässt, wird abgeleitet und nicht abgeschrieben.
+
+Wo eine Zahl keinen dieser Wege geht, gehört sie gestrichen und nicht
+verschoben. `crates/redact-cli/tests/belege.rs` hält die Regel samt Läufen;
+`die_zahlen_der_doku_sind_gebunden` und
+`jede_zahl_der_letzten_runden_ist_gebunden` prüfen sie.
 
 ### Fix-Runde 7: was die Gegenprüfung der Runde 6 noch fand
 
@@ -154,12 +176,27 @@ blieben.
   deren Pfade und ohne die Eigenschaftsliste, die den Spiegeltext trägt. Der
   Scan bleibt seitenweise, weil `scan_page` öffentlich und seitenweise ist:
   dokumentweit zu zählen hieße, dieselbe Seite je nach ihren Nachbarn zu
-  warnen oder nicht. Nachgemessen am Baum dieser Runde (Debug, im
-  Testprozess): mit der Decke bleibt dieselbe Datei bei 100 000 Zuordnungen
-  und einer Warnung, `scan_page` braucht dafür 0,30–0,31 s, die Spitze liegt
-  bei 36 MB; und mit ihr kosten die 1 000 Seiten aus 224 752 Byte den Redaktor
-  45,5–45,6 s und 38 MB statt 6 288 MB, bei genau 100 000 zurückgestellten
-  Abschnitten — der dokumentweiten Decke, an der es noch still bleibt.
+  warnen oder nicht.
+
+  Nachgemessen am Baum dieser Runde: mit der Decke bleibt dieselbe Datei bei
+  100 000 Zuordnungen und einer Warnung; `scan_page` braucht dafür 0,30–0,31 s
+  und die Spitze liegt bei 36 MB — gemessen im Testprozess (Debug), weil
+  `scan_page` im Extraktor liegt und die Kommandozeile es nicht herausgibt.
+  Am gebauten Binary (`target/release/redact-rs`, Release) kostet dieselbe
+  Struktur als Datei von 263 699 Byte 0,11–0,13 s und 35 MB Spitze, und der
+  Lauf endet mit Rückgabewert 3 und sieben ungeprüften Stellen; die Decke
+  selbst steht dabei auf der Konsole. Und mit ihr kosten die 1 000 Seiten aus
+  224 752 Byte am gebauten Binary 24,7–24,9 s und 86 MB statt 6 288 MB, bei
+  genau 100 000 zurückgestellten Abschnitten — der dokumentweiten Decke, an
+  der es noch still bleibt. Diese Spitze trägt Extraktor und Redaktor
+  zusammen, weil die Kommandozeile die beiden nicht trennt.
+
+  Die Zeit und die Spitze am Binary kommen von `/usr/bin/time -v`
+  (`Maximum resident set size`), das Material von
+  `zg_r1_decke::schreibt_material` über `R1_OUT` — die Datei der zweiten
+  Messung ist dabei bytegleich zu der jener Messung. Die 6 288 MB dagegen
+  beschreiben den ungedeckelten Stand `308ef38` und sind an diesem Baum nicht
+  mehr zu messen.
 * **Ein `/Filter`-Wert, der gar kein Name ist, machte das Orakel stumm.**
   `null`, eine Zahl, eine Zeichenkette, ein Verweis ins Leere — für `lopdf`
   ist das alles „ungefiltert", und das Orakel gab über LZW-gepacktem Klartext
@@ -202,8 +239,11 @@ blieben.
   hielt es für ein Leck und meldete den Text als noch in der Ausgabe stehend.
   Gemerkt wird die Löschung jetzt an der Kennung der Region und nicht an ihrem
   Text, damit ein Rückgängig sie wirklich aufhebt. Und die Statuszeile war mit
-  den echten Stellen eines Laufs 1 005 Zeichen lang — länger als jede Zeile,
-  die noch gelesen wird —, weil die Fix-Runde 6 nur einen Bestandteil gekürzt
+  den echten Stellen eines Laufs 1 005 Zeichen lang — gemessen im Testprozess
+  (Debug), weil die Statuszeile der Oberfläche gehört und am gebauten
+  `redact-rs` nicht entsteht; eine Zeichenzahl hängt anders als eine Zeit nicht
+  am Profil. Länger als jede Zeile, die noch gelesen wird, war sie, weil die
+  Fix-Runde 6 nur einen Bestandteil gekürzt
   hatte: gekürzt wird jetzt die ganze Zeile, hinten — die sichere Richtung,
   denn der Fund steht vorn — auf höchstens 400 Zeichen, und was nicht mehr
   hineinpasst, steht vollständig in den Warnungen.
@@ -222,20 +262,41 @@ blieben.
   baut die Windows-Schreibweise selbst und läuft deshalb auf jedem System.
   Mutation (die Vereinheitlichung entfernt): genau dieser Test rot, kein
   anderer.
-* **Teilweise offen: nicht jede Messzahl der Runde steht hier.** Gebunden ist,
-  was am Baum dieser Runde nachzumessen war — die beiden Dienstverweigerungen
-  und die Statuszeile, je mit dem Lauf, aus dem die Zahl stammt; `messwerte`
-  in `belege.rs` nennt ihn samt Profil. Nicht hier stehen die Zahlen, mit denen
-  die Gegenprüfung die Klartextträger am Metadatenlauf nachwies: sie stehen
-  weiter in der Doku am Quelltext von `meta.rs`. Und nicht hier stehen die
-  Zahlen des **ungedeckelten** Zustands — was die Korrektur unmöglich macht,
-  gibt kein Lauf mehr her, und was kein Lauf mehr hergibt, ist keine Zusage,
-  sondern ein Beleg von damals; er bleibt am Quelltext stehen, wo die
-  Gegenprüfung ihn gemessen hat. Offen bleibt auch der **Ort** der Messung:
-  gemessen ist im Testprozess, und der Block sagt es an jeder Zahl; derselbe
-  Lauf am gebauten Binary steht noch aus. Der Regeltest dieser Runde verlangt
-  für jede Zahl im Block einen gebundenen Satz, und er hat recht: was hier als
-  Zahl steht, ist eine Zusage.
+* **Der Ort der Messung, nachgeholt — und eine Zahl, die nicht hielt.** Die
+  Gegenprüfung hielt dieser Runde vor, dass alle drei neuen Messzahlen aus
+  einem Testprozess (Debug) stammten und der Lauf am gebauten Binary fehlte.
+  Er ist jetzt da: die beiden Dienstverweigerungen sind am
+  `target/release/redact-rs` nachgemessen, mit `/usr/bin/time -v` für die
+  Spitze und `zg_r1_decke::schreibt_material` für das Material.
+
+  Dabei fiel eine der drei: für den Redaktor hinter der dokumentweiten Decke
+  standen 45,5–45,6 s und 38 MB, zwei neue Läufe desselben Befehls gaben aber
+  45,001 s und 39 404 kB sowie 45,289 s und 39 384 kB — beide Zeiten unter der
+  Spanne, beide Spitzen darüber. Ein Zehntel Spanne über eine Messung dieser
+  Länge auf einer geteilten Maschine ist keine Zusage; sie ist gestrichen,
+  nicht verschoben, und an ihre Stelle tritt der Lauf am Binary. Die anderen
+  hielten, beide Male auf die Stelle genau.
+
+  Zwei Zahlen bleiben im Testprozess, und der Satz sagt es jetzt selbst samt
+  Profil: `scan_page` liegt im Extraktor, und die Statuszeile gehört der
+  Oberfläche, die keine Kommandozeile hat. Das ist der zweite erlaubte Weg,
+  kein Schlupfloch — der Maßstab steht im Vorspann dieses Abschnitts.
+
+  Nicht hier stehen die Zahlen, mit denen die Gegenprüfung die Klartextträger
+  am Metadatenlauf nachwies: sie stehen weiter in der Doku am Quelltext von
+  `meta.rs`, und sie sind dort fast alle mit „Gemessen (vor dieser Änderung)"
+  überschrieben — Trefferzahlen und Rückgabewerte des Zustands **vor** der
+  Korrektur, also nach der Regel des Vorspanns keine Zusage über heute. Was
+  vom Metadatenlauf den Zustand **danach** beschreibt, ist gebunden und steht
+  im Abschnitt der Runde, die es gemessen hat.
+
+  Und nicht hier stehen die Zahlen des **ungedeckelten** Zustands: der
+  Extraktor brauchte 31,1 s, der Redaktor 105 s, und 3 320 MB gingen allein
+  auf die Eigenschaftslisten. Sie beschreiben den ungedeckelten Stand
+  `308ef38` und sind an diesem Baum nicht mehr zu messen — prüfbar durch
+  Auschecken, nicht durch Wiederholen. Der Regeltest dieser
+  Runde verlangt für jede Zahl im Block einen gebundenen Satz, und er hat
+  recht: was hier als Zahl steht, ist eine Zusage.
 * **Offen und unerklärt: ein Test des Tores flattert.** Im ersten Gate-Lauf
   dieser Runde fiel der Test, der verlangt, dass eine neue Analyse die
   gelöschten Zeilen vergisst — die Aussage wäre, dass eine Löschung aus dem

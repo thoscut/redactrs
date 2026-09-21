@@ -860,23 +860,31 @@ fn run_within(seconds: u64, args: &[&str]) -> Option<Output> {
 /// den Testlauf platzen, obwohl am Programm nichts falsch war — derselbe Fehler,
 /// den `belege.rs` bei `python3` schon vermeidet. Fehlt das Werkzeug, gibt diese
 /// Funktion `None` zurück und **sagt es auf stderr**; der Aufrufer endet grün,
-/// aber nicht stillschweigend. Ein **vorhandenes** `mkfifo`, das scheitert,
-/// bleibt dagegen ein Fehler: dann gibt es die Pipe, und die Prüfung wäre
-/// klammheimlich ausgefallen.
+/// aber nicht stillschweigend.
+///
+/// Dasselbe gilt für **jeden** Ausgang außer null — und das ist die Korrektur
+/// der Korrektur. Der Anlassfall selbst war damit nicht gedeckt: auf einem
+/// BusyBox-Bild steht der Name als Symlink im `PATH` und das Applet fehlt;
+/// `status()` liefert `Ok(exit status: 127)` und nicht `Err`. Ein Ziel ohne
+/// FIFOs (vfat, ein 9p-Bindmount), eine Verweigerung von `mknod` durch seccomp
+/// oder ein BusyBox-Wrapper tun es ebenso. Scheitert `mkfifo`, gibt es **keine**
+/// Pipe — es ist genauso nichts zu prüfen wie bei fehlendem Werkzeug, und ein
+/// harter `assert` auf das Startergebnis wäre derselbe Fehler eine Ebene höher.
 #[cfg(unix)]
 fn fifo(dir: &Path, name: &str) -> Option<PathBuf> {
     let path = dir.join(name);
-    let ok = match Command::new("mkfifo").arg(&path).status() {
-        Ok(status) => status,
-        Err(e) => {
-            eprintln!(
-                "kein mkfifo im Pfad ({e}) — dass hinter den vier Schaltern keine \
-                 benannte Pipe den Lauf hängen lässt, bleibt hier ungeprüft"
-            );
-            return None;
-        }
+    let fehlt = match Command::new("mkfifo").arg(&path).status() {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!("mkfifo endete mit {status}")),
+        Err(e) => Some(format!("kein mkfifo im Pfad: {e}")),
     };
-    assert!(ok.success(), "mkfifo ist fehlgeschlagen");
+    if let Some(grund) = fehlt {
+        eprintln!(
+            "keine benannte Pipe angelegt ({grund}) — dass hinter den vier Schaltern \
+             keine benannte Pipe den Lauf hängen lässt, bleibt hier ungeprüft"
+        );
+        return None;
+    }
     Some(path)
 }
 

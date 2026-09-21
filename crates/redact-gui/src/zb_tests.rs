@@ -1407,16 +1407,39 @@ fn zb_p5d3_der_dokumentwechsel_raeumt_die_warnungen_weg() {
 /// (`let _repaint = repaint;`) und dort beim Abwickeln fallen gelassen.
 /// Mutation (der Wächter zurück zu `Option<egui::Context>` mit
 /// `ctx.request_repaint()` als letzter Anweisung): rot.
+///
+/// ## Zwei Wächter, zwei Kontexte
+///
+/// Seit Fix-Runde 8 läuft **auch der Export** auf einem Thread, und sein
+/// Wächter hängt an demselben `ui_ctx`. Solange beide Threads denselben
+/// Kontext bekamen, bezeugte dieser Test nichts: nahm man dem **Prüf**-Thread
+/// den Wächter weg (`std::mem::forget(repaint)` in `start_export_check`),
+/// blieb er grün, weil der **Export**-Thread das Neuzeichnen längst
+/// angefordert hatte — ein Test, der ohne seine Korrektur grün bleibt.
+///
+/// Getrennt wird über den Zeitpunkt: der Export-Thread nimmt den Kontext beim
+/// Abschicken mit (`export_ctx`), der Prüf-Thread erst, wenn
+/// [`RedactApp::start_export_check`] ihn startet — und das ist erst beim
+/// **Abholen** des Exports, also nach `wait_for_export`. Zwischen beidem wird
+/// umgestellt. `ctx` sieht danach genau einen Wächter: den des Prüf-Threads.
 #[test]
 fn zb_p5d5_eine_panik_im_pruefthread_fordert_trotzdem_ein_neuzeichnen() {
     let out = tmp("p5d5-panik").join("geschwaerzt.pdf");
     let ctx = egui::Context::default();
+    let export_ctx = egui::Context::default();
     assert!(!ctx.has_requested_repaint(), "frischer Kontext, nichts an");
 
     let mut app = demo_app();
-    app.ui_ctx = Some(ctx.clone());
     app.force_panic_in_check = true;
+    // Der Export-Thread hängt an seinem eigenen Kontext.
+    app.ui_ctx = Some(export_ctx.clone());
     app.export_to(out);
+    // Und der Prüf-Thread, der erst beim Abholen startet, an `ctx`.
+    app.ui_ctx = Some(ctx.clone());
+    assert!(
+        !ctx.has_requested_repaint(),
+        "bis hierher hat nur der Export-Thread etwas angefordert"
+    );
     app.wait_for_export();
     app.wait_for_export_checks();
 
@@ -1433,15 +1456,20 @@ fn zb_p5d5_eine_panik_im_pruefthread_fordert_trotzdem_ein_neuzeichnen() {
 
 /// Die Gegenrichtung: der geglückte Lauf fordert es genauso an — der
 /// Wächter ersetzt den Aufruf am Ende, er kommt nicht zu ihm hinzu.
+///
+/// Die Wächter sind aus demselben Grund getrennt wie im Test darüber.
 #[test]
 fn zb_p5d5_auch_der_geglueckte_lauf_fordert_ein_neuzeichnen() {
     let out = tmp("p5d5-gut").join("geschwaerzt.pdf");
     let ctx = egui::Context::default();
+    let export_ctx = egui::Context::default();
     assert!(!ctx.has_requested_repaint());
 
     let mut app = demo_app();
-    app.ui_ctx = Some(ctx.clone());
+    app.ui_ctx = Some(export_ctx.clone());
     app.export_to(out);
+    app.ui_ctx = Some(ctx.clone());
+    assert!(!ctx.has_requested_repaint());
     app.wait_for_export();
     app.wait_for_export_checks();
 

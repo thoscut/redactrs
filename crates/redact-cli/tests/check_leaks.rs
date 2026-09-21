@@ -490,26 +490,34 @@ fn a_file_that_is_not_a_pdf_is_refused() {
 /// `expect("mkfifo startbar")` den Testlauf platzen, obwohl am Programm nichts
 /// falsch war — derselbe Fehler, den `belege.rs` bei `python3` schon
 /// vermeidet: fehlt das Werkzeug, ist hier nichts zu prüfen, und der Test
-/// **sagt das** und endet grün. Ein **vorhandenes** `mkfifo`, das scheitert,
-/// bleibt dagegen ein Fehler: dann gibt es die Pipe, und die Prüfung wäre
-/// klammheimlich ausgefallen.
+/// **sagt das** und endet grün.
+///
+/// Dasselbe gilt für **jeden** Ausgang außer null — und das ist die Korrektur
+/// der Korrektur. Der Anlassfall selbst war damit nicht gedeckt: auf einem
+/// BusyBox-Bild steht der Name als Symlink im `PATH` und das Applet fehlt;
+/// `status()` liefert `Ok(exit status: 127)` und nicht `Err`. Ein Ziel ohne
+/// FIFOs (vfat, ein 9p-Bindmount), eine Verweigerung von `mknod` durch seccomp
+/// oder ein BusyBox-Wrapper tun es ebenso. Scheitert `mkfifo`, gibt es **keine**
+/// Pipe — es ist genauso nichts zu prüfen wie bei fehlendem Werkzeug, und ein
+/// harter `assert` auf das Startergebnis wäre derselbe Fehler eine Ebene höher.
 #[cfg(unix)]
 #[test]
 fn a_named_pipe_is_refused_without_opening_it() {
     let dir = workdir("pipe");
     let path = dir.join("pipe.pdf");
-    let ok = match Command::new("mkfifo").arg(&path).status() {
-        Ok(status) => status,
-        Err(e) => {
-            eprintln!(
-                "kein mkfifo im Pfad ({e}) — dass `--check-leaks` eine benannte \
-                 Pipe ablehnt, bleibt hier ungeprüft"
-            );
-            std::fs::remove_dir_all(&dir).ok();
-            return;
-        }
+    let fehlt = match Command::new("mkfifo").arg(&path).status() {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!("mkfifo endete mit {status}")),
+        Err(e) => Some(format!("kein mkfifo im Pfad: {e}")),
     };
-    assert!(ok.success(), "mkfifo ist fehlgeschlagen");
+    if let Some(grund) = fehlt {
+        eprintln!(
+            "keine benannte Pipe angelegt ({grund}) — dass `--check-leaks` eine benannte \
+             Pipe ablehnt, bleibt hier ungeprüft"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        return;
+    }
 
     let out = run(&[path.to_str().unwrap(), "--check-leaks", "DE89"]);
     assert_eq!(code(&out), 1, "{}", stdout(&out));
@@ -518,6 +526,102 @@ fn a_named_pipe_is_refused_without_opening_it() {
         "{}",
         stderr(&out)
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Die Sache selbst:** eine `mkfifo`-Attrappe, die mit 127 endet, darf den
+/// Lauf nicht brechen.
+///
+/// Der Ausweg von oben deckte in seiner ersten Fassung nur *einen* Fall —
+/// `mkfifo` lässt sich nicht **starten** (`Err`). Der Anlassfall des Befundes,
+/// „BusyBox ohne `mkfifo`“, ist nicht dieser Fall: dort steht der Name als
+/// Symlink im `PATH`, das Applet fehlt, und `status()` liefert
+/// `Ok(exit status: 127)`. Genauso verhält sich ein Ziel ohne
+/// FIFO-Unterstützung (vfat, ein 9p-Bindmount) oder ein von seccomp
+/// verweigertes `mknod`.
+///
+/// Geprüft wird das hier **nicht** an Zeichenketten des Quelltexts — ein
+/// `Err(e) => panic!(…)` erfüllt jede Textprüfung und auch die Plattformregel
+/// —, sondern **am Lauf**: diese Testdatei startet sich selbst noch einmal
+/// ([`std::env::current_exe`]), mit einem Filter auf genau den Test darüber und
+/// mit einem präparierten `PATH`. **Beide** Zweige des Auswegs werden gefahren:
+///
+/// 1. `mkfifo` ist ein Skript, das mit 127 endet — `status()` gibt
+///    `Ok(exit status: 127)`. Das ist der Anlassfall.
+/// 2. Der `PATH` ist leer — `status()` gibt `Err`. Das ist der Fall, den die
+///    erste Fassung schon deckte; er bleibt gedeckt, und ein
+///    `Err(e) => panic!(…)` fällt hier auf.
+///
+/// Der Kindlauf muss jedes Mal **grün** enden und sagen, was er deshalb nicht
+/// geprüft hat.
+///
+/// Mutation (nachgewiesen): `Ok(status) if status.success() => None` zurück auf
+/// `Ok(status) => status` samt `assert!(status.success(), …)` → dieser Test rot,
+/// der Kindlauf endet mit `exit status: 101`.
+#[cfg(unix)]
+#[test]
+fn eine_mkfifo_attrappe_mit_ausgang_127_bricht_den_lauf_nicht() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = workdir("attrappe");
+    let mit_attrappe = dir.join("mit");
+    let ohne_alles = dir.join("ohne");
+    std::fs::create_dir_all(&mit_attrappe).expect("Ordner");
+    std::fs::create_dir_all(&ohne_alles).expect("Ordner");
+    let attrappe = mit_attrappe.join("mkfifo");
+    std::fs::write(&attrappe, "#!/bin/sh\nexit 127\n").expect("Attrappe schreibbar");
+    std::fs::set_permissions(&attrappe, std::fs::Permissions::from_mode(0o755))
+        .expect("Attrappe ausführbar");
+
+    let selbst = std::env::current_exe().expect("die eigene Testdatei");
+    for (fall, pfad, grund) in [
+        (
+            "ein mkfifo, das mit 127 endet (BusyBox ohne das Applet)",
+            &mit_attrappe,
+            "mkfifo endete mit",
+        ),
+        (
+            "gar kein mkfifo im Pfad",
+            &ohne_alles,
+            "kein mkfifo im Pfad",
+        ),
+    ] {
+        let out = Command::new(&selbst)
+            .args([
+                "a_named_pipe_is_refused_without_opening_it",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("PATH", pfad)
+            .stdin(Stdio::null())
+            .output()
+            .expect("die eigene Testdatei ist startbar");
+
+        let alles = format!("{}{}", stdout(&out), stderr(&out));
+        assert!(
+            out.status.success(),
+            "{fall} hat den Lauf gebrochen ({}) — es ist keine Pipe entstanden, \
+             also war nichts zu prüfen:\n{alles}",
+            out.status
+        );
+        assert!(
+            alles.contains("1 passed"),
+            "{fall}: der Kindlauf hat den Test gar nicht gefahren — dann beweist \
+             sein grünes Ende nichts:\n{alles}"
+        );
+        assert!(
+            alles.contains("bleibt hier ungeprüft"),
+            "{fall}: der Kindlauf hat still übersprungen — ein übersprungener Test \
+             muss sagen, was er nicht geprüft hat:\n{alles}"
+        );
+        assert!(
+            alles.contains(grund),
+            "{fall}: der Grund des Übersprungs nennt „{grund}“ nicht — dann ist \
+             nicht zu sehen, welcher Fall eingetreten ist:\n{alles}"
+        );
+    }
 
     std::fs::remove_dir_all(&dir).ok();
 }

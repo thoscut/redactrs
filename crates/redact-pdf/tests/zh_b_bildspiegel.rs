@@ -442,8 +442,11 @@ fn die_auszeichnung_bleibt_nur_der_spiegel_faellt() {
 /// beiden anderen Ecken die äußeren. Die Schwärzung liegt genau dort — links
 /// der Diagonale, mitten im Bild.
 ///
-/// Mutation, die diesen Test rot macht: in `content::unit_square_bounds` nur
-/// `(0,0)` und `(1,1)` nehmen (`corners[2..]`-Schleife weglassen).
+/// Mutation, die diesen Test rot macht: in `content::unit_square_bounds` nur die
+/// ersten zwei Ecken nehmen (`corners[2..]`-Schleife weglassen). Seit der
+/// Bildfrage an der **Fläche** entschieden wird, hängt daran zweierlei: die
+/// Hülle ist die Vorauswahl von `ImagePlacement::covers`, und die vier Ecken
+/// sind sein Viereck (`content::unit_square_quad`).
 #[test]
 fn gedrehtes_bild_wird_ueber_alle_vier_ecken_gefunden() {
     let mut doc = Document::with_version("1.5");

@@ -32,7 +32,7 @@ mod common;
 use std::collections::BTreeSet;
 
 use lopdf::{dictionary, Document, Object};
-use redact_pdf::audit_bytes::{LeakSite, LeakView};
+use redact_pdf::audit_bytes::{LeakSite, LeakView, ObjectSource};
 use redact_pdf::testing::{build_pdf, TextItem};
 use redact_pdf::{leaks_many_within, LeakCheck};
 
@@ -188,6 +188,9 @@ fn zh_a2_die_objekt_id_steht_maschinenlesbar_im_ort() {
             view: LeakView::StringObject,
             page: None,
             object: Some((annot.0, annot.1)),
+            // Sicht 5 liest im geladenen Dokument — die Id ist die von
+            // `lopdf`, nicht eine aus Rohbytes gelesene.
+            object_source: Some(ObjectSource::Document),
         },
         "der Ort muss die Annotation nennen: {}",
         fund.text

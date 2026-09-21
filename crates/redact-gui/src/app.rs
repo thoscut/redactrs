@@ -23,7 +23,9 @@
 //! dieselbe Liste neu und geht deshalb durch dieselbe Frage.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::Arc;
 
 use egui::{Color32, Key, Pos2, RichText, Stroke, Vec2};
 use redact_core::ReviewFile;
@@ -677,7 +679,7 @@ struct PendingCheck {
     /// keiner Datei mehr zuzuordnen (Befund G5-A4).
     file: String,
     /// Die **Kennung** dieser Prüfung und ihrer Warnungen: der aufgelöste
-    /// Pfad der Ausgabe ([`file_key`]). Zwei Dateien gleichen Namens in
+    /// Pfad der Ausgabe ([`writing_key`]). Zwei Dateien gleichen Namens in
     /// verschiedenen Ordnern sind zwei Prüfungen; ein zweiter Export
     /// **derselben** Datei macht die ältere gegenstandslos
     /// ([`RedactApp::start_export_check`]) — gleich, wie ihr Pfad geschrieben
@@ -704,6 +706,17 @@ struct PendingExport {
     check: ExportCheckPlan,
     /// Die Kennung des laufenden Schreibvorgangs ([`writing_key`]).
     writing: PathBuf,
+    /// **Hat dieser Export geschrieben?** — gesetzt vom Export-Thread, sobald
+    /// die Ausgabedatei steht ([`crate::state::ExportPlan::run_reporting`]), und **bevor**
+    /// das Ergebnis in den Kanal geht.
+    ///
+    /// Daran hängt der Schnitt, der ein Urteil über die **alten** Bytes dieser
+    /// Datei wegwirft ([`RedactApp::poll_exports`]). Die Reihenfolge
+    /// „Fahne, dann Ergebnis“ ist der ganze Grund für die Fahne: sonst gäbe es
+    /// ein Fenster, in dem die neuen Bytes schon da sind, der Export aber noch
+    /// nicht abzuholen ist — und in dem ein Urteil über die alten Bytes
+    /// durchkäme.
+    wrote: Arc<AtomicBool>,
     result: Receiver<redact_core::Result<Outcome>>,
 }
 
@@ -714,42 +727,56 @@ fn file_name_of(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// Die Kennung einer Ausgabedatei: der **aufgelöste** Pfad.
+/// Die Kennung einer Ausgabedatei: **aufgelöstes Verzeichnis + Dateiname**.
 ///
 /// Gemeint ist die Datei, nicht ihre Schreibweise. `./a.pdf` und `a.pdf`,
-/// `ordner/../ordner/out.pdf` und `ordner/out.pdf`, ein Symlink und sein Ziel
-/// sind für einen Vergleich Zeichen für Zeichen verschieden und für das
-/// Dateisystem dasselbe. Daran hingen zwei Fehler (Befunde R4-4 und R4-5):
-/// die ältere Nachprüfung lief weiter und bewertete die **neuen** Bytes mit
-/// dem **alten** Plan — in der gefährlichen Richtung eine Entwarnung unter dem
-/// Präfix des ersten Exports —, und die Warnungen einer Datei wurden am
-/// bloßen **Dateinamen** gehalten, sodass ein sauberer Export nach
-/// `y/a.pdf` die Leckwarnung über `x/a.pdf` mitnahm.
+/// `ordner/../ordner/out.pdf` und `ordner/out.pdf` sind für einen Vergleich
+/// Zeichen für Zeichen verschieden und für das Dateisystem dasselbe. Daran
+/// hingen zwei Fehler (Befunde R4-4 und R4-5): die ältere Nachprüfung lief
+/// weiter und bewertete die **neuen** Bytes mit dem **alten** Plan — in der
+/// gefährlichen Richtung eine Entwarnung unter dem Präfix des ersten
+/// Exports —, und die Warnungen einer Datei wurden am bloßen **Dateinamen**
+/// gehalten, sodass ein sauberer Export nach `y/a.pdf` die Leckwarnung über
+/// `x/a.pdf` mitnahm.
 ///
-/// [`std::fs::canonicalize`] fragt dafür das Dateisystem (es löst `.`, `..`
-/// und Symlinks auf und verlangt, dass es die Datei gibt). Schlägt es fehl —
-/// die Datei wurde inzwischen gelöscht, ein Verzeichnis darüber ist nicht
-/// lesbar —, gilt der Pfad selbst: dann ist die Kennung wieder so grob wie
-/// vorher, aber nie falsch verschmolzen.
-fn file_key(path: &std::path::Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Die Kennung einer Datei, die **gerade geschrieben wird** — unabhängig
-/// davon, ob sie schon existiert.
+/// ## Warum nur das Verzeichnis aufgelöst wird
 ///
-/// [`file_key`] löst die Datei selbst auf und kann das erst, wenn es sie gibt:
-/// vor dem ersten Export liefert es den Pfad, wie er getippt war, danach den
-/// aufgelösten. Für die Frage „schreibt schon jemand diese Datei?“ wäre das
-/// genau der falsche Unterschied — derselbe Klick zweimal ergäbe zwei
-/// verschiedene Kennungen, und zwei Threads schrieben dasselbe Ziel. Aufgelöst
-/// wird deshalb das **Verzeichnis** (das gibt es), der Dateiname kommt
-/// unverändert daran.
+/// [`std::fs::canonicalize`] über den **ganzen** Pfad verlangt, dass es die
+/// Datei gibt, und liefert sonst den Pfad, wie er getippt war. Genau dieser
+/// Unterschied war ein eigener Fehler, und zwar zweimal derselbe:
+///
+/// * „schreibt schon jemand diese Datei?“ — derselbe Klick ergäbe vor und nach
+///   dem ersten Export zwei verschiedene Kennungen, und zwei Threads schrieben
+///   dasselbe Ziel;
+/// * „zu welcher Datei gehört diese Warnung?“ — die Abbruchwarnung eines
+///   **gescheiterten** Exports entsteht, solange es die Datei nicht gibt. Unter
+///   dem ungelösten Pfad abgelegt, fand sie der nächste, geglückte Export nicht
+///   und strich sie nicht: „es wurde keine Datei geschrieben“ stand neben der
+///   Erfolgsmeldung und dem sauberen Urteil.
+///
+/// Aufgelöst wird deshalb das **Verzeichnis** (das gibt es, `check_target`
+/// legt es notfalls an), der Dateiname kommt unverändert daran. Das ist
+/// genau die Identität, mit der auch geschrieben wird
+/// ([`redact_pdf::document::check_target`] kanonisiert ebenfalls nur das
+/// Verzeichnis) — und sie **folgt keinem Symlink**. Das ist kein Verlust,
+/// sondern der Punkt: durch einen Link hindurch wird nicht geschrieben, also
+/// sind `link.pdf` und sein Ziel zwei Ausgabeziele, von denen nur eines
+/// überhaupt Bytes bekommt. Das Urteil über das Ziel darf ein Klick auf den
+/// Link nicht anfassen.
+///
+/// Schlägt das Auflösen des Verzeichnisses fehl, gilt der Pfad selbst: dann
+/// ist die Kennung so grob wie eine getippte Schreibweise, aber nie falsch
+/// verschmolzen.
 fn writing_key(path: &std::path::Path) -> PathBuf {
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
     match (dir, path.file_name()) {
         (Some(dir), Some(name)) => std::fs::canonicalize(dir)
             .unwrap_or_else(|_| dir.to_path_buf())
+            .join(name),
+        // Ein nackter Dateiname: das Verzeichnis ist das laufende, und
+        // `check_target` setzt dort genauso `"."` ein.
+        (None, Some(name)) => std::fs::canonicalize(".")
+            .unwrap_or_else(|_| PathBuf::from("."))
             .join(name),
         _ => path.to_path_buf(),
     }
@@ -768,7 +795,7 @@ fn remove_first(list: &mut Vec<String>, entry: &str) {
 
 /// Die Warnungen **einer** Ausgabedatei.
 ///
-/// Gehalten wird am aufgelösten Pfad ([`file_key`]), angezeigt wird der
+/// Gehalten wird am aufgelösten Pfad ([`writing_key`]), angezeigt wird der
 /// Dateiname: der Pfad ist die Kennung, der Name ist der Text. Bis
 /// Fix-Runde 6 war beides dasselbe — und ein Export nach `y/a.pdf` strich die
 /// Warnungen von `x/a.pdf` (Befund R4-5).
@@ -958,6 +985,17 @@ pub struct RedactApp {
     /// sich prüfen, dass die Oberfläche **währenddessen** weiterläuft.
     #[cfg(test)]
     hold_export: Option<std::sync::Arc<CheckGate>>,
+    /// Testhaken: hält den Export-Thread an, **nachdem** er geschrieben und
+    /// das Weggeworfen-Signal gesetzt hat, aber **bevor** sein Ergebnis im
+    /// Kanal liegt.
+    ///
+    /// Genau dieses Fenster ist der Grund für [`PendingExport::wrote`]: die
+    /// Bytes auf der Platte sind neu, das Ergebnis des Exports ist noch nicht
+    /// abzuholen — und ein Urteil über die **alten** Bytes läge schon bereit.
+    /// Ohne den Haken wäre das Fenster Mikrosekunden lang und der Test ein
+    /// Würfelwurf.
+    #[cfg(test)]
+    hold_export_after_write: Option<std::sync::Arc<CheckGate>>,
 }
 
 impl Default for RedactApp {
@@ -1003,6 +1041,8 @@ impl RedactApp {
             force_panic_in_export: false,
             #[cfg(test)]
             hold_export: None,
+            #[cfg(test)]
+            hold_export_after_write: None,
         }
     }
 
@@ -1323,6 +1363,17 @@ impl RedactApp {
     /// Export *schreibt*, und deshalb geht es hier andersherum: der zweite
     /// wird **abgelehnt**, solange der erste schreibt ([`EXPORT_BUSY`]).
     ///
+    /// „Solange der erste schreibt“ muss dabei die Lage **jetzt** sein, nicht
+    /// die vom Anfang des Bildes. Deshalb steht [`RedactApp::poll_exports`] als
+    /// erste Anweisung: dieser Aufruf kommt aus der Mitte eines Bildes — vor
+    /// ihm liegt der blockierende Speichern-Dialog —, `poll_exports` lief aber
+    /// nur einmal je Bild an dessen Anfang. Ein längst fertiger Export stand so
+    /// noch in `exports`, der Klick wurde mit [`EXPORT_BUSY`] abgelehnt, **und
+    /// die Handlung war verloren** (abgelehnt heißt: nicht angelegt). Ein Bild
+    /// später überschrieb die Erfolgsmeldung des ersten Exports samt sauberem
+    /// Urteil die Ablehnung — eine Entwarnung über eine Datei, die den alten
+    /// Stand trug.
+    ///
     /// Der Grund ist die gefährliche Richtung. Geschrieben wird atomar (Temp-
     /// Datei, dann `rename`), zwei Threads mischen also keine Bytes — aber die
     /// Reihenfolge der `rename`-Aufrufe ist nicht die der Klicks. Landete der
@@ -1331,12 +1382,25 @@ impl RedactApp {
     /// Ausgabe, die niemand geprüft hat. Ablehnen ist die ehrliche Antwort;
     /// eine andere Datei parallel zu schreiben bleibt erlaubt.
     ///
-    /// Eine laufende **Nachprüfung** derselben Datei wird dagegen hier schon
-    /// fallen gelassen — ab jetzt entstehen neue Bytes, und ihr Urteil wäre
-    /// eines über Bytes, die es nicht mehr gibt. Bis Fix-Runde 8 stand dieser
-    /// Schnitt in `start_export_check` und damit **nach** dem Schreiben; das
-    /// ging nur, solange das Schreiben denselben Takt blockierte.
+    /// ## Wann eine laufende Nachprüfung derselben Datei fällt
+    ///
+    /// **Nicht hier.** Ein Klick ist der *Wunsch*, zu schreiben; ob Bytes
+    /// entstehen, weiß erst der Thread. Ein Schnitt an dieser Stelle warf das
+    /// Urteil über eine Datei weg, die danach unverändert liegen blieb — ein
+    /// Symlink als Ziel, eine volle Platte, `EACCES`, eine Panik: das Leck
+    /// stand weiter in der Datei, und niemand sagte es. Der Schnitt hängt
+    /// deshalb an [`PendingExport::wrote`] und fällt in
+    /// [`RedactApp::poll_exports`], sobald die neuen Bytes wirklich da sind.
+    ///
+    /// Bis Fix-Runde 8 stand er in [`RedactApp::start_export_check`] und damit
+    /// hinter einem **geglückten** Schreiben; das trug nur, solange das
+    /// Schreiben denselben Takt blockierte. Dort steht er weiterhin — für den
+    /// Weg ohne Thread und als die Stelle, an der die neue Prüfung die alte
+    /// ersetzt.
     fn export_to(&mut self, out: PathBuf) {
+        // Erst nachsehen, was fertig ist — siehe oben: „Zwei schnelle Exporte
+        // derselben Datei“.
+        self.poll_exports();
         let audit = self.state.audit_target(&out);
         let blocked = self.state.blocked_regions().len();
         let summary = self.state.hit_summary();
@@ -1361,20 +1425,20 @@ impl RedactApp {
                 return;
             }
         };
-        // Ab hier entstehen neue Bytes dieser Datei.
-        let written = file_key(&out);
-        self.checks.retain(|pending| pending.key != written);
-
         let (sender, receiver) = std::sync::mpsc::channel();
         let repaint = RepaintOnDrop(self.ui_ctx.clone());
+        let wrote = Arc::new(AtomicBool::new(false));
         #[cfg(test)]
         let force_panic = self.force_panic_in_export;
         #[cfg(test)]
         let gate = self.hold_export.clone();
+        #[cfg(test)]
+        let gate_after = self.hold_export_after_write.clone();
         let spawned = std::thread::Builder::new()
             .name("redact-export".to_string())
             .spawn({
                 let plan = plan.clone();
+                let wrote = Arc::clone(&wrote);
                 move || {
                     // Wie bei der Nachprüfung: der Wächter hängt am **Ende des
                     // Threads**, nicht an seinem Erfolg — stirbt der Thread
@@ -1387,8 +1451,20 @@ impl RedactApp {
                     }
                     #[cfg(test)]
                     assert!(!force_panic, "Testhaken: der Export panikt");
+                    let (written, result) = plan.run_reporting();
+                    // **Die Fahne vor dem Ergebnis.** Ab hier trägt die Datei
+                    // neue Bytes, und ein Urteil über die alten ist
+                    // gegenstandslos — auch in dem Fenster, in dem das
+                    // Ergebnis dieses Exports noch nicht abzuholen ist.
+                    if written {
+                        wrote.store(true, Ordering::Release);
+                    }
+                    #[cfg(test)]
+                    if let Some(gate) = &gate_after {
+                        gate.arrive_and_wait();
+                    }
                     // Ein `Err` beim Senden heißt: niemand wartet mehr.
-                    let _ = sender.send(plan.run());
+                    let _ = sender.send(result);
                 }
             });
         match spawned {
@@ -1400,6 +1476,7 @@ impl RedactApp {
                     blocked,
                     check,
                     writing,
+                    wrote,
                     result: receiver,
                 });
             }
@@ -1407,7 +1484,15 @@ impl RedactApp {
             // langsam ist besser als gar nicht — genau wie bei der
             // Nachprüfung.
             Err(_) => {
-                let result = plan.run();
+                let (written, result) = plan.run_reporting();
+                // Derselbe Schnitt an derselben Bedingung wie auf dem Thread.
+                // Auf dem geglückten Weg tut ihn `start_export_check` gleich
+                // noch einmal; hier deckt er den Fall ab, in dem die Datei
+                // steht und der Lauf trotzdem als `Err` endet (das Audit-Log
+                // kommt hinter den Bytes).
+                if written {
+                    self.checks.retain(|pending| pending.key != writing);
+                }
                 self.finish_export(&out, &audit, blocked, check, result);
             }
         }
@@ -1416,7 +1501,41 @@ impl RedactApp {
     /// Holt fertige Exporte ab — einmal je Bild, vor dem Zeichnen.
     ///
     /// Gibt zurück, wie viele Exporte fertig geworden sind.
+    ///
+    /// ## Der Schnitt: neue Bytes machen ein altes Urteil gegenstandslos
+    ///
+    /// [`ExportCheckPlan::run`] liest die Ausgabedatei **zum Prüfzeitpunkt**.
+    /// Sobald ein Export derselben Datei geschrieben hat, urteilte eine noch
+    /// laufende ältere Prüfung über Bytes, die es nicht mehr gibt — in der
+    /// gefährlichen Richtung eine Entwarnung über eine Ausgabe, die niemand
+    /// geprüft hat (siehe [`RedactApp::start_export_check`]).
+    ///
+    /// Der Schnitt fällt deshalb **hier**, an [`PendingExport::wrote`], und
+    /// nicht beim Klick: ein Klick ist erst der Wunsch zu schreiben, und wenn
+    /// kein Byte entsteht (Symlink als Ziel, volle Platte, `EACCES`, Panik),
+    /// dann liegt die Datei unverändert da und ihr Urteil gilt weiter. Er fällt
+    /// auch nicht erst beim abgeholten Ergebnis: zwischen „geschrieben“ und
+    /// „abzuholen“ liegt ein Fenster, und in dem käme ein Urteil über die alten
+    /// Bytes noch durch. Weil [`RedactApp::poll_export_checks`] `poll_exports`
+    /// als **erstes** ruft, liegt der Schnitt immer vor dem Abholen eines
+    /// Urteils.
+    ///
+    /// Was bleibt, ist eine Grenze, die diese Ebene nicht schließen kann: das
+    /// Fenster zwischen dem `rename` **in** [`redact_pipeline::apply`] und dem
+    /// Setzen der Fahne danach (dazwischen liegt nur das Audit-Log). Dafür
+    /// bräuchte es die Fahne innerhalb von `redact-pipeline`.
     pub fn poll_exports(&mut self) -> usize {
+        // Der Schnitt, bevor irgendetwas abgeholt wird — auch für Exporte, die
+        // geschrieben haben und deren Ergebnis noch unterwegs ist.
+        let written: Vec<PathBuf> = self
+            .exports
+            .iter()
+            .filter(|pending| pending.wrote.load(Ordering::Acquire))
+            .map(|pending| pending.writing.clone())
+            .collect();
+        if !written.is_empty() {
+            self.checks.retain(|pending| !written.contains(&pending.key));
+        }
         let mut done: Vec<(PendingExport, Option<redact_core::Result<Outcome>>)> = Vec::new();
         let mut still = Vec::new();
         for pending in std::mem::take(&mut self.exports) {
@@ -1435,6 +1554,7 @@ impl RedactApp {
                 audit,
                 blocked,
                 check,
+                writing,
                 ..
             } = pending;
             match result {
@@ -1444,7 +1564,12 @@ impl RedactApp {
                     // nächste Aktion, und ein Export, der nichts geschrieben
                     // hat, darf nicht so aussehen wie einer, der es tat.
                     let file = file_name_of(&out);
-                    self.note_check_warning(&file_key(&out), &file, EXPORT_BROKEN);
+                    // Dieselbe Kennung, die ein **geglückter** Export benutzt
+                    // ([`writing_key`]) — sonst findet der nächste diese
+                    // Warnung nicht und streicht sie nicht, und „es wurde
+                    // keine Datei geschrieben“ stünde neben seiner
+                    // Erfolgsmeldung.
+                    self.note_check_warning(&writing, &file, EXPORT_BROKEN);
                     self.state.status = EXPORT_BROKEN.to_string();
                 }
             }
@@ -1470,9 +1595,7 @@ impl RedactApp {
         match result {
             Ok(outcome) => {
                 self.error = None;
-                // Erst jetzt gibt es die Datei — vorher könnte `file_key`
-                // sie nicht auflösen.
-                let key = file_key(out);
+                let key = writing_key(out);
                 self.note_export_warnings(&key, &file_name_of(out), &outcome.warnings);
                 let prefix = export_status(
                     outcome.drawn_rects,
@@ -1566,7 +1689,7 @@ impl RedactApp {
     /// Streicht die Warnungen einer Ausgabedatei aus der Liste.
     ///
     /// Gestrichen wird, was **diese** Datei eingetragen hat, nicht was so
-    /// aussieht: der Schlüssel ist ihr aufgelöster Pfad ([`file_key`]), der
+    /// aussieht: der Schlüssel ist ihr aufgelöster Pfad ([`writing_key`]), der
     /// Text trägt nur den Dateinamen.
     fn forget_warnings_of(&mut self, key: &std::path::Path) {
         let Some(at) = self.warned_files.iter().position(|held| held.key == key) else {
@@ -1609,7 +1732,14 @@ impl RedactApp {
     /// ihr Urteil unter dem Präfix ein, zu dem es gehört. Verschwiegen wird
     /// nichts: Die Warnungen der ersten Ausgabe hat `note_export_warnings`
     /// bereits durch die der zweiten ersetzt, denn sie hängen an derselben
-    /// Ausgabedatei ([`file_key`]).
+    /// Ausgabedatei ([`writing_key`]).
+    ///
+    /// **Der frühere Schnitt liegt in [`RedactApp::poll_exports`]**, an
+    /// [`PendingExport::wrote`]: dort fällt er, sobald die neuen Bytes
+    /// wirklich da sind, und damit bevor überhaupt ein Urteil abgeholt wird.
+    /// Auf dem Weg über den Thread hat diese Zeile hier deshalb meist nichts
+    /// mehr zu tun; sie bleibt, weil sie den Weg **ohne** Thread deckt und
+    /// weil hier ohnehin die neue Prüfung an die Stelle der alten tritt.
     ///
     /// **Fallen gelassen heißt nicht abgebrochen** — und das bleibt so.
     /// Der Thread der älteren Prüfung liest die Datei zu Ende, durchsucht sie,
@@ -1640,8 +1770,9 @@ impl RedactApp {
         key: PathBuf,
     ) {
         // Dieselbe Datei, ältere Prüfung: sie urteilt sonst über Bytes, die
-        // es nicht mehr gibt. Verglichen wird die **Datei** ([`file_key`]),
-        // nicht die Schreibweise des Pfades.
+        // es nicht mehr gibt. Verglichen wird die **Datei** ([`writing_key`]),
+        // nicht die Schreibweise des Pfades. `poll_exports` hat das auf dem
+        // Weg über den Thread schon getan — siehe oben.
         self.checks.retain(|pending| pending.key != key);
         let (sender, receiver) = std::sync::mpsc::channel();
         let repaint = RepaintOnDrop(self.ui_ctx.clone());
@@ -2847,6 +2978,13 @@ mod zb_tests;
 #[cfg(test)]
 #[path = "zh_c_export_tests.rs"]
 mod zh_c_export_tests;
+
+// Nachbesserung zu Fix-Runde 8, Agent C: **wann** der Schnitt fällt, der ein
+// Urteil über die alten Bytes wegwirft — an den geschriebenen Bytes, nicht am
+// Wunsch, welche zu schreiben. Kindmodul von `app` wie `zh_c_export_tests`.
+#[cfg(test)]
+#[path = "zh2_c_leck_tests.rs"]
+mod zh2_c_leck_tests;
 
 // Gegenprüfung R4, Teil 2: der Prüf-Thread selbst — `start_export_check`,
 // der Haken `CheckGate`, die Warnungsliste über mehrere Ausgabedateien.

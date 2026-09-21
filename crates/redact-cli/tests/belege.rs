@@ -544,6 +544,16 @@ mod messwerte {
     pub const BEFUNDE_OBERFLAECHE_7: usize = 8;
     /// Die Decke je Seite statt je Dokument (`runde6/gegen/r1/mess_paare.txt`):
     /// 1 000 Seiten × (100 Klammern × 999 `Do`).
+    ///
+    /// [`DECKE_SPITZE_KB`] beschreibt den **ungedeckelten** Zustand und ist
+    /// damit eine Zahl nach der Regel „Zahlen, die den Zustand VOR der
+    /// Korrektur beschreiben“: an diesem Baum gibt sie kein Lauf mehr her, sie
+    /// steht an [`UNGEDECKELT_STAND`]. `kb_in_mb` rechnet sie mit 1024² um —
+    /// 6 288 MB. Die Doku **am Quelltext** (`content.rs`, `redact.rs`,
+    /// `zg_r1_decke.rs`) nennt dieselbe Messung „6 439 MB“; das ist derselbe
+    /// kB-Wert durch 1000 geteilt, also Dezimal-MB in einer Datei, die sonst
+    /// überall mit 1024² rechnet. Diese drei Stellen gehören nicht hierher und
+    /// stehen im Bericht als Vertrag.
     pub const DECKE_SEITEN: &str = "1 000";
     pub const DECKE_DATEI_BYTES: u64 = 224_752;
     pub const DECKE_SPITZE_KB: u64 = 6_438_680;
@@ -620,49 +630,206 @@ mod messwerte {
     // sagte deshalb, *was* sich geändert hat, und nicht, um wie viel. Hier
     // stehen sie am Baum dieser Runde nachgemessen, mit dem Lauf, aus dem sie
     // stammen.
+    //
+    // ## Der Ort der Messung: zwei erlaubte Wege, und nur zwei
+    //
+    // Die Regel dieses Projekts ist: eine Zahl in der Doku gilt, wenn sie aus
+    // einem Lauf des **gebauten Binaries** stammt. Die Nachbesserung dieser
+    // Runde hat sie eingelöst, wo die Kommandozeile die Größe zeigt — und wo
+    // sie sie nicht zeigt, steht das jetzt **im Satz selbst**, samt Profil.
+    // Erlaubt sind genau zwei Wege:
+    //
+    // 1. **Am gebauten Binary** (`target/release/redact-rs`, Release).
+    //    Zeit und Spitze kommen von `/usr/bin/time -v`; die Spitze ist
+    //    dessen `Maximum resident set size` (kB = 1024 Byte), also derselbe
+    //    Höchststand, den `VmHWM` im Prozess meldet. Das Material schreibt
+    //    `zg_r1_decke::schreibt_material` über `R1_OUT` — die Datei entsteht
+    //    damit auf der Kommandozeile und nicht im Kopf.
+    // 2. **Im Testprozess**, wenn die Größe eine Eigenschaft ist, die die
+    //    Kommandozeile gar nicht herausgibt: die Dauer eines einzelnen
+    //    `scan_page` liegt innerhalb des Extraktors, und die Statuszeile
+    //    gehört der Oberfläche, die keine Kommandozeile hat. Dann nennt der
+    //    Satz in der Doku das Wort „Testprozess“ **und** das Profil.
+    //
+    // Was keiner der beiden Wege ist: eine Debug-Zahl still als Binary-Zahl
+    // ausgeben. Genau das war der Einwand der Gegenprüfung, und genau dafür
+    // steht diese Liste.
+    //
+    // ## Zahlen, die den Zustand VOR der Korrektur beschreiben
+    //
+    // Eine Zahl, die den Schaden beziffert, den eine Korrektur beseitigt, ist
+    // nach der Korrektur **nicht mehr messbar** — kein Lauf an diesem Baum
+    // gibt sie her. Sie ist deshalb nicht falsch und nicht zu streichen: sie
+    // ist ein Beleg von damals, keine Zusage über heute. Damit sie
+    // nachvollziehbar bleibt, gilt die Regel:
+    //
+    // > Eine Zahl des alten Zustands sagt im Satz, **dass** sie den Zustand
+    // > vor der Korrektur beschreibt, und nennt den **Stand**, an dem dieser
+    // > Zustand steht ([`UNGEDECKELT_STAND`]). Dann ist sie prüfbar — durch
+    // > Auschecken dieses Standes —, auch wenn sie nicht wiederholbar ist.
+    //
+    // Wiederholbar heißt: derselbe Lauf am selben Baum liefert sie wieder.
+    // Nachvollziehbar heißt: es steht da, welcher Baum sie liefert. Das
+    // Zweite ist zu haben, das Erste nicht, und eine Zahl ohne beides gehört
+    // gestrichen.
 
     /// `BDC`-Klammern über Textoperationen: `B` verschachtelte Klammern über
     /// `S` Textoperationen ergeben `B × S` Zuordnungen, aus einer Datei, die
     /// dafür keinen Inhalt mitbringen muss. Die Zahl der Zuordnungen wird
     /// **abgeleitet** (Produkt der beiden Faktoren), nicht abgeschrieben.
     ///
-    /// Lauf (Debug, im Testprozess, zwei Läufe):
+    /// Lauf (**Testprozess**, Debug — `scan_page` liegt im Extraktor, die
+    /// Kommandozeile zeigt es nicht; Weg 2 der Liste oben), vier Läufe:
     /// `R1_PAGES=1 R1_B=6000 R1_S=6000 cargo test -p redact-pdf --test
     /// zg_r1_decke -- --ignored --nocapture --exact
     /// mess_klammern_mal_textoperationen`
-    /// → `Datei 263475 B`, `scan_page 301,6 ms` bzw. `310,6 ms`,
-    /// `100000 Textzuordnungen`, `1 Warnung(en)`, `VmHWM 36352 kB`.
+    /// → `Datei 263475 B`, `scan_page 301,6 / 310,6 ms` (Runde 7) und
+    /// `298,0 / 299,2 ms` (nachgemessen in dieser Runde),
+    /// `100000 Textzuordnungen`, `1 Warnung(en)`,
+    /// `VmHWM 36352 / 36356 / 36504 kB`. Gebunden ist die Spanne über alle
+    /// vier Läufe und der höchste gesehene Höchststand.
     pub const TJ_KLAMMERN: usize = 6_000;
     pub const TJ_OPERATIONEN: usize = 6_000;
     pub const TJ_DATEI_BYTES: u64 = 263_475;
     pub const TJ_SCAN_S: &str = "0,30–0,31";
-    pub const TJ_SPITZE_KB: u64 = 36_352;
+    pub const TJ_SPITZE_KB: u64 = 36_504;
+
+    /// Derselbe Fall **am gebauten Binary** (Weg 1) — der Lauf, der der
+    /// Runde 7 fehlte.
+    ///
+    /// Das Material kommt von
+    /// `R1_OUT=… R1_PAGES=1 R1_B=6000 R1_S=6000 cargo test -p redact-pdf
+    /// --test zg_r1_decke --release -- --ignored --exact schreibt_material`
+    /// als `text_1_6000x6000.pdf`. Es ist dieselbe Struktur wie oben mit
+    /// **einem** `Do` mehr (`schreibt_material` setzt `mit_do`), daher
+    /// 263 699 statt 263 475 Byte — deshalb steht die Größe hier eigens und
+    /// wird nicht von [`TJ_DATEI_BYTES`] geborgt.
+    ///
+    /// Lauf, drei Mal:
+    /// `/usr/bin/time -v target/release/redact-rs text_1_6000x6000.pdf -o … -f`
+    /// → `0:00.11 / 0:00.12 / 0:00.13`,
+    /// `Maximum resident set size 35340 / 35340 / 35416 kB`,
+    /// `Exit status 3`, und auf der Konsole die Decke selbst
+    /// („mehr als 100000 Zuordnungen zwischen einem Spiegel und einer
+    /// Textoperation“) sowie `7 Stelle(n) … nicht durchsucht`. Das Binary:
+    /// `redact-rs 0.6.0`, md5 `d894de2fa3e0e59af3931fc3f76c1e2e`, gebaut
+    /// 2026-09-21 01:11 — also nach den Korrekturen der Runde 7 und vor den
+    /// Änderungen, die in dieser Runde noch laufen.
+    pub const TJ_BINARY_BYTES: u64 = 263_699;
+    pub const TJ_BINARY_S: &str = "0,11–0,13";
+    pub const TJ_BINARY_KB: u64 = 35_416;
+    pub const TJ_BINARY_UNGEPRUEFT: usize = 7;
 
     /// Derselbe Fall, den [`DECKE_DATEI_BYTES`] und [`DECKE_SPITZE_KB`] als
-    /// Befund festhalten — jetzt **nach** der dokumentweiten Decke.
+    /// Befund festhalten — jetzt **nach** der dokumentweiten Decke und **am
+    /// gebauten Binary** (Weg 1).
     ///
-    /// Lauf (Debug, im Testprozess, zwei Läufe, der Extraktor übersprungen,
-    /// damit `VmHWM` den Redaktor allein trägt):
-    /// `R1_PAGES=1000 R1_B=100 R1_D=999 R1_SKIP_EXTRACT=1 cargo test -p
-    /// redact-pdf --test zg_r1_decke -- --ignored --nocapture --exact
-    /// mess_seiten_mal_paare`
-    /// → `Datei 224752 B`, `Redaktor 45,486 s` bzw. `45,639 s`,
-    /// `0 Warnung(en)`, `VmHWM 38532 kB`. Die 1 000 Seiten × 100 Klammern
-    /// sind genau `MAX_DEFERRED_MIRRORS` zurückgestellte Abschnitte, und
-    /// dass die Decke dort still bleibt und einen Schritt weiter nicht, hält
+    /// Die Runde 7 band hier `45,5–45,6 s / 38 532 kB` aus dem Testprozess
+    /// (Debug, `R1_SKIP_EXTRACT=1`, damit `VmHWM` den Redaktor allein trägt).
+    /// Diese Zahl **hielt nicht**: zwei neue Läufe desselben Befehls gaben
+    /// `45,001 s / 39 404 kB` und `45,289 s / 39 384 kB` — beide Zeiten unter
+    /// der gebundenen Spanne, beide Spitzen darüber. Eine Spanne von einem
+    /// Zehntel über eine 45-Sekunden-Messung auf einer geteilten Maschine ist
+    /// keine Zusage, die dieses Projekt halten kann; sie ist deshalb
+    /// gestrichen und nicht bloß verschoben.
+    ///
+    /// Gebunden ist stattdessen der Lauf, der der Runde 7 fehlte. Das
+    /// Material schreibt
+    /// `R1_OUT=… R1_PAGES=1000 R1_B=100 R1_D=999 cargo test -p redact-pdf
+    /// --test zg_r1_decke --release -- --ignored --exact schreibt_material`
+    /// als `seiten_1000_100x999.pdf`, **bytegleich** zu der Datei der
+    /// Messung: 224 752 Byte, also genau [`DECKE_DATEI_BYTES`].
+    ///
+    /// Lauf, drei Mal:
+    /// `/usr/bin/time -v target/release/redact-rs seiten_1000_100x999.pdf -o … -f`
+    /// → `0:24.74 / 0:24.88 / 0:24.88`,
+    /// `Maximum resident set size 88260 / 88312 / 88436 kB`,
+    /// `Exit status 0`, `Treffer gesamt: 0`, keine Warnung.
+    ///
+    /// Diese Spitze trägt Extraktor **und** Redaktor, weil die Kommandozeile
+    /// die beiden nicht trennt — sie ist damit größer als die 38 MB, die der
+    /// Testprozess dem Redaktor allein zumaß, und bleibt drei
+    /// Größenordnungen unter den [`DECKE_SPITZE_KB`] des ungedeckelten
+    /// Zustands. Das ist die Aussage, um die es geht, und sie steht jetzt auf
+    /// einem Lauf des Binaries.
+    ///
+    /// Die 1 000 Seiten × 100 Klammern sind genau `MAX_DEFERRED_MIRRORS`
+    /// zurückgestellte Abschnitte, und dass die Decke dort still bleibt und
+    /// einen Schritt weiter nicht, hält
     /// `zg_r1_decke::genau_an_der_dokumentweiten_decke_bleibt_es_still` fest.
-    pub const DECKE_REDAKTOR_S: &str = "45,5–45,6";
-    pub const DECKE_REDAKTOR_KB: u64 = 38_532;
+    pub const DECKE_BINARY_S: &str = "24,7–24,9";
+    pub const DECKE_BINARY_KB: u64 = 88_436;
+
+    /// Der Stand, an dem die Zahlen des **ungedeckelten** Zustands stehen:
+    /// der letzte Baum ohne `redact::MAX_DEFERRED_MIRRORS`, also vor der
+    /// Arbeit der Fix-Runde 7 (die mit `5142160` beginnt).
+    ///
+    /// Prüfbar mit einem Griff:
+    /// `git show 308ef38:crates/redact-pdf/src/redact.rs | grep -c
+    /// MAX_DEFERRED_MIRRORS` → `0`; an `HEAD` ist die Decke da. Die Zahlen,
+    /// die diesen Stand beschreiben — `36 000 000` Zuordnungen, Redaktor
+    /// `105 s` / [`DECKE_SPITZE_KB`], Extraktor `31,1 s`, `3 320 MB`
+    /// Eigenschaftslisten — gibt kein Lauf an diesem Baum mehr her. Sie
+    /// nennen deshalb diesen Stand, nach der Regel oben.
+    pub const UNGEDECKELT_STAND: &str = "308ef38";
+
+    /// Die drei Zahlen des ungedeckelten Zustands, die die Doku **am
+    /// Quelltext** trägt und die der CHANGELOG nur noch nennt, um zu sagen,
+    /// dass sie nicht mehr messbar sind.
+    ///
+    /// Stellen: `content.rs` (Extraktor, zweimal), `redact.rs` (Redaktor und
+    /// die Listen), `zg_r1_decke.rs` (beide). Alle drei gehören nach der Regel
+    /// zu [`UNGEDECKELT_STAND`].
+    pub const UNGEDECKELT_EXTRAKTOR_S: &str = "31,1";
+    pub const UNGEDECKELT_REDAKTOR_S: &str = "105";
+    pub const UNGEDECKELT_LISTEN_MB: &str = "3 320";
+
+    /// Die Zahl der neuen Messzahlen der Fix-Runde 7, die die Gegenprüfung
+    /// als Testprozess-Messungen beanstandete — und die Zahl derer, die es
+    /// bleiben, weil die Kommandozeile die Größe nicht herausgibt
+    /// (`scan_page` im Extraktor, die Statuszeile in der Oberfläche).
+    pub const NEUE_MESSZAHLEN_7: usize = 3;
+    pub const TESTPROZESS_ZAHLEN_7: usize = 2;
+
+    /// Die gestrichene Zahl und die zwei Läufe, die sie widerlegten.
+    ///
+    /// Sie steht hier, damit die Doku sie nennen darf: ein Satz, der sagt
+    /// „diese Zahl hielt nicht“, trägt die Zahl notwendig mit sich, und auch
+    /// eine widerlegte Zahl ist eine Zahl im Block.
+    ///
+    /// Lauf, zwei Mal: `R1_PAGES=1000 R1_B=100 R1_D=999 R1_SKIP_EXTRACT=1
+    /// cargo test -p redact-pdf --test zg_r1_decke -- --ignored --nocapture
+    /// --exact mess_seiten_mal_paare` → `45.001247419s` / `VmHWM 39404 kB`
+    /// und `45.28853015s` / `VmHWM 39384 kB`.
+    pub const WIDERLEGT_DECKE_S: &str = "45,5–45,6";
+    pub const WIDERLEGT_DECKE_MB: u64 = 38;
+    pub const NEU_DECKE_S1: &str = "45,001";
+    pub const NEU_DECKE_KB1: u64 = 39_404;
+    pub const NEU_DECKE_S2: &str = "45,289";
+    pub const NEU_DECKE_KB2: u64 = 39_384;
 
     /// Die Statuszeile mit den echten Stellen eines Laufs, **vor** der
     /// Kürzung der Fix-Runde 7.
     ///
-    /// Lauf (Debug): `cargo test -p redact-gui --lib
+    /// Lauf **im Testprozess**, Profil **Debug** (Weg 2 der Liste oben): die
+    /// Statuszeile gehört der Oberfläche, und die hat keine Kommandozeile —
+    /// am gebauten `redact-rs` ist diese Zahl nicht zu holen, weder in
+    /// Release noch in Debug. Der Satz in der Doku sagt das deshalb selbst.
+    ///
+    /// `cargo test -p redact-gui --lib
     /// zg_r4_3_die_statuszeile_ist_als_ganzes_gedeckelt -- --nocapture`
-    /// → `der ganze Satz (1005 Zeichen)`. Die 981, die die Doku am Quelltext
-    /// (`state.rs`, `zg_r4_tests.rs`) dafür nannte, stammen aus einer früheren
-    /// Fassung der Messung — sie nennen als Beleg einen Testnamen, den es nicht
-    /// mehr gibt (`zg_r4_3_die_laengste_statuszeile_ist_wieder_ueber_804_zeichen`).
+    /// → `der ganze Satz (1005 Zeichen)`, zwei Mal in dieser Runde
+    /// nachgemessen, beide Male genau 1005.
+    ///
+    /// Anders als eine Zeit hängt eine **Zeichenzahl** nicht am Profil: der
+    /// Satz ist derselbe String, ob optimiert gebaut oder nicht. Das macht
+    /// den Testprozess hier nicht zur Ausnahme von der Regel, sondern zum
+    /// einzigen Ort, an dem die Zahl überhaupt entsteht.
+    ///
+    /// Die 981, die die Doku am Quelltext (`state.rs`, `zg_r4_tests.rs`) dafür
+    /// nannte, stammen aus einer früheren Fassung der Messung — sie nennen als
+    /// Beleg einen Testnamen, den es nicht mehr gibt
+    /// (`zg_r4_3_die_laengste_statuszeile_ist_wieder_ueber_804_zeichen`).
     /// Gebunden ist, was die Messung **heute** liefert.
     pub const STATUSZEILE_ZEICHEN: usize = 1_005;
 }
@@ -1704,38 +1871,116 @@ fn messsaetze() -> Vec<(&'static str, String)> {
             mit_tausendertrenner((m::TJ_KLAMMERN * m::TJ_OPERATIONEN) as u64)
         ),
     );
-    // Derselbe Fall mit der Decke — die Zahl der Zuordnungen kommt aus dem
+    // Derselbe Fall mit der Decke, im Testprozess — der Satz muss den Ort
+    // **und** das Profil nennen, weil `scan_page` im Extraktor liegt und die
+    // Kommandozeile es nicht zeigt. Die Zahl der Zuordnungen kommt aus dem
     // Quelltext (`zuordnungen`), nicht aus der Doku.
     satz(
         "CHANGELOG.md",
         format!(
-            "bleibt dieselbe Datei bei {zuordnungen} Zuordnungen und einer Warnung, \
-             `scan_page` braucht dafür {} s, die Spitze liegt bei {} MB",
+            "bleibt dieselbe Datei bei {zuordnungen} Zuordnungen und einer Warnung; \
+             `scan_page` braucht dafür {} s und die Spitze liegt bei {} MB — \
+             gemessen im Testprozess (Debug), weil `scan_page` im Extraktor liegt \
+             und die Kommandozeile es nicht herausgibt",
             m::TJ_SCAN_S,
             kb_in_mb(m::TJ_SPITZE_KB)
         ),
     );
-    // Der zweite Weg: dieselbe Eingabe wie im Befund der Einleitung, jetzt
-    // hinter der dokumentweiten Decke.
+    // Und derselbe Fall am gebauten Binary — der Lauf, der der Runde 7
+    // fehlte. Der Rückgabewert kommt aus `RC_LECK`, nicht aus der Doku.
     satz(
         "CHANGELOG.md",
         format!(
-            "kosten die {} Seiten aus {} Byte den Redaktor {} s und {} MB statt {} MB, \
-             bei genau {} zurückgestellten Abschnitten",
+            "Am gebauten Binary (`target/release/redact-rs`, Release) kostet dieselbe \
+             Struktur als Datei von {} Byte {} s und {} MB Spitze, und der Lauf endet \
+             mit Rückgabewert {RC_LECK} und {} ungeprüften Stellen",
+            mit_tausendertrenner(m::TJ_BINARY_BYTES),
+            m::TJ_BINARY_S,
+            kb_in_mb(m::TJ_BINARY_KB),
+            zahlwort(m::TJ_BINARY_UNGEPRUEFT)
+        ),
+    );
+    // Der zweite Weg: dieselbe Eingabe wie im Befund der Einleitung, jetzt
+    // hinter der dokumentweiten Decke — und am Binary gemessen, nicht im
+    // Testprozess. Die Vergleichszahl beschreibt den Stand davor und nennt
+    // ihn deshalb.
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "kosten die {} Seiten aus {} Byte am gebauten Binary {} s und {} MB statt \
+             {} MB, bei genau {} zurückgestellten Abschnitten",
             m::DECKE_SEITEN,
             mit_tausendertrenner(m::DECKE_DATEI_BYTES),
-            m::DECKE_REDAKTOR_S,
-            kb_in_mb(m::DECKE_REDAKTOR_KB),
+            m::DECKE_BINARY_S,
+            mit_tausendertrenner(kb_in_mb(m::DECKE_BINARY_KB)),
             mit_tausendertrenner(kb_in_mb(m::DECKE_SPITZE_KB)),
             mit_tausendertrenner(dokumentdecke() as u64)
         ),
     );
-
-    // --- Und die Statuszeile, gemessen und gedeckelt ----------------------
+    // Die Regel für Zahlen des alten Zustands: der Satz nennt den Stand.
     satz(
         "CHANGELOG.md",
         format!(
-            "war mit den echten Stellen eines Laufs {} Zeichen lang",
+            "Die {} MB dagegen beschreiben den ungedeckelten Stand `{}` und sind an \
+             diesem Baum nicht mehr zu messen",
+            mit_tausendertrenner(kb_in_mb(m::DECKE_SPITZE_KB)),
+            m::UNGEDECKELT_STAND
+        ),
+    );
+    // Dieselbe Regel für die drei Zahlen, die nur noch am Quelltext stehen.
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "der Extraktor brauchte {} s, der Redaktor {} s, und {} MB gingen allein \
+             auf die Eigenschaftslisten. Sie beschreiben den ungedeckelten Stand `{}`",
+            m::UNGEDECKELT_EXTRAKTOR_S,
+            m::UNGEDECKELT_REDAKTOR_S,
+            m::UNGEDECKELT_LISTEN_MB,
+            m::UNGEDECKELT_STAND
+        ),
+    );
+
+    // --- Die Nachbesserung selbst: was gehalten hat und was nicht ---------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "dass alle {} neuen Messzahlen aus einem Testprozess (Debug) stammten",
+            zahlwort(m::NEUE_MESSZAHLEN_7)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "{} Zahlen bleiben im Testprozess, und der Satz sagt es jetzt selbst samt \
+             Profil",
+            zahlwort_gross(m::TESTPROZESS_ZAHLEN_7)
+        ),
+    );
+    // Die gestrichene Zahl und die beiden Läufe, die sie widerlegten.
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "standen {} s und {} MB, zwei neue Läufe desselben Befehls gaben aber \
+             {} s und {} kB sowie {} s und {} kB",
+            m::WIDERLEGT_DECKE_S,
+            m::WIDERLEGT_DECKE_MB,
+            m::NEU_DECKE_S1,
+            mit_tausendertrenner(m::NEU_DECKE_KB1),
+            m::NEU_DECKE_S2,
+            mit_tausendertrenner(m::NEU_DECKE_KB2)
+        ),
+    );
+
+    // --- Und die Statuszeile, gemessen und gedeckelt ----------------------
+    //
+    // Auch hier nennt der Satz den Ort und das Profil: die Statuszeile gehört
+    // der Oberfläche, die keine Kommandozeile hat.
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "war mit den echten Stellen eines Laufs {} Zeichen lang — gemessen im \
+             Testprozess (Debug), weil die Statuszeile der Oberfläche gehört und am \
+             gebauten `redact-rs` nicht entsteht",
             mit_tausendertrenner(m::STATUSZEILE_ZEICHEN as u64)
         ),
     );
@@ -2004,6 +2249,35 @@ fn die_abgeleiteten_zahlen_stimmen() {
 /// Bindung heraus und muss sagen, warum das keine Aussage über das Programm
 /// ist.
 const KEINE_MESSZAHL: &[(&str, &str)] = &[
+    (
+        "`zg_r1_decke::schreibt_material`",
+        "der Name des Tests, der das Material schreibt — keine gemessene Größe",
+    ),
+    (
+        "über `R1_OUT`",
+        "der Name einer Umgebungsvariablen, keine gemessene Größe",
+    ),
+    (
+        "bytegleich zu der jener Messung",
+        "eine Aussage über zwei Dateien, keine Zahl über das Programm",
+    ),
+    (
+        "Die Gegenprüfung hielt dieser Runde vor",
+        "Verweis auf den Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "Dabei fiel eine der drei",
+        "„drei“ zählt hier die Zahlen des Abschnitts darüber, nicht eine Messung; \
+         die Zahl selbst ist im Satz über die Testprozess-Messungen gebunden",
+    ),
+    (
+        "Die anderen hielten, beide Male auf die Stelle genau.",
+        "eine Aussage über die Wiederholbarkeit, keine gemessene Größe",
+    ),
+    (
+        "im Abschnitt der Runde, die es gemessen hat",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
     (
         "Fix-Runde 6: was die Gegenprüfung der Runde 5 noch fand",
         "Überschrift; die Nummer benennt einen Abschnitt dieser Datei",

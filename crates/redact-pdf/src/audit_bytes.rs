@@ -125,14 +125,29 @@
 //! über jeden Block; das kostete Begriffe × Bytes. Nachgemessen in
 //! Fix-Runde 6 (`tests/zd_orakel_budget.rs::zd_mess_die_alte_suche_je_muster`,
 //! Release): an einer Datei mit einem 64-MiB-Strom läuft jedes Muster über
-//! 268 MB (Rohdatei, roher Stromblock gepackt und entpackt, derselbe Strom
-//! über den Objektgraphen dekodiert); 6 Muster je Begriff, `memmem` bei
-//! 9,9 GB/s — **0,163 s je Begriff, also rund 163 s für 1 000 Begriffe**, und
-//! das ist eine **untere** Schranke: die Zeichenketten-Verkettung und die
-//! Textsichten kommen darauf. Die früher hier genannten „65,7 s“ liegen unter
-//! dieser Schranke und sind damit falsch; die Größenordnung des CHANGELOG
-//! (rund 300 s) passt. Heute kostet derselbe Lauf mit 1 000 Begriffen 5,99 s
-//! gegen 5,01 s mit einem (Verhältnis 1,20).
+//! **256 MB** — vier Blöcke à 64 MiB (Rohdatei, roher Stromblock gepackt und
+//! entpackt, derselbe Strom über den Objektgraphen dekodiert), und MB ist hier
+//! wie überall 1024² Byte. (Bis Fix-Runde 8 stand hier „268 MB“: dieselbe
+//! Menge dezimal gerechnet, also der Fehler, den derselbe Modulkopf ein
+//! Stück weiter unten für „205 und 138 MB“ schon einmal geradezieht.)
+//!
+//! Was die Zeit angeht, hängt jede dieser Zahlen an der Maschine, auf der sie
+//! entstanden ist — deshalb steht dabei, welcher Lauf sie geliefert hat:
+//!
+//! | Lauf | `memmem` | alte Suche, 1 Begriff | linear auf 1 000 | heute, 1 000 |
+//! |---|---|---|---|---|
+//! | Fix-Runde 6 | 9,9 GB/s | 0,163 s | rund 163 s | 5,99 s (gegen 5,01 s mit einem, Verhältnis 1,20) |
+//! | Fix-Runde 8, geteilte Maschine | 12,3 GB/s | 0,131 s | rund 131 s | 6,74 s (gegen 5,78 s, Verhältnis 1,17) |
+//!
+//! Die hochgerechnete Zahl ist eine **untere** Schranke: die
+//! Zeichenketten-Verkettung und die Textsichten kommen darauf. Beide Läufe
+//! liegen weit über den früher hier genannten „65,7 s“ — die sind damit
+//! falsch, und daran ändert die Maschine nichts; die Größenordnung des
+//! CHANGELOG (rund 300 s) passt. Die Sekundenzahlen sind **aufgeschriebene
+//! Läufe**, keine Zusage: zugesichert und geprüft ist die Schranke „1 000
+//! Begriffe unter dem Vierfachen von einem“
+//! (`tests/zd_orakel_budget.rs::zd_mess_1000_begriffe_kosten_wie_einer`), und
+//! die gilt auch auf einer anders schnellen Maschine.
 //!
 //! Entpackt wird nur bis zu einem Budget ([`leaks_many_within`]); was das
 //! Budget nicht deckt, steht in [`LeakCheck::unchecked`], damit „nicht
@@ -147,7 +162,12 @@
 //! Satz ist für Menschen — Kommandozeile, Oberfläche, `docs/pruefung.txt` —
 //! und bleibt Zeichen für Zeichen, wie er ist. Der Ort ist für Programme: er
 //! nennt die Sicht, die Seite (wo eine Sicht eine kennt, also Sicht 7) und die
-//! Objekt-Id (wo sie eine kennt).
+//! Objekt-Id (wo sie eine kennt) — samt ihrer **Herkunft**
+//! ([`LeakSite::object_source`]): aus dem geladenen Dokument, oder aus dem
+//! Objektkopf in den Rohbytes und dort gegen das Dokument **nicht** geprüft.
+//! Die Rohsicht-Id ist eine Aussage über die Bytes, keine über das geladene
+//! Dokument; an einer Datei mit inkrementellem Update fallen beide auseinander
+//! (Befund ZI-A1, siehe [`LeakSite::object`]).
 //!
 //! Der Grund ist eine Sicherheitsfolge, kein Komfort: die Oberfläche muss
 //! „gewollt stehen geblieben“ von „Schwärzung danebengegangen“ trennen. Solange
@@ -210,9 +230,17 @@ pub fn leaks(pdf_bytes: &[u8], needle: &str) -> Vec<String> {
 /// [`leaks`] entpackt jeden Stream, parst den Objektgraphen und dekodiert
 /// jede Zeichenkette. Diese Arbeit hängt allein an der Datei, nicht am
 /// Suchbegriff. Wer `--check-leaks` mit zehn Begriffen aufruft, hat sie
-/// vorher zehnmal bezahlt: gemessen an einer 792-kB-Datei 0,13 s für einen
-/// Begriff und 0,88 s für zehn. Hier fällt sie einmal an — und seit
-/// Fix-Runde 4 auch der Vergleich: ein Automat über alle Begriffe.
+/// vorher zehnmal bezahlt — die alte Suche lief **je Muster** über jeden
+/// Datenblock, also linear in der Zahl der Begriffe. Hier fällt sie einmal
+/// an, und seit Fix-Runde 4 auch der Vergleich: ein Automat über alle
+/// Begriffe. Was das an Zeit ausmacht, steht im Modulkopf unter „Kosten und
+/// Budget“ — mit dem Test, der es nachmisst.
+///
+/// (Bis Fix-Runde 8 standen hier „0,13 s für einen Begriff und 0,88 s für
+/// zehn, an einer 792-kB-Datei“. Hinter den Zahlen stand kein Test, und sie
+/// messen einen Code-Pfad, den es seit Fix-Runde 4 nicht mehr gibt —
+/// nachprüfbar ist daran nichts, also stehen sie nicht mehr da. Dieselbe
+/// Sorte Zahl wie die „65,7 s“, die Fix-Runde 6 gestrichen hat.)
 ///
 /// Ohne Budget: [`leaks_many_within`] mit `u64::MAX`. Was sich nicht laden
 /// oder entpacken lässt, fehlt hier stillschweigend — wer das wissen muss,
@@ -359,9 +387,36 @@ impl LeakView {
     }
 }
 
+/// Woher die Objekt-Id einer Fundstelle stammt — und damit, **was sie
+/// zusichert**.
+///
+/// Zwei Quellen, zwei verschieden starke Aussagen. Ohne diese Unterscheidung
+/// stand an [`LeakSite::object`] eine Zusicherung, die der Code nicht hält:
+/// „Objektnummer und Generation, wie `lopdf` sie zählt“ — die Rohsichten
+/// zählen aber nicht mit `lopdf`, sie lesen einen Objektkopf aus den Bytes
+/// (Befund ZI-A1, `tests/zi_a_ort_gegenprobe.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ObjectSource {
+    /// Aus dem **geladenen Dokument** (Sichten 3–5, und Sicht 6 auf einem
+    /// Strom des Objektgraphen): `lopdf` zählt das Objekt so, und der Fund
+    /// steht in genau diesem Objekt. Nur hier darf ein Aufrufer mit der Id
+    /// ins geladene Dokument greifen — [`LeakSite::document_object`] gibt
+    /// genau diese Fassung heraus.
+    Document,
+    /// Aus den **Rohbytes** gelesen (Sicht 2, und Sicht 6 auf demselben
+    /// Block): der letzte Objektkopf `N G obj` bis zu 64 KiB vor dem Block.
+    /// Gegen das geladene Dokument **nicht** geprüft — die Id sagt, wie diese
+    /// Bytes einmal beschriftet wurden, nicht, was das geladene Dokument
+    /// heute unter dieser Nummer führt.
+    RawHeader,
+}
+
 /// Der Ort einer Fundstelle, maschinenlesbar — neben ihrem Text.
 ///
-/// Gefüllt wird, was die Sicht **weiß**; geraten wird nichts:
+/// Gefüllt wird, was die Sicht **weiß**; geraten wird nichts. Und wo eine
+/// Sicht etwas **Schwächeres** weiß, sagt der Ort dazu, was es ist
+/// ([`LeakSite::object_source`]) — eine starke und eine schwache Auskunft
+/// unter demselben Namen wäre dasselbe Raten, nur auf der anderen Seite.
 ///
 /// * `page` kennt nur [`LeakView::FontDecoder`]: allein diese Sicht läuft
 ///   über Seiten. Die Sichten 1–6 laufen über Objekte, und ein Strom kann von
@@ -370,6 +425,7 @@ impl LeakView {
 /// * `object` kennt jede Sicht, die ein Objekt nennt: die Sichten aus dem
 ///   Objektgraphen immer, die Rohsicht dann, wenn vor dem Block ein
 ///   Objektkopf `N G obj` steht. Sicht 1 und Sicht 7 nennen keines.
+/// * `object_source` sagt, welche der beiden Quellen es war.
 ///
 /// Was hier `None` ist, heißt also „diese Sicht weiß es nicht“ — nicht „es
 /// gibt keine Seite“.
@@ -380,12 +436,77 @@ pub struct LeakSite {
     /// Die Seite, **1-basiert wie im Text** der Fundstelle: „Seite 3“ ist
     /// `Some(3)`. `None`, wenn die Sicht keine Seite kennt.
     pub page: Option<usize>,
-    /// Objektnummer und Generation, wie `lopdf` sie zählt. `None`, wenn die
-    /// Sicht kein Objekt kennt.
+    /// Objektnummer und Generation. Was das zusichert, hängt an
+    /// [`LeakSite::object_source`]: „wie `lopdf` sie zählt“ gilt **nur** für
+    /// [`ObjectSource::Document`]. `None`, wenn die Sicht kein Objekt kennt.
     ///
     /// Bei [`LeakView::ObjectStream`] ist es das **enthaltene** Objekt — dort
     /// steht der Text; welcher Container es trägt, sagt der Meldungstext.
+    /// (Quelle ist trotzdem [`ObjectSource::Document`]: das enthaltene Objekt
+    /// steht mit dieser Id im geladenen Dokument.)
+    ///
+    /// # Warum `Some(id)` allein nichts heißt
+    ///
+    /// Die Rohsichten übernehmen die Id aus dem Objektkopf **in den
+    /// Rohbytes** und fragen das geladene Dokument nicht. Das ist eine wahre
+    /// Aussage über die Bytes und eine falsche über das Dokument, sobald
+    /// beides auseinanderfällt — an **gewöhnlichen** Dateien:
+    ///
+    /// * **inkrementelles Update** (jedes „Speichern“ schreibt eines): der
+    ///   Klartext liegt in der alten Revision, dieselbe Id trägt im geladenen
+    ///   Dokument das neue, geschwärzte Objekt. Wer der Id folgt, liest
+    ///   „geschwärzt, also gewollt stehen geblieben“ — genau die
+    ///   Verwechslung, gegen die dieses Feld eingeführt wurde
+    ///   (Befund ZI-A1; Beleg `tests/zi_a_ort_gegenprobe.rs::zi_a1`,
+    ///   Vertrag `tests/zh2_a_ort_herkunft.rs`).
+    /// * **eingebettetes PDF ohne Filter** (PDF/A-3, ZUGFeRD): der Kopf
+    ///   gehört zur Objektzählung des **inneren** Dokuments.
+    /// * **ein Block, den die xref-Tabelle nicht mehr nennt**: die Rohsicht
+    ///   findet ihn mit Absicht (daher überlebt die Historie inkrementeller
+    ///   Updates überhaupt eine Prüfung) — im geladenen Dokument steht unter
+    ///   der Nummer aus seinem Kopf etwas anderes oder nichts.
+    ///
+    /// Wer ins geladene Dokument greifen will, nimmt deshalb
+    /// [`LeakSite::document_object`]; wer die Historie untersucht, nimmt die
+    /// Rohsicht-Id — zusammen mit dem Dateioffset, der im Satz steht.
+    ///
+    /// # Warum die Id nicht geprüft und nicht weggelassen wird
+    ///
+    /// * **Prüfen** (Id nur nennen, wenn das geladene Dokument sie bestätigt)
+    ///   hinge Sicht 2 an der Ladbarkeit der Datei. Diese Sicht ist aber
+    ///   genau dafür da, davon **unabhängig** zu sein: lädt `lopdf` die Datei
+    ///   nicht, ist sie die einzige Messung, die es noch gibt. Und sie
+    ///   verliert eine **richtige** Id in den Lagen, um die es forensisch
+    ///   geht — Altrevision, Block ohne xref-Eintrag: dort gibt es im
+    ///   geladenen Dokument nichts zu bestätigen, obwohl der Kopf in den
+    ///   Bytes steht.
+    /// * **Weglassen** wirft dieselbe Auskunft weg, nur immer.
+    /// * Falsch war nicht der Wert, sondern die **Zusicherung**. Sie steht
+    ///   jetzt am Typ, schwächer und wahr, kostet keine Laufzeit und lässt
+    ///   dem Aufrufer beide Fragen.
     pub object: Option<(u32, u16)>,
+    /// Woher `object` kommt — `None` **genau dann**, wenn `object` `None`
+    /// ist. Die beiden Felder werden zusammen gesetzt; siehe
+    /// [`ObjectSource`].
+    pub object_source: Option<ObjectSource>,
+}
+
+impl LeakSite {
+    /// Die Objekt-Id, **wenn** sie aus dem geladenen Dokument stammt — die
+    /// Fassung, mit der ein Aufrufer ins Dokument greifen darf.
+    ///
+    /// `None` heißt hier: entweder kennt diese Sicht kein Objekt, oder ihre
+    /// Id kommt aus den Rohbytes und ist ungeprüft
+    /// ([`ObjectSource::RawHeader`]). Eine Oberfläche, die „gewollt stehen
+    /// geblieben“ von „Schwärzung danebengegangen“ trennen soll, fragt so —
+    /// `site.object` allein würde ihr eine Altrevision als geschwärztes,
+    /// gewolltes Objekt verkaufen.
+    pub fn document_object(&self) -> Option<(u32, u16)> {
+        match self.object_source {
+            Some(ObjectSource::Document) => self.object,
+            _ => None,
+        }
+    }
 }
 
 /// [`leaks_many`] mit einem Budget für entpackte Bytes.
@@ -930,7 +1051,10 @@ struct Site<'a> {
     text: &'a str,
     view: LeakView,
     page: Option<usize>,
-    object: Option<(u32, u16)>,
+    /// Id **und** Herkunft in einem Feld: so kann keine Id ohne ihre
+    /// Herkunft weiterreisen (die Zusicherung von [`LeakSite::object`] hängt
+    /// daran).
+    object: Option<((u32, u16), ObjectSource)>,
 }
 
 impl<'a> Site<'a> {
@@ -958,9 +1082,19 @@ impl<'a> Site<'a> {
         Self { view, ..self }
     }
 
+    /// Eine Id aus dem geladenen Dokument.
     fn with_object(self, object: (u32, u16)) -> Self {
         Self {
-            object: Some(object),
+            object: Some((object, ObjectSource::Document)),
+            ..self
+        }
+    }
+
+    /// Eine Id aus dem Objektkopf in den **Rohbytes** — ungeprüft, siehe
+    /// [`ObjectSource::RawHeader`].
+    fn with_raw_object(self, object: (u32, u16)) -> Self {
+        Self {
+            object: Some((object, ObjectSource::RawHeader)),
             ..self
         }
     }
@@ -977,7 +1111,8 @@ impl<'a> Site<'a> {
         LeakSite {
             view: self.view,
             page: self.page,
-            object: self.object,
+            object: self.object.map(|(id, _)| id),
+            object_source: self.object.map(|(_, source)| source),
         }
     }
 }
@@ -1082,10 +1217,13 @@ fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) {
         let base = format!("Rohdaten-Stream @0x{offset:x}{}", object_label(header));
         // Der Objektkopf steht hier in **Rohbytes**, nicht im Objektgraphen:
         // was er nicht hergibt (kein Kopf in Reichweite, eine Zahl, die in
-        // keinen `u32` passt), bleibt `None` statt geraten zu werden.
+        // keinen `u32` passt), bleibt `None` statt geraten zu werden. Und was
+        // er hergibt, reist als `ObjectSource::RawHeader` weiter — im
+        // geladenen Dokument kann unter dieser Nummer etwas anderes stehen
+        // (Altrevision, eingebettetes PDF, verwaistes Objekt).
         let mut site = Site::new(&base, LeakView::RawStream);
         if let Some(id) = object_id(header) {
-            site = site.with_object(id);
+            site = site.with_raw_object(id);
         }
         scan_blob(payload, site.with_text(&format!("{base} (roh)")), probe);
         match inflate_raw(payload, budget.room()) {
@@ -1163,7 +1301,8 @@ fn object_label(header: Option<(&str, &str)>) -> String {
     }
 }
 
-/// Derselbe Kopf maschinenlesbar für [`LeakSite::object`]. `None`, wenn keiner
+/// Derselbe Kopf maschinenlesbar für [`LeakSite::object`] — dort als
+/// [`ObjectSource::RawHeader`], denn geprüft ist er nicht. `None`, wenn keiner
 /// gefunden wurde **oder** eine der Ziffernfolgen nicht in ihren Zahlentyp
 /// passt: dann weiß diese Sicht die Objekt-Id nicht, und eine geratene wäre
 /// schlimmer als keine.

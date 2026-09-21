@@ -18,8 +18,10 @@
 //! 2. Ein zweiter Export **derselben** Datei wird abgelehnt, solange der erste
 //!    schreibt — und ein Export in eine **andere** Datei ausdrücklich nicht.
 //! 3. Eine laufende Nachprüfung derselben Datei verliert ihr Urteil, sobald
-//!    neue Bytes entstehen: der Schnitt liegt jetzt am **Anfang** des Exports,
-//!    nicht mehr hinter dem Schreiben.
+//!    neue Bytes entstehen — und **erst** dann. Der Schnitt hängt an
+//!    `PendingExport::wrote`, nicht am Klick: siehe `zh2_c_leck_tests`, wo das
+//!    Gegenstück steht (ein Export, der nie ein Byte schreibt, darf kein
+//!    Urteil wegwerfen).
 //! 4. Stirbt der Export-Thread, schweigt die Oberfläche nicht.
 //! 5. Wer das Fenster schließt, während ein Export schreibt, wird gefragt.
 //! 6. Zwei gescheiterte Exporte derselben Datei warnen **einmal** — die
@@ -329,25 +331,34 @@ fn zh_c_eine_andere_datei_darf_gleichzeitig_geschrieben_werden() {
 // 3 — Neue Bytes machen ein altes Urteil gegenstandslos
 // ===========================================================================
 
-/// **Der Schnitt liegt am Anfang des Exports.**
+/// **Der Schnitt liegt an den geschriebenen Bytes** — nicht am Klick.
 ///
 /// [`ExportCheckPlan::run`] liest die Datei zum Prüfzeitpunkt. Sobald ein
-/// Export derselben Datei **beginnt**, entstehen neue Bytes — ein Urteil der
-/// älteren Prüfung wäre eines über Bytes, die es nicht mehr gibt, und im
-/// schlimmsten Fall eine Entwarnung über eine Datei, die gerade neu
-/// geschrieben wird. Bis Fix-Runde 8 stand dieser Schnitt in
-/// `start_export_check`, also **hinter** dem Schreiben; das trug nur, solange
-/// das Schreiben denselben Takt blockierte.
+/// Export derselben Datei **geschrieben hat**, wäre ein Urteil der älteren
+/// Prüfung eines über Bytes, die es nicht mehr gibt, und im schlimmsten Fall
+/// eine Entwarnung über eine Ausgabe, die niemand geprüft hat. Bis
+/// Fix-Runde 8 stand dieser Schnitt in `start_export_check`, also hinter einem
+/// **geglückten** Schreiben; das trug nur, solange das Schreiben denselben
+/// Takt blockierte.
 ///
-/// Mutation (`self.checks.retain(…)` in `export_to` entfernt — der Schnitt
-/// steht dann nur noch in `start_export_check`): die alte Prüfung lebt
-/// während des ganzen Exports weiter, `checks` zählt 1 — rot.
+/// Die Nachbesserung dazu: bis zur letzten Runde stand dieser Test hier mit
+/// der Erwartung „schon beim Klick leer“ — und hat damit ein Leck
+/// festgeschrieben. Schreibt der Export **nie** ein Byte (Symlink als Ziel,
+/// volle Platte, Panik), dann liegt die Datei unverändert da, und ihr Urteil
+/// gilt weiter. Deshalb prüft dieser Test jetzt **beide** Seiten des Fensters,
+/// und die Gegenstücke stehen in `zh2_c_leck_tests`.
+///
+/// Mutation (`self.exports … wrote`-Schnitt in `poll_exports` entfernt): das
+/// alte Urteil überlebt die neuen Bytes, `checks` zählt nach dem Schreiben
+/// weiterhin 1 — rot. Gegenmutation (`AtomicBool::new(true)`, also der Schnitt
+/// wieder am Klick): die Prüfung ist schon vor dem ersten Byte weg — rot.
 #[test]
 fn zh_c_ein_beginnender_export_beendet_die_pruefung_derselben_datei() {
     let dir = tmp("schnitt");
     let out = dir.join("out.pdf");
     let pruefhaken = Arc::new(CheckGate::default());
-    let exporthaken = Arc::new(CheckGate::default());
+    let vorhaken = Arc::new(CheckGate::default());
+    let nachhaken = Arc::new(CheckGate::default());
 
     let mut app = app_with(&ein_geheimnis());
     app.state
@@ -360,19 +371,34 @@ fn zh_c_ein_beginnender_export_beendet_die_pruefung_derselben_datei() {
     app.wait_for_export();
     warte_aufs_gatter(&pruefhaken, "die Nachprüfung");
     assert_eq!(app.checks.len(), 1, "die erste Prüfung muss laufen");
+    app.hold_check = None;
 
-    // Zweiter Export derselben Datei: **mit dem ersten Byte** ist das alte
-    // Urteil gegenstandslos — und das gilt schon, bevor geschrieben ist.
-    app.hold_export = Some(exporthaken.clone());
+    // Zweiter Export derselben Datei, angehalten **vor** dem Schreiben: noch
+    // ist kein Byte neu, also urteilt die alte Prüfung weiter über die Bytes,
+    // die auf der Platte stehen.
+    app.hold_export = Some(vorhaken.clone());
+    app.hold_export_after_write = Some(nachhaken.clone());
     app.export_to(out.clone());
-    warte_aufs_gatter(&exporthaken, "der zweite Export");
+    warte_aufs_gatter(&vorhaken, "der zweite Export vor dem Schreiben");
+    app.poll_export_checks();
+    assert_eq!(
+        app.checks.len(),
+        1,
+        "solange kein Byte geschrieben ist, gilt das alte Urteil"
+    );
+
+    // Und nun **mit** den neuen Bytes: geschrieben ist geschrieben, das
+    // Ergebnis des Exports liegt aber noch nicht im Kanal.
+    vorhaken.release();
+    warte_aufs_gatter(&nachhaken, "der zweite Export nach dem Schreiben");
+    app.poll_export_checks();
     assert!(
         app.checks.is_empty(),
-        "die alte Prüfung urteilt über Bytes, die gerade verschwinden"
+        "die alte Prüfung urteilt über Bytes, die es nicht mehr gibt"
     );
 
     pruefhaken.release();
-    exporthaken.release();
+    nachhaken.release();
     app.wait_for_export_checks();
     // Genau ein Urteil, und es gehört zum zweiten Export.
     let status = app.state.status.clone();

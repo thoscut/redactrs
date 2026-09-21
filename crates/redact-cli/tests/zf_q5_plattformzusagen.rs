@@ -117,19 +117,50 @@
 //! mit einem Anführungszeichen beginnen (`"/proc/`, `"C:\\Windows`), treffen
 //! ohnehin nur den Anfang eines Literals.
 //!
-//! Über eine Zeilengrenze trägt nur die ausdrückliche Fortsetzung mit `\` am
-//! Zeilenende ([`literalkarten`]) — und genau die braucht es, denn der gebundene
-//! Satz in `belege.rs` steht über drei Zeilen. Weiter trägt bewusst nichts: ein
-//! Zeichenliteral `'"'` oder eine rohe Zeichenkette endet nicht mit `\`, und ihr
-//! Irrtum bleibt deshalb auf seiner Zeile.
+//! # Die fünfte Verschärfung: die Karte muss stimmen — in **beide** Richtungen
 //!
-//! Beide Seiten stehen als Proben im Baum:
+//! Die erste Fassung dieser Karte zählte Anführungszeichen, Zeile für Zeile,
+//! mit einem Übertrag nur für die Fortsetzung mit `\` am Zeilenende. Damit war
+//! die Blindstelle **verschoben, nicht geschlossen** — und der Prüfer lag
+//! danach in *beide* Richtungen falsch:
+//!
+//! * Ein gewöhnliches Zeichenliteral `'"'` kippte die Zählung. Alles dahinter
+//!   galt als Inhalt einer Zeichenkette, also als Erwähnung — eine **Verwendung**
+//!   von `std::os::unix::` verschwand. Die alte, grobe Fassung (`zeile.contains`)
+//!   hatte sie gesehen. Gerade diese Klasse bricht auf Windows nicht zur
+//!   Laufzeit, sondern beim **Bau**, und war in der Runde 7 zwei von drei
+//!   echten Befunden.
+//! * Dieselbe Naivität erzeugte **Fehlalarme**: ein `'"'` ließ den
+//!   Kommentarschnitt entgleisen, danach schlug die Regel auf reinem
+//!   Kommentartext an; und ein Quelltext-Schnipsel in einer rohen Zeichenkette
+//!   (`r"…"`, `r#"…"#`, die keine Maskierung kennt) war **immer** ein Verstoß.
+//!   Eine Grenze, die gewöhnlichen Quelltext ablehnt, ist genauso ein Fehler
+//!   wie eine Lücke.
+//!
+//! Beides kommt von derselben Ursache: Rust lässt sich nicht durch Zählen von
+//! Anführungszeichen zerlegen. Deshalb geht jetzt **ein** Durchgang über die
+//! Datei ([`lagen`]) und legt für jedes Byte fest, was dort steht — Kommentar
+//! (auch geschachtelt), Inhalt einer Zeichenkette (auch roh, auch über mehrere
+//! Zeilen), Zeichenliteral oder Code. Aus demselben Durchgang kommen alle drei
+//! Sichten, die die Regel braucht ([`zerlegt`]): der Text ohne Kommentare, die
+//! Literalkarte und das **nackte** Abbild jeder Zeile, an dem Klammern gezählt
+//! und der Ausweg gesucht wird. Der Übertrag von Hand fällt damit weg: eine
+//! Zeichenkette über mehrere Zeilen ist von selbst richtig gezählt, und ein
+//! `'('` in einem Zeichenliteral ist keine offene Klammer mehr.
+//!
+//! Alle Seiten stehen als Proben im Baum — **paarweise**, denn ein Prüfer, der
+//! nur in einer Richtung geprobt wird, lässt die andere offen:
 //!
 //! | Probe | vorher | jetzt |
 //! |---|---|---|
 //! | `Path::new("%SystemRoot%\\win.ini")` — Verwendung | rot | rot |
 //! | derselbe Name mitten in einem gebundenen Satz | rot | grün |
 //! | derselbe Satz über drei Zeilen fortgesetzt | rot | grün |
+//! | Verwendung hinter einem `'"'` | **grün** | rot |
+//! | Verwendung hinter `'\''` und `'\\'` | rot | rot |
+//! | Kommentartext hinter einem `'"'` | **rot** | grün |
+//! | Schnipsel in `r#"…"#` | **rot** | grün |
+//! | derselbe Schnipsel mehrzeilig | **rot** | grün |
 //!
 //! # Was davon im Baum steht
 //!
@@ -141,12 +172,27 @@
 //! ein `/proc/self/status` mit `.expect(…)`, das ebendort zur Laufzeit panickt.
 //!
 //! Die sechs `mkfifo`-Stellen tragen jetzt den Ausweg, den `belege.rs` für
-//! `python3` vormacht: `match … { Ok(…) => …, Err(e) => { Hinweis; return } }`.
-//! Fünf davon nennt [`BEHOBENE_MKFIFO`] namentlich, und
+//! `python3` vormacht. Der erste Zuschnitt dieses Auswegs deckte allerdings
+//! genau **einen** Fall — `mkfifo` lässt sich nicht *starten* (`Err`) — und
+//! damit nicht den Anlassfall des Befundes: auf einem BusyBox-Bild steht der
+//! Name als Symlink im `PATH`, das Applet fehlt, `status()` liefert
+//! `Ok(exit status: 127)`, und der harte `assert!(ok.success(), …)` dahinter
+//! ließ den Lauf an allen fünf Stellen platzen, obwohl am Programm nichts
+//! falsch war. Die Begründung dafür war sachlich falsch: scheitert `mkfifo`,
+//! gibt es **keine** Pipe — es ist genauso nichts zu prüfen wie bei fehlendem
+//! Werkzeug. Deshalb überspringt jetzt **jeder** Ausgang außer null, mit
+//! Hinweis auf `stderr`.
+//!
+//! Fünf Stellen nennt [`BEHOBENE_MKFIFO`] namentlich, und
 //! [`die_fuenf_behobenen_mkfifo_stellen_haben_ihren_ausweg_und_sagen_ihn`] hält
 //! sie fest — samt der Zeile, die sagt, was ein übersprungener Test *nicht*
 //! geprüft hat. Ein stiller Übersprung wäre aus einer Prüfung eine Entwarnung
-//! geworden.
+//! geworden. Weil eine Textprüfung des Quelltexts das nicht halten kann (ein
+//! `Err(e) => panic!(…)` erfüllt jede Zeichenkettenprüfung und auch diese
+//! Regel), fährt
+//! `check_leaks::eine_mkfifo_attrappe_mit_ausgang_127_bricht_den_lauf_nicht`
+//! die Stelle **wirklich**: mit einem `PATH`, in dem `mkfifo` ein Skript ist,
+//! das mit 127 endet.
 //!
 //! Was noch offen ist, steht namentlich in [`ALTLASTEN`]; die Liste muss genau
 //! aufgehen — eine neue Verletzung macht den Test rot, eine behobene ebenso,
@@ -155,19 +201,19 @@
 //! Der Test liest den Quelltext, nicht das Programm — deshalb steht er hier
 //! und braucht kein Windows.
 //!
-//! Die zwölf Proben stehen als Quelltext-Schnipsel in
-//! [`die_zwoelf_proben_der_gegenpruefung`] — dort, wo die Regel sie beißt, und
-//! nicht als Anhängsel an einer fremden Datei (neun aus der Runde 6, drei für
-//! die Zeichenketten dieser Runde). Drei Gegenproben stehen daneben: derselbe
-//! Zugriff unter `cfg`, mit `.ok()` in derselben Anweisung, und der
-//! `python3`-Weg mit `match … Err(e) => …`.
+//! Die siebzehn Proben stehen als Quelltext-Schnipsel in
+//! [`die_proben_der_gegenpruefung`] — dort, wo die Regel sie beißt, und nicht
+//! als Anhängsel an einer fremden Datei (neun aus der Runde 6, drei für die
+//! Zeichenketten der Runde 7, fünf für die Literalkarte dieser Runde). Drei
+//! Gegenproben stehen daneben: derselbe Zugriff unter `cfg`, mit `.ok()` in
+//! derselben Anweisung, und der `python3`-Weg mit `match … Err(e) => …`.
 //!
-//! Mutationsnachweis: jede der vier Verschärfungen einzeln zurückgenommen
-//! (Ausweg im 8-Zeilen-Fenster statt in der Anweisung; Kommentare nur
-//! zeilenweise; `Command::new` unter `Schutz::CfgOderAusweg`; [`ist_verwendung`]
-//! einmal ohne die Erwähnung und einmal blind gegen jedes Literal; der Übertrag
-//! in [`literalkarten`] gestrichen) →
-//! `die_zwoelf_proben_der_gegenpruefung` ist jeweils rot und nennt die Probe.
+//! Mutationsnachweis: jede Verschärfung einzeln zurückgenommen (Ausweg im
+//! 8-Zeilen-Fenster statt in der Anweisung; Kommentare nur zeilenweise;
+//! `Command::new` unter `Schutz::CfgOderAusweg`; [`ist_verwendung`] einmal ohne
+//! die Erwähnung und einmal blind gegen jedes Literal; in [`lagen`] die
+//! Zeichenliterale und dann die rohen Zeichenketten übergangen) →
+//! `die_proben_der_gegenpruefung` ist jeweils rot und nennt die Probe.
 //! Dazu: `ALTLASTEN` um einen Eintrag gekürzt → rot, um einen erfundenen
 //! erweitert → rot.
 
@@ -263,6 +309,14 @@ const OPTIONAL: &[&str] = &[
 /// dagegen nur in derselben Anweisung (siehe [`anweisung`]).
 const NAHE: usize = 8;
 
+/// Wie viele Zeilen **nach** dem Start eines fremden Werkzeugs daraufhin
+/// gelesen werden, dass dort keine Behauptung über seinen Ausgang steht
+/// (siehe [`die_fuenf_behobenen_mkfifo_stellen_haben_ihren_ausweg_und_sagen_ihn`]).
+///
+/// Zwölf Zeilen: der Ausweg selbst braucht fünf bis acht, der harte `assert`
+/// stand unmittelbar dahinter.
+const FENSTER: usize = 12;
+
 /// Alle `*.rs` unter `crates/`.
 fn rust_dateien(wurzel: &Path, out: &mut Vec<PathBuf>) {
     let Ok(eintraege) = std::fs::read_dir(wurzel) else {
@@ -281,176 +335,306 @@ fn rust_dateien(wurzel: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Der Quelltext **ohne Kommentare**: jedes Zeichen eines `//`- oder
-/// `/* … */`-Kommentars wird durch ein Leerzeichen ersetzt, die Zeilenzahl
-/// bleibt.
+/// Was an einer Stelle des Quelltexts steht.
 ///
-/// Das ist die zweite Verschärfung: vorher fiel nur eine Zeile weg, die mit
-/// `//` *begann* — ein Blockkommentar, der `"/proc/self/status"` erklärt, war
-/// ein Fehlalarm (Probe P5 der Gegenprüfung).
-fn ohne_kommentare(text: &str) -> String {
-    let zeichen: Vec<char> = text.chars().collect();
-    let mut aus = String::with_capacity(text.len());
-    let mut i = 0;
-    let mut tiefe = 0usize; // Blockkommentare dürfen in Rust schachteln.
-    while i < zeichen.len() {
-        let c = zeichen[i];
-        let naechstes = zeichen.get(i + 1).copied().unwrap_or('\0');
-        if tiefe > 0 {
-            if c == '/' && naechstes == '*' {
-                tiefe += 1;
-                aus.push_str("  ");
-                i += 2;
-                continue;
+/// Eine Zeile Rust lässt sich **nicht** durch Zählen von Anführungszeichen
+/// zerlegen, und die erste Fassung dieses Prüfers tat genau das. Sie lag
+/// dadurch in *beide* Richtungen falsch:
+///
+/// * Ein gewöhnliches Zeichenliteral `'"'` kippte die Zählung. Alles dahinter
+///   galt als Inhalt einer Zeichenkette, also als *Erwähnung* — eine
+///   Verwendung von `std::os::unix::` verschwand. Das ist die Klasse, die auf
+///   Windows nicht zur Laufzeit, sondern beim **Bau** bricht, und in der Runde
+///   7 zwei von drei echten Befunden war.
+/// * Eine rohe Zeichenkette (`r"…"`, `r#"…"#`) kennt keine Maskierung; ihr
+///   Inhalt zerfiel dem Zähler in Stücke. Ein Quelltext-Schnipsel darin galt
+///   deshalb **immer** als Verstoß — ein Fehlalarm auf gewöhnlichem Quelltext.
+///
+/// Deshalb geht **ein** Durchgang über die Datei und legt für jedes Byte fest,
+/// was dort steht ([`lagen`]). Er kennt Zeilen- und (schachtelbare)
+/// Blockkommentare, gewöhnliche und rohe Zeichenketten samt `b`-Vorsatz,
+/// Zeichenliterale — und den Unterschied zwischen einem Zeichenliteral (`'a'`)
+/// und einer Lebenszeit (`'a`). Aus demselben Durchgang kommen alle drei
+/// Sichten, die die Regel braucht: der Quelltext ohne Kommentare, die
+/// Literalkarte und das **nackte** Abbild jeder Zeile.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lage {
+    /// Code — dazu gehören auch die Begrenzer einer Zeichenkette (`"`, `r#"`,
+    /// `"#`), denn eine Marke wie `"/proc/` beginnt mit dem öffnenden
+    /// Anführungszeichen.
+    Code,
+    /// Kommentar.
+    Kommentar,
+    /// Ein Zeichenliteral samt seiner Begrenzer. Für die Regel zählt es wie
+    /// Code (eine Marke passt in kein einzelnes Zeichen); beim Zählen von
+    /// Klammern wird es übersprungen, denn `'('` ist keine offene Klammer.
+    Zeichen,
+    /// Im *Inhalt* einer Zeichenkette, als `k`-tes Zeichen dieses Inhalts.
+    Inhalt(usize),
+}
+
+/// Die Länge in Bytes des Zeichens, das bei `i` beginnt (UTF-8).
+fn zeichenlaenge(b: &[u8], i: usize) -> usize {
+    let n = match b[i] {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        // Ein Folgebyte kann hier nicht anfangen; ein Byte weiter ist die
+        // einzige Antwort, die nicht stehenbleibt.
+        _ => 1,
+    };
+    n.min(b.len() - i)
+}
+
+/// Beginnt bei `i` eine **rohe** Zeichenkette (`r"…"`, `r#"…"#`, `br##"…"##`)?
+///
+/// Zurück kommt der Anfang ihres Inhalts und die Zahl der Rauten.
+fn roher_anfang(b: &[u8], i: usize) -> Option<(usize, usize)> {
+    // Kein Bestandteil eines Namens: das `r` in `for` fängt keine rohe
+    // Zeichenkette an.
+    if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
+        return None;
+    }
+    let mut j = i;
+    if b[j] == b'b' {
+        j += 1;
+    }
+    if b.get(j) != Some(&b'r') {
+        return None;
+    }
+    j += 1;
+    let mut rauten = 0usize;
+    while b.get(j) == Some(&b'#') {
+        rauten += 1;
+        j += 1;
+    }
+    if b.get(j) == Some(&b'"') {
+        Some((j + 1, rauten))
+    } else {
+        None
+    }
+}
+
+/// Stehen ab `i` genau `rauten` Rauten? Damit endet eine rohe Zeichenkette.
+fn rauten_folgen(b: &[u8], i: usize, rauten: usize) -> bool {
+    (0..rauten).all(|k| b.get(i + k) == Some(&b'#'))
+}
+
+/// Das Ende des Zeichenliterals, das bei `i` beginnt — oder `None`, wenn dort
+/// eine **Lebenszeit** steht (`'a`, `'static`, `'_`).
+///
+/// Das ist die Unterscheidung, an der ein Zähler von Anführungszeichen
+/// zerbricht: `'"'` ist ein Zeichen und öffnet keine Zeichenkette, `&'a str`
+/// dagegen ist gar kein Literal.
+fn zeichenliteral_ende(b: &[u8], i: usize) -> Option<usize> {
+    if i + 1 >= b.len() {
+        return None;
+    }
+    if b[i + 1] == b'\\' {
+        // Maskiert: `'\''`, `'\\'`, `'\n'`, `'\x41'`, `'\u{1F600}'`. Das
+        // maskierte Zeichen kann selbst ein `'` sein, deshalb erst dahinter
+        // suchen. Länger als `'\u{10FFFF}'` wird kein Zeichenliteral.
+        let mut j = i + 3;
+        while j < b.len() && j <= i + 12 {
+            if b[j] == b'\'' {
+                return Some(j + 1);
             }
-            if c == '*' && naechstes == '/' {
-                tiefe -= 1;
-                aus.push_str("  ");
-                i += 2;
-                continue;
-            }
-            aus.push(if c == '\n' { '\n' } else { ' ' });
-            i += 1;
-            continue;
+            j += 1;
         }
-        match c {
-            '/' if naechstes == '*' => {
-                tiefe = 1;
-                aus.push_str("  ");
-                i += 2;
-            }
-            '/' if naechstes == '/' => {
-                while i < zeichen.len() && zeichen[i] != '\n' {
-                    aus.push(' ');
-                    i += 1;
-                }
-            }
-            '"' => {
-                // Zeichenketten bleiben stehen: in ihnen *steht* die
-                // Einrichtung, die gesucht wird.
-                aus.push('"');
-                i += 1;
-                while i < zeichen.len() {
-                    let z = zeichen[i];
-                    aus.push(z);
-                    i += 1;
-                    if z == '\\' {
-                        if let Some(&n) = zeichen.get(i) {
-                            aus.push(n);
-                            i += 1;
-                        }
-                        continue;
-                    }
-                    if z == '"' {
-                        break;
-                    }
-                }
-            }
-            _ => {
-                aus.push(c);
-                i += 1;
+        return None;
+    }
+    let l = zeichenlaenge(b, i + 1);
+    if b.get(i + 1 + l) == Some(&b'\'') {
+        Some(i + 1 + l + 1)
+    } else {
+        None
+    }
+}
+
+/// Für **jedes Byte** des Quelltexts: was steht dort?
+///
+/// Der ganze Text auf einmal, nicht Zeile für Zeile — eine Zeichenkette über
+/// mehrere Zeilen (eine rohe oder eine mit `\` fortgesetzte) ist damit von
+/// selbst richtig gezählt, und der Übertrag von Hand, den die erste Fassung
+/// brauchte, fällt weg.
+fn lagen(text: &str) -> Vec<Lage> {
+    /// Eintragen — aber ein Zeilenumbruch bleibt immer `Code`: die
+    /// Zeilengrenzen müssen stehen bleiben, auch mitten in einer mehrzeiligen
+    /// Zeichenkette.
+    fn setze(aus: &mut [Lage], b: &[u8], von: usize, bis: usize, was: Lage) {
+        for k in von..bis {
+            if b[k] != b'\n' {
+                aus[k] = was;
             }
         }
     }
-    aus
-}
 
-/// Eine Zeile ohne ihre Zeichenketten — zum Zählen von Klammern.
-fn ohne_zeichenketten(zeile: &str) -> String {
-    let zeichen: Vec<char> = zeile.chars().collect();
-    let mut aus = String::with_capacity(zeile.len());
-    let mut i = 0;
-    while i < zeichen.len() {
-        if zeichen[i] != '"' {
-            aus.push(zeichen[i]);
+    let b = text.as_bytes();
+    let mut aus = vec![Lage::Code; b.len()];
+    let mut i = 0usize;
+    while i < b.len() {
+        // Blockkommentar — in Rust schachtelbar.
+        if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+            let von = i;
+            let mut tiefe = 1usize;
+            i += 2;
+            while i < b.len() && tiefe > 0 {
+                if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                    tiefe += 1;
+                    i += 2;
+                } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                    tiefe -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            setze(&mut aus, b, von, i, Lage::Kommentar);
+            continue;
+        }
+        // Zeilenkommentar.
+        if b[i] == b'/' && b.get(i + 1) == Some(&b'/') {
+            let von = i;
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            setze(&mut aus, b, von, i, Lage::Kommentar);
+            continue;
+        }
+        // Zeichenliteral — oder eine Lebenszeit, die nur ihr `'` ist.
+        if b[i] == b'\'' {
+            match zeichenliteral_ende(b, i) {
+                Some(ende) => {
+                    setze(&mut aus, b, i, ende, Lage::Zeichen);
+                    i = ende;
+                }
+                None => i += 1,
+            }
+            continue;
+        }
+        // Rohe Zeichenkette: keine Maskierung, Ende erst bei `"` samt Rauten.
+        if let Some((inhalt, rauten)) = roher_anfang(b, i) {
+            i = inhalt;
+            let mut k = 0usize;
+            while i < b.len() {
+                if b[i] == b'"' && rauten_folgen(b, i + 1, rauten) {
+                    i += 1 + rauten;
+                    break;
+                }
+                let l = zeichenlaenge(b, i);
+                setze(&mut aus, b, i, i + l, Lage::Inhalt(k));
+                i += l;
+                k += 1;
+            }
+            continue;
+        }
+        // Gewöhnliche Zeichenkette (auch `b"…"`).
+        if b[i] == b'"' {
             i += 1;
+            let mut k = 0usize;
+            while i < b.len() {
+                if b[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                if b[i] == b'\\' {
+                    // Maskierung: der Rückstrich und das maskierte Zeichen
+                    // gehören zum Inhalt — auch der Zeilenumbruch einer
+                    // Fortsetzung.
+                    setze(&mut aus, b, i, i + 1, Lage::Inhalt(k));
+                    i += 1;
+                    if i < b.len() {
+                        let l = zeichenlaenge(b, i);
+                        setze(&mut aus, b, i, i + l, Lage::Inhalt(k + 1));
+                        i += l;
+                    }
+                    k += 2;
+                    continue;
+                }
+                let l = zeichenlaenge(b, i);
+                setze(&mut aus, b, i, i + l, Lage::Inhalt(k));
+                i += l;
+                k += 1;
+            }
             continue;
         }
         i += 1;
-        while i < zeichen.len() {
-            if zeichen[i] == '\\' {
-                i += 2;
-                continue;
-            }
-            if zeichen[i] == '"' {
-                i += 1;
-                break;
-            }
-            i += 1;
-        }
-        aus.push(' ');
     }
     aus
 }
 
-/// Für jedes **Byte** einer Zeile: steht es im *Inhalt* einer Zeichenkette,
-/// und als wievieltes Zeichen dieses Inhalts?
-///
-/// `None` heißt Code — die Anführungszeichen selbst gehören dazu, denn eine
-/// Marke wie `"/proc/` beginnt mit dem öffnenden Anführungszeichen.
-///
-/// `uebertrag` ist der Stand am Ende der vorigen Zeile (siehe
-/// [`literalkarten`]); zurück kommt der Stand am Ende dieser.
-fn literalkarte(zeile: &str, uebertrag: Option<usize>) -> (Vec<Option<usize>>, Option<usize>) {
-    let mut karte: Vec<Option<usize>> = vec![None; zeile.len()];
-    let mut drin = uebertrag;
-    let mut zeichen = zeile.char_indices();
-    while let Some((b, c)) = zeichen.next() {
-        let Some(k) = drin else {
-            if c == '"' {
-                drin = Some(0);
-            }
-            continue;
-        };
-        if c == '"' {
-            drin = None;
-            continue;
-        }
-        karte[b..b + c.len_utf8()].fill(Some(k));
-        drin = Some(k + 1);
-        if c == '\\' {
-            // Maskiertes Zeichen: es schließt die Kette nicht.
-            if let Some((b2, c2)) = zeichen.next() {
-                karte[b2..b2 + c2.len_utf8()].fill(Some(k + 1));
-                drin = Some(k + 2);
-            }
-        }
-    }
-    (karte, drin)
+/// Eine Zeile in den drei Sichten, die die Regel braucht.
+struct Zeile {
+    /// Die Zeile ohne Kommentare — Zeichenketten bleiben stehen, denn in ihnen
+    /// *steht* die Einrichtung, die gesucht wird.
+    text: String,
+    /// Für jedes Byte: steht es im Inhalt einer Zeichenkette, und als
+    /// wievieltes Zeichen dieses Inhalts? (Siehe [`ist_verwendung`].)
+    karte: Vec<Option<usize>>,
+    /// Nur Code: Zeichenketten, Zeichenliterale und Kommentare sind durch
+    /// Leerzeichen ersetzt. Daran werden Klammern gezählt und der Ausweg
+    /// gesucht — ein `.ok()` **in** einer Zeichenkette ist keiner.
+    nackt: String,
 }
 
-/// Die Karten aller Zeilen — und der einzige Übertrag, der über eine
-/// Zeilengrenze trägt: die ausdrückliche Fortsetzung mit `\` am Zeilenende.
+/// Den Quelltext in Zeilen zerlegen — in einem Durchgang ([`lagen`]).
 ///
-/// Der gebundene Satz in `belege.rs` ist genau so geschrieben — ein Literal
-/// über drei Zeilen, mit `\` fortgesetzt. Ohne Übertrag sähe der Prüfer die
-/// zweite Zeile als Code und schlüge dort wieder an; die Lieferung wäre halb.
-///
-/// Weiter trägt bewusst **nichts**. Ein `\` am Zeilenende kann in Rust nur in
-/// einem Literal stehen; ein Zeichenliteral wie `'"'` oder eine rohe
-/// Zeichenkette (`r#"…"#`) endet nicht so, und ihr Irrtum bleibt deshalb auf
-/// seiner Zeile. Das ist die Richtung, in die ein Prüfer irren darf — eine
-/// Marke bleibt sichtbar, statt zu verschwinden.
-fn literalkarten(zeilen: &[&str]) -> Vec<Vec<Option<usize>>> {
-    let mut alle = Vec::with_capacity(zeilen.len());
-    let mut uebertrag: Option<usize> = None;
-    for zeile in zeilen {
-        let (karte, offen) = literalkarte(zeile, uebertrag);
-        uebertrag = if zeile.trim_end().ends_with('\\') {
-            offen
-        } else {
-            None
-        };
-        alle.push(karte);
+/// Die Ersetzungen halten die Byte-Länge, deshalb passen Karte, Text und
+/// nacktes Abbild Byte für Byte aufeinander.
+fn zerlegt(roh: &str) -> Vec<Zeile> {
+    if roh.is_empty() {
+        return Vec::new();
     }
-    alle
+    let lage = lagen(roh);
+    let b = roh.as_bytes();
+    let mut aus = Vec::new();
+    let mut von = 0usize;
+    loop {
+        let bis = match b[von..].iter().position(|c| *c == b'\n') {
+            Some(n) => von + n,
+            None => b.len(),
+        };
+        let scheibe = &lage[von..bis];
+        let text: Vec<u8> = b[von..bis]
+            .iter()
+            .zip(scheibe)
+            .map(|(c, l)| if *l == Lage::Kommentar { b' ' } else { *c })
+            .collect();
+        let nackt: Vec<u8> = b[von..bis]
+            .iter()
+            .zip(scheibe)
+            .map(|(c, l)| if *l == Lage::Code { *c } else { b' ' })
+            .collect();
+        aus.push(Zeile {
+            text: String::from_utf8(text).expect("ganze Zeichen ersetzt"),
+            karte: scheibe
+                .iter()
+                .map(|l| match l {
+                    Lage::Inhalt(k) => Some(*k),
+                    _ => None,
+                })
+                .collect(),
+            nackt: String::from_utf8(nackt).expect("ganze Zeichen ersetzt"),
+        });
+        if bis >= b.len() {
+            break;
+        }
+        von = bis + 1;
+        // Ein Text, der mit `\n` endet, hat keine leere Schlusszeile — genau
+        // wie [`str::lines`].
+        if von == b.len() {
+            break;
+        }
+    }
+    aus
 }
 
 /// Ist die Marke, die bei Byte `p` beginnt, eine **Verwendung** — oder nur eine
 /// **Erwähnung** in einem Text?
 ///
 /// Das ist die Blindstelle, die diese Runde schließt. Kommentare waren schon
-/// ausgenommen ([`ohne_kommentare`]), Zeichenketten nicht: der gebundene Satz
+/// ausgenommen ([`zerlegt`]), Zeichenketten nicht: der gebundene Satz
 /// in `belege.rs`, der einen behobenen Befund beschreibt, schlug an, weil er
 /// den Namen des Unix-APIs nannte.
 ///
@@ -468,7 +652,7 @@ fn literalkarten(zeilen: &[&str]) -> Vec<Vec<Option<usize>>> {
 ///
 /// Gebunden von den Proben „Verwendung im Zeichenketten-Argument“ (muss rot
 /// machen) und „Erwähnung im gebundenen Satz“ (darf nicht rot machen) in
-/// [`die_zwoelf_proben_der_gegenpruefung`].
+/// [`die_proben_der_gegenpruefung`].
 fn ist_verwendung(karte: &[Option<usize>], p: usize) -> bool {
     !matches!(karte.get(p), Some(Some(k)) if *k > 0)
 }
@@ -502,11 +686,14 @@ fn schliesst(zeile: &str) -> bool {
 /// Klammerbilanz aufgeht **und** die Zeile mit `;` (oder `,`) endet. Damit
 /// gehört `let out = match Command::new("python3") … { Ok(o) => o, Err(e) =>
 /// { … } };` ganz dazu, ein `.ok()` in der *nächsten* Zeile dagegen nicht.
-fn anweisung(zeilen: &[&str], i: usize) -> String {
+///
+/// Gezählt und gesucht wird auf den **nackten** Zeilen ([`Zeile::nackt`]):
+/// `'('` in einem Zeichenliteral ist keine offene Klammer, und ein `.ok()`
+/// **in** einer Zeichenkette ist kein Ausweg.
+fn anweisung(nackte: &[&str], i: usize) -> String {
     let mut von = i;
     while von > 0 {
-        let vorige = ohne_zeichenketten(zeilen[von - 1]);
-        let vorige = vorige.trim();
+        let vorige = nackte[von - 1].trim();
         if vorige.is_empty() || vorige.starts_with("#[") || schliesst(vorige) {
             break;
         }
@@ -514,8 +701,7 @@ fn anweisung(zeilen: &[&str], i: usize) -> String {
     }
     let mut tiefe: i32 = 0;
     let mut bis = von;
-    for (nr, zeile) in zeilen.iter().enumerate().skip(von) {
-        let nackt = ohne_zeichenketten(zeile);
+    for (nr, nackt) in nackte.iter().enumerate().skip(von) {
         for c in nackt.chars() {
             match c {
                 '(' | '[' | '{' => tiefe += 1,
@@ -539,13 +725,13 @@ fn anweisung(zeilen: &[&str], i: usize) -> String {
             break;
         }
     }
-    zeilen[von..=bis.min(zeilen.len() - 1)].join("\n")
+    nackte[von..=bis.min(nackte.len() - 1)].join("\n")
 }
 
 /// Die Zeile des Kopfes der Funktion, in der `zeile` steht (0-basiert).
-fn funktionskopf(zeilen: &[&str], zeile: usize) -> Option<usize> {
+fn funktionskopf(nackte: &[&str], zeile: usize) -> Option<usize> {
     (0..=zeile).rev().find(|&i| {
-        let s = zeilen[i].trim_start();
+        let s = nackte[i].trim_start();
         s.starts_with("fn ")
             || s.starts_with("pub fn ")
             || s.starts_with("pub(crate) fn ")
@@ -556,9 +742,9 @@ fn funktionskopf(zeilen: &[&str], zeile: usize) -> Option<usize> {
 
 /// Trägt die Funktion (oder das Modul), in der die Stelle steht, ein
 /// Plattform-`cfg` als Attribut?
-fn kopf_hat_cfg(zeilen: &[&str], kopf: usize) -> bool {
+fn kopf_hat_cfg(nackte: &[&str], kopf: usize) -> bool {
     for i in (0..kopf).rev() {
-        let s = zeilen[i].trim_start();
+        let s = nackte[i].trim_start();
         if CFG.iter().any(|c| s.starts_with(c)) {
             return true;
         }
@@ -578,17 +764,26 @@ fn kopf_hat_cfg(zeilen: &[&str], kopf: usize) -> bool {
 /// **genau**: eine neue Verletzung macht ihn rot, und eine behobene ebenso —
 /// dann ist die Zeile hier zu streichen.
 const ALTLASTEN: &[(&str, &str, &str)] = &[
-    // Was von den sechs `mkfifo`-Stellen noch offen ist:
-    // `Command::new("mkfifo")…status().expect(…)` unter `#[cfg(unix)]`.
-    // `cfg(unix)` sagt nichts über den `PATH`; auf einem schlanken Unix-Bild
-    // ohne `util-linux` panickt der Test, statt sich — wie `belege.rs` es für
-    // `python3` vormacht — mit einem Hinweis zu begnügen. Die fünf anderen
-    // sind behoben und deshalb gestrichen; sie stehen in [`BEHOBENE_MKFIFO`]
-    // und werden dort festgehalten.
+    // Von den sechs `mkfifo`-Stellen ist hier keine mehr offen: die fünf
+    // dieser Runde stehen in [`BEHOBENE_MKFIFO`], und die sechste
+    // (`crates/redact-gui/src/app.rs`) trägt ihren Ausweg jetzt ebenfalls —
+    // deshalb ist ihre Zeile gestrichen. **Offen bleibt dort etwas, das diese
+    // Regel nicht sieht:** hinter dem Ausweg steht weiter ein
+    // `assert!(ok.success(), …)`. Ein `mkfifo`, das mit 127 endet (BusyBox
+    // ohne das Applet), lässt den Lauf dort also weiter platzen, obwohl keine
+    // Pipe entstanden ist. Die Regel prüft den Ausweg, nicht was danach mit
+    // ihm geschieht; für die eigenen fünf Stellen hält das
+    // [`die_fuenf_behobenen_mkfifo_stellen_haben_ihren_ausweg_und_sagen_ihn`]
+    // — `app.rs` gehört der Oberfläche und ist als Vertrag gemeldet.
+    // Ein **Beleg der Gegenprüfung** (Register #19), absichtlich rot abgelegt —
+    // und dabei selbst ein Windows-Baufehler: `std::os::unix::fs::symlink` ohne
+    // `cfg`. Die Datei gehört `redact-gui`; hier steht sie, damit die Regel
+    // scharf bleibt, ohne eine fremde Datei zu ändern. Wird sie unter ein
+    // `cfg(unix)` gestellt, ist diese Zeile zu streichen — der Test sagt es.
     (
-        "crates/redact-gui/src/app.rs",
-        "Command::new(\"",
-        "mkfifo ohne Ausweg",
+        "crates/redact-gui/tests/zi_c_verworfenes_urteil.rs",
+        "std::os::unix::",
+        "Unix-API ohne cfg — Baufehler auf Windows, gehört redact-gui",
     ),
     // Die drei Stellen der Oberfläche, die Agent E hier nur melden konnte,
     // sind behoben und deshalb gestrichen: zweimal `std::os::unix::fs::symlink`
@@ -664,10 +859,9 @@ fn verstoesse() -> (Vec<Verstoss>, usize) {
         let roh = std::fs::read_to_string(datei)
             .unwrap_or_else(|e| panic!("{} lesbar: {e}", datei.display()))
             .replace("\r\n", "\n");
-        let text = ohne_kommentare(&roh);
-        let zeilen: Vec<&str> = text.lines().collect();
-        let karten = literalkarten(&zeilen);
-        let datei_gedeckt = zeilen.iter().any(|z| {
+        let zerlegte = zerlegt(&roh);
+        let nackte: Vec<&str> = zerlegte.iter().map(|z| z.nackt.as_str()).collect();
+        let datei_gedeckt = nackte.iter().any(|z| {
             let s = z.trim_start();
             s.starts_with("#![cfg(target_os")
                 || s.starts_with("#![cfg(unix")
@@ -682,12 +876,12 @@ fn verstoesse() -> (Vec<Verstoss>, usize) {
                 .to_string(),
         );
 
-        for (i, zeile) in zeilen.iter().enumerate() {
-            let Some((marke, schutz)) = verwendete_marke(zeile, &karten[i]) else {
+        for (i, zeile) in zerlegte.iter().enumerate() {
+            let Some((marke, schutz)) = verwendete_marke(&zeile.text, &zeile.karte) else {
                 continue;
             };
             geprueft += 1;
-            let satz = anweisung(&zeilen, i);
+            let satz = anweisung(&nackte, i);
             let hat_ausweg = OPTIONAL.iter().any(|o| satz.contains(o));
             if hat_ausweg {
                 continue;
@@ -699,10 +893,10 @@ fn verstoesse() -> (Vec<Verstoss>, usize) {
                 // nicht das `cfg` — ein `cfg` wirkt wirklich auf alles unter
                 // sich, ein `.ok()` nur auf seinen eigenen Ausdruck.
                 let von = i.saturating_sub(NAHE);
-                let davor = zeilen[von..=i].join("\n");
+                let davor = nackte[von..=i].join("\n");
                 let unter_cfg = datei_gedeckt
                     || CFG.iter().any(|c| davor.contains(c))
-                    || funktionskopf(&zeilen, i).is_some_and(|k| kopf_hat_cfg(&zeilen, k));
+                    || funktionskopf(&nackte, i).is_some_and(|k| kopf_hat_cfg(&nackte, k));
                 if unter_cfg {
                     continue;
                 }
@@ -711,7 +905,7 @@ fn verstoesse() -> (Vec<Verstoss>, usize) {
                 datei: relativ.clone(),
                 zeile: i + 1,
                 marke,
-                text: zeile.trim_start().to_string(),
+                text: zeile.text.trim_start().to_string(),
             });
         }
     }
@@ -800,19 +994,26 @@ fn keine_systemeinrichtung_ohne_cfg_oder_ohne_ausweg() {
     );
 }
 
-/// Die Regel gegen sich selbst: die zwölf Proben der Gegenprüfung, hier als
+/// Die Regel gegen sich selbst: die Proben der Gegenprüfung, hier als
 /// Quelltext-Schnipsel statt als Anhängsel an eine fremde Datei.
 ///
-/// Neun aus der Runde 6, drei für die Zeichenketten dieser Runde — eine
-/// Verwendung im Zeichenketten-Argument (muss rot machen) und zwei Erwähnungen,
-/// die nicht rot machen dürfen: der gebundene Satz auf einer Zeile und derselbe
-/// Satz über drei Zeilen fortgesetzt, wie `belege.rs` ihn schreibt. Dazu drei
-/// Gegenproben, die zeigen, wie es richtig aussieht.
+/// Siebzehn Proben und drei Gegenproben: neun aus der Runde 6, drei für die
+/// Zeichenketten der Runde 7 — und fünf für die Literalkarte, die diese Runde
+/// richtigstellt. Die fünf kommen **paarweise**: zwei Verwendungen, die die
+/// naive Zählung übersah (hinter `'\"'` und hinter maskierten
+/// Zeichenliteralen), und drei Fehlalarme, die sie erzeugte (Kommentartext
+/// hinter `'\"'`, ein Schnipsel in einer rohen Zeichenkette, derselbe
+/// mehrzeilig). Ein Prüfer, der nur in einer Richtung geprobt wird, lässt die
+/// andere offen — daran war die erste Fassung dieser Karte gescheitert.
 ///
-/// Das ist der Mutationsnachweis **im Baum**: wird eine der vier
-/// Verschärfungen zurückgenommen, wird dieser Test rot und nennt die Probe.
+/// Die Zahl stand früher im Namen dieses Tests und veraltete zweimal
+/// (‚neun‘, dann ‚zwölf‘); sie steht jetzt nur noch dort, wo ein Test sie hält
+/// — unten in der gebundenen Länge der Liste.
+///
+/// Das ist der Mutationsnachweis **im Baum**: wird eine der Verschärfungen
+/// zurückgenommen, wird dieser Test rot und nennt die Probe.
 #[test]
-fn die_zwoelf_proben_der_gegenpruefung() {
+fn die_proben_der_gegenpruefung() {
     // (Name, Rumpf, erwartet: ist es ein Verstoß?)
     const PROBEN: &[(&str, &str, bool)] = &[
         (
@@ -878,7 +1079,7 @@ fn die_zwoelf_proben_der_gegenpruefung() {
         ),
         // Und derselbe Satz, wie `belege.rs` ihn wirklich schreibt: ein Literal
         // über drei Zeilen, mit `\` fortgesetzt. Ohne den Übertrag in
-        // [`literalkarten`] sähe der Prüfer die zweite Zeile als Code und
+        // [`lagen`] sähe der Prüfer die zweite Zeile als Code und
         // schlüge dort wieder an — die Lieferung wäre halb.
         (
             "Erwähnung im fortgesetzten Satz",
@@ -897,6 +1098,44 @@ fn die_zwoelf_proben_der_gegenpruefung() {
             "fn f() {\n    let _p = std::fs::read_to_string(\"/proc/self/status\")\n        .ok()\n        .unwrap_or_default();\n}\n",
             false,
         ),
+        // ---- Die Blindstelle, die Befund 2 **verschoben** statt geschlossen
+        // hatte: die Literalkarte zählte Anführungszeichen naiv. Ein
+        // gewöhnliches `'\"'` kippte die Zählung — danach galt jede Marke als
+        // Erwähnung, und die Verwendung verschwand. Betroffen war gerade die
+        // Klasse, die auf Windows beim **Bau** bricht.
+        (
+            "Verwendung hinter einem Zeichenliteral",
+            "fn f(p: &std::path::Path) {\n    let _s = format!(\"{}{:?}\", '\"', std::os::unix::fs::symlink(p, p));\n}\n",
+            true,
+        ),
+        // Dieselbe Naivität in der anderen Richtung, Teil 1: ein `'\"'` ließ den
+        // Kommentarschnitt entgleisen, und danach schlug die Regel auf reinem
+        // Kommentartext an — ein Fehlalarm auf gewöhnlichem Quelltext.
+        (
+            "Erwähnung im Kommentar hinter einem Zeichenliteral",
+            "fn f() {\n    let anfuehrung = '\"';\n    // Hinweis: std::os::unix::fs::symlink gibt es auf Windows nicht.\n    let _ = anfuehrung;\n}\n",
+            false,
+        ),
+        // Teil 2: eine rohe Zeichenkette kennt keine Maskierung. Ein
+        // Quelltext-Schnipsel darin war deshalb **immer** ein Verstoß.
+        (
+            "Schnipsel in einer rohen Zeichenkette",
+            "fn f() {\n    let _doku = r#\"so nicht: std::fs::read_to_string(\"/proc/self/status\")\"#;\n    let _ = _doku;\n}\n",
+            false,
+        ),
+        (
+            "Schnipsel in einer mehrzeiligen rohen Zeichenkette",
+            "fn f() {\n    let _doku = r#\"\n        so nicht:\n            let _ = std::os::unix::fs::symlink(a, b);\n    \"#;\n    let _ = _doku;\n}\n",
+            false,
+        ),
+        // Und die Gegenrichtung der Gegenrichtung: maskierte Zeichenliterale
+        // dürfen die Karte **nicht** verschieben — der Verstoß dahinter bleibt
+        // sichtbar.
+        (
+            "Verwendung hinter maskierten Zeichenliteralen",
+            "fn f(p: &std::path::Path) {\n    let _s = format!(\"{}{}{:?}\", '\\'', '\\\\', std::os::unix::fs::symlink(p, p));\n}\n",
+            true,
+        ),
         (
             "Linux-Einrichtung unter cfg",
             "#[cfg(target_os = \"linux\")]\nfn f() {\n    let _p = std::fs::read_to_string(\"/proc/self/status\").expect(\"nur Linux\");\n}\n",
@@ -906,23 +1145,22 @@ fn die_zwoelf_proben_der_gegenpruefung() {
 
     let mut falsch: Vec<String> = Vec::new();
     for (name, rumpf, erwartet) in PROBEN {
-        let text = ohne_kommentare(&rumpf.replace("\r\n", "\n"));
-        let zeilen: Vec<&str> = text.lines().collect();
-        let karten = literalkarten(&zeilen);
+        let zerlegte = zerlegt(&rumpf.replace("\r\n", "\n"));
+        let nackte: Vec<&str> = zerlegte.iter().map(|z| z.nackt.as_str()).collect();
         let mut verstoss = false;
-        for (i, zeile) in zeilen.iter().enumerate() {
-            let Some((_, schutz)) = verwendete_marke(zeile, &karten[i]) else {
+        for (i, zeile) in zerlegte.iter().enumerate() {
+            let Some((_, schutz)) = verwendete_marke(&zeile.text, &zeile.karte) else {
                 continue;
             };
-            let satz = anweisung(&zeilen, i);
+            let satz = anweisung(&nackte, i);
             if OPTIONAL.iter().any(|o| satz.contains(o)) {
                 continue;
             }
             let von = i.saturating_sub(NAHE);
-            let davor = zeilen[von..=i].join("\n");
+            let davor = nackte[von..=i].join("\n");
             if schutz == Schutz::CfgOderAusweg
                 && (CFG.iter().any(|c| davor.contains(c))
-                    || funktionskopf(&zeilen, i).is_some_and(|k| kopf_hat_cfg(&zeilen, k)))
+                    || funktionskopf(&nackte, i).is_some_and(|k| kopf_hat_cfg(&nackte, k)))
             {
                 continue;
             }
@@ -943,13 +1181,13 @@ fn die_zwoelf_proben_der_gegenpruefung() {
         falsch.join("\n")
     );
 
-    // Die Zahl im Namen dieses Tests ist gebunden: zwölf Proben und drei
-    // Gegenproben. Ohne diese Zeile hätte der Name still veralten können — so
-    // wie „neun“ es tat, als die drei Gegenproben dazukamen.
+    // Die Zahl der Proben ist gebunden: siebzehn Proben und drei Gegenproben,
+    // wie die Doku dieses Tests sie zählt. Ohne diese Zeile könnte eine Probe
+    // still verschwinden.
     assert_eq!(
         PROBEN.len(),
-        12 + 3,
-        "der Name nennt zwölf Proben und die Doku drei Gegenproben — die Liste \
+        17 + 3,
+        "die Doku nennt siebzehn Proben und drei Gegenproben — die Liste \
          hat aber {} Einträge",
         PROBEN.len()
     );
@@ -997,14 +1235,29 @@ fn jede_altlast_traegt_ihren_grund_und_ihren_fall() {
 /// stiller Übersprung fällt überhaupt niemandem auf. Genau das ist die
 /// Fehlerklasse dieses Projekts: aus einer Prüfung wird eine Entwarnung.
 ///
-/// Vier Dinge werden gehalten: das Werkzeug wird noch gestartet (sonst gehört
+/// Fünf Dinge werden gehalten: das Werkzeug wird noch gestartet (sonst gehört
 /// die Zeile hier weg), sein Startergebnis geht über ein `match` (der Ausweg in
-/// derselben Anweisung), es wird **nicht** als gegeben genommen, und der
-/// Übersprung druckt eine Zeile.
+/// derselben Anweisung), es wird **nicht** als gegeben genommen, der Übersprung
+/// druckt eine Zeile — und hinter dem Ausweg steht **kein `assert` auf den
+/// Ausgang**. Das letzte ist neu und war die Lücke: ein Ausweg nur für `Err`
+/// und dahinter `assert!(ok.success(), …)` lässt den Lauf bei jedem
+/// nichtnull-Ausgang platzen — also im Anlassfall ‚BusyBox ohne `mkfifo`‘, wo
+/// `status()` `Ok(exit status: 127)` liefert.
+///
+/// **Was dieser Test nicht kann:** er liest Zeichenketten. Ein
+/// `Err(e) => panic!(…)` erfüllt jede davon und auch die Regel. Die Sache
+/// selbst — überspringt die Stelle wirklich, statt zu platzen? — fährt
+/// `check_leaks::eine_mkfifo_attrappe_mit_ausgang_127_bricht_den_lauf_nicht` mit
+/// einem präparierten `PATH` gegen eine der fünf Stellen. Die anderen vier
+/// trägt nur dieser Text; das ist als Rest festgehalten und nicht als
+/// Entwarnung.
 ///
 /// Mutation (nachgewiesen): in `crates/redact-core/src/read.rs` das `match`
 /// durch `.expect("mkfifo startbar")` ersetzt → dieser Test rot, und nur er
-/// sowie `keine_systemeinrichtung_ohne_cfg_oder_ohne_ausweg`.
+/// sowie `keine_systemeinrichtung_ohne_cfg_oder_ohne_ausweg`. Dazu in
+/// `check_leaks.rs` der Ausweg zurück auf `Ok(status) => status` samt
+/// `assert!(status.success(), …)` → dieser Test rot (`assert` auf den Ausgang)
+/// und der Attrappen-Test ebenfalls (Kindlauf mit `exit status: 101`).
 #[test]
 fn die_fuenf_behobenen_mkfifo_stellen_haben_ihren_ausweg_und_sagen_ihn() {
     for datei in BEHOBENE_MKFIFO {
@@ -1029,6 +1282,27 @@ fn die_fuenf_behobenen_mkfifo_stellen_haben_ihren_ausweg_und_sagen_ihn() {
             "{datei} überspringt still — ein übersprungener Test muss sagen, was er \
              nicht geprüft hat und warum"
         );
+        // Der Ausweg darf nicht gleich dahinter entwertet werden. Gesucht wird
+        // im Fenster **nach** dem Start des Werkzeugs: dort gehört keine
+        // Behauptung über seinen Ausgang hin.
+        let zeilen: Vec<&str> = text.lines().collect();
+        for (i, zeile) in zeilen.iter().enumerate() {
+            if !zeile.contains("Command::new(\"mkfifo\")") {
+                continue;
+            }
+            let bis = (i + FENSTER).min(zeilen.len());
+            for (nr, spaeter) in zeilen[i..bis].iter().enumerate() {
+                assert!(
+                    !(spaeter.contains("assert") && spaeter.contains("success")),
+                    "{datei}:{} behauptet nach dem Start von `mkfifo` etwas über \
+                     seinen Ausgang — dann trägt der Ausweg nur den Fall ‚`mkfifo` \
+                     lässt sich nicht starten‘ und nicht den Anlassfall (BusyBox \
+                     ohne das Applet, `Ok(exit status: 127)`):\n{}",
+                    i + nr + 1,
+                    spaeter.trim()
+                );
+            }
+        }
     }
     assert!(
         ALTLASTEN
