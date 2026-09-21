@@ -491,27 +491,48 @@ pub fn key_commands(keys: KeyState, has_selection: bool) -> Vec<KeyCommand> {
 ///
 /// Reine Entscheidung, damit sie ohne Fenster prüfbar ist.
 ///
-/// **Zwei Gründe, nicht einer.** Handarbeit ginge verloren — und seit
+/// **Drei Gründe, nicht einer.** Handarbeit ginge verloren — und seit
 /// Fix-Runde 8 kann auch ein **Export** noch unterwegs sein
 /// ([`RedactApp::export_to`]). Solange der im Zeichentakt lief, war das keine
 /// Frage: das Fenster nahm während des Schreibens keine Eingabe an, der
 /// Schließwunsch kam erst danach an, und die Datei stand. Jetzt beendete ein
 /// Klick auf das Kreuz den Prozess mitten im Schreiben. Geschrieben wird
 /// atomar, es gibt also keine halbe Datei — wohl aber **keine**, während die
-/// Statuszeile „Export läuft“ sagte. Wer schließt, soll wissen, was er
-/// wegwirft.
+/// Statuszeile „Export läuft“ sagte.
+///
+/// Der dritte Grund ist der schwerste, und er hat gefehlt: die
+/// **Nachprüfung**. Hier stand `(has_manual_work || export_running)`, und
+/// [`RedactApp::export_check_running`] kam nicht vor. Damit standen die Fälle
+/// verkehrt herum. Beim laufenden Export wurde gefragt — dort entsteht noch
+/// gar keine Datei, es geht also nur Arbeit verloren. Bei der laufenden
+/// Nachprüfung wurde **nicht** gefragt, obwohl die Ausgabedatei da schon auf
+/// der Platte liegt und das Urteil ihr einziger Zeuge ist: ob in ihr noch
+/// Klartext steht, sagt dann niemand mehr. Eine geschwärzte Datei ohne Urteil
+/// ist genau die Schwächung, die dieses Werkzeug nicht erzeugen darf.
+/// Wer schließt, soll wissen, was er wegwirft.
 pub fn needs_close_confirmation(
     has_manual_work: bool,
     export_running: bool,
+    check_running: bool,
     already_confirmed: bool,
 ) -> bool {
-    (has_manual_work || export_running) && !already_confirmed
+    (has_manual_work || export_running || check_running) && !already_confirmed
 }
 
 /// Der Satz der Rückfrage, wenn beim Schließen noch ein Export schreibt.
 pub const ABANDON_EXPORT_QUESTION: &str =
     "Ein Export ist noch nicht fertig. Wird das Fenster jetzt geschlossen, \
      entsteht keine Ausgabedatei — geschrieben wird erst am Ende in einem Zug.\n\n\
+     Trotzdem schließen?";
+
+/// Der Satz der Rückfrage, wenn beim Schließen noch die **Nachprüfung** läuft.
+///
+/// Anders als beim Export: die Datei ist geschrieben. Verloren geht nicht sie,
+/// sondern das Urteil über sie.
+pub const ABANDON_CHECK_QUESTION: &str =
+    "Die Ausgabedatei ist geschrieben, aber noch nicht nachgeprüft. Wird das \
+     Fenster jetzt geschlossen, bleibt sie ohne Urteil: ob in ihr noch Klartext \
+     steht, sagt dann niemand.\n\n\
      Trotzdem schließen?";
 
 /// Text der Rückfrage. `what` beschreibt, was gleich passiert.
@@ -764,21 +785,84 @@ fn file_name_of(path: &std::path::Path) -> String {
 /// überhaupt Bytes bekommt. Das Urteil über das Ziel darf ein Klick auf den
 /// Link nicht anfassen.
 ///
-/// Schlägt das Auflösen des Verzeichnisses fehl, gilt der Pfad selbst: dann
-/// ist die Kennung so grob wie eine getippte Schreibweise, aber nie falsch
-/// verschmolzen.
+/// ## Und wenn es das Verzeichnis noch nicht gibt
+///
+/// Genau dort hing die Zusage bis zur Gegenprüfung 9 in der Luft. `canonicalize`
+/// über ein Verzeichnis, das erst `check_target` anlegt, schlägt fehl; der
+/// Rückfall nahm den Pfad, wie er getippt war. Damit ergab **derselbe** Klick
+/// vor und nach dem ersten Export zwei Kennungen — also genau der Fehler, den
+/// der Abschnitt darüber als behoben beschreibt, nur eine Lage weiter. Belegt
+/// an `…/neu/../neu/out.pdf` und an einem Verzeichnis unter einem Link
+/// (`zm_b_kennung_der_ausgabedatei`).
+///
+/// Jetzt wird erst `.` und `..` **lexikalisch** weggerechnet und dann der
+/// längste Teil aufgelöst, den es schon gibt; der Rest kommt unverändert
+/// daran. Der Dateiname bleibt dabei außen vor — durch einen Link hindurch
+/// wird nicht geschrieben. Gibt es gar nichts aufzulösen, gilt der geglättete
+/// Pfad: grob wie eine getippte Schreibweise, aber nie falsch verschmolzen.
 fn writing_key(path: &std::path::Path) -> PathBuf {
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
     match (dir, path.file_name()) {
-        (Some(dir), Some(name)) => std::fs::canonicalize(dir)
-            .unwrap_or_else(|_| dir.to_path_buf())
-            .join(name),
+        (Some(dir), Some(name)) => resolved_dir(dir).join(name),
         // Ein nackter Dateiname: das Verzeichnis ist das laufende, und
         // `check_target` setzt dort genauso `"."` ein.
-        (None, Some(name)) => std::fs::canonicalize(".")
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(name),
+        (None, Some(name)) => resolved_dir(std::path::Path::new(".")).join(name),
         _ => path.to_path_buf(),
+    }
+}
+
+/// Ein Verzeichnis, so weit aufgelöst, wie es sich auflösen lässt — und
+/// unabhängig davon, ob es schon existiert.
+///
+/// Zwei Schritte, und die Reihenfolge ist der Punkt: erst `.`/`..`
+/// lexikalisch, dann der längste vorhandene Kopf durch `canonicalize`. Wer nur
+/// den zweiten Schritt tut, bekommt für `a/../a` vor und nach dem Anlegen zwei
+/// verschiedene Antworten.
+fn resolved_dir(dir: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let mut glatt = PathBuf::new();
+    for teil in dir.components() {
+        match teil {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Nur wegrechnen, was davor wirklich steht; ein führendes
+                // `..` bleibt stehen, sonst zeigte der Pfad woanders hin.
+                if !glatt.pop() {
+                    glatt.push("..");
+                }
+            }
+            sonst => glatt.push(sonst.as_os_str()),
+        }
+    }
+
+    let mut kopf = glatt.clone();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if !kopf.as_os_str().is_empty() {
+            if let Ok(echt) = std::fs::canonicalize(&kopf) {
+                let mut aus = echt;
+                for teil in rest.iter().rev() {
+                    aus.push(teil);
+                }
+                return aus;
+            }
+        }
+        match kopf.file_name().map(std::ffi::OsStr::to_os_string) {
+            Some(name) => {
+                rest.push(name);
+                kopf.pop();
+            }
+            // Nichts mehr abzuschneiden. Bei einem relativen Pfad ist das
+            // laufende Verzeichnis der Kopf, bei einem absoluten die Wurzel.
+            None => {
+                if glatt.is_absolute() {
+                    return glatt;
+                }
+                let mut aus = std::fs::canonicalize(".").unwrap_or_else(|_| PathBuf::from("."));
+                aus.push(&glatt);
+                return aus;
+            }
+        }
     }
 }
 
@@ -1102,6 +1186,27 @@ impl RedactApp {
     /// [`RedactApp::may_discard`]: dort geht es um Handarbeit, hier um eine
     /// Datei, die es nachher nicht gibt, und ein Satz über Schwärzungen wäre
     /// hier schlicht falsch.
+    /// Darf die noch laufende **Nachprüfung** aufgegeben werden?
+    ///
+    /// Eigene Frage und eigener Satz: beim Export geht Arbeit verloren, hier
+    /// das Urteil über eine Datei, die schon geschrieben ist.
+    fn may_abandon_check(&self) -> bool {
+        if !self.export_check_running() {
+            return true;
+        }
+        #[cfg(test)]
+        if let Ask::Answer(answer) = self.ask {
+            return answer;
+        }
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Nachprüfung läuft noch — trotzdem schließen?")
+            .set_description(ABANDON_CHECK_QUESTION)
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show()
+            == rfd::MessageDialogResult::Yes
+    }
+
     fn may_abandon_export(&self) -> bool {
         if !self.export_running() {
             return true;
@@ -1493,7 +1598,7 @@ impl RedactApp {
                 if written {
                     self.checks.retain(|pending| pending.key != writing);
                 }
-                self.finish_export(&out, &audit, blocked, check, result);
+                self.finish_export(&out, &audit, blocked, check, &writing, result);
             }
         }
     }
@@ -1559,7 +1664,7 @@ impl RedactApp {
                 ..
             } = pending;
             match result {
-                Some(result) => self.finish_export(&out, &audit, blocked, check, result),
+                Some(result) => self.finish_export(&out, &audit, blocked, check, &writing, result),
                 None => {
                     // Auch in die Warnungen: die Statuszeile überschreibt die
                     // nächste Aktion, und ein Export, der nichts geschrieben
@@ -1591,12 +1696,21 @@ impl RedactApp {
         audit: &std::path::Path,
         blocked: usize,
         check: ExportCheckPlan,
+        key: &std::path::Path,
         result: redact_core::Result<Outcome>,
     ) {
         match result {
             Ok(outcome) => {
                 self.error = None;
-                let key = writing_key(out);
+                // **Die Kennung des Klicks**, nicht eine neu gerechnete. Hier
+                // stand `writing_key(out)`, und die beiden fallen auseinander,
+                // sobald das Ausgabeverzeichnis beim Klick noch nicht existierte
+                // — `check_target` legt es erst im Export-Faden an, und erst
+                // danach lässt sich der Pfad auflösen. `poll_exports` schneidet
+                // an `PendingExport::writing`; wer hier anders rechnet, lässt
+                // „es wurde keine Datei geschrieben" neben der Erfolgsmeldung
+                // stehen.
+                let key = key.to_path_buf();
                 self.note_export_warnings(&key, &file_name_of(out), &outcome.warnings);
                 let prefix = export_status(
                     outcome.drawn_rects,
@@ -2657,6 +2771,7 @@ impl RedactApp {
         if !needs_close_confirmation(
             self.state.has_manual_work(),
             self.export_running(),
+            self.export_check_running(),
             self.close_confirmed,
         ) {
             return;
@@ -2664,7 +2779,10 @@ impl RedactApp {
         // Erst das Schließen zurücknehmen, dann fragen — sonst ist das Fenster
         // weg, bevor jemand antworten konnte.
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        if self.may_abandon_export() && self.may_discard("Das Fenster zu schließen") {
+        if self.may_abandon_export()
+            && self.may_abandon_check()
+            && self.may_discard("Das Fenster zu schließen")
+        {
             self.close_confirmed = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -4623,15 +4741,23 @@ mod tests {
     /// A8: die Rückfrage kommt genau dann, wenn wirklich etwas verloren geht.
     #[test]
     fn closing_only_asks_when_there_is_hand_work_to_lose() {
-        assert!(!needs_close_confirmation(false, false, false));
-        assert!(!needs_close_confirmation(false, false, true));
-        assert!(needs_close_confirmation(true, false, false));
+        assert!(!needs_close_confirmation(false, false, false, false));
+        assert!(!needs_close_confirmation(false, false, false, true));
+        assert!(needs_close_confirmation(true, false, false, false));
         // Und der zweite Grund: ein Export, der noch schreibt.
-        assert!(needs_close_confirmation(false, true, false));
-        assert!(!needs_close_confirmation(false, true, true));
+        assert!(needs_close_confirmation(false, true, false, false));
+        assert!(!needs_close_confirmation(false, true, false, true));
+        // **Der dritte, und der schwerste:** die Nachprüfung läuft noch. Die
+        // Ausgabedatei liegt dann schon auf der Platte, und das Urteil ist ihr
+        // einziger Zeuge — wer jetzt schließt, behält eine geschwärzte Datei,
+        // über die niemand etwas sagt. Ohne diesen Fall war die Frage verkehrt
+        // herum gestellt: gefragt wurde beim Export, wo noch gar keine Datei
+        // entsteht.
+        assert!(needs_close_confirmation(false, false, true, false));
+        assert!(!needs_close_confirmation(false, false, true, true));
         // Nach dem Bestätigen darf nicht noch einmal gefragt werden, sonst
         // ließe sich das Fenster nie schließen.
-        assert!(!needs_close_confirmation(true, false, true));
+        assert!(!needs_close_confirmation(true, false, false, true));
 
         let text = discard_question(3, "Das Fenster zu schließen");
         assert!(text.contains('3'));

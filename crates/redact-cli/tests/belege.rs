@@ -2307,74 +2307,9 @@ fn die_abgeleiteten_zahlen_stimmen() {
 /// Bindung heraus und muss sagen, warum das keine Aussage über das Programm
 /// ist.
 const KEINE_MESSZAHL: &[(&str, &str)] = &[
-    (
-        "`zg_r1_decke::schreibt_material`",
-        "der Name des Tests, der das Material schreibt — keine gemessene Größe",
-    ),
-    (
-        "über `R1_OUT`",
-        "der Name einer Umgebungsvariablen, keine gemessene Größe",
-    ),
-    (
-        "bytegleich zu der jener Messung",
-        "eine Aussage über zwei Dateien, keine Zahl über das Programm",
-    ),
-    (
-        "Die Gegenprüfung hielt dieser Runde vor",
-        "Verweis auf den Abschnitt dieser Datei, keine Messung",
-    ),
-    (
-        "Dabei fiel eine der drei",
-        "„drei“ zählt hier die Zahlen des Abschnitts darüber, nicht eine Messung; \
-         die Zahl selbst ist im Satz über die Testprozess-Messungen gebunden",
-    ),
-    (
-        "Die anderen hielten, beide Male auf die Stelle genau.",
-        "eine Aussage über die Wiederholbarkeit, keine gemessene Größe",
-    ),
-    (
-        "im Abschnitt der Runde, die es gemessen hat",
-        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
-    ),
-    (
-        "Fix-Runde 7: was die Gegenprüfung der Runde 6 noch fand",
-        "Überschrift; die Nummer benennt einen Abschnitt dieser Datei",
-    ),
-    (
-        "Fünf Gegenprüfer lasen die Korrekturen der Runde 6 mit eigenem Material gegen.",
-        "eine Angabe über den Ablauf der Runde, nicht über das Programm",
-    ),
-    (
-        "Die Fix-Runde 6 hat die Messzahlen der Doku an einen Testdatensatz gebunden",
-        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
-    ),
-    (
-        "den die Fix-Runde 6 neu zusagte",
-        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
-    ),
-    (
-        "jetzt fährt `zg_r5_filterketten` jede Zeile durch das Binary",
-        "der Name einer Testdatei, keine gemessene Größe",
-    ),
-    (
-        "obwohl dasselbe Dokument MB als 1024² Byte festlegt",
-        "die Definition der Einheit, keine gemessene Größe",
-    ),
     // --- Fix-Runde 7: Anzahlen von Befunden, Stellen und Vorfaellen -------
     // Keine davon misst das Programm; sie zaehlen, wovon der Abschnitt
     // handelt. Wer sie aendert, aendert keine Zusage ueber das Verhalten.
-    (
-        "**Zwei Wege zur Dienstverweigerung, beide gedeckelt.**",
-        "zaehlt die beiden Befunde dieses Punktes, misst nichts am Programm",
-    ),
-    (
-        "Drei Zähler tragen jetzt zusammen",
-        "zaehlt Konstrukte im Quelltext (drei Konten unter einer Decke), keine Messung",
-    ),
-    (
-        "Fix-Runde 6",
-        "Verweis auf einen Abschnitt dieser Datei, keine Messzahl",
-    ),
     // --- Der Vorspann der Release-Notizen ---------------------------------
     // Er liegt seit zi_e_lage_der_messzahlen IM geprueften Block. Was dort an
     // Zahlen steht, zaehlt oder benennt - gemessen wird nichts davon.
@@ -2383,13 +2318,13 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "die Spanne der Release-Notizen; ein Git-Bereich, keine gemessene Groesse",
     ),
     (
-        "Acht Fix-Runden seit 0.6.0",
+        "Neun Fix-Runden seit 0.6.0",
         "zaehlt die Abschnitte dieser Datei und nennt den Vorgaenger-Tag, keine Messung",
     ),
     (
-        "Zuletzt (Runde 8) fällt ein stilles Leck an der Oberfläche, der Ersatztext über \
-         einem Bild hängt nicht mehr an einer Schätzung, sondern an der Wahrheit über die \
-         Bildpunkte, und zwei Wächter über der Doku halten jetzt die Regel, die sie prüfen",
+        "Zuletzt (Runde 9) fällt ein stilles Leck im Bild, eine Grenze, die eine \
+         gewöhnliche Datei ablehnte, und eine Rückfrage, die beim falschen der beiden Fäden \
+         stand",
         "zaehlt die Befunde der Runde und nennt ihre Nummer, keine gemessene Groesse",
     ),
     (
@@ -2399,6 +2334,119 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "MB heißt 1024 Byte zum Quadrat",
         "die Definition der Einheit, in der gemessen wird; selbst keine Messung",
+    ),
+    // --- Fix-Runde 9 -----------------------------------------------------
+    (
+        "Fix-Runde 9: was die Gegenprüfung der Runde 8 noch fand",
+        "Überschrift; beide Nummern benennen Abschnitte dieser Datei",
+    ),
+    (
+        "Vier Gegenprüfer lasen die Korrekturen der Runde 8 mit eigenem Material gegen.",
+        "eine Angabe über den Ablauf der Runde, nicht über das Programm",
+    ),
+    (
+        "Was die Runde 8 getragen hat",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "Die Runde 8 hat den *Spiegel* daran ausgerichtet",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "auf einer Seite unter zwei Namen unter der Schwärzung",
+        "zaehlt die Namen des Materials, an dem der Befund haengt, keine Messung",
+    ),
+    (
+        "es waren drei Flächenfragen, nicht eine.",
+        "zaehlt die Stellen im Quelltext, die dieselbe Frage stellten, keine Messung",
+    ),
+    (
+        "Jetzt fragen alle drei dasselbe Viereck",
+        "dieselben drei Stellen im Quelltext, keine gemessene Groesse",
+    ),
+    (
+        "Derselbe Klick ergab dann zwei Kennungen",
+        "zaehlt die Kennungen eines Exports — eine Aussage ueber den Code, keine Messung",
+    ),
+    (
+        "standen aber die Zusagen der Runde 8",
+        "Verweis auf den Abschnitt darunter, wo jede dieser Zusagen einzeln steht",
+    ),
+    (
+        "**erste** Anweisung",
+        "zitiert die Zusage des Abschnitts darunter, wo sie eigens begruendet ist",
+    ),
+    (
+        "**einen** Namen",
+        "zitiert die Zusage des Abschnitts darunter, wo sie eigens begruendet ist",
+    ),
+    (
+        "**eine** Stelle",
+        "zitiert die Zusage des Abschnitts darunter, wo sie eigens begruendet ist",
+    ),
+    (
+        "**Zwei Helfer der Doku-Wächter waren zu grob.**",
+        "zaehlt die Befunde dieses Punktes, keine gemessene Groesse am Programm",
+    ),
+    (
+        "Rückgabewert 3. Dieselbe Datei",
+        "zitiert einen Beispielsatz, an dem die Satztrennung vorgefuehrt wird",
+    ),
+    (
+        "weil vor dem Punkt eine Ziffer stand; zwei Sätze verschmolzen",
+        "zaehlt die Teile dieses Beispielsatzes, keine gemessene Groesse",
+    ),
+    (
+        "**Eine Lockerung aus der Runde 8, zurückgenommen.**",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "hatte sechs neue Merkmale bekommen",
+        "zaehlt Eintraege in einer Liste des Testbestands, keine Messung am Programm",
+    ),
+    (
+        "sagte an zwei Stellen weiter, die Prüfung hänge",
+        "zaehlt Stellen im Quelltext, keine gemessene Groesse",
+    ),
+    (
+        "der Abschnitt der Fix-Runde 3 sagte im Präsens",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "Der Schritt ist in der Runde 8 getan.",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "**Drei Belegdateien der Prüfer hielten Kopien der Helfer, die sie prüfen.**",
+        "zaehlt Dateien des Testbestands, keine gemessene Groesse am Programm",
+    ),
+    (
+        "dieses Projekt seit der Runde 3 arbeitet",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "die Ablehnung eines **zweiten** Exports derselben Datei",
+        "eine Aussage ueber das Verhalten der Oberflaeche, keine gemessene Groesse; geprueft von zh2_c_ein_klick_mitten_im_bild_sieht_den_fertigen_export",
+    ),
+    (
+        "Die drei Punkte darunter sind die **Fehler** dieses Umbaus",
+        "zaehlt die Listenpunkte darunter, keine gemessene Groesse",
+    ),
+    (
+        "als **erste** Anweisung von `export_to`",
+        "eine Aussage ueber die Reihenfolge zweier Anweisungen, keine gemessene Groesse; geprueft von zh2_c_ein_klick_mitten_im_bild_sieht_den_fertigen_export",
+    ),
+    (
+        "Jetzt entscheidet **eine** Flächenfrage",
+        "eine Aussage ueber den Bau des Bildlaufs, keine gemessene Groesse; geprueft von zm_d_bildwahrheit_gegengelesen und zk_b_bildpunkt_ist_die_wahrheit",
+    ),
+    (
+        "`repoint_page` setzt genau **einen** Namen",
+        "eine Aussage ueber das Verhalten einer Funktion, keine gemessene Groesse; geprueft von zm_a_zwei_namen_ein_bild",
+    ),
+    (
+        "Jetzt beantwortet **eine** Stelle die Frage",
+        "eine Aussage ueber den Bau des Bildlaufs, keine gemessene Groesse; geprueft von zl_b_pendel_beide_richtungen und zm_a_zwei_namen_ein_bild",
     ),
     // --- Fix-Runde 8 -----------------------------------------------------
     (
@@ -2526,12 +2574,18 @@ fn kern(wort: &str) -> (usize, usize) {
 /// Block sei **keine** Zahl unbedeckt. Deshalb steht die Reihe jetzt vollständig
 /// da — bis „neunzehn“, die Zehner, „hundert“ und „tausend“ — und die
 /// `…mal`-Formen entstehen aus derselben Reihe statt aus einer zweiten Liste.
-fn traegt_zahl(wort: &str) -> bool {
+fn traegt_zahl(wort: &str, ausgezeichnet: bool) -> bool {
     // Kardinalzahlen. **Nicht** die Ordnungszahlen („der vierte“): die stehen
     // hier für einen Platz in einer Liste und nicht für eine Messung. „eins“
     // fehlt mit Absicht — „ein“ und „eine“ sind der unbestimmte Artikel und
     // stünden in jedem zweiten Satz.
-    const ZAHLWORTE: [&str; 24] = [
+    const ZAHLWORTE: [&str; 26] = [
+        // „null“ und „eins“ sind nie der unbestimmte Artikel — anders als
+        // „ein“/„eine“, die deshalb weiter fehlen. „Rückgabewert null“ ist eine
+        // Zusage wie „Rückgabewert 3“ zwei Absätze weiter, und sie stand
+        // ungebunden da.
+        "null",
+        "eins",
         "zwei",
         "drei",
         "vier",
@@ -2572,14 +2626,99 @@ fn traegt_zahl(wort: &str) -> bool {
         return true;
     }
     let klein = kern.to_lowercase();
-    // `…mal` aus derselben Reihe: „siebenmal“, nicht „siebenmal“ als eigener
-    // Eintrag. „siebenmal“ und „sieben“ unterscheiden sich nur um das Suffix.
+    // `…mal` aus derselben Reihe: „siebenmal“ ist „sieben“ plus Suffix und
+    // braucht keinen eigenen Eintrag.
     let ohne_mal = klein.strip_suffix("mal").unwrap_or(&klein);
-    ZAHLWORTE.contains(&ohne_mal)
-        || WEITERE.contains(&ohne_mal)
-        || WEITERE
-            .iter()
-            .any(|w| ohne_mal.len() > w.len() && ohne_mal.ends_with(w))
+    if ZAHLWORTE.contains(&ohne_mal) || WEITERE.contains(&ohne_mal) {
+        return true;
+    }
+    // Zusammengesetzt — aber nur, wenn **davor ein Zahlwort steht**.
+    // „zweihundert“ ja, „Jahrhundert“ nein: die Endung allein hielt ein
+    // gewöhnliches Wort für eine Zahl. Das machte den Wächter strenger und nicht
+    // schwächer, war aber trotzdem falsch — ein falscher Treffer verlangt
+    // irgendwann eine Ausnahme, und die deckt dann etwas anderes mit.
+    if WEITERE.iter().any(|w| {
+        ohne_mal.len() > w.len() && ohne_mal.ends_with(w) && {
+            let vorn = &ohne_mal[..ohne_mal.len() - w.len()];
+            ZAHLWORTE.contains(&vorn) || WEITERE.contains(&vorn) || vorn == "ein"
+        }
+    }) {
+        return true;
+    }
+    // **Und die Zusage in Fettschrift.** Ordnungszahlen und „ein/eine/einen“
+    // stehen mit Absicht nicht in der Reihe: im Fließtext sind sie ein Platz in
+    // einer Liste oder der unbestimmte Artikel. Steht so ein Wort aber in
+    // `**…**`, ist es keine Floskel, sondern die Zusage des Satzes — „als
+    // **erste** Anweisung“, „genau **einen** Namen“, „**eine** Stelle“. Genau
+    // dort standen drei der vier Sicherheitspunkte der Fix-Runde 8, und jede
+    // dieser Zusagen ließ sich umdrehen, ohne dass ein Test es merkte. Das
+    // Sternchen unterscheidet den Artikel von der Behauptung, und es kostet
+    // keine Ausnahme.
+    const ORDNUNGSSTAEMME: [&str; 12] = [
+        "erst", "zweit", "dritt", "viert", "fünft", "sechst", "siebt", "acht", "neunt", "zehnt",
+        "elft", "zwölft",
+    ];
+    const ARTIKELZAHLEN: [&str; 6] = ["ein", "eine", "einen", "einem", "einer", "eines"];
+    if ausgezeichnet {
+        if ARTIKELZAHLEN.contains(&ohne_mal) {
+            return true;
+        }
+        if ORDNUNGSSTAEMME.iter().any(|stamm| {
+            ohne_mal
+                .strip_prefix(stamm)
+                .is_some_and(|rest| matches!(rest, "e" | "er" | "en" | "es" | "em"))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Bis zu so vielen Wörtern gilt ein `**…**`-Lauf als **Betonung**; darüber als
+/// Überschrift.
+///
+/// Drei, weil die Zusagen, um die es geht, so aussehen: „als **erste**
+/// Anweisung", „genau **einen** Namen", „**eine** Stelle", „eines **zweiten**
+/// Exports". Die Überschriften der Listenpunkte sind Sätze.
+const FETT_WORTE: usize = 3;
+
+/// Welche Bytes des Textes stehen in einem `**…**`-Lauf?
+///
+/// Gebraucht von [`traegt_zahl`]: ein Zahlwort in Fettschrift ist keine
+/// Floskel, sondern die Zusage des Satzes. Ein **offener** Lauf (ein `**`, das
+/// keinen Partner findet) zeichnet nichts aus — sonst gälte der Rest des
+/// Blocks als fett.
+///
+/// Und ein **langer** Lauf zählt ebenfalls nicht. Die Listenpunkte dieser Datei
+/// beginnen mit einer fetten Überschrift („**Eine Kennung je Export, und zwar
+/// …**"), und darin ist „Eine" der Artikel und keine Behauptung über eine
+/// Anzahl. Betonung ist kurz: bis zu [`FETT_WORTE`] Wörter. Wer eine Anzahl in
+/// einer Überschrift nennt, nennt sie im Satz darunter noch einmal — und dort
+/// trägt sie.
+fn auszeichnung(text: &str) -> Vec<bool> {
+    let bytes = text.as_bytes();
+    let mut fett = vec![false; bytes.len()];
+    let mut offen: Option<usize> = None;
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'*' && bytes[i + 1] == b'*' {
+            match offen.take() {
+                Some(anfang) => {
+                    let inhalt = &text[anfang + 2..i];
+                    if inhalt.split_whitespace().count() <= FETT_WORTE {
+                        for b in fett.iter_mut().take(i + 2).skip(anfang) {
+                            *b = true;
+                        }
+                    }
+                }
+                None => offen = Some(i),
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    fett
 }
 
 /// **Die Bindung, andersherum.** Keine Zahl im Block der beiden letzten
@@ -2609,13 +2748,22 @@ fn jede_zahl_der_letzten_runden_ist_gebunden() {
         }
     }
 
+    // Welche Stellen des Blocks stehen in `**…**`? Ein Auszeichnungslauf kann
+    // mehrere Wörter umfassen („genau **einen** Namen" ebenso wie „**erste**"),
+    // deshalb wird er über den Block gerechnet und nicht am einzelnen Wort
+    // erkannt. Ein Lauf endet spätestens am Absatz.
+    let fett = auszeichnung(&block);
+
     let mut zahlen = 0usize;
     let mut offen: Vec<String> = Vec::new();
     let mut pos = 0usize;
     for wort in block.split(' ') {
         let von = pos;
         pos += wort.len() + 1;
-        if !traegt_zahl(wort) {
+        let ausgezeichnet = fett[von..(von + wort.len()).min(fett.len())]
+            .iter()
+            .any(|b| *b);
+        if !traegt_zahl(wort, ausgezeichnet) {
             continue;
         }
         zahlen += 1;
@@ -2637,9 +2785,30 @@ fn jede_zahl_der_letzten_runden_ist_gebunden() {
         offen.push(format!("„{wort}“ in: …{}…", &block[links..rechts]));
     }
 
+    // **Greift der Schnitt?** Hier stand `zahlen >= 100` — eine Zahl als
+    // Ersatz für die Frage. Sie hielt, solange jede Runde zahlenreich war, und
+    // schlug an, sobald eine Runde ihre Befunde ohne Messzahlen beschreiben
+    // konnte: ein Fehlalarm, der den Wächter zwingt, Zahlen zu erfinden. Was
+    // wirklich gemeint ist, lässt sich direkt sagen — der Block trägt den
+    // Vorspann und **genau** die beiden jüngsten Fix-Runden.
+    let ueberschriften: Vec<&str> = block
+        .match_indices("### Fix-Runde ")
+        .map(|(i, _)| block[i..].split(':').next().unwrap_or_default())
+        .collect();
     assert!(
-        zahlen >= 100,
-        "nur {zahlen} Zahl(en) im Block gefunden — der Schnitt greift nicht mehr"
+        block.contains("## Unveröffentlicht"),
+        "der Vorspann liegt nicht im Block — der Schnitt greift nicht mehr"
+    );
+    assert_eq!(
+        ueberschriften.len(),
+        2,
+        "der Block trägt {} Fix-Runden statt zwei: {ueberschriften:?}",
+        ueberschriften.len()
+    );
+    assert!(
+        zahlen >= 20,
+        "nur {zahlen} Zahl(en) im Block — für zwei Fix-Runden und einen \
+         Vorspann ist das zu wenig, da stimmt etwas mit dem Text nicht"
     );
     assert!(
         offen.is_empty(),

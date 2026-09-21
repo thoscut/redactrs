@@ -212,25 +212,19 @@ fn der_vorspann_der_release_notizen_liegt_im_geprueften_block() {
         vor.chars().any(|c| c.is_ascii_digit()),
         "der Vorspann trägt keine Ziffer mehr — dann prüft dieser Test nichts: {vor}"
     );
-    // **Abgeleitet, nicht abgeschrieben.** Hier stand „Sieben Fix-Runden“ als
+    // **Abgeleitet, nicht abgeschrieben.** Hier stand „Sieben Fix-Runden" als
     // Literal — und wurde in der Runde 8 rot, weil der Vorspann richtig
     // weiterzählte. Ein Literal prüft, dass sich nichts ändert; gefragt ist,
     // dass der Vorspann **mitzählt**.
     //
-    // Gezählt wird nicht die Zahl der Überschriften, sondern die **höchste
-    // Rundennummer**: die Runden 1 und 2 sind älter als diese Benennung und
-    // stehen unter eigenen Überschriften. Sechs Überschriften, acht Runden —
-    // wer die Überschriften zählt, zählt am Vorspann vorbei.
-    let runden = text
-        .match_indices("\n### Fix-Runde ")
-        .filter_map(|(i, m)| {
-            text[i + m.len()..]
-                .split(|c: char| !c.is_ascii_digit())
-                .next()
-                .and_then(|z| z.parse::<usize>().ok())
-        })
-        .max()
-        .expect("mindestens eine numerierte Fix-Runde");
+    // Gezählt werden die **numerierten Überschriften plus zwei**: die Runden 1
+    // und 2 sind älter als diese Benennung und stehen unter eigenen
+    // Überschriften. Hier stand die **höchste** Rundennummer, was heute
+    // dasselbe ergibt — aber nur, solange die Zählung lückenlos ist. Springt
+    // sie (`10, 8, 7, 6`), sagt `max` zehn, wo sechs Überschriften stehen, und
+    // verlangt vom Vorspann eine falsche Zahl. `max` ersetzt kein Zählen
+    // (Gegenprüfung 9, `zm_c_bindungsmaschine`).
+    let runden = text.matches("\n### Fix-Runde ").count() + 2;
     let wort = [
         "", "Eine", "Zwei", "Drei", "Vier", "Fünf", "Sechs", "Sieben", "Acht", "Neun", "Zehn",
         "Elf", "Zwölf",

@@ -99,11 +99,11 @@ fn das_orakel_findet_die_klartext_bildpunkte_in_der_eingabe() {
     let mut doc = Document::with_version("1.5");
     let bild_id = doc.add_object(Object::Stream(bild_mit_klartext_bildpunkten()));
     let res = doc.add_object(dictionary! { "XObject" => dictionary! { "Im0" => bild_id } });
-    let (mut doc, _) = seiten(
+    let (doc, _) = seiten(
         doc,
         vec![(res, b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec())],
     );
-    let bytes = save_to_bytes(&mut doc).expect("Speichern");
+    let bytes = save_to_bytes(&doc).expect("Speichern");
     assert!(
         !leaks(&bytes, GEHEIM).is_empty(),
         "Vorbedingung: die Bildpunkte sind für das Orakel sichtbar"
@@ -129,10 +129,7 @@ fn das_geteilte_bild_auf_beiden_seiten_geschwaerzt_laesst_keine_waise() {
     let inhalt = b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec();
     let (mut doc, _) = seiten(doc, vec![(res1, inhalt.clone()), (res2, inhalt)]);
     let zone = Rect::new(40.0, 590.0, 160.0, 710.0);
-    let (report, out) = schwaerze(
-        &mut doc,
-        &[schwaerzung(0, zone), schwaerzung(1, zone)],
-    );
+    let (report, out) = schwaerze(&mut doc, &[schwaerzung(0, zone), schwaerzung(1, zone)]);
     assert_eq!(
         report.copied_images, 2,
         "Vorbedingung: zwei Kopien, das Original bleibt unberührt — {:?}",
@@ -186,7 +183,10 @@ fn geteiltes_formular_ueberschreibt_und_warnt_fuer_beide_seiten() {
         &mut doc,
         &[schwaerzung(0, Rect::new(40.0, 590.0, 160.0, 710.0))],
     );
-    assert_eq!(report.copied_images, 0, "nicht kopiert, sondern überschrieben");
+    assert_eq!(
+        report.copied_images, 0,
+        "nicht kopiert, sondern überschrieben"
+    );
     assert!(
         report
             .warnings

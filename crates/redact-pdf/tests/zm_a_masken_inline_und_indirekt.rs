@@ -147,7 +147,10 @@ fn indirekte_bildmasse_werden_geschwaerzt() {
         .with_compression(false),
     ));
     let res = doc.add_object(dictionary! { "XObject" => dictionary! { "Im0" => bild_id } });
-    let (mut doc, _) = seiten(doc, vec![(res, b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec())]);
+    let (mut doc, _) = seiten(
+        doc,
+        vec![(res, b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec())],
+    );
     let (report, out) = schwaerze(
         &mut doc,
         &[schwaerzung(0, Rect::new(63.0, 613.0, 74.0, 637.0))],
@@ -252,7 +255,10 @@ fn stencil_malt_unter_der_zone_nicht_mehr() {
     let mut doc = Document::with_version("1.5");
     let bild_id = doc.add_object(Object::Stream(stencil(false, None)));
     let res = doc.add_object(dictionary! { "XObject" => dictionary! { "Im0" => bild_id } });
-    let (mut doc, _) = seiten(doc, vec![(res, b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec())]);
+    let (mut doc, _) = seiten(
+        doc,
+        vec![(res, b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec())],
+    );
     let (report, out) = schwaerze(
         &mut doc,
         &[schwaerzung(0, Rect::new(63.0, 613.0, 74.0, 637.0))],
@@ -284,7 +290,10 @@ fn invertierter_stencil_behaelt_seine_form() {
         Some(vec![Object::Integer(1), Object::Integer(0)]),
     )));
     let res = doc.add_object(dictionary! { "XObject" => dictionary! { "Im0" => bild_id } });
-    let (mut doc, _) = seiten(doc, vec![(res, b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec())]);
+    let (mut doc, _) = seiten(
+        doc,
+        vec![(res, b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec())],
+    );
     let (report, out) = schwaerze(
         &mut doc,
         &[schwaerzung(0, Rect::new(63.0, 613.0, 74.0, 637.0))],
@@ -339,9 +348,15 @@ fn unbrauchbare_maske_neben_der_zone_bricht_nicht_ab() {
     let mut doc = Document::with_version("1.5");
     let bild_id = doc.add_object(Object::Stream(bild_mit_unbrauchbarer_maske("Scan")));
     let res = doc.add_object(dictionary! { "XObject" => dictionary! { "Im0" => bild_id } });
-    let (mut doc, _) = seiten(doc, vec![(res, b"q 100 0 0 100 400 600 cm /Im0 Do Q\n".to_vec())]);
+    let (mut doc, _) = seiten(
+        doc,
+        vec![(res, b"q 100 0 0 100 400 600 cm /Im0 Do Q\n".to_vec())],
+    );
     let report = PdfRedactor::with_padding(0.0)
-        .apply_with_report(&mut doc, &[schwaerzung(0, Rect::new(40.0, 590.0, 160.0, 710.0))])
+        .apply_with_report(
+            &mut doc,
+            &[schwaerzung(0, Rect::new(40.0, 590.0, 160.0, 710.0))],
+        )
         .expect("der Lauf darf nicht an einem Bild scheitern, das die Schwärzung nicht berührt");
     assert_eq!(report.redacted_images, 0, "{:?}", report.warnings);
 }
@@ -356,7 +371,10 @@ fn unbrauchbare_maske_unter_der_zone_warnt_und_raeumt_den_ersatztext() {
     let mut doc = Document::with_version("1.5");
     let bild_id = doc.add_object(Object::Stream(bild_mit_unbrauchbarer_maske("Scan")));
     let res = doc.add_object(dictionary! { "XObject" => dictionary! { "Im0" => bild_id } });
-    let (mut doc, _) = seiten(doc, vec![(res, b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec())]);
+    let (mut doc, _) = seiten(
+        doc,
+        vec![(res, b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec())],
+    );
     let (report, out) = schwaerze(
         &mut doc,
         &[schwaerzung(0, Rect::new(63.0, 613.0, 74.0, 637.0))],

@@ -37,8 +37,9 @@
 //! `## Unveröffentlicht` — es fragt aber nur nach Sätzen, die von **heute**
 //! sprechen, und eine Gegenwartszahl muss heute messbar sein. Dieser Test
 //! fragt nach *jeder* Zeit- und Speicherzahl, auch nach denen der Runden 3
-//! bis 6. Über den ganzen Abschnitt gelesen melden 26 Sätze keinen Weg —
-//! gemessen in der Fix-Runde 8 mit genau diesem Schnitt. Das ist ein Befund
+//! bis 6. Über den ganzen Abschnitt gelesen melden **25** Sätze keinen Weg —
+//! gemessen in der Fix-Runde 9 mit genau diesem Schnitt, und festgehalten von
+//! `zm_d_wege_im_ganzen_abschnitt`, das in beide Richtungen rot wird. Das ist ein Befund
 //! und keine Nachlässigkeit dieses Tests: die Läufe hinter jenen Zahlen
 //! liegen Runden zurück, mancher Stand ist nicht mehr auszuchecken, und die
 //! Regel des Vorspanns ist jünger als sie. Er steht im Aufgabenregister und
@@ -101,11 +102,21 @@ fn saetze(absatz: &str) -> Vec<String> {
             let beginnt_neu = bytes
                 .get(i + 2)
                 .is_some_and(|c| c.is_uppercase() || "„»*`(".contains(*c));
-            // Kein Schnitt hinter einer Ziffer (`0. 6`) und keiner hinter
-            // einem einzelnen Buchstaben (`z. B.`).
-            let davor_ziffer = i > 0 && bytes[i - 1].is_ascii_digit();
-            let davor_einzeln = i >= 2 && !bytes[i - 2].is_alphanumeric();
-            if beginnt_neu && !davor_ziffer && !davor_einzeln {
+            // Kein Schnitt hinter einer Abkürzung aus **einem Buchstaben**
+            // („z. B.“, „d. h.“, „u. a.“).
+            //
+            // Hier stand zusätzlich „keiner hinter einer Ziffer" und die
+            // Abkürzungsfrage ohne die Prüfung, ob davor ein BUCHSTABE steht.
+            // Damit fiel der Schnitt auch hinter „… beide mit Rückgabewert 3.
+            // Dieselbe Datei hat neun Objekte …" aus: zwei Sätze verschmolzen,
+            // und ein Weg, der im ersten stand, deckte eine Zahl im zweiten.
+            // Sieben solche Stellen hatte der Block. Die Ziffernregel ist
+            // ersatzlos weg — `beginnt_neu` verlangt ohnehin einen
+            // Großbuchstaben, eine Anführung oder eine Auszeichnung, und
+            // `0.6.0` trägt gar kein „. ".
+            let davor_abkuerzung =
+                i >= 2 && bytes[i - 1].is_alphabetic() && !bytes[i - 2].is_alphanumeric();
+            if beginnt_neu && !davor_abkuerzung {
                 aus.push(bytes[anfang..=i].iter().collect::<String>());
                 anfang = i + 2;
             }
@@ -185,28 +196,24 @@ fn traegt_mess_groesse(satz: &str) -> Vec<String> {
 ///   dasteht. Stünde die Binary-Frage davor, machte ein „am Binary“ in einem
 ///   Nebensatz die Prüfung des Profils überflüssig.
 fn weg(satz: &str) -> Option<&'static str> {
-    const BINARY: [&str; 8] = [
+    // **Kürzer als in der Fix-Runde 8, und mit Grund.** Dort kamen sechs
+    // Merkmale hinzu: eine Kommandozeile im Satz, `RUSAGE_CHILDREN`, der
+    // `VmHWM` und die Spitze eines Kindprozesses, und der Name eines
+    // `_mess_`-Tests. **Keines** kam im geprüften Block vor — eine Lockerung,
+    // die kein Lauf deckt, ist ein Scheintest. Und eines war zusätzlich falsch:
+    // eine Kommandozeile zu **erwähnen** ist nicht dasselbe, wie die Zahl von
+    // dort zu haben; der Gegenbeweis steht als Probe in
+    // [`die_merkmale_des_weges_sind_einzeln_belegt`].
+    //
+    // Sie kommen zurück, wenn der Schnitt auf den ganzen Abschnitt geweitet
+    // wird (Register #53) — dann **mit** ihren Fällen.
+    const BINARY: [&str; 4] = [
         "gebauten Binary",
         "gebauten Binaries",
         "target/release/redact-rs",
         "am Binary",
-        // Eine Kommandozeile ist ein Lauf des Binaries, und die Spitze eines
-        // KINDprozesses kann nur ein Kindprozess geliefert haben.
-        "`redact-rs ",
-        "RUSAGE_CHILDREN",
-        "VmHWM` des Kindprozesses",
-        "Spitze des Kindprozesses",
     ];
-    // Ein benannter Messtest ist ein aufgezeichneter Lauf **im Testprozess** —
-    // das Profil verlangt der zweite Weg zusätzlich, wie bei jedem anderen
-    // Merkmal dieser Liste.
-    const TESTPROZESS: [&str; 5] = [
-        "Testprozess",
-        "im Testlauf",
-        "eigener Prozess",
-        "_mess_",
-        "::mess_",
-    ];
+    const TESTPROZESS: [&str; 3] = ["Testprozess", "im Testlauf", "eigener Prozess"];
     const ALTSTAND: [&str; 6] = [
         "Stand `",
         "ungedeckelt",
@@ -232,6 +239,70 @@ fn weg(satz: &str) -> Option<&'static str> {
     None
 }
 
+/// **Jedes Merkmal einzeln, an einem gebauten Satz.**
+///
+/// Die Merkmalslisten in [`weg`] sind das, woran dieser Test hängt — und sie
+/// waren eine Runde lang ungeprüft: keines der in der Fix-Runde 8
+/// hinzugekommenen Merkmale kam im Block überhaupt vor, und ein Lauf, der
+/// nichts trifft, deckt nichts. Nimmt man sie weg, bleibt alles grün; das ist
+/// die Bauart eines Scheintests. Hier stehen sie einzeln, mit dem Satz, der
+/// sie auslöst, und mit dem, der sie **nicht** auslösen darf.
+///
+/// Mutation, die ihn rot macht: ein Merkmal aus `BINARY` oder `TESTPROZESS`
+/// streichen — oder „`redact-rs " wieder aufnehmen.
+#[test]
+fn die_merkmale_des_weges_sind_einzeln_belegt() {
+    // (Satz, erwartetes Urteil)
+    let proben: [(&str, Option<&str>); 7] = [
+        ("Gemessen am gebauten Binary: 0,15 s.", Some("Binary")),
+        (
+            "Aus einem Lauf des gebauten Binaries: 0,15 s.",
+            Some("Binary"),
+        ),
+        ("`target/release/redact-rs` braucht 0,15 s.", Some("Binary")),
+        (
+            "Gemessen im Testprozess (Release): 0,15 s.",
+            Some("Testprozess + Profil"),
+        ),
+        (
+            "Gemessen im Testprozess (Release), Lauf \
+             `zd_orakel_budget::zd_mess_die_alte_suche_je_muster`: 0,163 s.",
+            Some("Testprozess + Profil"),
+        ),
+        // **Der Gegenbeweis.** Der Name eines Messtests allein ist kein Weg: er
+        // sagt nicht, wo gemessen wurde. „Testprozess“ sagt es, und dann
+        // verlangt der zweite Weg zusätzlich das Profil.
+        (
+            "Gemessen in `zd_mess_die_alte_suche_je_muster`: 0,163 s.",
+            None,
+        ),
+        // **Der Gegenbeweis, der diese Liste gekostet hat.** Der Satz erwähnt
+        // eine Kommandozeile und sagt im selben Atemzug, dass die Zahl NICHT
+        // von dort kommt. Galt „`redact-rs " als Merkmal, ging er als Zahl des
+        // gebauten Binaries durch — das stille Umetikett, das der Vorspann
+        // ausschließt.
+        (
+            "Gemessen an der Oberfläche: die Statuszeile entsteht heute in 0,42 s, \
+             und die Kommandozeile `redact-rs --gui` gibt es dafür nicht.",
+            None,
+        ),
+    ];
+
+    for (satz, erwartet) in proben {
+        assert_eq!(
+            weg(satz),
+            erwartet,
+            "der Weg dieses Satzes wird falsch gelesen: „{satz}“"
+        );
+        // Und die Probe prüft wirklich etwas: jeder dieser Sätze trägt eine
+        // Zeit- oder Speicherzahl, fällt also überhaupt unter die Regel.
+        assert!(
+            !traegt_mess_groesse(satz).is_empty(),
+            "die Probe trägt gar keine Messgröße: „{satz}“"
+        );
+    }
+}
+
 /// **Die Regel des Vorspanns, angewandt.** Jeder Satz des Blocks, der eine
 /// Zeit- oder Speicherzahl trägt, nennt seinen Weg.
 #[test]
@@ -253,11 +324,15 @@ fn jede_zeit_und_speicherzahl_nennt_ihren_weg() {
         }
     }
 
-    assert!(
-        mit_weg + ohne_weg.len() >= 8,
-        "nur {} Satz/Sätze mit einer Zeit- oder Speicherzahl gefunden — der \
-         Schnitt oder die Satztrennung greift nicht mehr",
-        mit_weg + ohne_weg.len()
+    // **Greift der Schnitt?** Hier stand `>= 8` — eine Zahl als Ersatz für die
+    // Frage, und sie schlug an, sobald eine Runde ihre Befunde ohne Zeit- und
+    // Speicherzahlen beschreiben konnte. Das ist ein Fehlalarm, der den Wächter
+    // zwingt, Zahlen zu erfinden. Gefragt ist, ob der Schnitt **die beiden
+    // jüngsten Fix-Runden** trägt — und das lässt sich direkt sagen.
+    let runden = block.matches("### Fix-Runde ").count();
+    assert_eq!(
+        runden, 2,
+        "der Block trägt {runden} Fix-Runden statt zwei — der Schnitt greift nicht mehr"
     );
 
     assert!(

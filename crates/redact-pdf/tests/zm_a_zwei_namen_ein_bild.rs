@@ -203,8 +203,8 @@ fn zweiter_name_desselben_bildes_zeigt_ungeschwaerzte_bildpunkte() {
     let res2 = doc.add_object(dictionary! {
         "XObject" => dictionary! { "Im0" => bild_id },
     });
-    let inhalt1 = b"q 100 0 0 100 50 600 cm /Im0 Do Q\nq 100 0 0 100 400 600 cm /Im1 Do Q\n"
-        .to_vec();
+    let inhalt1 =
+        b"q 100 0 0 100 50 600 cm /Im0 Do Q\nq 100 0 0 100 400 600 cm /Im1 Do Q\n".to_vec();
     let inhalt2 = b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec();
     let (mut doc, ids) = seiten(doc, vec![(res1, inhalt1), (res2, inhalt2)]);
 
@@ -219,7 +219,7 @@ fn zweiter_name_desselben_bildes_zeigt_ungeschwaerzte_bildpunkte() {
         "Vorbedingung: beide Platzierungen liegen unter der Schwärzung"
     );
     // Vorbedingung: vor dem Lauf sind die Klartext-Bildpunkte sichtbar.
-    let vorher = save_to_bytes(&mut doc.clone()).expect("Speichern");
+    let vorher = save_to_bytes(&doc).expect("Speichern");
     assert!(
         sichtbare_bildpunkte(&vorher, 0, zone).len() >= 72,
         "Vorbedingung: beide Bilder zeigen ihre 36 Bildpunkte"
@@ -242,10 +242,8 @@ fn zweiter_name_desselben_bildes_zeigt_ungeschwaerzte_bildpunkte() {
         .chunks(3)
         .map(|c| [c[0], c[1], c[2], 255])
         .collect();
-    let stehen_geblieben: Vec<&[u8; 4]> = sichtbar
-        .iter()
-        .filter(|p| klartext.contains(p))
-        .collect();
+    let stehen_geblieben: Vec<&[u8; 4]> =
+        sichtbar.iter().filter(|p| klartext.contains(p)).collect();
     assert!(
         stehen_geblieben.is_empty(),
         "Seite 1 zeigt innerhalb der Schwärzung noch {} ungeschwärzte \
@@ -307,8 +305,7 @@ fn formularname_und_seitenname_desselben_bildes_eine_kopie_reicht_nicht() {
     let res2 = doc.add_object(dictionary! {
         "XObject" => dictionary! { "Im0" => bild_id },
     });
-    let inhalt1 =
-        b"q 100 0 0 100 50 600 cm /Im0 Do Q\nq 1 0 0 1 400 600 cm /Fm0 Do Q\n".to_vec();
+    let inhalt1 = b"q 100 0 0 100 50 600 cm /Im0 Do Q\nq 1 0 0 1 400 600 cm /Fm0 Do Q\n".to_vec();
     let inhalt2 = b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec();
     let (mut doc, ids) = seiten(doc, vec![(res1, inhalt1), (res2, inhalt2)]);
 

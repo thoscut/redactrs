@@ -475,9 +475,9 @@ fn zh_c_ein_export_der_auf_dem_thread_stirbt_schweigt_nicht() {
 fn zh_c_ein_laufender_export_fragt_vor_dem_schliessen() {
     // Die Entscheidung: ohne Handarbeit, aber mit laufendem Export wird
     // gefragt — und nach dem Bestätigen nicht noch einmal.
-    assert!(needs_close_confirmation(false, true, false));
-    assert!(!needs_close_confirmation(false, false, false));
-    assert!(!needs_close_confirmation(false, true, true));
+    assert!(needs_close_confirmation(false, true, false, false));
+    assert!(!needs_close_confirmation(false, false, false, false));
+    assert!(!needs_close_confirmation(false, true, false, true));
 
     let dir = tmp("schliessen");
     let out = dir.join("out.pdf");

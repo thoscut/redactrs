@@ -244,7 +244,10 @@ fn determinante_null_faellt_nicht_und_behauptet_nichts() {
         Object::Stream(s) => s.content.clone(),
         other => panic!("kein Strom: {other:?}"),
     };
-    let (report, _out) = schwaerze(&mut doc, &[schwaerzung(Rect::new(40.0, 590.0, 160.0, 710.0))]);
+    let (report, _out) = schwaerze(
+        &mut doc,
+        &[schwaerzung(Rect::new(40.0, 590.0, 160.0, 710.0))],
+    );
     assert_eq!(
         report.redacted_images, 0,
         "nichts gefallen, nichts behauptet — {:?}",
@@ -272,10 +275,12 @@ fn unendliche_ctm_bricht_nicht_ab() {
         res,
         b"q 1e200 0 0 1e200 0 0 cm 1e200 0 0 1e200 0 0 cm /Im0 Do Q\n".to_vec(),
     );
-    let ergebnis = PdfRedactor::with_padding(0.0)
-        .apply_with_report(&mut doc, &[schwaerzung(Rect::new(40.0, 590.0, 160.0, 710.0))]);
+    let ergebnis = PdfRedactor::with_padding(0.0).apply_with_report(
+        &mut doc,
+        &[schwaerzung(Rect::new(40.0, 590.0, 160.0, 710.0))],
+    );
     let report = ergebnis.expect("der Lauf darf an einer ∞-CTM nicht scheitern");
-    let _ = save_to_bytes(&mut doc).expect("und die Ausgabedatei entsteht");
+    let _ = save_to_bytes(&doc).expect("und die Ausgabedatei entsteht");
     // Welcher Ausgang es ist, sagt der Test nicht: eine Fläche, die kein
     // Betrachter zeichnet, darf gefüllt oder ungefüllt bleiben. Gefragt ist,
     // dass nichts panikt und nichts behauptet wird, was nicht geschah.
@@ -301,9 +306,12 @@ fn nan_in_der_ctm_bricht_nicht_ab() {
         b"q 1e200 1e200 1e200 1e200 0 0 cm 1e200 0 0 0 0 0 cm /Im0 Do Q\n".to_vec(),
     );
     let report = PdfRedactor::with_padding(0.0)
-        .apply_with_report(&mut doc, &[schwaerzung(Rect::new(40.0, 590.0, 160.0, 710.0))])
+        .apply_with_report(
+            &mut doc,
+            &[schwaerzung(Rect::new(40.0, 590.0, 160.0, 710.0))],
+        )
         .expect("der Lauf darf an einer NaN-CTM nicht scheitern");
-    let _ = save_to_bytes(&mut doc).expect("und die Ausgabedatei entsteht");
+    let _ = save_to_bytes(&doc).expect("und die Ausgabedatei entsteht");
     assert!(report.redacted_images <= 1);
 }
 
@@ -317,15 +325,21 @@ fn nan_in_der_ctm_bricht_nicht_ab() {
 #[test]
 fn bild_neben_der_zone_verliert_nichts() {
     let (mut doc, bild_id) = seite_mit_bild("100 0 0 100 400 600", "Organigramm");
-    let (report, out) = schwaerze(&mut doc, &[schwaerzung(Rect::new(40.0, 590.0, 160.0, 710.0))]);
+    let (report, out) = schwaerze(
+        &mut doc,
+        &[schwaerzung(Rect::new(40.0, 590.0, 160.0, 710.0))],
+    );
     assert_eq!(report.redacted_images, 0, "{:?}", report.warnings);
     assert_eq!(report.image_alt_texts_cleared, 0);
     assert!(gefallene(&out).is_empty(), "kein Bildpunkt fällt");
     let aus = load_from_bytes(&out).expect("Ausgabe lädt");
     let alt = match aus.get_object(bild_id).expect("Bild") {
-        Object::Stream(s) => s.dict.get(b"Alt").ok().and_then(|o| o.as_str().ok()).map(
-            |b| String::from_utf8_lossy(b).into_owned(),
-        ),
+        Object::Stream(s) => s
+            .dict
+            .get(b"Alt")
+            .ok()
+            .and_then(|o| o.as_str().ok())
+            .map(|b| String::from_utf8_lossy(b).into_owned()),
         _ => None,
     };
     assert_eq!(

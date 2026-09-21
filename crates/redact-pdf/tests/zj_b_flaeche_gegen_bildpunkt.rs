@@ -200,11 +200,13 @@ fn die_huelle_wird_getroffen_und_die_kontrolle_greift() {
 /// Spiegel darüber bleibt stehen — genau das Leck aus Register #20, das diese
 /// Runde geschlossen haben wollte.
 ///
-/// `crate::image::Work::covers` prüft die vier Ecken jeder Pixelzelle mit
-/// `Rect::contains` (Rand eingeschlossen) und füllt; `ImagePlacement::covers`
-/// prüft mit strengen Vergleichen (Berührung zählt nicht) und verneint. Damit
-/// ist die Zusicherung „ein Bild, das Bildpunkte verliert, wird nie übersehen“
-/// widerlegt.
+/// `crate::image::Work::covers` prüfte die vier **Ecken** jeder Pixelzelle mit
+/// `Rect::contains` (Rand eingeschlossen) und füllte; `ImagePlacement::covers`
+/// prüft mit strengen Vergleichen (Berührung zählt nicht) und verneinte. Damit
+/// war die Zusicherung „ein Bild, das Bildpunkte verliert, wird nie übersehen“
+/// widerlegt. Seit der Fix-Runde 8 fragt `Work::covers` die **Fläche** der
+/// Zelle (`cell_meets_rect`), und dieser Test hält, dass die beiden Antworten
+/// zusammenpassen.
 #[test]
 fn bildpunkt_faellt_und_der_spiegel_darueber_bleibt_stehen() {
     let (mut doc, page_id, bild_id) = seite_mit_gedrehtem_bild();

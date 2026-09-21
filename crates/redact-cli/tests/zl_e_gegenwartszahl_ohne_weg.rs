@@ -66,10 +66,24 @@ fn changelog_block() -> String {
         .find(marke)
         .expect("der Abschnitt `## Unveröffentlicht`")
         + 1;
-    let bis = text[von + marke.len()..]
-        .find("\n## ")
-        .map(|i| von + marke.len() + i)
-        .unwrap_or(text.len());
+    // Das Ende ist die nächste `## `-Überschrift — aber nur **außerhalb** eines
+    // eingezäunten Codeblocks. Eine Zeile `## …` in einem Block beendete den
+    // Schnitt sonst still: der geprüfte Abschnitt war um Hunderte Zeilen
+    // kürzer, und alle Tests blieben grün. Ein Wächter, der weniger liest, als
+    // er sagt, meldet nichts — die schlechteste Art Fehler.
+    let mut bis = text.len();
+    let mut im_zaun = false;
+    let mut pos = von;
+    for zeile in text[von..].split_inclusive('\n') {
+        let gestutzt = zeile.trim_start();
+        if gestutzt.starts_with("```") || gestutzt.starts_with("~~~") {
+            im_zaun = !im_zaun;
+        } else if pos > von && !im_zaun && zeile.starts_with("## ") {
+            bis = pos;
+            break;
+        }
+        pos += zeile.len();
+    }
     assert!(
         text[von..bis].contains("\n### Fix-Runde "),
         "der Abschnitt enthält keine numerierte Fix-Runde — der Schnitt greift nicht"
@@ -96,9 +110,13 @@ fn saetze(absatz: &str) -> Vec<String> {
             let beginnt_neu = bytes
                 .get(i + 2)
                 .is_some_and(|c| c.is_uppercase() || "„»*`(".contains(*c));
-            let davor_ziffer = i > 0 && bytes[i - 1].is_ascii_digit();
-            let davor_einzeln = i >= 2 && !bytes[i - 2].is_alphanumeric();
-            if beginnt_neu && !davor_ziffer && !davor_einzeln {
+            // Wörtlich wie in `zj_e::saetze` — samt der Korrektur der Runde 9:
+            // die Abkürzungsregel verlangt einen **Buchstaben** vor dem Punkt,
+            // sonst verschmolz „… Rückgabewert 3. Dieselbe Datei …" zu einem
+            // Satz, und ein Weg im ersten Teil deckte eine Zahl im zweiten.
+            let davor_abkuerzung =
+                i >= 2 && bytes[i - 1].is_alphabetic() && !bytes[i - 2].is_alphanumeric();
+            if beginnt_neu && !davor_abkuerzung {
                 aus.push(bytes[anfang..=i].iter().collect::<String>());
                 anfang = i + 2;
             }

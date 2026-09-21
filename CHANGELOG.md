@@ -33,13 +33,13 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 Bereich: `git log v0.6.0..HEAD`.
 
-Acht Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
-und Doku mit demselben Maßstab. Zuletzt (Runde 8) fällt ein stilles Leck an der
-Oberfläche, der Ersatztext über einem Bild hängt nicht mehr an einer Schätzung,
-sondern an der Wahrheit über die Bildpunkte, und zwei Wächter über der Doku
-halten jetzt die Regel, die sie prüfen — denn **jede** Zahl der beiden
-jüngsten Abschnitte dieser Datei ist an einen Lauf, eine Konstante oder eine
-aufgezeichnete Messung gebunden, nicht nur die, an die jemand dachte.
+Neun Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
+und Doku mit demselben Maßstab. Zuletzt (Runde 9) fällt ein stilles Leck im
+Bild, eine Grenze, die eine gewöhnliche Datei ablehnte, und eine Rückfrage, die
+beim falschen der beiden Fäden stand — denn **jede** Zahl der beiden jüngsten
+Abschnitte dieser Datei ist an einen Lauf, eine Konstante oder eine
+aufgezeichnete Messung gebunden, nicht nur die, an die jemand dachte, und seit
+dieser Runde auch jede Zusage, die in Fettschrift steht.
 
 Der Maßstab für eine Messzahl, ausgeschrieben — die pauschale Zusage, die hier
 stand („jede Angabe hier stammt aus einem Lauf des gebauten Binaries“), war
@@ -64,6 +64,94 @@ verschoben. `crates/redact-cli/tests/belege.rs` hält die Regel samt Läufen;
 `die_zahlen_der_doku_sind_gebunden` und
 `jede_zahl_der_letzten_runden_ist_gebunden` prüfen sie.
 
+### Fix-Runde 9: was die Gegenprüfung der Runde 8 noch fand
+
+Vier Gegenprüfer lasen die Korrekturen der Runde 8 mit eigenem Material gegen.
+Was die Runde 8 getragen hat, steht zuerst, weil es den Rest einordnet: jede
+ihrer Korrekturen wurde einzeln zurückgenommen, und jedes Mal wurde der
+richtige Test rot; jede Zahl des geprüften Blocks wurde einzeln geändert, und
+keine blieb unbemerkt. Was sie nicht getragen hat, steht hier.
+
+* **⚠ Sicherheit: ein zweiter Name desselben Bildes zeigte ungeschwärzte
+  Bildpunkte mitten im Schwärzungsrechteck.** Die Runde 8 hat den *Spiegel*
+  daran ausgerichtet, dass `repoint_page` genau einen Namen setzt — die
+  *Bildpunkte* nicht. Lag ein Bildobjekt auf einer Seite unter zwei Namen unter
+  der Schwärzung, wurde nur der erste umgebogen; der zweite zeigte weiter das
+  unversehrte Original. Das Programm meldete Erfolg, und keine Warnung stand
+  daneben. Gefunden nicht am Bericht, sondern an den Bildpunkten der
+  Ausgabedatei. Jetzt trägt die Arbeit die Menge der getroffenen
+  **(Strom, Name)**-Paare, es wird jedes davon umgebogen, und der Vermerk fällt
+  **nach** dem Schreiben — denn wohin die Bildpunkte kommen, weiß nur der, der
+  sie geschrieben hat.
+
+* **⚠ Sicherheit und Dienstverweigerung: es waren drei Flächenfragen, nicht
+  eine.** Der Vorfilter der Seite und der Sammler der Inline-Bilder fragten die
+  **Hülle** einer Platzierung mit strengen Vergleichen, das Füllen ihre
+  **Pixelzelle** mit Berührung als Treffer. Am Rand gingen die Antworten
+  auseinander, und zwar in beide Richtungen: eine Seite, deren Platzierung eine
+  Zone nur berührte, wurde ganz übersprungen — still, ohne Warnung, mit den
+  Bildpunkten in der Datei; und ein Inline-Bild, dessen Fläche eine Zone nur
+  berührte, verlor seine Rohdaten und wurde trotzdem aufgenommen, worauf der
+  Lauf mit einem Fehler und **ohne Ausgabedatei** endete. Eine Grenze, die eine
+  gewöhnliche Datei ablehnt, ist hier genauso ein Fehler wie eine Lücke. Jetzt
+  fragen alle drei dasselbe Viereck; die Hülle ist im Bildlauf abgelöst.
+
+* **⚠ Sicherheit: wer das Fenster schloss, während die Nachprüfung lief, wurde
+  nicht gefragt.** Die Rückfrage kannte den laufenden **Export** — dort
+  entsteht noch gar keine Datei — und nicht die laufende **Nachprüfung**, wo
+  die Ausgabedatei schon auf der Platte liegt und das Urteil ihr einziger Zeuge
+  ist. Die Fälle standen damit verkehrt herum. Jetzt wird auch dann gefragt,
+  mit einem eigenen Satz: verloren geht nicht die Datei, sondern das Urteil
+  über sie.
+
+* **Eine Kennung je Export, und zwar vor und nach dem Anlegen des Ordners
+  dieselbe.** Die Kennung löste das Verzeichnis auf — nur gibt es das beim
+  Klick noch nicht, wenn der Ordner erst beim Schreiben entsteht. Derselbe
+  Klick ergab dann zwei Kennungen, und „es wurde keine Datei geschrieben" blieb
+  neben der Erfolgsmeldung stehen. Jetzt wird erst `.`/`..` lexikalisch
+  weggerechnet und dann der längste vorhandene Teil aufgelöst; der Abschluss
+  des Exports bekommt die Kennung des Klicks gereicht, statt eine zweite zu
+  rechnen.
+
+* **Eine Zusage in Fettschrift ist eine Zahl.** Der Wächter über die Zahlen der
+  Doku ließ Ordnungszahlen und „ein/eine/einen" mit Absicht aus — im Fließtext
+  sind sie ein Platz in einer Liste oder der unbestimmte Artikel. Genau dort
+  standen aber die Zusagen der Runde 8: „als **erste** Anweisung", „genau
+  **einen** Namen", „**eine** Stelle". Jede ließ sich umdrehen, ohne dass ein
+  Test es merkte. Jetzt zählt ein Zahlwort in einem `**…**`-Lauf als Zahl; das
+  Sternchen unterscheidet den Artikel von der Behauptung. Dazu: „null" und
+  „eins" gehören in die Reihe, und eine zusammengesetzte Zahl verlangt ein
+  Zahlwort vor der Endung — „zweihundert" ja, „Jahrhundert" nein.
+
+* **Zwei Helfer der Doku-Wächter waren zu grob.** Die Satztrennung schnitt
+  nicht hinter „… Rückgabewert 3. Dieselbe Datei …", weil vor dem Punkt eine
+  Ziffer stand; zwei Sätze verschmolzen, und ein Weg im ersten deckte eine Zahl
+  im zweiten. Und der Schnitt des Abschnitts endete an der ersten Zeile, die
+  mit `## ` beginnt — auch mitten in einem Codeblock, was den geprüften Bereich
+  still verkürzt hätte.
+
+* **Eine Lockerung aus der Runde 8, zurückgenommen.** Der Wächter über die
+  Herkunft einer Messzahl hatte sechs neue Merkmale bekommen; keines kam im
+  geprüften Block vor, und eines war falsch: eine Kommandozeile im Satz zu
+  **erwähnen** ist nicht dasselbe, wie die Zahl von dort zu haben. Sie sind
+  gestrichen. Was bleibt, steht jetzt einzeln mit dem Satz, der es auslöst, und
+  mit dem, der es nicht auslösen darf.
+
+* **Die Doku beschrieb sich im Zustand vor der Korrektur.** `image.rs` sagte an
+  zwei Stellen weiter, die Prüfung hänge an den *Ecken* jeder Pixelzelle. Und
+  der Abschnitt der Fix-Runde 3 sagte im Präsens, der Export laufe weiter im
+  Zeichentakt der Oberfläche, und kündigte den Umbau als kommenden Schritt an —
+  im selben Abschnitt `## Unveröffentlicht`, aus dem die Release-Notizen
+  geschnitten werden. Der Schritt ist in der Runde 8 getan.
+
+* **Drei Belegdateien der Prüfer hielten Kopien der Helfer, die sie prüfen.**
+  Eine Kopie prüft ihr eigenes Abbild, sobald das Original sich bewegt: sie
+  blieb rot, nachdem das Original schon stimmte, und hätte ebenso gut grün
+  bleiben können, während es falsch ist — dieselbe Scheintest-Klasse, gegen die
+  dieses Projekt seit der Runde 3 arbeitet, diesmal auf der Prüferseite. Wo
+  eine Kopie bleiben muss (der Helfer ist privat), hängt sie jetzt an einem
+  Test, der den Quelltext des Originals liest.
+
 ### Fix-Runde 8: was die Gegenprüfung der Runde 7 noch fand
 
 Fünf Gegenprüfer lasen die Korrekturen der Runde 7 mit eigenem Material gegen.
@@ -71,6 +159,15 @@ Was blieb: ein stilles Leck an der Oberfläche, ein Bildbefund, der zwischen Lec
 und Fehlalarm hin und her ging, bis er dreimal gedreht war, zwei Wächter über der
 Doku, die ihre eigene Regel nicht hielten, und eine Menge, die dezimal gerechnet
 dastand, wo derselbe Abschnitt die Einheit binär festlegt.
+
+* **Der Export selbst läuft auf einem eigenen Faden.** Bis hierher hielt er die
+  Oberfläche an, solange er schrieb; jetzt nicht mehr. Dazu gehören eine
+  gesperrte Bedienung, während er läuft, die Ablehnung eines **zweiten**
+  Exports derselben Datei, und eine Meldung für den Fall, dass der Faden
+  abstürzt: „es wurde keine Datei geschrieben" — denn geschrieben wird am Ende
+  in einem Zug, es gibt also keine halbe Datei, wohl aber keine. Die drei
+  Punkte darunter sind die **Fehler** dieses Umbaus, gefunden von der
+  Gegenprüfung; hier steht der Umbau selbst, ohne den sie nichts bedeuten.
 
 * **⚠ Sicherheit: die Oberfläche zeigte nach einem Export das Urteil über die
   vorigen Bytes.** Die Nachprüfung nach dem Export steht seit der Runde 4 in
@@ -1081,13 +1178,17 @@ gilt, und ein Test bleibt ohne seine Korrektur grün.
   Spiegel-Schlüssel (`/ActualText` muss den Glyphen gleichen, `/Alt` und `/E`
   dürfen abweichen) und den `/Alt` eines Bildes als blinden Fleck.
 * **Nicht in dieser Runde: der Export selbst in den Hintergrund.** Der Export
-  läuft weiter im Zeichentakt der Oberfläche (6,3 s bei 305 Seiten — Messung
-  der Runde, nicht im Baum; der Messtest dort misst die Nachprüfung, nicht
-  den Export);
-  nur die Nachprüfung danach ist im Hintergrund. Ein `PendingExport` mit
-  gesperrter Bedienung, Fehlerkanal und verketteter Nachprüfung berührt
-  dieselben Dateien, an denen diese Runde die Decke und die Doppelentscheidung
-  korrigiert — das kommt als eigener Schritt, nicht nebenbei.
+  lief damals weiter im Zeichentakt der Oberfläche; nur die Nachprüfung danach
+  war im Hintergrund. Ein `PendingExport` mit gesperrter Bedienung,
+  Fehlerkanal und verketteter Nachprüfung berührt dieselben Dateien, an denen
+  diese Runde die Decke und die Doppelentscheidung korrigiert — das kam als
+  eigener Schritt, nicht nebenbei.
+
+  **Nachgetragen in der Fix-Runde 9:** dieser Schritt ist in der Runde 8 getan,
+  und der Satz stand trotzdem noch im Präsens da — im selben Abschnitt
+  `## Unveröffentlicht`, aus dem die Release-Notizen geschnitten werden. Was
+  heute im Zeichentakt bleibt, ist nur noch der Abzug; die Zahlen stehen im
+  Abschnitt der Runde 9.
 * **Bewusst offen: der `/Alt` eines Bildes.** Beschreibt ein getaggtes PDF
   ein Bild mit `/Figure <</Alt (…)>> BDC /Im0 Do EMC` und steht in der
   Beschreibung, was auf dem Bild zu lesen ist, überlebt sie die
