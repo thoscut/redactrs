@@ -2337,40 +2337,12 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Verweis auf einen Abschnitt dieser Datei, keine Messung",
     ),
     (
-        "Fix-Runde 6: was die Gegenprüfung der Runde 5 noch fand",
-        "Überschrift; die Nummer benennt einen Abschnitt dieser Datei",
-    ),
-    (
         "Fix-Runde 7: was die Gegenprüfung der Runde 6 noch fand",
         "Überschrift; die Nummer benennt einen Abschnitt dieser Datei",
     ),
     (
-        "Fünf Gegenprüfer lasen die Korrekturen der Runde 5 mit eigenem Material gegen.",
-        "eine Angabe über den Ablauf der Runde, nicht über das Programm",
-    ),
-    (
         "Fünf Gegenprüfer lasen die Korrekturen der Runde 6 mit eigenem Material gegen.",
         "eine Angabe über den Ablauf der Runde, nicht über das Programm",
-    ),
-    (
-        "die die Runde 5 hinzugefügt hatte",
-        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
-    ),
-    (
-        "obwohl die Runde 5 UTF-16LE eingebaut hatte",
-        "Verweis auf einen Abschnitt dieser Datei; UTF-16LE ist ein Name",
-    ),
-    (
-        "die die Runde 5 gerade abgeschafft hatte",
-        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
-    ),
-    (
-        "dieselbe Klasse wie der ASCII85-Fall der Runde 5",
-        "ASCII85 ist ein Filtername; die Runde benennt einen Abschnitt",
-    ),
-    (
-        "Die Runde 5 hatte",
-        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
     ),
     (
         "Die Fix-Runde 6 hat die Messzahlen der Doku an einen Testdatensatz gebunden",
@@ -2381,53 +2353,12 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Verweis auf einen Abschnitt dieser Datei, keine Messung",
     ),
     (
-        "war zu viel versprochen — siehe Fix-Runde 7.)",
-        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
-    ),
-    (
         "jetzt fährt `zg_r5_filterketten` jede Zeile durch das Binary",
         "der Name einer Testdatei, keine gemessene Größe",
     ),
     (
         "obwohl dasselbe Dokument MB als 1024² Byte festlegt",
         "die Definition der Einheit, keine gemessene Größe",
-    ),
-    (
-        "„UTF-8, Latin-1/PDFDoc, UTF-16BE und als Hex-String“",
-        "Namen von Kodierungen, keine gemessenen Größen",
-    ),
-    (
-        "**UTF-16LE fehlte in beiden Kodierungslisten.**",
-        "UTF-16LE ist der Name einer Kodierung, keine gemessene Größe",
-    ),
-    (
-        "(der vierte in `zf_q5_unbekannter_filter.rs`; der fünfte gehört der Oberfläche",
-        "der Name einer Testdatei, keine gemessene Größe",
-    ),
-    (
-        "`setrlimit(RLIMIT_CORE, 0)`",
-        "der Aufruf mit seinem Argument, keine gemessene Größe",
-    ),
-    (
-        "(durch 1024²)",
-        "die Definition der Einheit: MB heißt in diesem Projekt 1024² Byte",
-    ),
-    (
-        "MB heißt in diesem Projekt 1024² Byte",
-        "die Definition der Einheit",
-    ),
-    (
-        "`/Title 4 0 R`",
-        "eine Objektnummer im Beispiel, keine gemessene Größe",
-    ),
-    (
-        "Jetzt steht jede Messzahl **einmal** im Testdatensatz",
-        "„einmal“ ist hier keine Zahl, sondern die Zusage, dass es keine zweite \
-         Abschrift gibt",
-    ),
-    (
-        "läuft einmal je Strom statt je Platzierung",
-        "„einmal“ beschreibt die Häufigkeit eines Durchlaufs, keine Messung",
     ),
     // --- Fix-Runde 7: Anzahlen von Befunden, Stellen und Vorfaellen -------
     // Keine davon misst das Programm; sie zaehlen, wovon der Abschnitt
@@ -2452,11 +2383,13 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "die Spanne der Release-Notizen; ein Git-Bereich, keine gemessene Groesse",
     ),
     (
-        "Sieben Fix-Runden seit 0.6.0",
+        "Acht Fix-Runden seit 0.6.0",
         "zaehlt die Abschnitte dieser Datei und nennt den Vorgaenger-Tag, keine Messung",
     ),
     (
-        "Zuletzt (Runde 7) fallen vier stille Lecks am Rand des Formularwesens, zwei Wege",
+        "Zuletzt (Runde 8) fällt ein stilles Leck an der Oberfläche, der Ersatztext über \
+         einem Bild hängt nicht mehr an einer Schätzung, sondern an der Wahrheit über die \
+         Bildpunkte, und zwei Wächter über der Doku halten jetzt die Regel, die sie prüfen",
         "zaehlt die Befunde der Runde und nennt ihre Nummer, keine gemessene Groesse",
     ),
     (
@@ -2466,6 +2399,61 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "MB heißt 1024 Byte zum Quadrat",
         "die Definition der Einheit, in der gemessen wird; selbst keine Messung",
+    ),
+    // --- Fix-Runde 8 -----------------------------------------------------
+    (
+        "Fix-Runde 8: was die Gegenprüfung der Runde 7 noch fand",
+        "Überschrift; beide Nummern benennen Abschnitte dieser Datei",
+    ),
+    (
+        "Fünf Gegenprüfer lasen die Korrekturen der Runde 7 mit eigenem Material gegen.",
+        "eine Angabe über den Ablauf der Runde, nicht über das Programm",
+    ),
+    (
+        "bis er dreimal gedreht war, zwei Wächter über der Doku",
+        "zaehlt die Anlaeufe einer Korrektur und die Waechter, keine gemessene Groesse",
+    ),
+    (
+        "steht seit der Runde 4 in einem eigenen Faden",
+        "Verweis auf einen Abschnitt dieser Datei, keine Messung",
+    ),
+    (
+        "und zwei Schreibwege auf dieselbe Datei fallen zusammen",
+        "zaehlt die Wege zu einer Datei — eine Aussage ueber die Kennung, keine Messung",
+    ),
+    (
+        "Die Korrektur hat drei Anläufe gebraucht",
+        "zaehlt die Anlaeufe dieser Korrektur, keine gemessene Groesse am Programm",
+    ),
+    (
+        "**Sechs Teststellen behaupteten den Ausgang eines Programms",
+        "zaehlt Stellen im Testbestand dieses Repositoriums, keine Messung am Programm",
+    ),
+    (
+        "Jetzt übergeht jede der sechs Stellen den Fall",
+        "dieselben sechs Stellen im Testbestand, keine gemessene Groesse",
+    ),
+    (
+        "`cargo clippy --target x86_64-pc-windows-gnu` an derselben Zeile mit `E0433` \
+         abbrach",
+        "der Name eines Zielsystems und die Kennung eines Compilerfehlers, keine Messung",
+    ),
+    (
+        "**Zwei Wächter über der Doku hielten ihre eigene Regel nicht.**",
+        "zaehlt die beiden Tests dieses Befundes, keine gemessene Groesse",
+    ),
+    (
+        "seine Wortliste endete bei „zwölf“ und hatte „siebzehn“ von Hand nachgetragen",
+        "zitiert die Woerter einer Wortliste; Namen von Zahlwoertern, keine Messung",
+    ),
+    (
+        "„dreizehn“, „zwanzig“, „hundert“, „tausend“ und „Dutzend“ waren für ihn keine \
+         Zahlen",
+        "zitiert Zahlwoerter als Woerter — was der Waechter sah, nicht was gemessen wurde",
+    ),
+    (
+        "an einer Datei mit einem 64-MiB-Strom durchläuft",
+        "die Stromgroesse ist im Satz ueber die Kostenrechnung gebunden (KLON_STROM_MIB)",
     ),
 ];
 

@@ -49,19 +49,32 @@ fn glatt(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Der Block der beiden letzten Fix-Runden — derselbe Schnitt wie in
-/// `belege::changelog_block` und `zj_e::changelog_block`.
+/// Der **ganze** Abschnitt `## Unveröffentlicht`.
+///
+/// Hier stand der Schnitt der beiden letzten Fix-Runden, wie in
+/// `belege::changelog_block` und `zj_e::changelog_block`. Der hing am Fenster:
+/// kam eine Runde hinzu, fiel die drittletzte heraus — und mit ihr der Satz, an
+/// dem dieser Test hing. Die Wächterzahl fiel auf 0, und der Test meldete
+/// richtig „der Schnitt greift nicht mehr“. Behoben ist das am richtigen Ort:
+/// die Regel, gegen die hier geprüft wird, steht im **Vorspann dieses
+/// Abschnitts** und gilt für den ganzen Abschnitt. Also wird der Abschnitt
+/// gelesen und nicht sein jüngstes Fenster.
 fn changelog_block() -> String {
     let text = lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG"));
-    let ueberschriften: Vec<usize> = text
-        .match_indices("\n### Fix-Runde ")
-        .map(|(i, _)| i)
-        .collect();
+    let marke = "\n## Unveröffentlicht";
+    let von = text
+        .find(marke)
+        .expect("der Abschnitt `## Unveröffentlicht`")
+        + 1;
+    let bis = text[von + marke.len()..]
+        .find("\n## ")
+        .map(|i| von + marke.len() + i)
+        .unwrap_or(text.len());
     assert!(
-        ueberschriften.len() >= 3,
-        "weniger als drei Fix-Runden im CHANGELOG"
+        text[von..bis].contains("\n### Fix-Runde "),
+        "der Abschnitt enthält keine numerierte Fix-Runde — der Schnitt greift nicht"
     );
-    text[ueberschriften[0]..ueberschriften[2]].to_string()
+    text[von..bis].to_string()
 }
 
 fn absaetze(block: &str) -> Vec<String> {
@@ -151,23 +164,27 @@ const ZJ_E_EINHEITEN: [&str; 8] = [" s", " ms", " MB", " kB", " GB", " GiB", " M
 /// Weg 1 und Weg 2 des Vorspanns, Merkmale wörtlich wie in `zj_e::weg`. Weg 3
 /// fehlt hier mit Absicht: er gilt nur für Zahlen des alten Zustands.
 fn weg_fuer_heute(satz: &str) -> Option<&'static str> {
-    const BINARY: [&str; 6] = [
+    // Ohne „(Release“/„Release)“ und mit dem Testprozess zuerst — aus demselben
+    // Grund wie in `zj_e::weg`: ein **Profil ist kein Ort**. Solange
+    // „(Release“ als Merkmal des gebauten Binaries galt, wäre eine im
+    // Testprozess erhobene Zahl als Binary-Zahl durchgegangen, und genau das
+    // schließt der Vorspann aus.
+    const BINARY: [&str; 4] = [
         "gebauten Binary",
         "gebauten Binaries",
         "target/release/redact-rs",
         "am Binary",
-        "(Release",
-        "Release)",
     ];
     const TESTPROZESS: [&str; 3] = ["Testprozess", "im Testlauf", "eigener Prozess"];
 
+    if TESTPROZESS.iter().any(|m| satz.contains(m)) {
+        if satz.contains("Debug") || satz.contains("Release") {
+            return Some("Testprozess + Profil");
+        }
+        return None;
+    }
     if BINARY.iter().any(|m| satz.contains(m)) {
         return Some("Binary");
-    }
-    if TESTPROZESS.iter().any(|m| satz.contains(m))
-        && (satz.contains("Debug") || satz.contains("Release"))
-    {
-        return Some("Testprozess + Profil");
     }
     None
 }

@@ -31,6 +31,19 @@
 //! Eng ist er an **einer** Stelle, und zwar an der, an der die Großzügigkeit
 //! die Regel aufgehoben hätte: ein Profil („Release“) ist kein Ort. Siehe
 //! [`weg`].
+//!
+//! **Das Fenster: die beiden jüngsten Fix-Runden, und das mit Grund.**
+//! `zl_e_gegenwartszahl_ohne_weg` liest inzwischen den ganzen Abschnitt
+//! `## Unveröffentlicht` — es fragt aber nur nach Sätzen, die von **heute**
+//! sprechen, und eine Gegenwartszahl muss heute messbar sein. Dieser Test
+//! fragt nach *jeder* Zeit- und Speicherzahl, auch nach denen der Runden 3
+//! bis 6. Über den ganzen Abschnitt gelesen melden 26 Sätze keinen Weg —
+//! gemessen in der Fix-Runde 8 mit genau diesem Schnitt. Das ist ein Befund
+//! und keine Nachlässigkeit dieses Tests: die Läufe hinter jenen Zahlen
+//! liegen Runden zurück, mancher Stand ist nicht mehr auszuchecken, und die
+//! Regel des Vorspanns ist jünger als sie. Er steht im Aufgabenregister und
+//! nicht in einer stillen Ausnahme; wer ihn abarbeitet, weitet hier den
+//! Schnitt auf den Abschnitt und nimmt die 26 Sätze der Reihe nach.
 
 use std::path::PathBuf;
 
@@ -172,13 +185,28 @@ fn traegt_mess_groesse(satz: &str) -> Vec<String> {
 ///   dasteht. Stünde die Binary-Frage davor, machte ein „am Binary“ in einem
 ///   Nebensatz die Prüfung des Profils überflüssig.
 fn weg(satz: &str) -> Option<&'static str> {
-    const BINARY: [&str; 4] = [
+    const BINARY: [&str; 8] = [
         "gebauten Binary",
         "gebauten Binaries",
         "target/release/redact-rs",
         "am Binary",
+        // Eine Kommandozeile ist ein Lauf des Binaries, und die Spitze eines
+        // KINDprozesses kann nur ein Kindprozess geliefert haben.
+        "`redact-rs ",
+        "RUSAGE_CHILDREN",
+        "VmHWM` des Kindprozesses",
+        "Spitze des Kindprozesses",
     ];
-    const TESTPROZESS: [&str; 3] = ["Testprozess", "im Testlauf", "eigener Prozess"];
+    // Ein benannter Messtest ist ein aufgezeichneter Lauf **im Testprozess** —
+    // das Profil verlangt der zweite Weg zusätzlich, wie bei jedem anderen
+    // Merkmal dieser Liste.
+    const TESTPROZESS: [&str; 5] = [
+        "Testprozess",
+        "im Testlauf",
+        "eigener Prozess",
+        "_mess_",
+        "::mess_",
+    ];
     const ALTSTAND: [&str; 6] = [
         "Stand `",
         "ungedeckelt",

@@ -33,10 +33,11 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 Bereich: `git log v0.6.0..HEAD`.
 
-Sieben Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
-und Doku mit demselben Maßstab. Zuletzt (Runde 7) fallen vier
-stille Lecks am Rand des Formularwesens, zwei Wege, auf denen eine kleine Datei
-den Rechner belegen konnte, sind gedeckelt — und **jede** Zahl der beiden
+Acht Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
+und Doku mit demselben Maßstab. Zuletzt (Runde 8) fällt ein stilles Leck an der
+Oberfläche, der Ersatztext über einem Bild hängt nicht mehr an einer Schätzung,
+sondern an der Wahrheit über die Bildpunkte, und zwei Wächter über der Doku
+halten jetzt die Regel, die sie prüfen — denn **jede** Zahl der beiden
 jüngsten Abschnitte dieser Datei ist an einen Lauf, eine Konstante oder eine
 aufgezeichnete Messung gebunden, nicht nur die, an die jemand dachte.
 
@@ -62,6 +63,116 @@ Wo eine Zahl keinen dieser Wege geht, gehört sie gestrichen und nicht
 verschoben. `crates/redact-cli/tests/belege.rs` hält die Regel samt Läufen;
 `die_zahlen_der_doku_sind_gebunden` und
 `jede_zahl_der_letzten_runden_ist_gebunden` prüfen sie.
+
+### Fix-Runde 8: was die Gegenprüfung der Runde 7 noch fand
+
+Fünf Gegenprüfer lasen die Korrekturen der Runde 7 mit eigenem Material gegen.
+Was blieb: ein stilles Leck an der Oberfläche, ein Bildbefund, der zwischen Leck
+und Fehlalarm hin und her ging, bis er dreimal gedreht war, zwei Wächter über der
+Doku, die ihre eigene Regel nicht hielten, und eine Menge, die dezimal gerechnet
+dastand, wo derselbe Abschnitt die Einheit binär festlegt.
+
+* **⚠ Sicherheit: die Oberfläche zeigte nach einem Export das Urteil über die
+  vorigen Bytes.** Die Nachprüfung nach dem Export steht seit der Runde 4 in
+  einem eigenen Faden, ihr Ergebnis kommt über einen Kanal zurück. Wer in der
+  Zwischenzeit ein zweites Mal exportierte, sah das Urteil des ersten Laufs über
+  der neuen Datei — „keine Fundstellen“ über Bytes, die niemand gelesen hatte.
+  Jetzt räumt `poll_exports` als **erste** Anweisung von `export_to` die Urteile
+  über alte Bytes weg. Die Kennung eines Exports ist dabei nicht mehr der Pfad,
+  sondern das aufgelöste Verzeichnis samt unverändertem Dateinamen
+  (`writing_key`) — sie folgt keinem Symlink, und zwei Schreibwege auf dieselbe
+  Datei fallen zusammen. Und ein fertiger Export meldet nicht mehr
+  „beschäftigt“: das Merkmal dafür ist, dass die Ausgabedatei entstanden ist,
+  nicht dass der Lauf fehlerfrei endete.
+
+* **⚠ Sicherheit: der Ersatztext über einem Bild hing an einer Schätzung, und
+  die Schätzung war in beide Richtungen falsch.** Ob ein Spiegel über einer
+  Bildplatzierung fällt, entschied die Frage „liegt das Rechteck auf der Fläche“
+  — nicht die Frage, ob dort Bildpunkte gefallen sind. Beides ging schief. Bei
+  einem gedrehten Bild ist die **Hülle** größer als das Bild, und in ihren Ecken
+  liegt gar kein Bildpunkt: eine Schwärzung dort nahm einem unversehrten Bild
+  seinen Ersatztext, ohne dass ein Byte des Bildes sich änderte (Fehlalarm). Und
+  die Prüfung je Pixelzelle sah nur deren **Ecken**: ein Schwärzungsrechteck
+  ganz zwischen den Gitterlinien eines groben, groß gezogenen Bildes traf keine,
+  die Bildpunkte blieben in der Datei, und es gab keine Warnung (Leck). Jetzt
+  entscheidet **eine** Flächenfrage, gestellt mit trennenden Achsen und nicht
+  mit Ecken (Berührung zählt als Treffer, ein `NaN` ebenfalls); der
+  Kandidatenfilter fragt das **Viereck** der Platzierung statt ihrer Hülle; und
+  `crate::image` berichtet je Platzierung, ob dort Bildpunkte fielen, statt den
+  Aufrufer schätzen zu lassen. Die Korrektur hat drei Anläufe gebraucht: der
+  erste schloss das Leck und öffnete den Fehlalarm, der zweite schloss den
+  Fehlalarm und öffnete das Leck wieder. Der Grund steht als Lehre daneben — die
+  Wahrheit über gefallene Bildpunkte liegt in `image.rs`, und wer sie eine
+  Ebene weiter vorn nachbildet, bildet sie falsch nach.
+
+* **⚠ Sicherheit: ein zweiter Name desselben Bildes behielt seine Bildpunkte und
+  verlor trotzdem seinen Spiegel.** Vermerkt wurde nach Objekt-Id, umgebogen
+  wird nach Name: hängt ein Bild an mehreren Seiten, entsteht eine Kopie, und
+  `repoint_page` setzt genau **einen** Namen. Zeichnete dieselbe Seite dasselbe
+  Objekt unter einem zweiten Namen, zeigte der weiter das unversehrte Original —
+  und verlor doch seinen Ersatztext. Fehlalarm und Leck in einer Datei: der
+  Spiegel weg, die Bildpunkte sichtbar. Jetzt beantwortet **eine** Stelle die
+  Frage, wohin die geschwärzten Bildpunkte kommen, und die beiden, die sie
+  brauchen — der, der schreibt, und der, der vermerkt —, halten sich an dieselbe
+  Antwort.
+
+* **Ein Bild, das sich nicht dekodieren lässt, nimmt nur der getroffenen
+  Platzierung den Ersatztext.** Dort fällt kein Bildpunkt; das Objekt wird weder
+  überschrieben noch kopiert. Eine unberührte zweite Platzierung desselben
+  Bildes zeigt danach buchstäblich dasselbe wie vorher, ihr Spiegel ist wahr,
+  und sein Verlust hätte keinen Gegenwert. Das `/Alt` am **Bilddictionary**
+  fällt weiter für alle Platzierungen — es hängt an der Objekt-Id und ist nicht
+  je Platzierung zu haben; diese Über-Schwärzung steht neben einer Warnung und
+  ist der Preis von `--allow-undecodable-images`.
+
+* **Der Ort einer Fundstelle ist maschinenlesbar geworden.** Bis hierher war er
+  nur Satz, und die Oberfläche konnte „gewollt stehen geblieben“ nicht von
+  „Schwärzung danebengegangen“ unterscheiden. Jetzt kommt zu jeder Fundstelle
+  ein Ort: die Sicht, die Seite (wo eine Sicht eine kennt) und die Objekt-Id (wo
+  sie eine kennt) — samt ihrer Herkunft, damit niemand eine geratene Seite für
+  eine gelesene nimmt.
+
+* **Sechs Teststellen behaupteten den Ausgang eines Programms, das gar nicht
+  gelaufen war.** Wo eine Prüfung eine benannte Pipe braucht, war der Ausweg
+  „diese Umgebung kann das nicht“ nur für einen Startfehler vorgesehen; ein
+  `mkfifo`, das startet und mit einem Fehler endet (seccomp, ein
+  BusyBox-Wrapper, ein Dateisystem ohne Pipes), lief in eine Behauptung. Jetzt
+  übergeht jede der sechs Stellen den Fall und schreibt eine Zeile auf die
+  Fehlerausgabe. `cfg(unix)` sagt, dass es benannte Pipes **gibt** — nicht, dass
+  dieser Rechner sie anlegen lässt.
+
+* **Die Plattformregel konnte sich selbst aushebeln.** Sie verlangt, dass jede
+  Stelle, die eine Einrichtung des Systems nennt, unter einem `cfg` steht oder
+  ihr Ergebnis in derselben Anweisung als möglicherweise fehlend behandelt; was
+  offen ist, steht namentlich in einer Liste, und die muss genau aufgehen. Nur:
+  eine Verletzung, die den **Build** für Windows bricht, durfte in dieser Liste
+  geparkt werden. Dann war der Regeltest grün, während
+  `cargo clippy --target x86_64-pc-windows-gnu` an derselben Zeile mit `E0433`
+  abbrach — die Liste sagte „bekannt“, und niemand sagte „rot“. Solche
+  Verletzungen gehören jetzt nicht mehr in die Liste, sondern behoben. Außerdem
+  verglich die Zuordnung einer Stelle zu ihrem Listeneintrag Pfade mit dem
+  Trennzeichen des Wirtssystems: unter Windows fand sie ihren eigenen Eintrag
+  nicht.
+
+* **Zwei Wächter über der Doku hielten ihre eigene Regel nicht.** Der eine liest
+  jeden Satz des geprüften Blocks und verlangt, dass eine Zeit- oder
+  Speicherzahl sagt, woher sie kommt — er nahm dafür aber ein **Profil**
+  („Release“) als Ort an und hätte damit genau das durchgelassen, was die Regel
+  ausschließt: eine im Testprozess erhobene Zahl als Zahl des gebauten Binaries.
+  Der andere prüft die Gegenrichtung, dass im Block keine Zahl unbedeckt
+  dasteht — seine Wortliste endete bei „zwölf“ und hatte „siebzehn“ von Hand
+  nachgetragen, wuchs also dort, wo jemand hinsah. „dreizehn“, „zwanzig“,
+  „hundert“, „tausend“ und „Dutzend“ waren für ihn keine Zahlen. Die Reihe steht
+  jetzt vollständig da, und die `…mal`-Formen entstehen aus ihr statt aus einer
+  zweiten Liste.
+
+* **Eine Menge stand dezimal gerechnet da, wo derselbe Abschnitt die Einheit
+  binär festlegt.** Wie viel jedes Muster der alten Suche an einer Datei mit
+  einem 64-MiB-Strom durchläuft, stand als Dezimalwert — derselbe Fehler, den
+  der Block seiner Nachbarzahl ausdrücklich anschreibt. Die Zahl wird jetzt aus
+  der Zahl der Blöcke und der Stromgröße **abgeleitet** und nicht mehr
+  abgeschrieben, und beide Stellen, die sie nennen, werden gegeneinander
+  gehalten.
 
 ### Fix-Runde 7: was die Gegenprüfung der Runde 6 noch fand
 
@@ -962,7 +1073,9 @@ gilt, und ein Test bleibt ohne seine Korrektur grün.
 * **Doku.** Die Nachprüfung der Oberfläche heißt `leaks_many`, nicht `leaks`;
   ihre Decke ist oben in der richtigen Einheit beschrieben; „über vier
   Stunden“ für eine Million Begriffe war der Wert vor `memmem` — heute sind es
-  über eine Stunde (rund 4 ms je Begriff); `SECURITY.md` sagt an der
+  über eine Stunde, und die Messreihe, aus der das folgt, steht an
+  `redact_core::MAX_CHECK_NEEDLES` (die Zahl je Begriff stand hier ohne Weg und
+  ist gestrichen, nicht verschoben); `SECURITY.md` sagt an der
   Grenzentabelle, dass MB dort wie überall 1024² Byte heißt und MiB dieselbe
   Einheit ist; README und `SECURITY.md` nennen die zwei Rollen der drei
   Spiegel-Schlüssel (`/ActualText` muss den Glyphen gleichen, `/Alt` und `/E`
