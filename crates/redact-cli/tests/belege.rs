@@ -659,12 +659,11 @@ mod messwerte {
     ///
     /// Lauf (Debug): `cargo test -p redact-gui --lib
     /// zg_r4_3_die_statuszeile_ist_als_ganzes_gedeckelt -- --nocapture`
-    /// → `der ganze Satz (1005 Zeichen)`. Die Doku am Quelltext
-    /// (`state.rs`, `zg_r4_tests.rs`) sagt dafür 981 und nennt dazu einen
-    /// Test, den es nicht mehr gibt
-    /// (`zg_r4_3_die_laengste_statuszeile_ist_wieder_ueber_804_zeichen`): die
-    /// Zahl stammt aus einer früheren Fassung der Messung. Gebunden ist, was
-    /// die Messung **heute** liefert.
+    /// → `der ganze Satz (1005 Zeichen)`. Die 981, die die Doku am Quelltext
+    /// (`state.rs`, `zg_r4_tests.rs`) dafür nannte, stammen aus einer früheren
+    /// Fassung der Messung — sie nennen als Beleg einen Testnamen, den es nicht
+    /// mehr gibt (`zg_r4_3_die_laengste_statuszeile_ist_wieder_ueber_804_zeichen`).
+    /// Gebunden ist, was die Messung **heute** liefert.
     pub const STATUSZEILE_ZEICHEN: usize = 1_005;
 }
 

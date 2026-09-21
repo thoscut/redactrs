@@ -146,9 +146,9 @@ blieben.
   `/Contents`-Strom zeigen dürfen — jede Seite zahlte sie voll aus, und der
   Redaktor hielt die Spiegel aller Seiten bis zum Ende fest. Drei Zähler
   tragen jetzt zusammen eine gemeinsame Decke je Seiten-Scan, keiner
-  verbraucht den anderen; und weil die
-  Kosten nicht im Scan, sondern beim Festhalten der zurückgestellten Spiegel
-  anfielen, steht die dokumentweite Decke dort (`MAX_DEFERRED_MIRRORS`).
+  verbraucht den anderen; und weil die Kosten nicht im Scan, sondern beim
+  Festhalten der zurückgestellten Spiegel anfielen, steht die dokumentweite
+  Decke dort (`MAX_DEFERRED_MIRRORS`).
   Zurückgestellt wird außerdem nur noch, was die späte Frage braucht — die
   Objekt-Ids der Formulare, einmal je Formular statt je Platzierung, ohne
   deren Pfade und ohne die Eigenschaftsliste, die den Spiegeltext trägt. Der
@@ -225,14 +225,17 @@ blieben.
 * **Teilweise offen: nicht jede Messzahl der Runde steht hier.** Gebunden ist,
   was am Baum dieser Runde nachzumessen war — die beiden Dienstverweigerungen
   und die Statuszeile, je mit dem Lauf, aus dem die Zahl stammt; `messwerte`
-  in `belege.rs` nennt ihn samt Profil. Nicht hier stehen die Zahlen des
-  Metadatenlaufs: sie stehen weiter in der Doku am Quelltext von `meta.rs`.
-  Und nicht hier stehen die Zahlen des **ungedeckelten** Zustands — was die
-  Korrektur unmöglich macht, gibt kein Lauf mehr her, und was kein Lauf mehr
-  hergibt, ist keine Zusage, sondern ein Beleg von damals; er bleibt am
-  Quelltext stehen, wo die Gegenprüfung ihn gemessen hat. Der Regeltest dieser
-  Runde verlangt für jede Zahl im Block einen gebundenen Satz, und er hat
-  recht: was hier als Zahl steht, ist eine Zusage.
+  in `belege.rs` nennt ihn samt Profil. Nicht hier stehen die Zahlen, mit denen
+  die Gegenprüfung die Klartextträger am Metadatenlauf nachwies: sie stehen
+  weiter in der Doku am Quelltext von `meta.rs`. Und nicht hier stehen die
+  Zahlen des **ungedeckelten** Zustands — was die Korrektur unmöglich macht,
+  gibt kein Lauf mehr her, und was kein Lauf mehr hergibt, ist keine Zusage,
+  sondern ein Beleg von damals; er bleibt am Quelltext stehen, wo die
+  Gegenprüfung ihn gemessen hat. Offen bleibt auch der **Ort** der Messung:
+  gemessen ist im Testprozess, und der Block sagt es an jeder Zahl; derselbe
+  Lauf am gebauten Binary steht noch aus. Der Regeltest dieser Runde verlangt
+  für jede Zahl im Block einen gebundenen Satz, und er hat recht: was hier als
+  Zahl steht, ist eine Zusage.
 * **Offen und unerklärt: ein Test des Tores flattert.** Im ersten Gate-Lauf
   dieser Runde fiel der Test, der verlangt, dass eine neue Analyse die
   gelöschten Zeilen vergisst — die Aussage wäre, dass eine Löschung aus dem
