@@ -86,9 +86,14 @@ fn pdf_with_streams(streams: Vec<Stream>) -> (Vec<u8>, Vec<ObjectId>) {
 /// `unchecked` nennt dann den Objektgraphen mit dem Budget als Grund. Das ist
 /// die Aussage, die dieser Test seither hält (wie `zd_orakel_budget`): mit
 /// der Summe des Laders ist alles entpackt und gefunden, mit weniger sagt das
-/// Orakel, dass die Sichten 3–7 fehlen. Der Klartext ist zlib-verpackt und
-/// von der Rohsicht ohne die Kette nicht zu sehen, weil die Nutzlast mit
-/// RunLength-Längenbytes beginnt und kein zlib-Strom ist.
+/// Orakel, dass die Sichten 3–7 fehlen.
+///
+/// Die Rohsicht hielt sich bis Register #95 heraus: sie las die Kette nicht,
+/// weil `lopdf` sie ohne Leerzeichen schreibt (`[/RunLengthDecode/FlateDecode]`),
+/// und ohne die Kette ist der Klartext nicht zu sehen. Jetzt liest sie sie
+/// mit ihrem eigenen Budget und bucht die Arbeit beider Glieder (Register
+/// #99): der sechzehnte harmlose Strom passt nicht mehr und steht in
+/// `unchecked`, der kleinere siebzehnte passt — das Geheimnis ist gefunden.
 #[test]
 fn viele_kleine_stroeme_brauchen_das_budget_auf_und_das_wird_gesagt() {
     let harmless = fuellung(256 * 1024);
@@ -104,9 +109,19 @@ fn viele_kleine_stroeme_brauchen_das_budget_auf_und_das_wird_gesagt() {
     let budget = (16 * harmless.len()) as u64;
     let tight = leaks_many_within(&pdf, &[SECRET], budget);
     assert!(
-        tight.findings[0].is_empty(),
-        "das Geheimnis stand nur im nicht entpackten Strom: {:?}",
         tight.findings[0]
+            .iter()
+            .any(|h| h.contains(&last) && h.contains("RunLengthDecode+FlateDecode")),
+        "die Rohsicht hat den siebzehnten Strom nicht entpackt: {:?}",
+        tight.findings[0]
+    );
+    assert!(
+        tight
+            .unchecked
+            .iter()
+            .any(|u| u.starts_with("Rohdaten-Stream") && u.contains("nicht entpackt")),
+        "der Strom, der das Budget der Rohsicht sprengt, wird nicht genannt: {:?}",
+        tight.unchecked
     );
     assert!(
         tight

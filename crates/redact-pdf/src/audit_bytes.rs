@@ -188,7 +188,9 @@ use aho_corasick::{AhoCorasick, MatchKind};
 use lopdf::{Dictionary, Document, Object, ObjectStream, Stream, StringFormat};
 use memchr::memmem;
 
-use crate::document::{is_delimiter, is_whitespace, prescan, Limits};
+use crate::document::{
+    is_delimiter, is_whitespace, prescan, raw_dict_entry, raw_object_value, Limits,
+};
 use crate::extract::PdfExtractor;
 use crate::filters::{self, Oversize};
 
@@ -582,7 +584,7 @@ pub fn leaks_many_within(
     scan_raw_file(pdf_bytes, &mut probe);
     scan_raw_string_literals(pdf_bytes, &mut probe);
     let mut raw_budget = Budget::new(max_decompressed_bytes);
-    let raw_streams = scan_raw_streams(pdf_bytes, &mut probe, &mut raw_budget);
+    let (raw_streams, raw_gaps) = scan_raw_streams(pdf_bytes, &mut probe, &mut raw_budget);
     // Stellen zählen, bevor die Decke aus vielen Stellen eine Zeile macht.
     let mut places = raw_budget.places();
     let mut unchecked = raw_budget.into_unchecked();
@@ -604,9 +606,21 @@ pub fn leaks_many_within(
         Ok(doc) => {
             // Was der Lader anders las, als es in den Rohbytes steht, haben
             // die Sichten 3–7 nicht gesehen (Register #98).
-            let misread = misread_streams(pdf_bytes, &raw_streams, &doc);
-            places += misread.len();
-            push_capped(&mut unchecked, misread, "Ströme");
+            let (mut streams, covered) = misread_streams(pdf_bytes, &raw_streams, &doc);
+            // Eine gescheiterte Kette der Rohsicht zählt nur, wo keine
+            // Objektsicht denselben Strom gelesen hat — dort meldet sie die
+            // Objektsicht selbst (Register #95). Ein verschlüsseltes Dokument
+            // vergleicht niemand; dort bleibt es bei der Objektsicht.
+            if let Some(covered) = covered {
+                streams.extend(
+                    raw_gaps
+                        .into_iter()
+                        .filter(|(block, _)| !covered.contains(block))
+                        .map(|(_, line)| line),
+                );
+            }
+            places += streams.len();
+            push_capped(&mut unchecked, streams, "Ströme");
             let mut budget = Budget::new(max_decompressed_bytes);
             scan_object_graph(&doc, &mut probe, &mut budget);
             let skipped = budget.skipped;
@@ -638,6 +652,9 @@ pub fn leaks_many_within(
             unchecked.push(format!(
                 "Objektgraph (Sichten 3–7) nicht durchsucht — {reason}"
             ));
+            let lines: Vec<String> = raw_gaps.into_iter().map(|(_, line)| line).collect();
+            places += lines.len();
+            push_capped(&mut unchecked, lines, "Ströme");
         }
     }
 
@@ -1279,14 +1296,13 @@ fn scan_raw_file(bytes: &[u8], probe: &mut Probe) {
 /// Findet jeden `stream … endstream`-Block anhand der Rohbytes — unabhängig
 /// davon, ob die xref-Tabelle das Objekt noch kennt. Genau so überlebt die
 /// Historie inkrementeller Updates.
-fn scan_raw_streams(
-    bytes: &[u8],
-    probe: &mut Probe,
-    budget: &mut Budget,
-) -> Vec<((u32, u16), usize)> {
-    // Die Ströme mit Objektkopf und Dictionary — für den Vergleich mit dem,
-    // was der Lader daraus machte ([`misread_streams`]).
+/// Liefert die Ströme mit Objektkopf und Dictionary (für den Vergleich mit
+/// dem, was der Lader daraus machte, [`misread_streams`]) und je Block, an
+/// dem die Kette stehen blieb, seine Zeile ([`chain_gap`]).
+fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) -> RawStreams {
     let mut kopf = Vec::new();
+    let mut gaps = Vec::new();
+    let mut definitions = RawDefinitions::new(bytes);
     for (offset, payload) in raw_stream_blocks(bytes) {
         let header = object_header(bytes, offset);
         let base = format!("Rohdaten-Stream @0x{offset:x}{}", object_label(header));
@@ -1317,25 +1333,29 @@ fn scan_raw_streams(
             kopf.push((id, offset));
         }
         let chain = match dict {
-            Some(dict) => decode_raw_chain(dict, payload, budget.room()),
-            None => Ok(None),
+            Some(dict) => decode_raw_chain(dict, payload, offset, &mut definitions, budget.room()),
+            None => Ok(RawChain::default()),
         };
         match chain {
-            Ok(Some((decoded, names, work))) => {
+            Ok(chain) => {
                 // Die Arbeit der Kette, nicht die Ausgabe ihres letzten
                 // Glieds (Register #99).
-                budget.charge(work);
-                // Reines Flate ohne Prädiktor ist, was der blinde Versuch
-                // immer schon tat — und heißt in der Fundstelle weiter so.
-                let wie = if names == "FlateDecode" {
-                    "inflate".to_string()
-                } else {
-                    format!("dekodiert: {names}")
-                };
-                scan_blob(&decoded, site.with_text(&format!("{base} ({wie})")), probe);
-                continue;
+                budget.charge(chain.work);
+                if let Some(gap) = chain.gap {
+                    gaps.push((offset, format!("{base}: {gap}")));
+                }
+                if let Some((decoded, names)) = chain.decoded {
+                    // Reines Flate ohne Prädiktor ist, was der blinde Versuch
+                    // immer schon tat — und heißt in der Fundstelle weiter so.
+                    let wie = if names == "FlateDecode" {
+                        "inflate".to_string()
+                    } else {
+                        format!("dekodiert: {names}")
+                    };
+                    scan_blob(&decoded, site.with_text(&format!("{base} ({wie})")), probe);
+                    continue;
+                }
             }
-            Ok(None) => {}
             Err(Oversize) => {
                 budget.skip(&base, payload.len());
                 continue;
@@ -1354,8 +1374,13 @@ fn scan_raw_streams(
             Err(Oversize) => budget.skip(&base, payload.len()),
         }
     }
-    kopf
+    (kopf, gaps)
 }
+
+/// Was [`scan_raw_streams`] für die Zeit nach dem Laden zurücklässt: die
+/// Ströme mit Objektkopf und die Zeilen gescheiterter Ketten, je mit dem
+/// Offset ihres Blocks.
+type RawStreams = (Vec<((u32, u16), usize)>, Vec<(usize, String)>);
 
 /// Das rohe Stream-Dictionary vor einem `stream`-Block: die Bytes zwischen
 /// dem Objektkopf `N G obj` und dem Schlüsselwort. `None`, wenn kein Kopf in
@@ -1371,156 +1396,193 @@ fn raw_stream_dict(bytes: &[u8], data_offset: usize) -> Option<&[u8]> {
     Some(&window[obj + 3..keyword])
 }
 
+/// Was die Kette eines rohen Blocks ergab.
+#[derive(Default)]
+struct RawChain {
+    /// Die Bytes nach dem letzten angewandten Glied und die Namen der
+    /// angewandten Glieder — `None`, wenn kein Glied lief.
+    decoded: Option<(Vec<u8>, String)>,
+    /// Die Arbeit der Kette (Register #99).
+    work: usize,
+    /// Wo die Kette stehen blieb, mit Grund ([`chain_gap`]).
+    gap: Option<String>,
+}
+
 /// Entpackt einen rohen Block über die Filterkette seines Dictionaries —
-/// derselbe Weg wie [`filters::decoded_prefix_within`] in der Objektsicht,
-/// nur dass Filter und `/DecodeParms` hier aus den Rohbytes gelesen werden
-/// (ein Verweis darin bleibt unaufgelöst: die Altgeneration hat keinen
-/// Objektgraphen mehr). `Ok(None)`, wenn kein Filter genannt ist oder schon
-/// das erste Glied unbekannt war; sonst die Bytes und die angewandten
-/// Filternamen.
+/// derselbe Dekoder wie in der Objektsicht, nur dass `/Filter` und
+/// `/DecodeParms` aus den Rohbytes gelesen werden: die Altrevision eines
+/// inkrementellen Updates steht in keinem Objektgraphen mehr.
+///
+/// Gelesen wird mit dem Wortzerleger aus [`crate::document`], nicht an
+/// Leerraum getrennt: `/Filter[/ASCII85Decode/FlateDecode]` und
+/// `/DecodeParms<</Predictor 12/Columns 5>>` ohne ein Leerzeichen sind
+/// gewöhnliche Ausgabe von iText (Register #95). Ein Verweis darin wird aus
+/// den Rohbytes aufgelöst ([`RawDefinitions`]).
 fn decode_raw_chain(
     dict: &[u8],
     payload: &[u8],
+    offset: usize,
+    definitions: &mut RawDefinitions<'_>,
     limit: usize,
-) -> Result<Option<(Vec<u8>, String, usize)>, Oversize> {
-    let filters = raw_filter_value(dict);
-    if filters.is_empty() {
-        return Ok(None);
-    }
+) -> Result<RawChain, Oversize> {
+    let Some(filter) = raw_dict_entry(dict, b"Filter") else {
+        return Ok(RawChain::default());
+    };
     let mut stream_dict = lopdf::Dictionary::new();
-    stream_dict.set("Filter", Object::Array(filters.clone()));
-    if let Some(parms) = raw_decode_parms(dict) {
+    stream_dict.set("Filter", filter);
+    if let Some(parms) = raw_dict_entry(dict, b"DecodeParms") {
         stream_dict.set("DecodeParms", parms);
     }
+    let doc = definitions.scratch(&stream_dict, offset);
     let stream = lopdf::Stream::new(stream_dict, payload.to_vec());
-    let (data, applied, work) = filters::decoded_prefix_counted(&Document::new(), &stream, limit)?;
-    if applied == 0 {
-        return Ok(None);
+    let names = filters::filter_names(&doc, &stream.dict).unwrap_or_default();
+    if names.is_empty() {
+        return Ok(RawChain::default());
     }
-    let mut names = filters
-        .iter()
-        .take(applied)
-        .map(|f| match f {
-            Object::Name(name) => String::from_utf8_lossy(name).into_owned(),
-            _ => "?".to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("+");
-    if stream.dict.has(b"DecodeParms") {
-        names.push_str(" mit DecodeParms");
-    }
-    Ok(Some((data, names, work)))
-}
-
-/// Der `/Filter`-Wert aus den Rohbytes eines Dictionaries, Glied für Glied
-/// **so, wie er dasteht**: ein Name als Name, `null`, eine Zahl oder ein
-/// Verweis als das, was es ist — damit die Kette an einem Glied, das kein
-/// Filtername ist, genauso stehen bleibt wie in der Objektsicht
-/// ([`filters::decoded_prefix_within`]), statt es zu überlesen und eine
-/// Kette zu entpacken, die kein Betrachter so liest. Leer, wenn kein
-/// `/Filter` dasteht.
-fn raw_filter_value(dict: &[u8]) -> Vec<Object> {
-    let Some(at) = memmem::find(dict, b"/Filter") else {
-        return Vec::new();
-    };
-    let rest = &dict[at + b"/Filter".len()..];
-    let Some(start) = rest.iter().position(|b| !b.is_ascii_whitespace()) else {
-        return Vec::new();
-    };
-    let rest = &rest[start..];
-    let body: &[u8] = if rest.starts_with(b"[") {
-        match memmem::find(rest, b"]") {
-            Some(end) => &rest[1..end],
-            None => return Vec::new(),
-        }
-    } else {
-        // Ein einzelner Wert: bis zum nächsten Schlüssel oder Ende.
-        let end = rest
+    let (data, applied, work) = filters::decoded_prefix_counted(&doc, &stream, limit)?;
+    let decoded = (applied > 0).then(|| {
+        let mut label = names[..applied]
             .iter()
-            .skip(1)
-            .position(|&b| b == b'/' || b == b'>')
-            .map_or(rest.len(), |p| p + 1);
-        &rest[..end]
-    };
-    let text = String::from_utf8_lossy(body);
-    let tokens: Vec<&str> = text.split_whitespace().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < tokens.len() {
-        let token = tokens[i];
-        if let Some(name) = token.strip_prefix('/') {
-            out.push(Object::Name(name.as_bytes().to_vec()));
-            i += 1;
-        } else if token == "null" {
-            out.push(Object::Null);
-            i += 1;
-        } else if let Ok(number) = token.parse::<i64>() {
-            // `N G R` ist ein Verweis — in einer Altgeneration ohne Ziel.
-            if tokens.get(i + 2) == Some(&"R")
-                && tokens.get(i + 1).is_some_and(|g| g.parse::<i64>().is_ok())
-            {
-                out.push(Object::Null);
-                i += 3;
-            } else {
-                out.push(Object::Integer(number));
-                i += 1;
-            }
-        } else {
-            out.push(Object::Null);
-            i += 1;
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect::<Vec<_>>()
+            .join("+");
+        if stream.dict.has(b"DecodeParms") {
+            label.push_str(" mit DecodeParms");
         }
-    }
-    out
+        (data, label)
+    });
+    Ok(RawChain {
+        decoded,
+        work,
+        gap: chain_gap(&names, applied),
+    })
 }
 
-/// `/DecodeParms` aus den Rohbytes eines Dictionaries: ein Dictionary oder
-/// ein Array von Dictionaries und `null`, jeweils nur mit ganzzahligen
-/// Werten (`/Predictor`, `/Columns`, `/Colors`, `/BitsPerComponent`,
-/// `/EarlyChange`). Alles andere wird übergangen.
-fn raw_decode_parms(dict: &[u8]) -> Option<Object> {
-    let at = memmem::find(dict, b"/DecodeParms")? + b"/DecodeParms".len();
-    let rest = &dict[at..];
-    let start = rest.iter().position(|b| !b.is_ascii_whitespace())?;
-    let rest = &rest[start..];
-    if rest.starts_with(b"[") {
-        let end = memmem::find(rest, b"]")?;
-        let mut items = Vec::new();
-        let mut i = 1;
-        while i < end {
-            if rest[i..].starts_with(b"<<") {
-                let close = memmem::find(&rest[i..end], b">>")? + i;
-                items.push(raw_int_dict(&rest[i + 2..close]));
-                i = close + 2;
-            } else if rest[i..].starts_with(b"null") {
-                items.push(Object::Null);
-                i += 4;
-            } else {
-                i += 1;
+/// So viele Bytes hinter `N G obj` liest eine Definition höchstens: ein
+/// Filtername oder ein `/DecodeParms`-Dictionary ist kurz.
+const RAW_DEFINITION_WINDOW: usize = 1024;
+
+/// Die Definitionen `N G obj` in den Rohbytes — für Verweise in einem rohen
+/// Stream-Dictionary (`/Filter 7 0 R`, `/DecodeParms 9 0 R`).
+///
+/// Der Verzeichnis entsteht erst beim ersten Verweis, in einem Durchgang über
+/// die Datei. Gilt eine Nummer mehrmals (inkrementelle Updates), gilt die
+/// Definition, die dem Block am nächsten steht: die Objekte einer Revision
+/// stehen beieinander, und ein Erzeuger schreibt das Parameterobjekt gleich
+/// vor oder hinter den Strom. Jede Definition wird einmal gelesen, bis zu
+/// ihrem `endobj`, höchstens [`RAW_DEFINITION_WINDOW`] Byte; zusammen
+/// höchstens so viele Bytes, wie die Datei hat. Eine gewöhnliche Datei
+/// erreicht das nie — ihre Definitionen überlappen nicht —, eine Datei aus
+/// lauter `N 0 obj` ohne `endobj` bleibt so linear (die Klasse aus Register
+/// #100). Was danach kommt, bleibt unaufgelöst.
+struct RawDefinitions<'a> {
+    bytes: &'a [u8],
+    index: Option<std::collections::HashMap<(u32, u16), Vec<usize>>>,
+    parsed: std::collections::HashMap<usize, Object>,
+    parsed_bytes: usize,
+}
+
+impl<'a> RawDefinitions<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            index: None,
+            parsed: std::collections::HashMap::new(),
+            parsed_bytes: 0,
+        }
+    }
+
+    /// Ein Dokument, das genau die Objekte enthält, auf die `dict` (und was
+    /// daraus aufgelöst wurde) verweist — je Nummer die Definition nahe
+    /// `near`.
+    fn scratch(&mut self, dict: &lopdf::Dictionary, near: usize) -> Document {
+        let mut doc = Document::new();
+        let mut queue = Vec::new();
+        for (_, value) in dict.iter() {
+            collect_references(value, &mut queue);
+        }
+        while let Some(id) = queue.pop() {
+            if doc.objects.contains_key(&id) {
+                continue;
+            }
+            if let Some(object) = self.lookup(id, near) {
+                collect_references(&object, &mut queue);
+                doc.objects.insert(id, object);
             }
         }
-        Some(Object::Array(items))
-    } else if rest.starts_with(b"<<") {
-        let close = memmem::find(rest, b">>")?;
-        Some(raw_int_dict(&rest[2..close]))
-    } else {
-        None
+        doc
+    }
+
+    fn lookup(&mut self, id: (u32, u16), near: usize) -> Option<Object> {
+        let bytes = self.bytes;
+        let index = self
+            .index
+            .get_or_insert_with(|| raw_definition_index(bytes));
+        let offsets = index.get(&id)?;
+        // Aufsteigend gesammelt: die nächste ist links oder rechts von `near`.
+        let right = offsets.partition_point(|&o| o < near);
+        let at = [right.checked_sub(1), Some(right)]
+            .into_iter()
+            .flatten()
+            .filter_map(|i| offsets.get(i).copied())
+            .min_by_key(|o| o.abs_diff(near))?;
+        if let Some(object) = self.parsed.get(&at) {
+            return Some(object.clone());
+        }
+        let window = &bytes[at..(at + RAW_DEFINITION_WINDOW).min(bytes.len())];
+        let body = memmem::find(window, b"endobj").map_or(window, |end| &window[..end]);
+        if self.parsed_bytes + body.len() > bytes.len() {
+            return None;
+        }
+        self.parsed_bytes += body.len();
+        let object = raw_object_value(body);
+        self.parsed.insert(at, object.clone());
+        Some(object)
     }
 }
 
-/// Die ganzzahligen Einträge eines rohen Dictionary-Rumpfs.
-fn raw_int_dict(body: &[u8]) -> Object {
-    let mut out = lopdf::Dictionary::new();
-    let text = String::from_utf8_lossy(body);
-    let mut tokens = text.split_whitespace().peekable();
-    while let Some(token) = tokens.next() {
-        if let Some(key) = token.strip_prefix('/') {
-            if let Some(value) = tokens.peek().and_then(|v| v.parse::<i64>().ok()) {
-                out.set(key.as_bytes().to_vec(), Object::Integer(value));
-                tokens.next();
-            }
+/// Jede Definition `N G obj` der Datei: Nummer und Generation → die Stellen
+/// hinter `obj`, aufsteigend.
+fn raw_definition_index(bytes: &[u8]) -> std::collections::HashMap<(u32, u16), Vec<usize>> {
+    let mut index: std::collections::HashMap<(u32, u16), Vec<usize>> =
+        std::collections::HashMap::new();
+    for at in memmem::find_iter(bytes, b"obj") {
+        if bytes[..at].ends_with(b"end") {
+            continue;
+        }
+        // `obj` als Wort, nicht als Anfang von `object`.
+        if bytes
+            .get(at + 3)
+            .is_some_and(|b| !is_whitespace(*b) && !is_delimiter(*b))
+        {
+            continue;
+        }
+        let head = bytes[..at].trim_ascii_end();
+        if head.len() == at {
+            continue;
+        }
+        let (rest, generation) = trailing_number(head);
+        let (_, number) = trailing_number(rest.trim_ascii_end());
+        let id = number
+            .and_then(|n| n.parse::<u32>().ok())
+            .zip(generation.and_then(|g| g.parse::<u16>().ok()));
+        if let Some(id) = id {
+            index.entry(id).or_default().push(at + 3);
         }
     }
-    Object::Dictionary(out)
+    index
+}
+
+/// Sammelt die Verweise in `object` (Listen und Dictionaries eingeschlossen).
+fn collect_references(object: &Object, out: &mut Vec<(u32, u16)>) {
+    match object {
+        Object::Reference(id) => out.push(*id),
+        Object::Array(items) => items.iter().for_each(|item| collect_references(item, out)),
+        Object::Dictionary(dict) => dict
+            .iter()
+            .for_each(|(_, value)| collect_references(value, out)),
+        _ => {}
+    }
 }
 
 fn raw_stream_blocks(bytes: &[u8]) -> Vec<(usize, &[u8])> {
@@ -1538,7 +1600,15 @@ fn raw_stream_blocks(bytes: &[u8]) -> Vec<(usize, &[u8])> {
         if !is_stream_keyword(bytes, start) {
             continue;
         }
+        // Hinter dem Schlüsselwort: Leerzeichen, dann das Zeilenende
+        // ([`is_stream_keyword`]). Der Strom beginnt dahinter — bis zur
+        // Spur-A-Runde 2 hier schon beim Leerzeichen, und ein Flate-Strom
+        // hinter `stream \r\n` begann mit drei Bytes, die nicht dazugehören
+        // (Register #95).
         let mut data = i;
+        while matches!(bytes.get(data), Some(b' ' | b'\t')) {
+            data += 1;
+        }
         if bytes.get(data) == Some(&b'\r') {
             data += 1;
         }
@@ -1895,56 +1965,7 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
     let total = names.len();
     let (data, applied, work) = filters::decoded_prefix_counted(doc, stream, room)?;
 
-    // Der Filter, an dem die Kette stehen blieb — falls sie stehen blieb.
-    // Ob er der erste ist oder der letzte, ändert nichts daran, was hinter
-    // ihm liegt: ungelesen. Nur **welcher** Filter es ist, entscheidet, ob
-    // das eine Meldung wert ist.
-    // Der Grund für eine Meldung — `None` heißt: die Kette lief ganz durch,
-    // oder sie blieb an etwas stehen, worüber zu schweigen richtig ist.
-    let grund = (applied < total).then(|| {
-        let name = &names[applied];
-        // Ein leeres Glied ist keines mit unbekanntem Namen, sondern eines
-        // ganz **ohne** Namen: `/Filter [/LZWDecode null]`, ein Verweis ins
-        // Leere, eine Zahl, eine Zeichenkette (siehe `filters::filter_names`).
-        if name.is_empty() {
-            return Some(
-                "der Wert an dieser Stelle ist kein Filtername (Verweis ins Leere, \
-                 null, Zahl oder Zeichenkette)"
-                    .to_string(),
-            );
-        }
-        if filters::is_image_filter(name) {
-            // Der benannte blinde Fleck — aber nur als **letztes** Glied.
-            // Die Ausgabe eines Bildfilters sind Abtastwerte; kein Erzeuger
-            // hängt dahinter noch einen Filter (PDF 32000-1, 7.4.1: die
-            // Reihenfolge im Array ist die Dekodierreihenfolge). Steht doch
-            // eines dahinter, liegt dort kein Bild, sondern ein Glied, das
-            // niemand angewandt hat — und darüber zu schweigen, verkauft
-            // einen Bildfilternamen als meldungsfreie Zone (Befund R2-A).
-            return (applied + 1 < total).then(|| {
-                format!(
-                    "/{} ist ein Bildfilter und wird nicht dekodiert, aber die Kette \
-                     geht dahinter weiter",
-                    String::from_utf8_lossy(name)
-                )
-            });
-        }
-        Some(format!(
-            "/{} ist hier kein bekannter Filter",
-            String::from_utf8_lossy(name)
-        ))
-    });
-    let unchecked = match grund.flatten() {
-        Some(grund) if applied == 0 => Some(format!(
-            "gar nicht dekodiert — {grund} (Glied 1 von {total}); gelesen sind \
-             nur die rohen, gepackten Bytes"
-        )),
-        Some(grund) => Some(format!(
-            "nur bis Filter {applied} von {total} dekodiert — {grund}; was dahinter \
-             steht, hat keine Sicht gelesen"
-        )),
-        None => None,
-    };
+    let unchecked = chain_gap(&names, applied);
 
     let chain = |names: &[Vec<u8>]| {
         names
@@ -2156,10 +2177,15 @@ fn push_capped(unchecked: &mut Vec<String>, lines: Vec<String>, was: &str) {
 /// mit Rückgabewert 0 (Register #98). Ein verschlüsseltes Dokument wird
 /// nicht verglichen — der Lader entschlüsselt, die Rohbytes nicht —, und
 /// ebenso wenig ein Objekt-Strom, den der Lader entpackt ablegt.
-fn misread_streams(bytes: &[u8], raw: &[((u32, u16), usize)], doc: &Document) -> Vec<String> {
+fn misread_streams(
+    bytes: &[u8],
+    raw: &[((u32, u16), usize)],
+    doc: &Document,
+) -> (Vec<String>, Option<BTreeSet<usize>>) {
     if doc.is_encrypted() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
+    let mut covered = BTreeSet::new();
     let mut by_id: std::collections::BTreeMap<(u32, u16), Vec<usize>> =
         std::collections::BTreeMap::new();
     for (id, offset) in raw {
@@ -2202,31 +2228,27 @@ fn misread_streams(bytes: &[u8], raw: &[((u32, u16), usize)], doc: &Document) ->
                 true
             }
             Some(Object::Stream(stream)) => {
-                // `stream` darf vor dem Zeilenende noch Leerraum tragen
-                // (`stream \r\n`); der Rohblock beginnt dann davor.
-                let vorn = bytes[block..]
-                    .iter()
-                    .take(4)
-                    .take_while(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
-                    .count();
-                (0..=vorn).any(|skip| {
-                    let rest = &bytes[block + skip..];
-                    rest.starts_with(&stream.content) && {
-                        // Und dahinter, nach Leerraum, `endstream`: dann
-                        // stimmte die Länge. (Verteidigend — `lopdf` 0.42
-                        // übernimmt einen Strom nur, wenn es so ist.)
-                        let hinten = &rest[stream.content.len()..];
-                        let leer = hinten
-                            .iter()
-                            .take_while(|b| matches!(b, b'\r' | b'\n' | b' ' | b'\t' | b'\x0c' | 0))
-                            .count();
-                        hinten[leer..].starts_with(b"endstream")
-                    }
-                })
+                // Der Rohblock beginnt hinter dem Zeilenende, auch hinter
+                // `stream \r\n` ([`raw_stream_blocks`]) — dort, wo auch der
+                // Lader die Bytes nimmt.
+                let rest = &bytes[block..];
+                rest.starts_with(&stream.content) && {
+                    // Und dahinter, nach Leerraum, `endstream`: dann stimmte
+                    // die Länge. (Verteidigend — `lopdf` 0.42 übernimmt einen
+                    // Strom nur, wenn es so ist.)
+                    let hinten = &rest[stream.content.len()..];
+                    let leer = hinten
+                        .iter()
+                        .take_while(|b| matches!(b, b'\r' | b'\n' | b' ' | b'\t' | b'\x0c' | 0))
+                        .count();
+                    hinten[leer..].starts_with(b"endstream")
+                }
             }
             _ => false,
         };
-        if !gelesen {
+        if gelesen {
+            covered.insert(block);
+        } else {
             out.push(format!(
                 "Objekt {} {}: der Lader übernahm nicht den Strom, der in den Rohbytes \
                  steht (Länge im Dictionary oder Querverweis passt nicht) — die Sichten \
@@ -2235,7 +2257,69 @@ fn misread_streams(bytes: &[u8], raw: &[((u32, u16), usize)], doc: &Document) ->
             ));
         }
     }
-    out
+    (out, Some(covered))
+}
+
+/// Wo eine Kette stehen blieb, als Zeile für `unchecked` — oder `None`: sie
+/// lief ganz durch, oder sie blieb an etwas stehen, worüber zu schweigen
+/// richtig ist (ein Bildfilter als letztes Glied, der benannte blinde Fleck).
+///
+/// Dieselbe Regel für die Objektsicht ([`decode_stream`]) und die Rohsicht
+/// ([`decode_raw_chain`]). Bis zur Spur-A-Runde 2 meldete die Rohsicht eine
+/// gescheiterte Kette nie: eine Altrevision unter `/FooDecode` stand in
+/// keiner Objektsicht und in keiner Zeile (Register #95).
+fn chain_gap(names: &[Vec<u8>], applied: usize) -> Option<String> {
+    let total = names.len();
+    // Der Filter, an dem die Kette stehen blieb — falls sie stehen blieb.
+    // Ob er der erste ist oder der letzte, ändert nichts daran, was hinter
+    // ihm liegt: ungelesen. Nur **welcher** Filter es ist, entscheidet, ob
+    // das eine Meldung wert ist.
+    // Der Grund für eine Meldung — `None` heißt: die Kette lief ganz durch,
+    // oder sie blieb an etwas stehen, worüber zu schweigen richtig ist.
+    let grund = (applied < total).then(|| {
+        let name = &names[applied];
+        // Ein leeres Glied ist keines mit unbekanntem Namen, sondern eines
+        // ganz **ohne** Namen: `/Filter [/LZWDecode null]`, ein Verweis ins
+        // Leere, eine Zahl, eine Zeichenkette (siehe `filters::filter_names`).
+        if name.is_empty() {
+            return Some(
+                "der Wert an dieser Stelle ist kein Filtername (Verweis ins Leere, \
+                 null, Zahl oder Zeichenkette)"
+                    .to_string(),
+            );
+        }
+        if filters::is_image_filter(name) {
+            // Der benannte blinde Fleck — aber nur als **letztes** Glied.
+            // Die Ausgabe eines Bildfilters sind Abtastwerte; kein Erzeuger
+            // hängt dahinter noch einen Filter (PDF 32000-1, 7.4.1: die
+            // Reihenfolge im Array ist die Dekodierreihenfolge). Steht doch
+            // eines dahinter, liegt dort kein Bild, sondern ein Glied, das
+            // niemand angewandt hat — und darüber zu schweigen, verkauft
+            // einen Bildfilternamen als meldungsfreie Zone (Befund R2-A).
+            return (applied + 1 < total).then(|| {
+                format!(
+                    "/{} ist ein Bildfilter und wird nicht dekodiert, aber die Kette \
+                     geht dahinter weiter",
+                    String::from_utf8_lossy(name)
+                )
+            });
+        }
+        Some(format!(
+            "/{} ist hier kein bekannter Filter",
+            String::from_utf8_lossy(name)
+        ))
+    });
+    match grund.flatten() {
+        Some(grund) if applied == 0 => Some(format!(
+            "gar nicht dekodiert — {grund} (Glied 1 von {total}); gelesen sind \
+             nur die rohen, gepackten Bytes"
+        )),
+        Some(grund) => Some(format!(
+            "nur bis Filter {applied} von {total} dekodiert — {grund}; was dahinter \
+             steht, hat keine Sicht gelesen"
+        )),
+        None => None,
+    }
 }
 
 /// PDFDocEncoding (PDF 32000-1, Anhang D.2), wo es von Latin-1 abweicht:

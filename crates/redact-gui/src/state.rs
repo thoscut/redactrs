@@ -380,7 +380,8 @@ impl HitOutcome {
 /// `MAX_UNCHECKED`) gilt je **Zähler**, und davon gibt es fünf: nicht
 /// entpackte Ströme der Rohsicht, dieselben der Objektsicht (jede Sicht hat
 /// ihr eigenes Budget), Stellen aus anderem Grund — etwa die
-/// Verschachtelungstiefe —, verlesene Ströme und abgelehnte Seiten (seit der
+/// Verschachtelungstiefe —, verlesene oder in der Rohsicht nicht dekodierte
+/// Ströme und abgelehnte Seiten (seit der
 /// Spur-A-Runde 2; bis dahin drei Zähler und die Zeile über Sicht 7, zusammen
 /// 154). Gemessen
 /// (`zf_q4_tests::zf_q4_3_die_zahl_der_ungepruefeten_stellen_sprengt_die_zusage`):

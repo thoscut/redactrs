@@ -220,6 +220,29 @@ sind, jeder in seinem eigenen Commit.
   `audit_bytes::tests::only_the_stream_keyword_opens_a_raw_block`.
   Mutationsnachweis: jede Hälfte der Prüfung zurückgenommen → ihr Fall rot.
 
+* **⚠ Sicherheit: die Rohsicht las das Dictionary einer Altrevision
+  schlecht, und eine gescheiterte Kette meldete sie nie** (Register #95,
+  Prüfer D; stilles Leck des Orakels, die Zeile #80 der Probenliste trat
+  weiter auf). Die Rohsicht liest `/Filter` und `/DecodeParms` einer
+  Altrevision aus den Rohbytes und trennte die Wörter dort nur an Leerraum:
+  `/Filter[/ASCII85Decode/FlateDecode]`, wie iText und `lopdf` es
+  schreiben, war ein einziger Name; `/DecodeParms<</Predictor 12/Columns
+  8>>` ein Prädiktor ohne Zahl, `/DecodeParms 9 0 R` gar keiner; hinter
+  `stream \r\n` begann der Strom beim Leerzeichen. Das Geheimnis kam als
+  „nicht gefunden“ zurück — und `/FooDecode` an einer Altrevision stand in
+  keiner Zeile. Jetzt liest die Rohsicht mit dem Wortzerleger der
+  Vorprüfung, löst einen Verweis aus den Rohbytes auf (die Definition, die
+  dem Strom am nächsten steht) und meldet eine gescheiterte Kette mit dem
+  Wortlaut der Objektsicht — dort, wo keine Objektsicht denselben Strom
+  gelesen hat. Weil die Rohsicht damit zum ersten Mal Ketten liest, die
+  `lopdf` geschrieben hat, stimmten alte Belege nicht mehr: der zu
+  ASCII85 am genau passenden Budget hielt seit #64 nichts mehr (die
+  Vorprüfung lehnte die Datei ab, die Objektsicht lief nie) und misst jetzt
+  die Rohsicht; der zu vielen kleinen Strömen findet das Geheimnis jetzt in
+  der Rohsicht und nennt den Strom, der ihr Budget sprengt. Belege:
+  `zp_d_rohes_dictionary`, `ze_p1_befunde`, `ze_p1_budget_und_filter`.
+  Mutationsnachweis: je Teil zurückgenommen → sein Fall rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

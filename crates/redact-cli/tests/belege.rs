@@ -1913,7 +1913,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     satz(
         "SECURITY.md",
         format!(
-            "die Decke `MAX_UNCHECKED = {}` einzeln genannter Stellen plus Summenzeile gilt je **Zähler**, und davon gibt es {} (zu große Ströme der Rohsicht, dieselben der Objektsicht, Stellen aus anderem Grund, verlesene Ströme, abgelehnte Seiten): {} × {}",
+            "die Decke `MAX_UNCHECKED = {}` einzeln genannter Stellen plus Summenzeile gilt je **Zähler**, und davon gibt es {} (zu große Ströme der Rohsicht, dieselben der Objektsicht, Stellen aus anderem Grund, verlesene oder in der Rohsicht nicht dekodierte Ströme, abgelehnte Seiten): {} × {}",
             konstante_aus("crates/redact-pdf/src/audit_bytes.rs", "MAX_UNCHECKED"),
             zahlwort(5),
             5,
@@ -3357,6 +3357,30 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "(Register #96, Prüfer D; stilles Leck des Orakels, neue Klasse)",
         "eine Registernummer, keine Messung",
+    ),
+    (
+        "(Register #95, Prüfer D; stilles Leck des Orakels, die Zeile #80 der Probenliste trat weiter auf)",
+        "Registernummern, keine Messung",
+    ),
+    (
+        "`/Filter[/ASCII85Decode/FlateDecode]`",
+        "ein Filtername als Beispiel der Schreibweise, keine Messung",
+    ),
+    (
+        "`/DecodeParms<</Predictor 12/Columns 8>>`",
+        "PDF-Syntax als Beispiel der Schreibweise, keine Messung",
+    ),
+    (
+        "`/DecodeParms 9 0 R`",
+        "ein Verweis als Beispiel der Schreibweise, keine Messung",
+    ),
+    (
+        "der zu ASCII85 am genau passenden Budget hielt seit #64",
+        "ein Filtername und eine Registernummer, keine Messung",
+    ),
+    (
+        "`ze_p1_befunde`, `ze_p1_budget_und_filter`",
+        "Dateinamen, keine Messung",
     ),
 ];
 

@@ -176,8 +176,17 @@ fn p1_2_ascii85_wird_beim_eigenen_umfang_abgelehnt() {
 ///
 /// Aufbau: ein erster Strom verbraucht das Budget bis auf genau `n` Byte,
 /// der zweite ist ein ASCII85-Strom von genau `n` Byte (`n % 4 == 3`).
-/// Der erste hängt hinter `RunLengthDecode`, damit die Vorprüfung des
-/// Laders ihn nicht selbst auspackt und das Budget vorwegnimmt.
+///
+/// Gemessen wird an der **Rohsicht**. Bis zur Spur-A-Runde 2 hing der erste
+/// Strom hinter `[/RunLengthDecode /FlateDecode]`, damit die Vorprüfung des
+/// Laders ihn nicht auspackt — seit Register #64 packt sie ihn doch aus, und
+/// weil sie die übrigen Ströme der Datei mitzählt, lehnt sie die Datei ab: die
+/// Objektsicht lief hier seither gar nicht, und der Test hielt nichts. Die
+/// Rohsicht las die Kette bis Register #95 nicht (`lopdf` schreibt sie ohne
+/// Leerzeichen). Jetzt liest sie sie, und sie bucht die Arbeit **beider**
+/// Glieder (Register #99): der ASCII85-Strom passte nicht mehr. Deshalb ein
+/// einzelnes `/FlateDecode` — Arbeit gleich Ausgabe —, und die Rohsicht muss
+/// den ASCII85-Strom genau in den Rest des Budgets entpacken.
 #[test]
 fn p1_2_ascii85_strom_wird_grundlos_uebersprungen() {
     const BUDGET: usize = 64 * 1024;
@@ -200,9 +209,8 @@ fn p1_2_ascii85_strom_wird_grundlos_uebersprungen() {
         d.content_id,
         Object::Stream(
             Stream::new(
-                dictionary! { "Filter" => Object::Array(vec![
-                "RunLengthDecode".into(), "FlateDecode".into()]) },
-                common::run_length_encode(&deflate(&fuellung)),
+                dictionary! { "Filter" => "FlateDecode" },
+                deflate(&fuellung),
             )
             .with_compression(false),
         ),
@@ -224,5 +232,13 @@ fn p1_2_ascii85_strom_wird_grundlos_uebersprungen() {
             .any(|u| u.contains(&format!("Objekt {} {}", a85.0, a85.1))),
         "ein {N}-Byte-Strom passt in die verbleibenden {N} Byte des Budgets: {:?}",
         result.unchecked
+    );
+    assert!(
+        result.findings[0]
+            .iter()
+            .any(|h| h.contains(&format!("Objekt {} {}", a85.0, a85.1))
+                && h.contains("dekodiert: ASCII85Decode")),
+        "die Rohsicht hat den ASCII85-Strom nicht entpackt: {:?}",
+        result.findings[0]
     );
 }

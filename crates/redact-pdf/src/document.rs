@@ -1244,6 +1244,146 @@ fn dict_tokens(bytes: &[u8]) -> Vec<Token<'_>> {
     out
 }
 
+/// Der Wert zu `key` auf der obersten Ebene eines **rohen** Dictionarys —
+/// als `lopdf::Object`, zerlegt mit demselben Wortzerleger wie
+/// [`filter_names`].
+///
+/// Für die Rohsicht des Orakels, die ein Stream-Dictionary aus den Rohbytes
+/// liest, weil die Altrevision eines inkrementellen Updates in keinem
+/// Objektgraphen mehr steht. Bis zur Spur-A-Runde 2 trennte sie die Wörter
+/// dort nur an Leerraum: `/Filter[/ASCII85Decode/FlateDecode]`, wie iText es
+/// schreibt, war **ein** Name, `/DecodeParms<</Predictor 12/Columns 5>>`
+/// ein Prädiktor ohne Zahl — die Kette lief nicht oder falsch, und das
+/// Geheimnis darin kam als „nicht gefunden“ zurück (Register #95).
+///
+/// Ein Verweis bleibt ein [`Object::Reference`]; ihn aufzulösen ist Sache des
+/// Aufrufers. Eine Zeichenkette steht als leere Zeichenkette da — kein
+/// Filtername, aber auch nicht `null`. Tiefer als [`RAW_OBJECT_DEPTH`]
+/// Ebenen wird nicht gelesen.
+pub(crate) fn raw_dict_entry(dict: &[u8], key: &[u8]) -> Option<Object> {
+    let tokens = dict_tokens(dict);
+    if !matches!(tokens.first(), Some(Token::DictOpen)) {
+        return None;
+    }
+    let mut i = 1;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::DictClose => return None,
+            Token::Name(name) => {
+                let (value, next) = read_object(&tokens, i + 1, 0);
+                if name.as_slice() == key {
+                    return Some(value);
+                }
+                i = next.max(i + 1);
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Der Wert eines rohen Objekts — die Bytes hinter `N G obj`.
+pub(crate) fn raw_object_value(body: &[u8]) -> Object {
+    read_object(&dict_tokens(body), 0, 0).0
+}
+
+/// So tief liest [`read_object`] verschachtelte Listen und Dictionaries; was
+/// tiefer steht, wird übersprungen und ist `null`. Eine Filterkette braucht
+/// eine Ebene, `/DecodeParms` zwei.
+const RAW_OBJECT_DEPTH: usize = 8;
+
+/// Liest den Wert bei `tokens[i]` als `lopdf::Object`; liefert ihn und die
+/// Stelle dahinter.
+fn read_object(tokens: &[Token<'_>], i: usize, depth: usize) -> (Object, usize) {
+    match tokens.get(i) {
+        Some(Token::Name(name)) => (Object::Name(name.clone()), i + 1),
+        Some(Token::Word(word)) => {
+            if is_integer(word) {
+                if let (Some(Token::Word(generation)), Some(Token::Word(b"R"))) =
+                    (tokens.get(i + 1), tokens.get(i + 2))
+                {
+                    if is_integer(generation) {
+                        let number = std::str::from_utf8(word).ok().and_then(|w| w.parse().ok());
+                        let generation = std::str::from_utf8(generation)
+                            .ok()
+                            .and_then(|g| g.parse().ok());
+                        let value = match (number, generation) {
+                            (Some(number), Some(generation)) => {
+                                Object::Reference((number, generation))
+                            }
+                            _ => Object::Null,
+                        };
+                        return (value, i + 3);
+                    }
+                }
+            }
+            let text = std::str::from_utf8(word).unwrap_or_default();
+            let value = match text {
+                "null" => Object::Null,
+                "true" => Object::Boolean(true),
+                "false" => Object::Boolean(false),
+                _ => text
+                    .parse::<i64>()
+                    .map(Object::Integer)
+                    .or_else(|_| text.parse::<f32>().map(Object::Real))
+                    .unwrap_or(Object::Null),
+            };
+            (value, i + 1)
+        }
+        Some(Token::ArrOpen) if depth < RAW_OBJECT_DEPTH => {
+            let mut items = Vec::new();
+            let mut j = i + 1;
+            while j < tokens.len() && !matches!(tokens[j], Token::ArrClose) {
+                let (item, next) = read_object(tokens, j, depth + 1);
+                items.push(item);
+                j = next.max(j + 1);
+            }
+            (Object::Array(items), (j + 1).min(tokens.len()))
+        }
+        Some(Token::DictOpen) if depth < RAW_OBJECT_DEPTH => {
+            let mut dict = lopdf::Dictionary::new();
+            let mut j = i + 1;
+            while j < tokens.len() && !matches!(tokens[j], Token::DictClose) {
+                if let Token::Name(key) = &tokens[j] {
+                    let (value, next) = read_object(tokens, j + 1, depth + 1);
+                    dict.set(key.clone(), value);
+                    j = next.max(j + 1);
+                } else {
+                    j += 1;
+                }
+            }
+            (Object::Dictionary(dict), (j + 1).min(tokens.len()))
+        }
+        Some(Token::ArrOpen | Token::DictOpen) => (Object::Null, skip_balanced(tokens, i)),
+        Some(Token::DictClose | Token::ArrClose) | None => (Object::Null, i),
+        Some(Token::Other) => (
+            Object::String(Vec::new(), lopdf::StringFormat::Literal),
+            i + 1,
+        ),
+    }
+}
+
+/// Die Stelle hinter der Liste oder dem Dictionary, das bei `tokens[i]`
+/// beginnt.
+fn skip_balanced(tokens: &[Token<'_>], i: usize) -> usize {
+    let mut depth = 0usize;
+    let mut j = i;
+    while j < tokens.len() {
+        match tokens[j] {
+            Token::DictOpen | Token::ArrOpen => depth += 1,
+            Token::DictClose | Token::ArrClose => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return j + 1;
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    j
+}
+
 fn hex_value(b: Option<&u8>) -> Option<u8> {
     b.and_then(|b| (*b as char).to_digit(16)).map(|d| d as u8)
 }

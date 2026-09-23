@@ -1968,7 +1968,8 @@ gezählt („… und N weitere“); `MAX_NAMED_PLACES = 3` in
 sind abgeleitet, nicht gemessen: die Decke `MAX_UNCHECKED = 50` einzeln
 genannter Stellen plus Summenzeile gilt je **Zähler**, und davon gibt es fünf
 (zu große Ströme der Rohsicht, dieselben der Objektsicht, Stellen aus anderem
-Grund, verlesene Ströme, abgelehnte Seiten): 5 × 51. Die Zeile, Sicht 7 sei
+Grund, verlesene oder in der Rohsicht nicht dekodierte Ströme, abgelehnte
+Seiten): 5 × 51. Die Zeile, Sicht 7 sei
 nicht gelaufen, schließt die abgelehnten Seiten aus — wo Sicht 7 nicht lief,
 lehnte sie auch keine Seite ab. Bis zur Spur-A-Runde 2 waren es drei Zähler
 und die Zeile über Sicht 7. Gemessen wurden 52 Zeilen aus
