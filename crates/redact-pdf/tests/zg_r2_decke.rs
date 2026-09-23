@@ -35,7 +35,9 @@
 //! ihrem eigenen `Budget` als „nicht entpackt“. Die Zählung (`skip`, `note`,
 //! Summenzeilen, `unchecked_places`) ist dieselbe Struktur; der Topf `note`
 //! bleibt in der Objektsicht. Den Topf `skip` der Objektsicht samt der Zeile
-//! über Sicht 7 hält `zf_q2_teildekoder::q2_unchecked_kennt_mehr_gruende_als_die_doku_aufzaehlt`.
+//! über Sicht 7 erreicht seit Register #83 keine Datei mehr, die die
+//! Vorprüfung mit demselben Budget durchlässt (siehe
+//! `zf_q2_teildekoder::q2_unchecked_kennt_mehr_gruende_als_die_doku_aufzaehlt`).
 
 mod common;
 

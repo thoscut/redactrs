@@ -367,9 +367,15 @@ Entpackbudget. Trägt die Kette `LZWDecode` oder `ASCII85Decode`, gilt zusätzli
 die 16-MB-Grenze der **Rohgröße** — nachgemessen an einem
 17-MB-`ASCII85Decode`-Strom: `Stream mit Altlast-Filter (ASCII85Decode) ist mit
 17 825 795 Bytes zu groß (Grenze 16 777 216 Bytes)`, Rückgabewert 1. Die
-Bildfilter packt die Vorprüfung **gar nicht** aus, sie zählt ihre Rohbytes;
+Bildfilter packt die Vorprüfung **gar nicht** aus, sie zählt ihre Rohbytes.
 ein 17-MB-`ASCIIHexDecode`-Strom lief vor der Runde roh durch (Rückgabewert 0,
-nachgemessen) und wird jetzt entpackt gezählt. Ausgepackt werden die Bildfilter erst beim Schwärzen und in der
+nachgemessen) und wird jetzt entpackt gezählt. Was **vor** einem Bildfilter
+oder einem unbekannten Filter steht — der Flate-Vorspann von `[/FlateDecode
+/DCTDecode]` —, packt sie seit Register #83 aus und zählt es gegen das ganze
+Budget; bis dahin buchte sie die ganze Kette roh, und der Bilddekoder des
+Schreibpfads entpackte den Vorspann ohne Grenze. Die Grenze der Rohgröße gilt
+einem solchen Vorspann nicht, auch wenn er `ASCII85Decode` heißt: er lief
+vorher roh durch und soll nicht erst jetzt fallen. Ausgepackt werden die Bildfilter erst beim Schwärzen und in der
 Nachprüfung — und dort gegen `--max-decompressed-mb`, nicht gegen 16 MB
 (nachgemessen: ein `RunLengthDecode`- und ein `ASCIIHexDecode`-Seiteninhalt mit
 demselben Geheimnis werden von `--check-leaks` gefunden, letzterer ausdrücklich
@@ -1947,7 +1953,14 @@ hinzugefügt hatte:
 
 Die letzte Zeile ist eine Folge der ersten: bleibt auch nur ein Strom
 ungepackt, läuft Sicht 7 gar nicht erst, weil der Schriftdekoder ohne eigene
-Grenze entpackt.
+Grenze entpackt. Seit Register #83 bucht die Vorprüfung jeden Strom
+mindestens so groß, wie die Objektsicht ihn mit demselben Dekoder entpackt;
+eine Datei, die sie mit demselben Budget durchlässt, erreicht die Zeile
+„nicht entpackt“ der Objektsicht und die über Sicht 7 nur noch, wo die zwei
+Dekoder aus einem Strom verschieden viel holen. Beide bleiben als Rückfall;
+die Entpackgrenze der **Rohsicht** — ein zlib-Strom ohne `/Filter`, den die
+Vorprüfung roh zählt — ist die Zeile, die man an einer gewöhnlichen
+Kommandozeile noch sieht.
 
 ### Interpreter und Orakel lesen verschieden
 

@@ -940,6 +940,22 @@ mod messwerte {
     pub const KETTENBOMBE_ENTPACKT_GB: &str = "2,4";
     pub const KETTENBOMBE_SPITZE_GB: &str = "3,8";
     pub const KETTENBOMBE_ADRESSRAUM_GIB: &str = "1,5";
+
+    // Der Vorspann vor einem Bildfilter (Spur-A-Runde 1, Register #83).
+    //
+    // Gemessen am gebauten Binary (Weg 1, Debug, `/usr/bin/time -v`,
+    // Maximum resident set size) am Stand [`VORSPANN_STAND`], an dem die
+    // Vorpruefung `[/FlateDecode /DCTDecode]` roh buchte — nach der
+    // Korrektur nicht mehr messbar (Weg 3 im Satz): 3 131 802 Byte Datei,
+    // 3 GiB Nullen im Flate-Glied, 3 241 844 KB Spitze bei
+    // `--max-decompressed-mb 64`. Probedateien und Erzeuger im Arbeitsbuch
+    // der Runde, nicht im Baum; `zo_e_vorspann_vor_bildfilter` baut die
+    // kleinere Form nach.
+    pub const VORSPANN_STAND: &str = "72711d0";
+    pub const VORSPANN_DATEI_MB: u64 = 3;
+    pub const VORSPANN_NULLEN_GIB: u64 = 3;
+    pub const VORSPANN_SPITZE_GB: &str = "3,1";
+    pub const VORSPANN_BUDGET_MB: u64 = 64;
 }
 
 /// Die ausgeschriebene Zahl, wie die Doku kleine Zahlen schreibt.
@@ -2263,6 +2279,21 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // --- Der Vorspann vor einem Bildfilter (Spur-A-Runde 1, Register #83) ----
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Am Stand `{}` brauchte eine Datei von {} MB mit {} GiB Nullen im Flate-Glied \
+             am gebauten Binary {} GB Spitze (`/usr/bin/time -v`), bei \
+             `--max-decompressed-mb {}`, und endete mit Rückgabewert 1",
+            m::VORSPANN_STAND,
+            m::VORSPANN_DATEI_MB,
+            m::VORSPANN_NULLEN_GIB,
+            m::VORSPANN_SPITZE_GB,
+            m::VORSPANN_BUDGET_MB
+        ),
+    );
+
     aus
 }
 
@@ -3101,6 +3132,26 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "die Rohsicht an `[null /ASCII85Decode]` stehen bleibt",
         "ein Filtername der Norm im Beispiel, keine Messung",
+    ),
+    (
+        "an einem Bildfilter endet** (Register #83, Nachtrag zu #64; Dienstverweigerung)",
+        "Registernummern, keine Messung",
+    ),
+    (
+        "Die Vorprüfung packte seit #64 jede Kette aus",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "`[/ASCII85Decode /DCTDecode]` lief vorher roh durch",
+        "Filternamen der Norm, keine Messung",
+    ),
+    (
+        "Die Zeile der Probenliste zu #64 trat damit noch auf",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "`zf_q2_teildekoder` hält seither die Ablehnung fest",
+        "ein Dateiname (Gegenprüfung Q2), keine Messung",
     ),
 ];
 

@@ -43,7 +43,7 @@ Prosa.
 | Erscheinungsstrom, den niemand liest: `/MK /I`, `/RI`, `/IX`; `/AP` einer nur über `/Popup`, `/Parent`, `/IRT` gehaltenen Annotation | A | Spur-A-Runde 1 (#71) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
 | Gehaltene Spiegel in Formularen über alle Seiten, ohne Decke | A | Spur-A-Runde 1 (#68) | `crates/redact-pdf/tests/zo_c_spiegel_umgebungen.rs` |
 | Abgelehnte gewöhnliche Datei: ein Bildfilter, den das Orakel kann und der Bilddekoder nicht (`LZWDecode`) | A | Spur-A-Runde 1 (#78) | `crates/redact-pdf/tests/zo_a_maske_und_filter.rs` |
-| Filterkette: ein Glied, das die Vorprüfung nicht auspackt, nimmt der ganzen Kette die Entpackgrenze | A | Spur-A-Runde 1 (#64) | `crates/redact-cli/tests/zo_e_kettenbombe_schreibpfad.rs` |
+| Filterkette: ein Glied, das die Vorprüfung nicht auspackt, nimmt der ganzen Kette die Entpackgrenze | A | Spur-A-Runde 1 (#64, Nachtrag #83: der Vorspann vor einem Bildfilter) | `crates/redact-cli/tests/zo_e_kettenbombe_schreibpfad.rs`, `crates/redact-cli/tests/zo_e_vorspann_vor_bildfilter.rs` |
 | Orakel: eine Zeichenkettenkodierung der Norm, die der Dekoder nicht kennt (PDFDocEncoding 0x80–0xA0) | A | Spur-A-Runde 1 (#81) | `crates/redact-pdf/tests/zo_d_altgeneration_und_kodierung.rs`, `crates/redact-cli/tests/zo_d_orakel_am_binary.rs` |
 | Orakel: eine Altgeneration unter einem Filter, den nur die Objektsicht kann, oder als maskierte Zeichenkette | A | Spur-A-Runde 1 (#80) | `crates/redact-pdf/tests/zo_d_altgeneration_und_kodierung.rs`, `crates/redact-cli/tests/zo_d_orakel_am_binary.rs` |
 

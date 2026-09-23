@@ -276,9 +276,19 @@ fn q2_prescan_deckt_den_klon_ab() {
 /// selbst ab. Roh gebucht wird nur noch eine Kette mit einem Glied, das nie
 /// zu PDF-Syntax wird — hier `[/RunLengthDecode /DCTDecode]`: die Objektsicht
 /// entpackt den RunLength-Vorspann (der Bildfilter am Ende ist der benannte
-/// blinde Fleck und meldet sich nicht) und läuft damit ans Budget. Ob der
-/// Schreibpfad einen solchen Vorspann begrenzt entpackt, ist eine eigene
-/// Frage (Register #83); dieser Test hält nur die Gründe des Orakels.
+/// blinde Fleck und meldet sich nicht) und läuft damit ans Budget.
+///
+/// **Seit Register #83** packt die Vorprüfung auch diesen Vorspann aus — der
+/// Schreibpfad hatte ihn ohne Grenze entpackt — und lehnt die Datei ab. Die
+/// Zeilen „nicht entpackt“ der Objektsicht und „Sicht 7 nicht gelaufen“
+/// bleiben im Code als Rückfall: die Vorprüfung bucht jetzt jeden Strom
+/// mindestens so groß, wie die Objektsicht ihn mit demselben Dekoder
+/// entpackt, und eine Datei, die sie mit demselben Budget durchlässt,
+/// erreicht die beiden Zeilen nur noch, wo die zwei Dekoder aus einem Strom
+/// verschieden viel holen. Dieser Test hält deshalb fest, was an ihre Stelle
+/// tritt: die Ablehnung der Vorprüfung mit dem Budget als Grund — und mit
+/// genug Budget keine offene Stelle. Die Entpackgrenze der Rohsicht zeigt
+/// `zg_r2_decke`.
 #[test]
 fn q2_unchecked_kennt_mehr_gruende_als_die_doku_aufzaehlt() {
     // 1 KB Rohbytes → 128 KB entpackt (jeder Lauf verhundertachtundzwanzigfacht).
@@ -313,27 +323,25 @@ fn q2_unchecked_kennt_mehr_gruende_als_die_doku_aufzaehlt() {
     let mut bytes = Vec::new();
     doc.save_to(&mut bytes).expect("speicherbar");
 
-    // Budget 16 KiB: die Vorprüfung nimmt die Datei (2 KB Rohbytes), das Orakel
-    // kann den Strom nicht entpacken.
+    // Budget 16 KiB: 2 KB Rohbytes, 128 KB Vorspann — die Vorprüfung lehnt ab.
     let check = leaks_many_within(&bytes, &["DE89 3704 0044 0532 0130 00"], 16 * 1024);
-    assert!(
-        !check.unchecked.iter().any(|m| m.contains("Vorprüfung")),
-        "die Vorprüfung muss die Datei annehmen: {:#?}",
-        check.unchecked
-    );
-    assert!(
-        check.unchecked.iter().any(|m| m.contains("nicht entpackt")),
-        "Grund 1 (Budget) fehlt: {:#?}",
-        check.unchecked
-    );
     assert!(
         check
             .unchecked
             .iter()
-            .any(|m| m.contains("Sicht 7 (Schriftdekoder) nicht gelaufen")),
-        "der fünfte Grund fehlt: {:#?}",
+            .any(|m| m.contains("Vorprüfung") && m.contains("Budget")),
+        "die Vorprüfung muss den Vorspann gegen das Budget buchen: {:#?}",
         check.unchecked
     );
+    assert!(
+        !check.unchecked.iter().any(|m| m.contains("Sicht 7")),
+        "ohne geladenes Dokument läuft keine Objektsicht, die sich abmelden könnte: {:#?}",
+        check.unchecked
+    );
+    // Mit genug Budget ist nichts offen: der Bildfilter am Ende ist der
+    // benannte blinde Fleck und meldet sich nicht.
+    let voll = leaks_many_within(&bytes, &["DE89 3704 0044 0532 0130 00"], u64::MAX);
+    assert!(voll.unchecked.is_empty(), "{:#?}", voll.unchecked);
 }
 
 // ---------------------------------------------------------------------------

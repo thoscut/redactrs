@@ -385,6 +385,32 @@ seiner neuen Zeile in der Probenliste.
   die Objektsicht. Mutationsnachweis: Kette nicht gelesen → der erste und
   der dritte rot; Literale nicht gelesen → der zweite und der dritte rot.
 
+* **⚠ Sicherheit: die Entpackgrenze galt nicht für den Vorspann einer Kette,
+  die an einem Bildfilter endet** (Register #83, Nachtrag zu #64;
+  Dienstverweigerung). Die Vorprüfung packte seit #64 jede Kette aus, deren
+  Glieder alle auspackbar sind, und buchte jede andere weiter ganz roh —
+  auch `[/FlateDecode /DCTDecode]`, ein JPEG, noch einmal mit Flate gepackt.
+  Steht im Flate-Glied eine Bombe, entpackte der Bilddekoder des
+  Schreibpfads sie ohne Grenze, um an die JPEG-Bytes zu kommen. Am Stand
+  `72711d0` brauchte eine Datei von 3 MB mit 3 GiB Nullen im Flate-Glied am
+  gebauten Binary 3,1 GB Spitze (`/usr/bin/time -v`), bei
+  `--max-decompressed-mb 64`, und endete mit Rückgabewert 1 und der falschen
+  Ursache „JPEG nicht dekodierbar“. Jetzt packt die Vorprüfung den
+  auspackbaren Vorspann jeder Kette begrenzt aus und bucht ihn gegen das
+  ganze Budget; die Bombe fällt dort mit der Budgetmeldung. Die
+  Rohgrößen-Grenze der Altlast-Filter gilt dem Vorspann nicht:
+  `[/ASCII85Decode /DCTDecode]` lief vorher roh durch und soll nicht erst
+  jetzt fallen. Die Zeile der Probenliste zu #64 trat damit noch auf; sie
+  trägt jetzt beide Belege. Für das Orakel heißt das: eine Datei, die die
+  Vorprüfung mit demselben Budget durchlässt, bringt die Objektsicht nur noch
+  dort ans Budget, wo die beiden Dekoder aus einem Strom verschieden viel
+  holen; `zf_q2_teildekoder` hält seither die Ablehnung fest. Belege:
+  `zo_e_vorspann_vor_bildfilter::ein_flate_vorspann_vor_dctdecode_faellt_am_budget`,
+  `…::ein_echtes_jpeg_hinter_flate_bleibt_durchlaessig` und die Gegenprobe
+  zur Altlast-Grenze in derselben Datei. Mutationsnachweis: Vorspann wieder
+  roh gebucht → der erste rot; Altlast-Grenze auch am Vorspann → die
+  Gegenprobe rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

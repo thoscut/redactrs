@@ -626,11 +626,12 @@ impl Prescan<'_> {
     /// und die muss stimmen, sonst ließe sich der Stream gar nicht auspacken.
     fn account(&mut self, dict: &[u8], payload: &[u8]) -> Result<()> {
         let filters = filter_names(dict);
-        // Die Kette wird ausgepackt, wenn **jedes** Glied einer der Filter
-        // ist, die `crate::filters` begrenzt entpacken kann — dieselben, die
-        // der Schreibpfad später auspackt. Alles andere (DCT, JPX, CCITT,
-        // JBIG2, Unbekanntes) wird nie zu PDF-Syntax und kann keine
-        // Verschachtelung verstecken; es wird nur roh gebucht.
+        // Ausgepackt wird der **Vorspann** der Kette, soweit jedes Glied
+        // einer der Filter ist, die `crate::filters` begrenzt entpacken kann
+        // — dieselben, die der Schreibpfad später auspackt. Was dahinter
+        // steht (DCT, JPX, CCITT, JBIG2, Unbekanntes), wird nie zu
+        // PDF-Syntax und kann keine Verschachtelung verstecken; ab dort wird
+        // nichts mehr ausgepackt.
         //
         // Bis zur Spur-A-Runde 1 fehlten `RunLengthDecode` und `ASCIIHexDecode`
         // (und die Kurznamen), und eine Kette mit einem solchen Glied wurde
@@ -638,25 +639,24 @@ impl Prescan<'_> {
         // [/FlateDecode /RunLengthDecode]` über einem RunLength-Strom, der
         // sich auf 2,4 GB aufbläst, stand als 39 KB in der Datei, ging durch,
         // und der Schreibpfad entpackte ihn ohne Grenze (Register #64).
-        let decodable = filters.iter().all(|f| {
-            matches!(
-                f.as_slice(),
-                b"FlateDecode"
-                    | b"Fl"
-                    | b"LZWDecode"
-                    | b"LZW"
-                    | b"ASCII85Decode"
-                    | b"A85"
-                    | b"ASCIIHexDecode"
-                    | b"AHx"
-                    | b"RunLengthDecode"
-                    | b"RL"
-            )
-        });
-
-        if !decodable {
+        //
+        // Und bis zu ihrem Nachtrag galt das Ganze-oder-nichts auch für den
+        // Vorspann: `[/FlateDecode /DCTDecode]` wurde roh gebucht, weil DCT
+        // nicht auspackbar ist — der Bilddekoder des Schreibpfads entpackte
+        // das Flate-Glied dann ohne Grenze, um an die JPEG-Bytes zu kommen.
+        // Eine 3-MB-Datei mit 3 GiB Nullen im Flate-Glied brauchte am
+        // gebauten Binary 3,1 GB Spitze, bei `--max-decompressed-mb 64`
+        // (Register #83).
+        let decodable = filters.iter().take_while(|f| is_decodable(f)).count();
+        if decodable == 0 && !filters.is_empty() {
             return self.charge(payload.len() as u64, payload.len() as u64, false);
         }
+        // Blieb die Kette stehen, sind die ausgepackten Bytes die Eingabe
+        // eines Bild- oder unbekannten Filters: Nutzlast, keine Syntax. Sie
+        // zählen gegen das ganze Budget, nicht gegen das enge der Syntax,
+        // und werden nicht durchlaufen.
+        let whole = decodable == filters.len();
+        let filters = &filters[..decodable];
 
         let total_room = self
             .limits
@@ -668,9 +668,9 @@ impl Prescan<'_> {
         // betrachtet ohnehin nur die ersten [`BINARY_SAMPLE_BYTES`]. Erst
         // wenn diese Frage beantwortet ist, steht fest, welches Budget gilt —
         // und damit, wie viel überhaupt ausgepackt werden darf.
-        let flate_only = !filters.is_empty() && filters.iter().all(|f| is_flate(f));
+        let flate_only = whole && !filters.is_empty() && filters.iter().all(|f| is_flate(f));
         let (binary, decoded, room) = if flate_only {
-            let probe = self.decode(&filters, payload, total_room.min(BINARY_SAMPLE_BYTES))?;
+            let probe = self.decode(filters, payload, total_room.min(BINARY_SAMPLE_BYTES), true)?;
             let binary = match &probe {
                 Some((data, _)) => looks_binary(data),
                 None => looks_binary(payload),
@@ -682,16 +682,21 @@ impl Prescan<'_> {
             } else {
                 total_room.min(parsed_room)
             };
-            (binary, self.decode(&filters, payload, room)?, room)
+            (binary, self.decode(filters, payload, room, true)?, room)
         } else {
             // Altlast-Filter werden nur einmal ausgepackt — ein zweiter Lauf
             // durch `lopdf` wäre bei LZW teurer als die Klassifikation wert
             // ist. Die Rohgröße begrenzt [`MAX_LEGACY_STREAM_BYTES`].
-            let decoded = self.decode(&filters, payload, total_room)?;
-            let binary = match &decoded {
-                Some((data, _)) => looks_binary(data),
-                None => looks_binary(payload),
-            };
+            // Die Rohgrößen-Grenze der Altlast-Filter gilt nur einer ganzen
+            // Kette: `[/ASCII85Decode /DCTDecode]` über einem großen JPEG
+            // (Distiller) lief vorher roh durch und soll nicht erst jetzt
+            // fallen — die begrenzten Dekoder halten ihn auch so im Budget.
+            let decoded = self.decode(filters, payload, total_room, whole)?;
+            let binary = !whole
+                || match &decoded {
+                    Some((data, _)) => looks_binary(data),
+                    None => looks_binary(payload),
+                };
             (binary, decoded, total_room)
         };
 
@@ -710,6 +715,9 @@ impl Prescan<'_> {
             data.len() as u64
         };
         self.charge(payload.len() as u64, size, !binary)?;
+        if !whole {
+            return Ok(());
+        }
 
         // **Jeder** auspackbare Stream wird durchlaufen, auch einer, der sich
         // als Bild ausgibt. Früher stand hier eine Ausnahme für
@@ -735,6 +743,7 @@ impl Prescan<'_> {
         filters: &[Vec<u8>],
         payload: &[u8],
         room: u64,
+        legacy_rule: bool,
     ) -> Result<Option<(Vec<u8>, bool)>> {
         if filters.is_empty() {
             return Ok(None);
@@ -750,7 +759,7 @@ impl Prescan<'_> {
                 b"LZWDecode" | b"LZW" | b"ASCII85Decode" | b"A85"
             )
         });
-        if legacy && payload.len() > MAX_LEGACY_STREAM_BYTES {
+        if legacy_rule && legacy && payload.len() > MAX_LEGACY_STREAM_BYTES {
             return Err(RedactError::Pdf(format!(
                 "Stream mit Altlast-Filter ({}) ist mit {} Bytes zu groß \
                  (Grenze {} Bytes). Solche Streams werden nicht ausgepackt, \
@@ -925,6 +934,24 @@ fn inflate_bounded(data: &[u8], limit: u64) -> Option<(Vec<u8>, bool)> {
     }
     let truncated = out.len() as u64 > limit;
     Some((out, truncated))
+}
+
+/// Ein Filter, den `crate::filters` begrenzt entpacken kann — Lang- und
+/// Kurzname (PDF 32000-1, Tabelle 6 und Tabelle 94).
+fn is_decodable(filter: &[u8]) -> bool {
+    matches!(
+        filter,
+        b"FlateDecode"
+            | b"Fl"
+            | b"LZWDecode"
+            | b"LZW"
+            | b"ASCII85Decode"
+            | b"A85"
+            | b"ASCIIHexDecode"
+            | b"AHx"
+            | b"RunLengthDecode"
+            | b"RL"
+    )
 }
 
 /// `FlateDecode` unter beiden Namen (PDF 32000-1, Tabelle 94).
