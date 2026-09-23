@@ -13,7 +13,7 @@
 //! geht durch den einen Schreibpfad [`write_file`].
 
 use std::collections::BTreeSet;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use lopdf::{Document, Object, ObjectId};
@@ -260,10 +260,13 @@ pub fn load_from_bytes_with_limits(bytes: &[u8], limits: &Limits) -> Result<Docu
 
     // Vorprüfung der Rohbytes — muss *vor* `load_mem` laufen: was dort
     // durchfällt, soll den Parser gar nicht erst erreichen.
-    prescan(bytes, limits)?;
+    let pending = prescan_pending(bytes, limits)?;
 
     let mut doc = Document::load_mem(bytes)
         .map_err(|e| RedactError::Pdf(format!("Datei nicht lesbar: {e}")))?;
+    // Die zweite Hälfte: was nur das geladene Dokument kennt (eine
+    // Filterkette mit Verweis), gegen dasselbe Budget.
+    pending.finish(&doc)?;
     restore_revision_markers(bytes, &mut doc);
 
     validate(&doc)?;
@@ -374,6 +377,12 @@ const MAX_BINARY_NESTING_DEPTH: usize = 256;
 /// wie Größe, lässt sich sonst trivial in einem komprimierten Objekt- oder
 /// Content-Stream verstecken.
 pub fn prescan(bytes: &[u8], limits: &Limits) -> Result<()> {
+    prescan_pending(bytes, limits).map(|_| ())
+}
+
+/// Wie [`prescan`], aber mit dem Stand der Buchhaltung für die zweite
+/// Hälfte nach dem Laden ([`PendingPrescan::finish`]).
+pub fn prescan_pending<'a>(bytes: &[u8], limits: &'a Limits) -> Result<PendingPrescan<'a>> {
     let mut scan = Prescan {
         limits,
         packed: 0,
@@ -381,7 +390,55 @@ pub fn prescan(bytes: &[u8], limits: &Limits) -> Result<()> {
         parsed: 0,
         objects: 0,
     };
-    scan.walk(bytes, true, false)
+    scan.walk(bytes, true, false)?;
+    Ok(PendingPrescan(scan))
+}
+
+/// Die Vorprüfung nach ihrer ersten Hälfte — der Lauf über die Rohbytes ist
+/// verbucht, das Dokument noch nicht geladen.
+///
+/// **Warum es eine zweite Hälfte gibt.** Eine Filterkette darf Verweise
+/// tragen (`/Filter 5 0 R`, `/Filter [5 0 R]`; PDF 32000-1, 7.3.8.2). Aus den
+/// Rohbytes eines Stream-Dictionaries ist nicht zu erfahren, wohin sie
+/// zeigen; `lopdf` entpackt einen solchen Strom beim Laden auch nicht (seine
+/// `Stream::filters` kennt nur Namen), der Schreibpfad aber sehr wohl
+/// (`crate::filters::filter_names` löst auf) — und zwar ohne Grenze. Bis zur
+/// Spur-A-Runde 2 buchte die Vorprüfung einen solchen Strom mit seiner
+/// Rohgröße, und die Entpackgrenze galt für ihn nicht (Register #89).
+#[must_use = "ohne `finish` bleibt eine Filterkette mit Verweis ungebucht"]
+pub struct PendingPrescan<'a>(Prescan<'a>);
+
+impl PendingPrescan<'_> {
+    /// Verbucht jeden Strom des geladenen Dokuments, dessen Filterkette einen
+    /// Verweis trägt, mit der aufgelösten Kette — gegen dasselbe Budget wie
+    /// die Rohbytes.
+    ///
+    /// Die Rohgröße eines solchen Stroms hat die erste Hälfte schon gebucht;
+    /// hier kommt die entpackte dazu. Doppelt gezählt ist damit nur die
+    /// Rohgröße der wenigen Ströme mit Verweis in der Kette — eine Abweichung
+    /// nach oben, die keine Grenze öffnet.
+    pub fn finish(mut self, doc: &Document) -> Result<()> {
+        for object in doc.objects.values() {
+            let Object::Stream(stream) = object else {
+                continue;
+            };
+            if filter_is_indirect(&stream.dict) {
+                self.0.account_resolved(doc, stream)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Trägt `/Filter` einen Verweis — als Wert oder als Glied der Liste?
+fn filter_is_indirect(dict: &lopdf::Dictionary) -> bool {
+    match dict.get(b"Filter") {
+        Ok(Object::Reference(_)) => true,
+        Ok(Object::Array(items)) => items
+            .iter()
+            .any(|item| matches!(item, Object::Reference(_))),
+        _ => false,
+    }
 }
 
 /// Beginnt an `i` ein **Wort** der PDF-Syntax?
@@ -620,7 +677,13 @@ impl Prescan<'_> {
     /// [`looks_binary`]. Aus dem Dictionary wird nur die Filterkette gelesen,
     /// und die muss stimmen, sonst ließe sich der Stream gar nicht auspacken.
     fn account(&mut self, dict: &[u8], payload: &[u8]) -> Result<()> {
-        let filters = filter_names(dict);
+        // Ein Verweis in der Kette: welcher Filter dahinter steht, weiß erst
+        // das geladene Dokument ([`PendingPrescan::finish`] bucht ihn dort
+        // mit der aufgelösten Kette). Bis dahin zählt die Rohgröße, wie bei
+        // Nutzlast.
+        let Some(filters) = filter_names(dict) else {
+            return self.charge(payload.len() as u64, payload.len() as u64, false);
+        };
         // Ausgepackt wird der **Vorspann** der Kette, soweit jedes Glied
         // einer der Filter ist, die `crate::filters` begrenzt entpacken kann
         // — dieselben, die der Schreibpfad später auspackt. Was dahinter
@@ -749,15 +812,11 @@ impl Prescan<'_> {
         let mut truncated = false;
         for filter in filters {
             data = match filter.as_slice() {
-                b"FlateDecode" | b"Fl" => match inflate_bounded(&data, room) {
-                    Some((out, hit)) => {
-                        truncated |= hit;
-                        out
-                    }
-                    // Kaputter oder verschlüsselter Stream: nicht auspackbar,
-                    // also wird er auch nicht geparst.
-                    None => return Ok(None),
-                },
+                b"FlateDecode" | b"Fl" => {
+                    let (out, hit) = inflate_bounded(&data, room);
+                    truncated |= hit;
+                    out
+                }
                 // Dieselben begrenzten Dekoder wie der Schreibpfad
                 // (`crate::filters`): kein Glied erzeugt mehr als `room`
                 // Byte. Bis zur Spur-A-Runde 1 lief hier `lopdf` ohne Grenze —
@@ -822,6 +881,35 @@ impl Prescan<'_> {
             )?;
         }
         Ok(())
+    }
+
+    /// Verbucht einen Strom mit der **aufgelösten** Filterkette — der zweite
+    /// Teil von [`PendingPrescan::finish`].
+    ///
+    /// Entpackt wird über denselben Dekoder wie im Orakel und im Schreibpfad
+    /// (`crate::filters`), begrenzt auf das, was vom Budget noch übrig ist;
+    /// was sich entpacken ließ, wird wie in [`Prescan::account`] gebucht und,
+    /// wenn die Kette ganz lief, durchlaufen.
+    fn account_resolved(&mut self, doc: &Document, stream: &lopdf::Stream) -> Result<()> {
+        let room = self
+            .limits
+            .max_decompressed_bytes
+            .saturating_sub(self.decompressed);
+        let packed = stream.content.len() as u64;
+        let limit = usize::try_from(room).unwrap_or(usize::MAX);
+        match crate::filters::decoded_prefix_within(doc, stream, limit) {
+            Ok((data, applied)) => {
+                let total = crate::filters::filter_names(doc, &stream.dict).map_or(0, |f| f.len());
+                let whole = applied == total;
+                let binary = !whole || looks_binary(&data);
+                self.charge(packed, data.len() as u64, !binary)?;
+                if whole {
+                    self.walk(&data, false, binary)?;
+                }
+                Ok(())
+            }
+            Err(crate::filters::Oversize) => self.charge(packed, room.saturating_add(1), false),
+        }
     }
 
     /// Verbucht Bytes, aus denen `lopdf` PDF-Syntax macht.
@@ -893,18 +981,59 @@ impl Prescan<'_> {
 /// Der zweite Rückgabewert meldet, dass die Grenze erreicht wurde. Belegt wird
 /// nie mehr als `limit + 1` Byte — deshalb kann eine Dekompressionsbombe hier
 /// nichts ausrichten.
-fn inflate_bounded(data: &[u8], limit: u64) -> Option<(Vec<u8>, bool)> {
+///
+/// **Gelesen wird wie in `lopdf` und im Schreibpfad**
+/// (`crate::filters::inflate_within`): ein Teilergebnis zählt, und liefert
+/// zlib gar nichts, folgt rohes Deflate hinter dem 2-Byte-Kopf. Bis zur
+/// Spur-A-Runde 2 las die Vorprüfung nur zlib und gab bei einem Fehler auf —
+/// der Strom galt als nicht auspackbar und zählte mit seiner Rohgröße,
+/// während `lopdf` (beim Laden eines Objekt-Streams) und der Schreibpfad ihn
+/// über den Rückfall ohne Grenze entpackten: rohes Deflate hinter zwei
+/// beliebigen Bytes, oder ein zlib-Strom mit kaputtem Ende (Register #89).
+/// Die Vorprüfung ist nur dann eine Schranke, wenn sie mindestens so viel
+/// liest wie jeder Leser nach ihr.
+fn inflate_bounded(data: &[u8], limit: u64) -> (Vec<u8>, bool) {
+    let cap = limit.saturating_add(1);
     let mut out = Vec::new();
-    let reader = flate2::read::ZlibDecoder::new(data);
-    if reader
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut out)
-        .is_err()
-    {
-        return None;
+    inflate_counting(data, true, cap, &mut out);
+    if out.is_empty() && data.len() > 2 {
+        inflate_counting(&data[2..], false, cap, &mut out);
     }
     let truncated = out.len() as u64 > limit;
-    Some((out, truncated))
+    (out, truncated)
+}
+
+/// Entpackt `data` (zlib oder rohes Deflate) nach `out`, höchstens `cap`
+/// Byte — und behält **jedes** Byte, das der Dekoder geliefert hat, auch das
+/// aus dem Aufruf, der mit einem Fehler endet.
+///
+/// Über `flate2::Decompress` und nicht über `read::ZlibDecoder`: der Leser
+/// meldet einen Fehler (eine kaputte Prüfsumme am Ende) als `Err` und
+/// verschweigt dabei die Bytes, die derselbe Aufruf noch geschrieben hat.
+/// Wie viele das sind, hängt an der Puffergröße des Aufrufers — `lopdf`, der
+/// Schreibpfad und die Vorprüfung verlören verschieden viel, und die
+/// Vorprüfung wäre keine Schranke mehr. `total_out` zählt sie mit.
+fn inflate_counting(data: &[u8], zlib: bool, cap: u64, out: &mut Vec<u8>) {
+    let mut decoder = flate2::Decompress::new(zlib);
+    let mut chunk = vec![0u8; 64 * 1024];
+    while (out.len() as u64) < cap {
+        let consumed = usize::try_from(decoder.total_in()).unwrap_or(usize::MAX);
+        let before = decoder.total_out();
+        let result = decoder.decompress(
+            data.get(consumed..).unwrap_or(&[]),
+            &mut chunk,
+            flate2::FlushDecompress::None,
+        );
+        let produced = usize::try_from(decoder.total_out() - before).unwrap_or(usize::MAX);
+        let room = usize::try_from(cap - out.len() as u64).unwrap_or(usize::MAX);
+        out.extend_from_slice(&chunk[..produced.min(room).min(chunk.len())]);
+        match result {
+            Ok(flate2::Status::StreamEnd) | Err(_) => return,
+            // Kein Fortschritt: die Eingabe ist zu Ende, der Strom nicht.
+            Ok(_) if produced == 0 && decoder.total_in() as usize == consumed => return,
+            Ok(_) => {}
+        }
+    }
 }
 
 /// Ein Filter, den `crate::filters` begrenzt entpacken kann — Lang- und
@@ -930,35 +1059,231 @@ fn is_flate(filter: &[u8]) -> bool {
     matches!(filter, b"FlateDecode" | b"Fl")
 }
 
-/// Filternamen aus den Rohbytes eines Stream-Dictionaries.
-fn filter_names(dict: &[u8]) -> Vec<Vec<u8>> {
-    let Some(pos) = find_from(dict, b"/Filter", 0) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    let mut i = pos + b"/Filter".len();
-    // Hinter `/Filter` steht entweder ein Name oder ein Array von Namen.
-    // Beides endet spätestens am nächsten Schlüssel oder am Ende.
-    while i < dict.len() {
-        match dict[i] {
-            b'/' => {
-                let start = i + 1;
-                let mut end = start;
-                while end < dict.len() && !is_delimiter(dict[end]) && !is_whitespace(dict[end]) {
-                    end += 1;
+/// Die Filterkette aus den Rohbytes eines Stream-Dictionaries — **so
+/// gelesen, wie `lopdf` sie liest.**
+///
+/// Nur ein Schlüssel der obersten Ebene zählt, Namen werden mit `#xx`
+/// entschlüsselt (PDF 32000-1, 7.3.5), und steht `/Filter` zweimal da, gilt
+/// der letzte Eintrag — `lopdf` legt das Dictionary mit `Dictionary::set` an.
+/// Bis zur Spur-A-Runde 2 suchte diese Funktion die ersten Bytes `/Filter` im
+/// Dictionary und las den Namen dahinter: `/Fil#74er /FlateDecode` hieß
+/// „kein Filter“, `/Filter /Flate#44ecode` „unbekannter Filter“, ein `/Filter`
+/// in einem inneren Dictionary oder in einer Zeichenkette ging dem echten
+/// vor, und hinter `/Filter 5 0 R` las sie den nächsten Schlüssel als
+/// Filternamen. Jedes Mal zählte der Strom mit seiner Rohgröße, während
+/// `lopdf` (beim Laden eines Objekt-Streams) oder der Schreibpfad ihn ohne
+/// Grenze entpackte (Register #89).
+///
+/// `None`, wenn die Kette einen Verweis trägt: den löst erst das geladene
+/// Dokument auf ([`PendingPrescan::finish`]). `null` heißt kein Filter. Ein
+/// anderer Wert, und ein Glied der Liste, das kein Name ist, steht wie in
+/// `crate::filters::filter_names` als leerer Name da — ein Glied, das niemand
+/// auspackt.
+fn filter_names(dict: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let tokens = dict_tokens(dict);
+    let mut chain = Some(Vec::new());
+    if !matches!(tokens.first(), Some(Token::DictOpen)) {
+        return chain;
+    }
+    let mut i = 1;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::DictClose => break,
+            Token::Name(key) => {
+                let (value, next) = read_value(&tokens, i + 1);
+                if key.as_slice() == b"Filter" {
+                    chain = match value {
+                        Wert::Name(name) => Some(vec![name]),
+                        Wert::Null => Some(Vec::new()),
+                        Wert::Verweis => None,
+                        Wert::Liste(items) => {
+                            if items.iter().any(|w| matches!(w, Wert::Verweis)) {
+                                None
+                            } else {
+                                Some(
+                                    items
+                                        .into_iter()
+                                        .map(|w| match w {
+                                            Wert::Name(name) => name,
+                                            _ => Vec::new(),
+                                        })
+                                        .collect(),
+                                )
+                            }
+                        }
+                        Wert::Anderes => Some(vec![Vec::new()]),
+                    };
                 }
-                out.push(dict[start..end].to_vec());
-                i = end;
-                // Ein einzelner Name (kein Array) beendet die Liste.
-                if out.len() == 1 && !dict[pos..start].contains(&b'[') {
-                    break;
-                }
+                i = next.max(i + 1);
             }
-            b']' | b'>' => break,
+            // Kein Name an der Stelle eines Schlüssels: so liest `lopdf`
+            // dieses Dictionary nicht. Weiter zum nächsten Namen.
             _ => i += 1,
         }
     }
+    chain
+}
+
+/// Ein Wort der Syntax in einem Stream-Dictionary, soweit
+/// [`filter_names`] es unterscheiden muss.
+enum Token<'a> {
+    DictOpen,
+    DictClose,
+    ArrOpen,
+    ArrClose,
+    /// Ein Name, `#xx` schon entschlüsselt.
+    Name(Vec<u8>),
+    /// Zahl oder Schlüsselwort (`R`, `null`, `true`, …).
+    Word(&'a [u8]),
+    /// Zeichenkette oder verirrtes Trennzeichen.
+    Other,
+}
+
+/// Ein Wert hinter einem Schlüssel.
+enum Wert {
+    Name(Vec<u8>),
+    Verweis,
+    Null,
+    Liste(Vec<Wert>),
+    Anderes,
+}
+
+fn dict_tokens(bytes: &[u8]) -> Vec<Token<'_>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            _ if is_whitespace(b) => i += 1,
+            b'%' => i = skip_to_eol(bytes, i),
+            b'(' => {
+                out.push(Token::Other);
+                i = skip_literal_string(bytes, i);
+            }
+            b'<' if bytes.get(i + 1) == Some(&b'<') => {
+                out.push(Token::DictOpen);
+                i += 2;
+            }
+            b'<' => {
+                out.push(Token::Other);
+                i = skip_hex_string(bytes, i);
+            }
+            b'>' if bytes.get(i + 1) == Some(&b'>') => {
+                out.push(Token::DictClose);
+                i += 2;
+            }
+            b'[' => {
+                out.push(Token::ArrOpen);
+                i += 1;
+            }
+            b']' => {
+                out.push(Token::ArrClose);
+                i += 1;
+            }
+            b'/' => {
+                let mut name = Vec::new();
+                let mut j = i + 1;
+                while j < bytes.len() && !is_whitespace(bytes[j]) && !is_delimiter(bytes[j]) {
+                    if bytes[j] == b'#' {
+                        // Wie `lopdf`: `#` mit zwei Hexziffern ist ein Byte;
+                        // ohne sie endet der Name hier.
+                        match (hex_value(bytes.get(j + 1)), hex_value(bytes.get(j + 2))) {
+                            (Some(high), Some(low)) => {
+                                name.push((high << 4) | low);
+                                j += 3;
+                                continue;
+                            }
+                            _ => break,
+                        }
+                    }
+                    name.push(bytes[j]);
+                    j += 1;
+                }
+                out.push(Token::Name(name));
+                i = j.max(i + 1);
+            }
+            _ if is_delimiter(b) => {
+                out.push(Token::Other);
+                i += 1;
+            }
+            _ => {
+                let start = i;
+                while i < bytes.len() && !is_whitespace(bytes[i]) && !is_delimiter(bytes[i]) {
+                    i += 1;
+                }
+                out.push(Token::Word(&bytes[start..i]));
+            }
+        }
+    }
     out
+}
+
+fn hex_value(b: Option<&u8>) -> Option<u8> {
+    b.and_then(|b| (*b as char).to_digit(16)).map(|d| d as u8)
+}
+
+fn is_integer(word: &[u8]) -> bool {
+    !word.is_empty() && word.iter().all(u8::is_ascii_digit)
+}
+
+/// Liest den Wert, der bei `tokens[i]` beginnt; liefert ihn und die Stelle
+/// dahinter. Eine Liste wird **eine** Ebene tief gelesen — tiefer steht in
+/// einer Filterkette nichts, was ein Filter wäre.
+fn read_value(tokens: &[Token<'_>], i: usize) -> (Wert, usize) {
+    match tokens.get(i) {
+        Some(Token::ArrOpen) => {
+            let mut items = Vec::new();
+            let mut j = i + 1;
+            while j < tokens.len() && !matches!(tokens[j], Token::ArrClose) {
+                let (item, next) = read_scalar(tokens, j);
+                items.push(item);
+                j = next.max(j + 1);
+            }
+            (Wert::Liste(items), (j + 1).min(tokens.len()))
+        }
+        _ => read_scalar(tokens, i),
+    }
+}
+
+/// Ein Wert ohne Liste: Name, Verweis, `null`, oder etwas anderes — ein
+/// inneres Dictionary oder eine innere Liste wird dabei ganz übersprungen.
+fn read_scalar(tokens: &[Token<'_>], i: usize) -> (Wert, usize) {
+    match tokens.get(i) {
+        Some(Token::Name(name)) => (Wert::Name(name.clone()), i + 1),
+        Some(Token::Word(word)) if is_integer(word) => {
+            match (tokens.get(i + 1), tokens.get(i + 2)) {
+                (Some(Token::Word(generation)), Some(Token::Word(b"R")))
+                    if is_integer(generation) =>
+                {
+                    (Wert::Verweis, i + 3)
+                }
+                _ => (Wert::Anderes, i + 1),
+            }
+        }
+        Some(Token::Word(b"null")) => (Wert::Null, i + 1),
+        Some(Token::DictOpen | Token::ArrOpen) => {
+            let mut depth = 0usize;
+            let mut j = i;
+            while j < tokens.len() {
+                match tokens[j] {
+                    Token::DictOpen | Token::ArrOpen => depth += 1,
+                    Token::DictClose | Token::ArrClose => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return (Wert::Anderes, j + 1);
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            (Wert::Anderes, j)
+        }
+        // Eine schließende Klammer an der Stelle eines Werts: nicht
+        // verbrauchen, der Aufrufer sieht sie.
+        Some(Token::DictClose | Token::ArrClose) | None => (Wert::Anderes, i),
+        Some(_) => (Wert::Anderes, i + 1),
+    }
 }
 
 /// Sieht der Stream nach Nutzlast statt nach PDF-Syntax aus?
@@ -1847,14 +2172,59 @@ mod tests {
 
     #[test]
     fn filters_are_read_from_the_dictionary() {
-        assert_eq!(filter_names(b"<< /Length 10 >>"), Vec::<Vec<u8>>::new());
+        let flate = || Some(vec![b"FlateDecode".to_vec()]);
+        assert_eq!(filter_names(b"<< /Length 10 >>"), Some(Vec::new()));
         assert_eq!(
             filter_names(b"<< /Filter /FlateDecode /Length 10 >>"),
-            vec![b"FlateDecode".to_vec()]
+            flate()
         );
         assert_eq!(
             filter_names(b"<< /Filter [/ASCII85Decode /FlateDecode] >>"),
-            vec![b"ASCII85Decode".to_vec(), b"FlateDecode".to_vec()]
+            Some(vec![b"ASCII85Decode".to_vec(), b"FlateDecode".to_vec()])
+        );
+        assert_eq!(
+            filter_names(b"<</Filter[/ASCII85Decode/FlateDecode]/Length 3>>"),
+            Some(vec![b"ASCII85Decode".to_vec(), b"FlateDecode".to_vec()])
+        );
+    }
+
+    /// Register #89: die Kette so, wie `lopdf` sie liest — nicht die ersten
+    /// Bytes `/Filter` im Dictionary.
+    #[test]
+    fn filters_are_read_like_lopdf_reads_them() {
+        let flate = || Some(vec![b"FlateDecode".to_vec()]);
+        // `#xx` im Schlüssel und im Namen.
+        assert_eq!(filter_names(b"<< /Fil#74er /FlateDecode >>"), flate());
+        assert_eq!(filter_names(b"<< /Filter /Flate#44ecode >>"), flate());
+        // Ein `/Filter` in einem inneren Dictionary, einer Zeichenkette oder
+        // einem Kommentar zählt nicht.
+        assert_eq!(
+            filter_names(b"<< /X << /Filter /ASCIIHexDecode >> /Filter /FlateDecode >>"),
+            flate()
+        );
+        assert_eq!(
+            filter_names(b"<< /X (/Filter /ASCIIHexDecode) /Filter /FlateDecode >>"),
+            flate()
+        );
+        assert_eq!(
+            filter_names(b"<< % /Filter /ASCIIHexDecode\n/Filter /FlateDecode >>"),
+            flate()
+        );
+        // Zweimal `/Filter`: der letzte gilt.
+        assert_eq!(
+            filter_names(b"<< /Filter /ASCIIHexDecode /Filter /FlateDecode >>"),
+            flate()
+        );
+        // Ein Verweis: das weiß erst das geladene Dokument.
+        assert_eq!(filter_names(b"<< /Filter 5 0 R /Length 10 >>"), None);
+        assert_eq!(filter_names(b"<< /Filter [/FlateDecode 5 0 R] >>"), None);
+        // `null` ist kein Filter, eine Zahl ein namenloses Glied.
+        assert_eq!(filter_names(b"<< /Filter null >>"), Some(Vec::new()));
+        assert_eq!(filter_names(b"<< /Filter 5 >>"), Some(vec![Vec::new()]));
+        // Eine Zahl vor einem Namen ist kein Verweis.
+        assert_eq!(
+            filter_names(b"<< /Length 10 /Filter /FlateDecode >>"),
+            flate()
         );
     }
 

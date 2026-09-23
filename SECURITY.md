@@ -381,6 +381,20 @@ Nachprüfung — und dort gegen `--max-decompressed-mb`
 demselben Geheimnis werden von `--check-leaks` gefunden, letzterer ausdrücklich
 als `<Stream, dekodiert: ASCIIHexDecode>`).
 
+**Wie die Vorprüfung liest: wie die Leser nach ihr.** Eine Schranke ist sie
+nur, wenn sie aus jedem Strom mindestens so viel herausliest wie `lopdf` beim
+Laden und der Schreibpfad danach. Bis zur Spur-A-Runde 2 las sie weniger
+(Register #89): eine Filterkette mit Verweis buchte sie mit
+der Rohgröße; Flate las sie nur als zlib und gab beim ersten Fehler auf, wo
+die anderen das Teilergebnis behalten und auf rohes Deflate hinter dem
+zlib-Kopf zurückfallen; und den Schlüssel `/Filter` suchte sie als
+Bytefolge, statt das Dictionary zu lesen. Jetzt liest sie es wie `lopdf`:
+nur die oberste Ebene, Namen mit `#xx` entschlüsselt, der letzte Eintrag
+gilt. Von Flate zählt sie jedes Byte, das der Dekoder liefert, auch das vor
+einem Fehler, und fällt wie die anderen auf rohes Deflate zurück. Eine Kette
+mit Verweis bucht sie nach dem Laden mit der aufgelösten Kette gegen dasselbe
+Budget; deren Rohgröße zählt dabei doppelt, eine Abweichung nach oben.
+
 **Der Spitzenspeicher hängt am größten Einzelstrom, nicht am Budget.** „1024 MB“
 ist die *Summe* der entpackten Bytes über alle Ströme, nicht der Bedarf. Wer
 den Bedarf schätzen will, sieht auf den **größten einzelnen Strom**: gemessen

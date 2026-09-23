@@ -122,6 +122,27 @@ sind, jeder in seinem eigenen Commit.
   Mutationsnachweis: keine zusammengesetzte Sicht → jeder Fall rot; der
   Aufrufer geht vor → die Grenze rot.
 
+* **⚠ Sicherheit: die Vorprüfung las weniger als die Leser nach ihr**
+  (Register #89, Prüfer E; Dienstverweigerung, die Zeile #64/#83 der
+  Probenliste). `--max-decompressed-mb` gilt für das, was die Vorprüfung aus
+  den Rohbytes auspackt. Sie las weniger als `lopdf` und der Schreibpfad:
+  eine Filterkette mit Verweis buchte sie roh; von Flate las sie
+  nur zlib und gab beim ersten Fehler auf, wo die anderen das Teilergebnis
+  behalten und auf rohes Deflate zurückfallen; und den Schlüssel `/Filter`
+  suchte sie als Bytefolge — mit `#xx` im Namen, als zweiter Eintrag oder
+  hinter einem `/Filter` in einem inneren Dictionary kam die Kette an ihr
+  vorbei. Am Stand `f6c5c68` brauchte eine Datei von 1 MB mit 1 GiB Nullen
+  hinter `/Filter 6 0 R` am gebauten Binary 2,1 GB Spitze
+  (`/usr/bin/time -v`), bei `--max-decompressed-mb 64`, und endete mit
+  Rückgabewert 1 und der falschen Ursache, der Inhaltsstrom lasse sich nicht
+  zerlegen; rohes Deflate und der Schlüssel mit `#xx` ebenso. Jetzt liest die
+  Vorprüfung das Dictionary wie `lopdf`, zählt von Flate jedes Byte, das der
+  Dekoder liefert, und bucht eine Kette mit Verweis nach dem Laden mit der
+  aufgelösten Kette gegen dasselbe Budget. Belege:
+  `zp_e_vorpruefung_als_schranke` (jede Form der Bombe und eine gewöhnliche
+  Kette mit Verweis), `zp_e_teilergebnis_zaehlt`, die Einheitstests der Kette
+  in `document.rs`. Mutationsnachweis: je Teil zurückgenommen → sein Fall rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

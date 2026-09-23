@@ -966,6 +966,21 @@ mod messwerte {
     pub const JPEGKOPF_JPEG: &str = "6000 × 6000";
     pub const JPEGKOPF_SPITZE_MB: u64 = 262;
     pub const JPEGKOPF_DECKE_MB: u64 = 8;
+
+    // Die Vorprüfung als Schranke (Spur-A-Runde 2, Register #89). Gemessen
+    // am gebauten Binary (Weg 1, Debug, `/usr/bin/time -v`, Maximum resident
+    // set size) am Stand [`SCHRANKE_STAND`], an dem die Vorprüfung eine Kette
+    // mit Verweis roh buchte (Weg 3 im Satz): 1 044 167 Byte Datei, 1 GiB
+    // Nullen hinter `/Filter 6 0 R`, 2 180 744 KB Spitze bei
+    // `--max-decompressed-mb 64`, Rückgabewert 1; rohes Deflate 2 181 132 KB,
+    // der Schlüssel mit `#xx` 2 180 856 KB. Nach der Korrektur: Budgetmeldung,
+    // rund 81 MB Spitze. Probedateien und Erzeuger im Arbeitsbuch der Runde;
+    // `zp_e_vorpruefung_als_schranke` baut die kleinere Form nach.
+    pub const SCHRANKE_STAND: &str = "f6c5c68";
+    pub const SCHRANKE_DATEI_MB: u64 = 1;
+    pub const SCHRANKE_NULLEN_GIB: u64 = 1;
+    pub const SCHRANKE_SPITZE_GB: &str = "2,1";
+    pub const SCHRANKE_BUDGET_MB: u64 = 64;
 }
 
 /// Die ausgeschriebene Zahl, wie die Doku kleine Zahlen schreibt.
@@ -2304,6 +2319,21 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // --- Die Vorprüfung als Schranke (Spur-A-Runde 2, Register #89) ---------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Am Stand `{}` brauchte eine Datei von {} MB mit {} GiB Nullen hinter \
+             `/Filter 6 0 R` am gebauten Binary {} GB Spitze (`/usr/bin/time -v`), bei \
+             `--max-decompressed-mb {}`, und endete mit Rückgabewert 1",
+            m::SCHRANKE_STAND,
+            m::SCHRANKE_DATEI_MB,
+            m::SCHRANKE_NULLEN_GIB,
+            m::SCHRANKE_SPITZE_GB,
+            m::SCHRANKE_BUDGET_MB
+        ),
+    );
+
     // --- Der Vorspann vor einem Bildfilter (Spur-A-Runde 1, Register #83) ----
     satz(
         "CHANGELOG.md",
@@ -3264,6 +3294,10 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "`/Properties` folgt weiter der Regel aus #67",
         "eine Registernummer, keine Messung",
+    ),
+    (
+        "(Register #89, Prüfer E; Dienstverweigerung, die Zeile #64/#83 der Probenliste)",
+        "Registernummern, keine Messung",
     ),
 ];
 

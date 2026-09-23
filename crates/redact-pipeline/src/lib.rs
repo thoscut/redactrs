@@ -46,8 +46,8 @@ use redact_core::{
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::document::{
-    check_target, load_from_bytes_with_limits, prescan, sane_page_boxes, save_to_bytes, validate,
-    write_file, Limits, SaneBox, WriteOptions,
+    check_target, load_from_bytes_with_limits, prescan_pending, sane_page_boxes, save_to_bytes,
+    validate, write_file, Limits, SaneBox, WriteOptions,
 };
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
@@ -573,16 +573,18 @@ pub fn check_limits_after_decryption(doc: &Document, limits: &Limits) -> Result<
     //    Budget gemessen werden — die stehen im Speicher noch komprimiert und
     //    fallen unter Schritt 1 nicht auf.
     let bytes = save_to_bytes(doc)?;
-    prescan(&bytes, limits).map_err(|e| match e {
-        // Der Zusatz sagt, welcher der beiden Durchgänge angeschlagen hat —
-        // die Datei sah von außen harmlos aus, und das gehört in die Meldung.
-        //
-        // Bewusst „entschlüsselt“ und nicht „verschlüsselt“: [`password_required`]
-        // sucht nach letzterem, und die Oberfläche fragte sonst wieder nach
-        // einem Passwort, das längst gepasst hat.
-        RedactError::Pdf(msg) => RedactError::Pdf(format!("entschlüsselt gilt weiter: {msg}")),
-        other => other,
-    })
+    prescan_pending(&bytes, limits)
+        .and_then(|pending| pending.finish(doc))
+        .map_err(|e| match e {
+            // Der Zusatz sagt, welcher der beiden Durchgänge angeschlagen hat —
+            // die Datei sah von außen harmlos aus, und das gehört in die Meldung.
+            //
+            // Bewusst „entschlüsselt“ und nicht „verschlüsselt“: [`password_required`]
+            // sucht nach letzterem, und die Oberfläche fragte sonst wieder nach
+            // einem Passwort, das längst gepasst hat.
+            RedactError::Pdf(msg) => RedactError::Pdf(format!("entschlüsselt gilt weiter: {msg}")),
+            other => other,
+        })
 }
 
 /// Prüft die **schon entpackten** Objekte im Speicher gegen `max_parsed_bytes`.
