@@ -1573,7 +1573,11 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
     `/JPXDecode` und `/CCITTFaxDecode`, siehe
     `crates/redact-pdf/src/image.rs`). Lieber ein Fehler als eine Datei, in der
     die Schwärzung nur obenauf liegt; `--allow-undecodable-images` hebt das
-    bewusst auf.
+    bewusst auf. Gezählt werden die Maße des Bild-Dictionaries — bei
+    `DCTDecode` zusätzlich die im Kopf des JPEG: ein JPEG mit mehr
+    Bildpunkten, als sein Dictionary angibt, gilt seit Register #101 als
+    nicht dekodierbar. Vorher belegte der Dekoder die Maße des JPEG, ohne
+    dass eine der beiden Grenzen sie sah.
   * **256 MB gleichzeitig gehaltene dekodierte Bildbytes** (`--max-image-mb`).
 
   **Richtigstellung.** Bis einschließlich Aufgabe #58 stand hier allein die

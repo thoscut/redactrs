@@ -64,6 +64,26 @@ verschoben. `crates/redact-cli/tests/belege.rs` hält die Regel samt Läufen;
 `die_zahlen_der_doku_sind_gebunden` und
 `jede_zahl_der_letzten_runden_ist_gebunden` prüfen sie.
 
+### Spur-A-Runde 2: die Varianten der eigenen Korrekturen
+
+Die zweite Runde unter demselben Mandat, auf dem Stand `2edf407`, wieder mit
+einem Prüfer je Gebiet. Die Punkte stehen hier, sobald sie behoben
+sind, jeder in seinem eigenen Commit.
+
+* **⚠ Sicherheit: die Bilddecke galt den Maßen des Dictionaries, der
+  JPEG-Dekoder belegte die Maße aus dem JPEG** (Register #101, Prüfer A;
+  Dienstverweigerung). `--max-image-mb` und die harte Pixeldecke prüfen
+  `/Width` × `/Height`; `decode_jpeg` las die Maße erst beim Dekodieren aus
+  dem SOF-Kopf und belegte sie ohne Frage. Am Stand `2edf407` belegte ein
+  Bild mit 100 × 100 im Dictionary über einem JPEG mit 6000 × 6000 am
+  gebauten Binary 262 MB Spitze (`/usr/bin/time -v`), bei `--max-image-mb 8`,
+  mit Rückgabewert 0 — ein größeres JPEG entsprechend mehr. Jetzt liest der
+  Dekoder zuerst den Kopf; ein JPEG mit mehr Bildpunkten, als sein
+  Dictionary angibt, gilt als nicht dekodierbar und nennt den Grund. Eines,
+  das kleiner ist, bleibt erlaubt. Belege: `zp_a_jpeg_groesser_als_angegeben`
+  (der große Fall und die Gegenproben). Mutationsnachweis: Kopf ungeprüft →
+  der große Fall rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

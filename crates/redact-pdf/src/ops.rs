@@ -969,14 +969,9 @@ fn decode_image_inner(
                 }
             }
         }
-        Payload::Jpeg(data) => match decode_jpeg(&data, decode.as_deref()) {
-            Some(image) => image,
-            None => {
-                return (
-                    RasterImage::solid([220, 220, 220, 255], true),
-                    Some("JPEG nicht dekodierbar".into()),
-                )
-            }
+        Payload::Jpeg(data) => match decode_jpeg(&data, decode.as_deref(), width, height) {
+            Ok(image) => image,
+            Err(reason) => return (RasterImage::solid([220, 220, 220, 255], true), Some(reason)),
         },
         Payload::Jpx => {
             return (
@@ -1308,17 +1303,40 @@ fn read_sample(row: &[u8], bit_offset: usize, bpc: usize) -> u32 {
 }
 
 /// JPEG über `zune-jpeg`. CMYK-JPEGs werden als Adobe-invertiert behandelt.
-fn decode_jpeg(data: &[u8], decode: Option<&[f64]>) -> Option<RasterImage> {
+///
+/// **Die Maße im JPEG entscheiden über den Speicher, nicht die im
+/// Dictionary.** `--max-image-mb` und [`MAX_IMAGE_PIXELS`] prüfen `/Width` ×
+/// `/Height`; der Dekoder belegt aber, was der SOF-Kopf des JPEG sagt. Bis zur
+/// Spur-A-Runde 2 las ihn niemand vorher: ein Dictionary mit 100 × 100 über
+/// einem JPEG mit 6000 × 6000 kam an jeder Decke vorbei (Register #101).
+/// Jetzt wird zuerst der Kopf gelesen, und ein JPEG mit mehr Bildpunkten, als
+/// das Dictionary angibt — für das die Decke reserviert hat —, gilt als nicht
+/// dekodierbar, mit seinem Grund.
+fn decode_jpeg(
+    data: &[u8],
+    decode: Option<&[f64]>,
+    declared_width: u32,
+    declared_height: u32,
+) -> std::result::Result<RasterImage, String> {
     use zune_jpeg::zune_core::bytestream::ZCursor;
     use zune_jpeg::JpegDecoder;
 
+    let unlesbar = || "JPEG nicht dekodierbar".to_string();
     let mut decoder = JpegDecoder::new(ZCursor::new(data));
-    let pixels = decoder.decode().ok()?;
-    let info = decoder.info()?;
+    decoder.decode_headers().map_err(|_| unlesbar())?;
+    let info = decoder.info().ok_or_else(unlesbar)?;
     let (width, height) = (info.width as u32, info.height as u32);
     if width == 0 || height == 0 {
-        return None;
+        return Err(unlesbar());
     }
+    if u64::from(width) * u64::from(height) > u64::from(declared_width) * u64::from(declared_height)
+    {
+        return Err(format!(
+            "JPEG größer als im Bild-Dictionary angegeben ({width}x{height} statt \
+             {declared_width}x{declared_height})"
+        ));
+    }
+    let pixels = decoder.decode().map_err(|_| unlesbar())?;
     let count = width as usize * height as usize;
     let comps = pixels.len() / count.max(1);
     // `/Decode [1 0 …]` dreht die Werte um.
@@ -1356,11 +1374,11 @@ fn decode_jpeg(data: &[u8], decode: Option<&[f64]>) -> Option<RasterImage> {
                 };
                 crate::content::cmyk_to_rgb(f(p[0]), f(p[1]), f(p[2]), f(p[3])).to_u8()
             }
-            _ => return None,
+            _ => return Err(unlesbar()),
         };
         rgba[i * 4..i * 4 + 3].copy_from_slice(&rgb);
     }
-    Some(RasterImage {
+    Ok(RasterImage {
         width,
         height,
         rgba,

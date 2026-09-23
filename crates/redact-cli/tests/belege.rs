@@ -956,6 +956,16 @@ mod messwerte {
     pub const VORSPANN_NULLEN_GIB: u64 = 3;
     pub const VORSPANN_SPITZE_GB: &str = "3,1";
     pub const VORSPANN_BUDGET_MB: u64 = 64;
+
+    // Die Bilddecke gegen die Maße im JPEG-Kopf (Spur-A-Runde 2, Register
+    // #101). Gemessen am gebauten Binary (Weg 1, Debug, `/usr/bin/time -v`)
+    // am Stand [`JPEGKOPF_STAND`], an dem der Dekoder die SOF-Maße ungeprüft
+    // belegte (Weg 3 im Satz): 268 184 KB Spitze, Rückgabewert 0.
+    pub const JPEGKOPF_STAND: &str = "2edf407";
+    pub const JPEGKOPF_DICT: &str = "100 × 100";
+    pub const JPEGKOPF_JPEG: &str = "6000 × 6000";
+    pub const JPEGKOPF_SPITZE_MB: u64 = 262;
+    pub const JPEGKOPF_DECKE_MB: u64 = 8;
 }
 
 /// Die ausgeschriebene Zahl, wie die Doku kleine Zahlen schreibt.
@@ -2279,6 +2289,21 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // --- Die Bilddecke gegen den JPEG-Kopf (Spur-A-Runde 2, Register #101) ---
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Am Stand `{}` belegte ein Bild mit {} im Dictionary über einem JPEG mit {} \
+             am gebauten Binary {} MB Spitze (`/usr/bin/time -v`), bei `--max-image-mb {}`, \
+             mit Rückgabewert 0",
+            m::JPEGKOPF_STAND,
+            m::JPEGKOPF_DICT,
+            m::JPEGKOPF_JPEG,
+            m::JPEGKOPF_SPITZE_MB,
+            m::JPEGKOPF_DECKE_MB
+        ),
+    );
+
     // --- Der Vorspann vor einem Bildfilter (Spur-A-Runde 1, Register #83) ----
     satz(
         "CHANGELOG.md",
@@ -3188,6 +3213,18 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "blieb mit dem Geheimnis stehen — ohne Warnung, mit Rückgabewert 0; `--check-leaks` an der Ausgabe fand sie",
         "ein Rückgabewert, keine Messung",
+    ),
+    (
+        "Die zweite Runde unter demselben Mandat, auf dem Stand `2edf407`",
+        "ein Commit-Stand, keine Messung",
+    ),
+    (
+        "JPEG-Dekoder belegte die Maße aus dem JPEG** (Register #101, Prüfer A;",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "### Spur-A-Runde 2: die Varianten der eigenen Korrekturen",
+        "eine Rundennummer in der Überschrift, keine Messung",
     ),
 ];
 
