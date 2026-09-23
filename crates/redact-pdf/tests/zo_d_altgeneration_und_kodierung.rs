@@ -443,7 +443,6 @@ fn zo_d1_altgeneration_kontrollen() {
 /// LZW und ASCII85 sind die Filter der Distiller-Generation, ASCIIHex mit
 /// Zeilenumbrüchen ist die Form, in der jeder ASCIIHex-Kodierer schreibt.
 #[test]
-#[ignore = "offen: Register #80 Altgeneration im Orakel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn zo_d2_altgeneration_stroeme_stilles_leck() {
     let content = content_with_secret();
     let faelle: Vec<(&str, Vec<u8>)> = vec![
@@ -535,7 +534,6 @@ fn pdf_stream_copy(pdf: &[u8]) -> Vec<u8> {
 /// maskiert; Hex-Strings mit Zeilenumbruch schreiben Erzeuger mit fester
 /// Zeilenlänge (pdfTeX, Ghostscript).
 #[test]
-#[ignore = "offen: Register #80 Altgeneration im Orakel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn zo_d3_altgeneration_zeichenketten_stilles_leck() {
     let hex_ws: String = SECRET
         .as_bytes()

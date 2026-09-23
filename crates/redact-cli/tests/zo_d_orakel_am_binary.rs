@@ -275,7 +275,6 @@ fn zo_d10_probenliste_filterkette_am_binary() {
 /// unmaskierte Zeichenkette wird gefunden (Rückgabewert 3) — die Rohsichten
 /// lesen die Altgeneration also, nur nicht in diesen Kodierungen.
 #[test]
-#[ignore = "offen: Register #80 Altgeneration im Orakel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn zo_d11_altgeneration_am_binary_stilles_leck() {
     let dir = workdir("altgeneration");
     let content = format!("BT /F1 10 Tf 72 700 Td (IBAN {SECRET}) Tj ET").into_bytes();

@@ -291,13 +291,22 @@ fn pdf_mit_tiefem_text(depth: usize, geheim: &str) -> Vec<u8> {
 /// aber nie stillschweigend 0. Der Lauf sagt jetzt beides:
 ///
 /// ```text
-/// Tiefe 32:  GEFUNDEN (2 Fundstelle(n)): DE89 3704 0044 0532 0130 00
+/// Tiefe 32:  GEFUNDEN (3 Fundstelle(n)): DE89 3704 0044 0532 0130 00
 ///            Objekt 5 0[0]…[0] [Zeichenkette, literal]: …      → 3
-/// Tiefe 33:  nicht gefunden: DE89 3704 0044 0532 0130 00
+/// Tiefe 33:  GEFUNDEN (1 Fundstelle(n)): DE89 3704 0044 0532 0130 00
+///            Rohdatei @0x… [Zeichenkette (dekodiert)]: …
 ///            NICHT GEPRÜFT: Objekt 5 0[0]…[0]: nicht durchsucht —
 ///            Verschachtelungstiefe 32 erreicht; was tiefer liegt, hat
 ///            keine Sicht gelesen                                 → 3
 /// ```
+///
+/// Die Zeichenkette ist oktal maskiert, damit die Rohsicht der Datei sie
+/// nicht als Bytes trifft. Bis zur Spur-A-Runde 1 (Register #80) hieß Tiefe
+/// 33 deshalb „nicht gefunden“ plus `NICHT GEPRÜFT`; seither liest ein
+/// zweiter Gang der Rohsicht jedes Zeichenketten-Literal dekodiert und
+/// findet sie auch dort, wo die Objektsicht nicht mehr hinkommt. Die
+/// Objektsicht selbst findet sie auf Ebene 33 weiterhin nicht, und sie sagt
+/// es weiterhin — das ist, was dieser Test hält.
 #[test]
 fn tiefe_33_ist_eine_stille_entwarnung() {
     let dir = workdir("tiefe");
@@ -309,9 +318,13 @@ fn tiefe_33_ist_eine_stille_entwarnung() {
         let out = run_in(&dir, &[&datei, "--check-leaks", geheim], None);
         let text = stdout(&out);
         assert_eq!(
-            text.contains("  GEFUNDEN ("),
+            text.contains("[Zeichenkette, literal]"),
             gefunden,
             "Tiefe {tiefe}: {text}"
+        );
+        assert!(
+            text.contains("[Zeichenkette (dekodiert)]") && text.contains("  GEFUNDEN ("),
+            "Tiefe {tiefe}: die dekodierte Zeichenkette der Rohsicht fehlt:\n{text}"
         );
         assert_eq!(
             out.status.code(),
@@ -319,9 +332,9 @@ fn tiefe_33_ist_eine_stille_entwarnung() {
             "Tiefe {tiefe}: stille Entwarnung — der Text steht in der Datei, \
              keine Sicht hat ihn gelesen, und der Lauf sagt es nicht:\n{text}"
         );
-        // Ebene 33 wird nicht gefunden — dann muss sie benannt sein, mit
-        // Grund. „nicht gefunden“ allein wäre genau die Entwarnung, die
-        // dieser Test verhindert.
+        // Ebene 33 liest die Objektsicht nicht — dann muss sie benannt
+        // sein, mit Grund. Der Fund der Rohsicht ersetzt das nicht: was
+        // keine Sicht gelesen hat, bleibt eine offene Stelle.
         if !gefunden {
             assert!(
                 text.contains("  NICHT GEPRÜFT: "),

@@ -3066,6 +3066,42 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Mutationsnachweis: jedes Byte wieder Latin-1 → beide rot.",
         "der Name einer Kodierung unter Mutation, keine Messung",
     ),
+    (
+        "mit reinem Flate geschrieben war** (Register #80, Prüfer D)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "`/LZWDecode`, `/ASCII85Decode`, ASCIIHex mit Zeilenumbrüchen, Flate mit PNG-Prädiktor oder `[/ASCII85Decode /FlateDecode]` (Distiller)",
+        "Filternamen der Norm, keine Messung",
+    ),
+    (
+        "als UTF-16BE so maskiert wie pdfTeX es schreibt",
+        "der Name einer Kodierung, keine Messung",
+    ),
+    (
+        "`zo_d_altgeneration_und_kodierung::zo_d2_altgeneration_stroeme_stilles_leck`",
+        "ein Testname (Befund D2), keine Messung",
+    ),
+    (
+        "`…::zo_d3_altgeneration_zeichenketten_stilles_leck`",
+        "ein Testname (Befund D3), keine Messung",
+    ),
+    (
+        "`zo_d_orakel_am_binary::zo_d11_altgeneration_am_binary_stilles_leck`",
+        "ein Testname (Befund D2/D3 am Binary), keine Messung",
+    ),
+    (
+        "`…::zo_d0_probenliste_filterkette_bleibt_gruen`",
+        "ein Testname (Probenliste), keine Messung",
+    ),
+    (
+        "stehen bleibt wie die Objektsicht. Mutationsnachweis: Kette nicht gelesen → der erste und der dritte rot; Literale nicht gelesen → der zweite und der dritte rot.",
+        "zaehlt rote Tests unter Mutation, keine Messung",
+    ),
+    (
+        "die Rohsicht an `[null /ASCII85Decode]` stehen bleibt",
+        "ein Filtername der Norm im Beispiel, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

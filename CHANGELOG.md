@@ -358,6 +358,33 @@ seiner neuen Zeile in der Probenliste.
   (am gebauten Binary, an der Ausgabedatei); beide vorher absichtlich rot.
   Mutationsnachweis: jedes Byte wieder Latin-1 → beide rot.
 
+* **⚠ Sicherheit: das Orakel sah eine Altgeneration nur, wenn sie roh oder
+  mit reinem Flate geschrieben war** (Register #80, Prüfer D). Ein
+  inkrementelles Update lässt die Vorgängerfassung eines Objekts in der
+  Datei; die neue Querverweistabelle nennt sie nicht mehr, also steht sie in
+  keiner Objektsicht. Die Rohsicht der Ströme versuchte an jedem Block nur
+  zlib und rohes Deflate: unter `/LZWDecode`, `/ASCII85Decode`, ASCIIHex mit
+  Zeilenumbrüchen, Flate mit PNG-Prädiktor oder `[/ASCII85Decode
+  /FlateDecode]` (Distiller) kein Fund, keine Meldung. Und die Rohsicht der
+  Datei verglich nur Bytes: eine Zeichenkette der Altgeneration mit oktalen
+  Escapes, als UTF-16BE so maskiert wie pdfTeX es schreibt, als Hex-String
+  mit Leerraum oder mit Zeilenfortsetzung — kein Fund, keine Meldung. Jetzt
+  entpackt die Rohsicht jeden Block über die Filterkette seines eigenen
+  Dictionaries, mit demselben Dekoder wie die Objektsicht (`/Filter` und
+  `/DecodeParms` aus den Rohbytes gelesen, ein Glied, das kein Filtername
+  ist, hält die Kette an wie dort; der blinde zlib-Versuch bleibt für Blöcke
+  ohne lesbaren Kopf), und ein zweiter Gang der Rohsicht liest jedes
+  Zeichenketten-Literal außerhalb der Ströme dekodiert. In `docs/pruefung.txt`
+  (neu erzeugt mit `make-preview.sh`) nennt die Rohsicht für den Namen seither
+  auch die dekodierten Zeichenketten aus `/Title` und `/Author`. Belege:
+  `zo_d_altgeneration_und_kodierung::zo_d2_altgeneration_stroeme_stilles_leck`,
+  `…::zo_d3_altgeneration_zeichenketten_stilles_leck` und
+  `zo_d_orakel_am_binary::zo_d11_altgeneration_am_binary_stilles_leck`, alle
+  vorher absichtlich rot; `…::zo_d0_probenliste_filterkette_bleibt_gruen`
+  hält fest, dass die Rohsicht an `[null /ASCII85Decode]` stehen bleibt wie
+  die Objektsicht. Mutationsnachweis: Kette nicht gelesen → der erste und
+  der dritte rot; Literale nicht gelesen → der zweite und der dritte rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

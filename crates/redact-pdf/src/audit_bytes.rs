@@ -580,6 +580,7 @@ pub fn leaks_many_within(
     }
 
     scan_raw_file(pdf_bytes, &mut probe);
+    scan_raw_string_literals(pdf_bytes, &mut probe);
     let mut raw_budget = Budget::new(max_decompressed_bytes);
     scan_raw_streams(pdf_bytes, &mut probe, &mut raw_budget);
     // Stellen zählen, bevor die Decke aus vielen Stellen eine Zeile macht.
@@ -1191,6 +1192,60 @@ fn printable_context(hay: &[u8], pos: usize, len: usize) -> String {
 // Ebene 1+2: Rohdatei und rohe Streams
 // ---------------------------------------------------------------------------
 
+/// Sicht 1, zweiter Gang: jedes Zeichenketten-Literal in den Rohbytes
+/// **außerhalb** der Stream-Blöcke, dekodiert wie ein Zeichenketten-Objekt —
+/// oktale Maskierung (`\104\105…`, auch UTF-16BE so maskiert, wie pdfTeX es
+/// schreibt), Hex-Strings mit Leerraum, Zeilenfortsetzung. Der Bytevergleich
+/// der Rohsicht trifft keine dieser Schreibweisen, und ein Objekt der
+/// Altgeneration steht in keiner Objektsicht mehr: bis zur Spur-A-Runde 1
+/// war das ein stilles Leck (Register #80). Die Stream-Blöcke bleiben außen
+/// vor — ihre Literale liest die Rohsicht der Ströme (Sicht 6).
+fn scan_raw_string_literals(bytes: &[u8], probe: &mut Probe) {
+    let blocks = raw_stream_blocks(bytes);
+    let mut next_block = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // Einen Stream-Block überspringen, sobald er beginnt.
+        if let Some(&(start, payload)) = blocks.get(next_block) {
+            if i >= start {
+                i = start + payload.len();
+                next_block += 1;
+                continue;
+            }
+        }
+        match bytes[i] {
+            b'(' => {
+                let (raw, next) = read_literal_string(bytes, i + 1);
+                scan_raw_literal(&raw, i, probe);
+                i = next;
+            }
+            b'<' if bytes.get(i + 1) != Some(&b'<') => {
+                let (raw, next) = read_hex_string(bytes, i + 1);
+                scan_raw_literal(&raw, i, probe);
+                i = next;
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+fn scan_raw_literal(raw: &[u8], offset: usize, probe: &mut Probe) {
+    if raw.is_empty() {
+        return;
+    }
+    // Der Ort ist die Rohdatei, wie bei der Bytesuche; wie verglichen
+    // wurde, sagt das Etikett in Klammern. So liest jeder, der den Satz
+    // nach „Ort [Wie]“ zerlegt, dieselbe Sicht wie aus dem Ort.
+    let base = format!("Rohdatei @0x{offset:x}");
+    let site = Site::new(&base, LeakView::RawFile);
+    scan_text(
+        &decode_pdf_string(raw),
+        site,
+        "Zeichenkette (dekodiert)",
+        probe,
+    );
+}
+
 fn scan_raw_file(bytes: &[u8], probe: &mut Probe) {
     let found = probe.bytes.positions(bytes, 8);
     for (id, positions) in found.iter().enumerate() {
@@ -1226,6 +1281,40 @@ fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) {
             site = site.with_raw_object(id);
         }
         scan_blob(payload, site.with_text(&format!("{base} (roh)")), probe);
+        // Zuerst über die Filterkette, die das rohe Dictionary vor dem Block
+        // nennt — mit demselben Dekoder wie die Objektsicht. Bis zur
+        // Spur-A-Runde 1 versuchte diese Sicht nur zlib und rohes Deflate:
+        // eine Altgeneration unter `/LZWDecode`, `/ASCII85Decode`, ASCIIHex
+        // mit Zeilenumbrüchen, Flate mit Prädiktor oder `[/ASCII85Decode
+        // /FlateDecode]` stand in keiner Querverweistabelle mehr und damit in
+        // keiner Objektsicht — kein Fund, keine Meldung (Register #80).
+        // Erst wenn die Kette nichts hergibt (kein Kopf, kein `/Filter`,
+        // schon das erste Glied unbekannt), bleibt der blinde Versuch mit
+        // zlib und rohem Deflate: ein Block ohne Kopf, ein eingebettetes PDF.
+        // Gebucht wird je Block einmal.
+        let chain = match raw_stream_dict(bytes, offset) {
+            Some(dict) => decode_raw_chain(dict, payload, budget.room()),
+            None => Ok(None),
+        };
+        match chain {
+            Ok(Some((decoded, names))) => {
+                budget.charge(decoded.len());
+                // Reines Flate ohne Prädiktor ist, was der blinde Versuch
+                // immer schon tat — und heißt in der Fundstelle weiter so.
+                let wie = if names == "FlateDecode" {
+                    "inflate".to_string()
+                } else {
+                    format!("dekodiert: {names}")
+                };
+                scan_blob(&decoded, site.with_text(&format!("{base} ({wie})")), probe);
+                continue;
+            }
+            Ok(None) => {}
+            Err(Oversize) => {
+                budget.skip(&base, payload.len());
+                continue;
+            }
+        }
         match inflate_raw(payload, budget.room()) {
             Ok(Some(inflated)) => {
                 budget.charge(inflated.len());
@@ -1239,6 +1328,172 @@ fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) {
             Err(Oversize) => budget.skip(&base, payload.len()),
         }
     }
+}
+
+/// Das rohe Stream-Dictionary vor einem `stream`-Block: die Bytes zwischen
+/// dem Objektkopf `N G obj` und dem Schlüsselwort. `None`, wenn kein Kopf in
+/// Reichweite steht.
+fn raw_stream_dict(bytes: &[u8], data_offset: usize) -> Option<&[u8]> {
+    let from = data_offset.saturating_sub(OBJECT_HEADER_LOOKBACK);
+    let window = &bytes[from..data_offset];
+    let keyword = memmem::rfind(window, b"stream")?;
+    let obj = memmem::rfind(&window[..keyword], b"obj")?;
+    if window[..obj].ends_with(b"end") {
+        return None;
+    }
+    Some(&window[obj + 3..keyword])
+}
+
+/// Entpackt einen rohen Block über die Filterkette seines Dictionaries —
+/// derselbe Weg wie [`filters::decoded_prefix_within`] in der Objektsicht,
+/// nur dass Filter und `/DecodeParms` hier aus den Rohbytes gelesen werden
+/// (ein Verweis darin bleibt unaufgelöst: die Altgeneration hat keinen
+/// Objektgraphen mehr). `Ok(None)`, wenn kein Filter genannt ist oder schon
+/// das erste Glied unbekannt war; sonst die Bytes und die angewandten
+/// Filternamen.
+fn decode_raw_chain(
+    dict: &[u8],
+    payload: &[u8],
+    limit: usize,
+) -> Result<Option<(Vec<u8>, String)>, Oversize> {
+    let filters = raw_filter_value(dict);
+    if filters.is_empty() {
+        return Ok(None);
+    }
+    let mut stream_dict = lopdf::Dictionary::new();
+    stream_dict.set("Filter", Object::Array(filters.clone()));
+    if let Some(parms) = raw_decode_parms(dict) {
+        stream_dict.set("DecodeParms", parms);
+    }
+    let stream = lopdf::Stream::new(stream_dict, payload.to_vec());
+    let (data, applied) = filters::decoded_prefix_within(&Document::new(), &stream, limit)?;
+    if applied == 0 {
+        return Ok(None);
+    }
+    let mut names = filters
+        .iter()
+        .take(applied)
+        .map(|f| match f {
+            Object::Name(name) => String::from_utf8_lossy(name).into_owned(),
+            _ => "?".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("+");
+    if stream.dict.has(b"DecodeParms") {
+        names.push_str(" mit DecodeParms");
+    }
+    Ok(Some((data, names)))
+}
+
+/// Der `/Filter`-Wert aus den Rohbytes eines Dictionaries, Glied für Glied
+/// **so, wie er dasteht**: ein Name als Name, `null`, eine Zahl oder ein
+/// Verweis als das, was es ist — damit die Kette an einem Glied, das kein
+/// Filtername ist, genauso stehen bleibt wie in der Objektsicht
+/// ([`filters::decoded_prefix_within`]), statt es zu überlesen und eine
+/// Kette zu entpacken, die kein Betrachter so liest. Leer, wenn kein
+/// `/Filter` dasteht.
+fn raw_filter_value(dict: &[u8]) -> Vec<Object> {
+    let Some(at) = memmem::find(dict, b"/Filter") else {
+        return Vec::new();
+    };
+    let rest = &dict[at + b"/Filter".len()..];
+    let Some(start) = rest.iter().position(|b| !b.is_ascii_whitespace()) else {
+        return Vec::new();
+    };
+    let rest = &rest[start..];
+    let body: &[u8] = if rest.starts_with(b"[") {
+        match memmem::find(rest, b"]") {
+            Some(end) => &rest[1..end],
+            None => return Vec::new(),
+        }
+    } else {
+        // Ein einzelner Wert: bis zum nächsten Schlüssel oder Ende.
+        let end = rest
+            .iter()
+            .skip(1)
+            .position(|&b| b == b'/' || b == b'>')
+            .map_or(rest.len(), |p| p + 1);
+        &rest[..end]
+    };
+    let text = String::from_utf8_lossy(body);
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+        if let Some(name) = token.strip_prefix('/') {
+            out.push(Object::Name(name.as_bytes().to_vec()));
+            i += 1;
+        } else if token == "null" {
+            out.push(Object::Null);
+            i += 1;
+        } else if let Ok(number) = token.parse::<i64>() {
+            // `N G R` ist ein Verweis — in einer Altgeneration ohne Ziel.
+            if tokens.get(i + 2) == Some(&"R")
+                && tokens.get(i + 1).is_some_and(|g| g.parse::<i64>().is_ok())
+            {
+                out.push(Object::Null);
+                i += 3;
+            } else {
+                out.push(Object::Integer(number));
+                i += 1;
+            }
+        } else {
+            out.push(Object::Null);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `/DecodeParms` aus den Rohbytes eines Dictionaries: ein Dictionary oder
+/// ein Array von Dictionaries und `null`, jeweils nur mit ganzzahligen
+/// Werten (`/Predictor`, `/Columns`, `/Colors`, `/BitsPerComponent`,
+/// `/EarlyChange`). Alles andere wird übergangen.
+fn raw_decode_parms(dict: &[u8]) -> Option<Object> {
+    let at = memmem::find(dict, b"/DecodeParms")? + b"/DecodeParms".len();
+    let rest = &dict[at..];
+    let start = rest.iter().position(|b| !b.is_ascii_whitespace())?;
+    let rest = &rest[start..];
+    if rest.starts_with(b"[") {
+        let end = memmem::find(rest, b"]")?;
+        let mut items = Vec::new();
+        let mut i = 1;
+        while i < end {
+            if rest[i..].starts_with(b"<<") {
+                let close = memmem::find(&rest[i..end], b">>")? + i;
+                items.push(raw_int_dict(&rest[i + 2..close]));
+                i = close + 2;
+            } else if rest[i..].starts_with(b"null") {
+                items.push(Object::Null);
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        Some(Object::Array(items))
+    } else if rest.starts_with(b"<<") {
+        let close = memmem::find(rest, b">>")?;
+        Some(raw_int_dict(&rest[2..close]))
+    } else {
+        None
+    }
+}
+
+/// Die ganzzahligen Einträge eines rohen Dictionary-Rumpfs.
+fn raw_int_dict(body: &[u8]) -> Object {
+    let mut out = lopdf::Dictionary::new();
+    let text = String::from_utf8_lossy(body);
+    let mut tokens = text.split_whitespace().peekable();
+    while let Some(token) = tokens.next() {
+        if let Some(key) = token.strip_prefix('/') {
+            if let Some(value) = tokens.peek().and_then(|v| v.parse::<i64>().ok()) {
+                out.set(key.as_bytes().to_vec(), Object::Integer(value));
+                tokens.next();
+            }
+        }
+    }
+    Object::Dictionary(out)
 }
 
 fn raw_stream_blocks(bytes: &[u8]) -> Vec<(usize, &[u8])> {

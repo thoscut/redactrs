@@ -50,7 +50,7 @@ Geprüft: kontoauszug.pdf (1862 Byte)
   GEFUNDEN (8 Fundstelle(n)): DE89 3704 0044 0532 0130 00
   GEFUNDEN (6 Fundstelle(n)): COBADEFFXXX
   GEFUNDEN (6 Fundstelle(n)): 532013000
-  GEFUNDEN (14 Fundstelle(n)): Max Mustermann
+  GEFUNDEN (16 Fundstelle(n)): Max Mustermann
 ```
 
 Nachher drei davon nicht mehr — auf keiner der Ebenen, auf denen
