@@ -346,6 +346,19 @@ sind, jeder in seinem eigenen Commit.
   README und der Bericht nennen es. Belege: `zp_b_richmedia_einstellungen`.
   Mutationsnachweis: der Schlüssel aus der Liste genommen → beide Fälle rot.
 
+* **⚠ Sicherheit: die Seitenbeschriftung behielt Präfixe** (Register #92,
+  zweiter Teil, Prüfer B; stilles Leck, die Zeile zum Beiwerk mit Klartext
+  trat weiter auf). Im Zahlenbaum `/PageLabels` endete die Schleife am
+  ersten direkt eingebetteten Beschriftungs-Dictionary; jedes spätere als
+  eigenes Objekt behielt sein Präfix `/P`. Ein Baum, der tiefer ging als eine
+  feste Stufe, endete dort still. Beides stand nach dem Lauf in der Datei,
+  ohne Warnung. Jetzt wird jeder Wert bearbeitet, als eigenes Objekt wie
+  direkt im Feld, und jeder Knoten, gleich wie tief; ein direkt eingebetteter
+  Knoten unter `/Kids` (regelwidrig) wird in seinem Elternknoten bereinigt,
+  statt den Baum im Katalog zu ersetzen. Belege: `zp_b_seitenbeschriftung`.
+  Mutationsnachweis: der alte Abbruch, eine feste Stufe und der übergangene
+  direkte Knoten → je ihr Fall rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

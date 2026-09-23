@@ -1799,8 +1799,16 @@ const OBJECT_BEIWERK_KEYS: [&[u8]; 2] = [b"Ref", b"OPI"];
 /// Zahlenbaum `/PageLabels` (Tabelle 159). `/S` und `/St` bleiben: der
 /// Betrachter zählt weiter römisch oder arabisch, nur ohne
 /// „Kontoauszug <Konto> – “ davor.
+///
+/// Jeder Wert in `/Nums` wird bearbeitet, als eigenes Objekt wie direkt im
+/// Feld, und jeder Knoten unter `/Kids`, gleich wie tief. Bis zur
+/// Spur-A-Runde 2 endete die Schleife am ersten direkten Wert, und ein Baum
+/// endete still an einer festen Stufe; ein Präfix dahinter stand nach dem
+/// Lauf in der Datei (Register #92). Knoten als eigene Objekte laufen über
+/// einen Stapel mit `seen` gegen Zyklen; ein direkt eingebetteter Knoten
+/// (regelwidrig, `/Kids` verlangt Verweise) wird in seinem Elternknoten
+/// bereinigt, nicht an dessen Stelle geschrieben.
 fn clean_page_labels(doc: &mut Document, catalog_id: ObjectId, beiwerk: &mut Tally) {
-    const MAX_DEPTH: usize = 32;
     let Some(root) = doc
         .get_dictionary(catalog_id)
         .ok()
@@ -1808,57 +1816,63 @@ fn clean_page_labels(doc: &mut Document, catalog_id: ObjectId, beiwerk: &mut Tal
     else {
         return;
     };
-    let mut stack: Vec<(Object, usize)> = vec![(root, 0)];
+    let mut nodes: Vec<ObjectId> = Vec::new();
+    let mut labels: Vec<ObjectId> = Vec::new();
+    match root {
+        Object::Reference(id) => nodes.push(id),
+        Object::Dictionary(mut dict) => {
+            clean_label_node(&mut dict, &mut nodes, &mut labels, beiwerk);
+            if let Ok(catalog) = doc.get_dictionary_mut(catalog_id) {
+                catalog.set("PageLabels", Object::Dictionary(dict));
+            }
+        }
+        _ => return,
+    }
     let mut seen: BTreeSet<ObjectId> = BTreeSet::new();
-    while let Some((node, depth)) = stack.pop() {
-        if depth > MAX_DEPTH {
+    while let Some(id) = nodes.pop() {
+        if !seen.insert(id) {
             continue;
         }
-        let node_id = match node {
-            Object::Reference(id) if seen.insert(id) => Some(id),
-            Object::Reference(_) => continue,
-            _ => None,
-        };
-        let Some(Object::Dictionary(dict)) = resolve(doc, &node).cloned() else {
+        let Ok(mut dict) = doc.get_dictionary(id).cloned() else {
             continue;
         };
-        if let Some(Object::Array(kids)) = value_of(&dict, b"Kids") {
-            stack.extend(kids.iter().map(|k| (k.clone(), depth + 1)));
+        clean_label_node(&mut dict, &mut nodes, &mut labels, beiwerk);
+        doc.objects.insert(id, Object::Dictionary(dict));
+    }
+    for id in labels {
+        if let Ok(label) = doc.get_dictionary_mut(id) {
+            take(label, b"P", beiwerk);
         }
-        let Some(Object::Array(nums)) = value_of(&dict, b"Nums") else {
-            continue;
-        };
+    }
+}
+
+/// Ein Knoten des Zahlenbaums `/PageLabels`: nimmt jedem direkten
+/// Beschriftungs-Dictionary in `/Nums` sein `/P` und steigt in direkt
+/// eingebettete `/Kids` ab; was als eigenes Objekt dasteht, geht auf `nodes`
+/// (Knoten) oder `labels` (Beschriftungen).
+fn clean_label_node(
+    node: &mut Dictionary,
+    nodes: &mut Vec<ObjectId>,
+    labels: &mut Vec<ObjectId>,
+    beiwerk: &mut Tally,
+) {
+    if let Ok(Object::Array(nums)) = node.get_mut(b"Nums") {
         // Die Werte des Zahlenbaums: jedes zweite Element.
-        for value in nums.iter().skip(1).step_by(2) {
+        for value in nums.iter_mut().skip(1).step_by(2) {
             match value {
-                Object::Reference(id) => {
-                    if let Ok(label) = doc.get_dictionary_mut(*id) {
-                        take(label, b"P", beiwerk);
-                    }
+                Object::Reference(id) => labels.push(*id),
+                Object::Dictionary(label) => {
+                    take(label, b"P", beiwerk);
                 }
-                Object::Dictionary(_) => {
-                    // Direkt im Feld: das Feld gehört dem Knoten, der Knoten
-                    // steht entweder als Objekt oder direkt im Katalog.
-                    let mut neu = dict.clone();
-                    if let Ok(Object::Array(items)) = neu.get_mut(b"Nums") {
-                        for item in items.iter_mut() {
-                            if let Object::Dictionary(label) = item {
-                                take(label, b"P", beiwerk);
-                            }
-                        }
-                    }
-                    match node_id {
-                        Some(id) => {
-                            doc.objects.insert(id, Object::Dictionary(neu));
-                        }
-                        None => {
-                            if let Ok(catalog) = doc.get_dictionary_mut(catalog_id) {
-                                catalog.set("PageLabels", Object::Dictionary(neu));
-                            }
-                        }
-                    }
-                    break;
-                }
+                _ => {}
+            }
+        }
+    }
+    if let Ok(Object::Array(kids)) = node.get_mut(b"Kids") {
+        for kid in kids.iter_mut() {
+            match kid {
+                Object::Reference(id) => nodes.push(*id),
+                Object::Dictionary(inner) => clean_label_node(inner, nodes, labels, beiwerk),
                 _ => {}
             }
         }
