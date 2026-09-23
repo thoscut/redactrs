@@ -465,7 +465,11 @@ impl PdfRedactor {
         // **jeder** Seite, auch der ohne Schwärzung — das Formular darunter
         // kann von einer anderen Seite aus geschwärzt werden.
         let mut form_marked: BTreeMap<ObjectId, Vec<MarkedTextRecord>> = BTreeMap::new();
-        let mut form_marked_seen: BTreeSet<(ObjectId, usize)> = BTreeSet::new();
+        // Schlüssel wie `Collector::seen_marked`: Operation **und** Herkunft
+        // der Liste — über Seiten hinweg kommt dasselbe Formular unter jeder
+        // Seite mit deren `/Properties` (Register #65).
+        let mut form_marked_seen: BTreeSet<(ObjectId, usize, Option<ObjectId>, Option<ObjectId>)> =
+            BTreeSet::new();
         // Seiten, die neu zu schreiben sind — erst nach der Formularschleife,
         // siehe [`PendingPage`].
         let mut pending_pages: Vec<PendingPage> = Vec::new();
@@ -537,7 +541,12 @@ impl PdfRedactor {
             }
             for record in &scan.marked {
                 if let StreamKey::Form(id) = record.stream {
-                    if form_marked_seen.insert((id, record.op_index)) {
+                    if form_marked_seen.insert((
+                        id,
+                        record.op_index,
+                        record.property_owner,
+                        record.property_id,
+                    )) {
                         form_marked.entry(id).or_default().push(record.clone());
                     }
                 }

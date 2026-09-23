@@ -497,7 +497,6 @@ fn zwei_umgebungen_beide_mit_spiegel(unter_fm0: &str, unter_seite: &str) -> Vec<
 /// (Seite) wird verworfen — die Liste in der Seite bleibt mit dem Geheimnis
 /// stehen. Zwei Ausprägungen: beide Spiegel lügen; nur der zweite lügt.
 #[test]
-#[ignore = "offen: Register #65 zwei Umgebungen, beide mit Spiegel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn zwei_umgebungen_beide_mit_spiegel_auf_einer_seite() {
     let mut offen = Vec::new();
     for (name, unter_fm0, unter_seite) in [
@@ -595,7 +594,6 @@ fn zwei_seiten_zwei_listen(unter_seite_1: &str, unter_seite_2: &str) -> Vec<u8> 
 /// von Seite 1; die Liste in den Ressourcen von Seite 2 wird nie geräumt —
 /// gleich, ob auf Seite 1, Seite 2 oder beiden geschwärzt wird.
 #[test]
-#[ignore = "offen: Register #65 zwei Umgebungen, beide mit Spiegel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn zwei_umgebungen_beide_mit_spiegel_auf_zwei_seiten() {
     let mut offen = Vec::new();
     for (name, unter_seite_1, unter_seite_2, seite) in [

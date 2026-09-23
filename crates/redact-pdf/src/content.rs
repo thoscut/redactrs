@@ -1545,7 +1545,10 @@ pub struct ScanResult {
     /// Durchsuchen der Liste: eine getaggte Seite bringt leicht Tausende
     /// Abschnitte mit, und ein mehrfach platziertes Formular liefert sie
     /// mehrfach.
-    seen_marked: HashSet<(StreamKey, usize)>,
+    /// Schlüssel: Strom, Operation **und Herkunft der Eigenschaftsliste**
+    /// (Eigentümer der Ressourcen, Objekt-Id der Liste). Bis zur
+    /// Spur-A-Runde 1 fehlte die Herkunft (Register #65).
+    seen_marked: HashSet<(StreamKey, usize, Option<ObjectId>, Option<ObjectId>)>,
     /// Dasselbe für [`ScanResult::warnings`].
     ///
     /// Die Entdopplung war schon immer zugesagt; sie lief nur über
@@ -1730,7 +1733,20 @@ impl ContentSink for ScanResult {
         // Ein mehrfach platziertes Form-XObject wird mehrfach durchlaufen; sein
         // Strom wird aber nur **einmal** neu geschrieben. Derselbe Spiegel darf
         // deshalb nicht mehrfach in der Liste stehen.
-        if !self.seen_marked.insert((record.stream, record.op_index)) {
+        //
+        // „Derselbe“ heißt: dieselbe Operation **und** dieselbe
+        // Eigenschaftsliste. Ein Formular ohne eigenes `/Resources` löst
+        // `/MC0` unter jeder Umgebung neu auf — zeichnet es Fm0 mit einem
+        // Spiegel und danach die Seite mit einem anderen, sind das zwei
+        // Listen an zwei Fundorten. Wer nur nach (Strom, Operation) prüfte,
+        // verwarf die zweite: ihr Klartext blieb im Verzeichnis der Seite,
+        // ohne Warnung, mit Rückgabewert 0 (Spur-A-Runde 1, Register #65).
+        if !self.seen_marked.insert((
+            record.stream,
+            record.op_index,
+            record.property_owner,
+            record.property_id,
+        )) {
             return;
         }
         self.marked.push(record);

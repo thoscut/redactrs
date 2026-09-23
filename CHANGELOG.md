@@ -151,6 +151,24 @@ seiner neuen Zeile in der Probenliste.
   (Orakel und Alphaebene). Mutationsnachweis: die Bedingung `filled == 0`
   entfernt → rot.
 
+* **⚠ Sicherheit: ein Formular unter zwei Umgebungen, beide mit Spiegel —
+  nur der erste Fundort wurde geleert** (Register #65, Prüfer C). Ein
+  Form-XObject ohne eigenes `/Resources` löst `/MC0` unter jeder Umgebung neu
+  auf: zeichnet es erst ein äußeres Formular mit einem Spiegel und danach die
+  Seite mit einem anderen (oder zwei Seiten mit je eigenem `/Properties`),
+  sind das zwei Listen an zwei Fundorten. Die Sammelstelle des Scans hielt je
+  Strom und Operation nur den **ersten** Datensatz und verwarf den zweiten —
+  dessen Klartext blieb im Verzeichnis der Seite, ohne Warnung, mit
+  Rückgabewert 0; `--check-leaks` an der Ausgabe fand ihn. Jetzt gehört die
+  Herkunft der Liste zum Schlüssel (Eigentümer der Ressourcen und Objekt-Id
+  der Liste), in `Collector::seen_marked` wie über Seiten hinweg in
+  `form_marked_seen`; ein wirklich mehrfach platziertes Formular kommt weiter
+  nur einmal. Belege:
+  `zo_c_spiegel_umgebungen::zwei_umgebungen_beide_mit_spiegel_auf_einer_seite`
+  und `…_auf_zwei_seiten` (sieben Ausprägungen, darunter die stille, in der
+  beide Spiegel wortgleich mit den Glyphen sind). Mutationsnachweis: Herkunft
+  aus dem Schlüssel des Scans entfernt → der Ein-Seiten-Beleg rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

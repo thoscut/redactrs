@@ -2717,6 +2717,38 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Mutationsnachweis: die Bedingung `filled == 0`",
         "eine Bedingung im Code, keine Messung",
     ),
+    (
+        "ein Formular unter zwei Umgebungen, beide mit Spiegel",
+        "zaehlt die Umgebungen des Szenarios, keine Messung",
+    ),
+    (
+        "nur der erste Fundort wurde geleert** (Register #65, Prüfer C)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "(oder zwei Seiten mit je eigenem `/Properties`)",
+        "zaehlt Seiten des Szenarios, keine Messung",
+    ),
+    (
+        "sind das zwei Listen an zwei Fundorten",
+        "zaehlt Listen und Fundorte, keine Messung",
+    ),
+    (
+        "und `…_auf_zwei_seiten` (sieben Ausprägungen",
+        "zaehlt Testauspraegungen, keine Messung",
+    ),
+    (
+        "löst `/MC0` unter jeder Umgebung neu auf",
+        "der Name einer Eigenschaftsliste (Ressourcenname), keine Messung",
+    ),
+    (
+        "hielt je Strom und Operation nur den **ersten** Datensatz",
+        "beschreibt den alten Zustand; gebunden durch den Mutationsnachweis des Befundes, keine Messung",
+    ),
+    (
+        "ohne Warnung, mit Rückgabewert 0; `--check-leaks` an der Ausgabe fand ihn",
+        "der Rueckgabewert des Laufs, in zo_c gebunden, keine Messgroesse",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
