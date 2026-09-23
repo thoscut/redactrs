@@ -147,8 +147,9 @@
 //!   Dictionary, auch an einem, das kein Träger ist (ein `/StructElem` hinter
 //!   `/IRT`). Beides ist frei wählbarer Text, der gewöhnlich genau das
 //!   spiegelt, was gerade aus dem Strom verschwunden ist.
-//! * das Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`, `/3DD`, `/3DV`
-//!   und `/RO` — als Ganzes, siehe [`ANNOTATION_PLATE_KEYS`]. Gemessen (vor
+//! * das Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`,
+//!   `/RichMediaSettings`, `/3DD`, `/3DV` und `/RO` — als Ganzes, siehe
+//!   [`ANNOTATION_PLATE_KEYS`]. Gemessen (vor
 //!   dieser Änderung): der Dateiname in `/Movie /F`, die
 //!   Einheitenbeschriftung in `/Measure /X[0] /U`, eine eingebettete Datei
 //!   unter `/RichMediaContent /Assets`, der JavaScript-Strom unter
@@ -295,8 +296,8 @@ pub struct MetadataReport {
     /// einer: `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`,
     /// `/OverlayText`, `/NM`, `/DS` sowie `/CA`, `/RC`, `/AC` in `/MK`,
     /// dazu `/Alt` und `/ActualText` an jedem erreichten Dictionary und das
-    /// Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`, `/3DD`, `/3DV`,
-    /// `/RO` sowie `/SV` (Seed-Value eines Signaturfelds: `/Reasons`,
+    /// Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`,
+    /// `/RichMediaSettings`, `/3DD`, `/3DV`, `/RO` sowie `/SV` (Seed-Value eines Signaturfelds: `/Reasons`,
     /// `/LegalAttestation`) und `/Lock` (`/Fields`).
     pub annotation_texts_cleared: usize,
     /// Seiten **außerhalb des Seitenbaums**, die ihren Inhalt verloren haben.
@@ -410,8 +411,8 @@ impl MetadataReport {
         );
         count(
             self.annotation_texts_cleared,
-            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO, /SV, /Lock)",
-            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO, /SV, /Lock)",
+            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /RichMediaSettings, /3DD, /3DV, /RO, /SV, /Lock)",
+            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /RichMediaSettings, /3DD, /3DV, /RO, /SV, /Lock)",
         );
         count(
             self.beiwerk_removed,
@@ -1142,6 +1143,11 @@ const ALTERNATE_TEXT_KEYS: [&[u8]; 2] = [b"Alt", b"ActualText"];
 ///   der dritte Weg, auf dem eine **eingebettete Datei** in einer PDF-Datei
 ///   steckt — neben `/Names /EmbeddedFiles` und der
 ///   `/FileAttachment`-Annotation, die beide schon fallen.
+/// * `/RichMediaSettings` (13.7.2, Tabelle 332): unter `/Activation` hält
+///   jede Instanz einer `/Configuration` mit `/Asset` dieselben Filespecs,
+///   die `/Assets` nennt, und `/Scripts` eine Liste weiterer — so schreiben
+///   es Acrobat und media9. Mit `/RichMediaContent` allein blieb die Datei
+///   über die Einstellungen erreichbar (Register #92).
 /// * `/3DD` und `/3DV` (13.6.2, Tabelle 298): der Strom des 3D-Modells trägt
 ///   unter `/OnInstantiate` einen **JavaScript-Strom** (Tabelle 300), die
 ///   Ansicht unter `/XN` ihren frei wählbaren Anzeigenamen (Tabelle 304).
@@ -1163,10 +1169,11 @@ const ALTERNATE_TEXT_KEYS: [&[u8]; 2] = [b"Alt", b"ActualText"];
 /// nichts, kein Betrachter bricht daran ab, und der Seitentext bleibt
 /// unverändert (Beleg:
 /// `zg_r3_beiwerk::movie_annotation_ohne_movie_laedt_und_behaelt_den_seitentext`).
-const ANNOTATION_PLATE_KEYS: [&[u8]; 8] = [
+const ANNOTATION_PLATE_KEYS: [&[u8]; 9] = [
     b"Movie",
     b"Measure",
     b"RichMediaContent",
+    b"RichMediaSettings",
     b"3DD",
     b"3DV",
     b"RO",

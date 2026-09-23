@@ -3418,6 +3418,10 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "ein eigener Befund (Register #106)",
         "eine Registernummer, keine Messung",
     ),
+    (
+        "(Register #92, erster Teil, Prüfer B; stilles Leck, die Zeile der Metadaten-Träger trat weiter auf)",
+        "eine Registernummer, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

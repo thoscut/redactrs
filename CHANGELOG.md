@@ -334,6 +334,18 @@ sind, jeder in seinem eigenen Commit.
   Mutationsnachweis: je Teil zurückgenommen → sein Fall rot; was nur Arbeit
   spart, zeigt die Messung im Release.
 
+* **⚠ Sicherheit: die Einstellungen einer RichMedia-Annotation hielten ihre
+  Dateien** (Register #92, erster Teil, Prüfer B; stilles Leck, die Zeile
+  der Metadaten-Träger trat weiter auf). Eine `/RichMedia`-Annotation trägt
+  neben `/RichMediaContent` ein `/RichMediaSettings`; unter `/Activation`
+  zeigt jede Instanz einer `/Configuration` mit `/Asset` auf dieselben
+  Filespecs, die `/Assets` nennt, und `/Scripts` auf weitere. Der
+  Metadatenlauf nahm nur den Inhalt, die eingebettete Datei blieb über die
+  Einstellungen erreichbar und stand nach dem Lauf in der Ausgabe, ohne
+  Warnung. Jetzt fällt `/RichMediaSettings` als Ganzes wie `/RichMediaContent`;
+  README und der Bericht nennen es. Belege: `zp_b_richmedia_einstellungen`.
+  Mutationsnachweis: der Schlüssel aus der Liste genommen → beide Fälle rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile
