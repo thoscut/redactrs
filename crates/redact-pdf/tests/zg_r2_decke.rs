@@ -22,6 +22,20 @@
 //!   Zahl der **Zeilen**, nicht der Stellen. 61 nicht geprüfte Ströme kommen
 //!   als „52 Stelle(n) nicht geprüft“ heraus — direkt unter der Zeile, die
 //!   „… und 11 weitere“ sagt.
+//!
+//! **Seit der Spur-A-Runde 1 (Register #64)** läuft der Topf `skip` hier über
+//! die **Rohsicht**. Bis dahin trieb ihn ein `[/RunLengthDecode
+//! /FlateDecode]`-Strom in der Objektsicht: die Vorprüfung des Laders packte
+//! RunLength nicht aus, ließ die Datei durch, und erst die Objektsicht lief
+//! ans Budget. Seit #64 packt die Vorprüfung dieselbe Kette gegen dasselbe
+//! Budget aus und lehnt die Datei als Ganzes ab — die Objektsicht kommt gar
+//! nicht zum Zählen. Die Ströme über dem Budget sind jetzt zlib-gepackter
+//! Klartext **ohne** `/Filter`: die Vorprüfung zählt ihre Rohbytes (wenige
+//! hundert Byte je Strom), die Rohsicht bläst sie blind auf und bucht sie in
+//! ihrem eigenen `Budget` als „nicht entpackt“. Die Zählung (`skip`, `note`,
+//! Summenzeilen, `unchecked_places`) ist dieselbe Struktur; der Topf `note`
+//! bleibt in der Objektsicht. Den Topf `skip` der Objektsicht samt der Zeile
+//! über Sicht 7 hält `zf_q2_teildekoder::q2_unchecked_kennt_mehr_gruende_als_die_doku_aufzaehlt`.
 
 mod common;
 
@@ -36,20 +50,6 @@ fn zlib(data: &[u8]) -> Vec<u8> {
     let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
     e.write_all(data).expect("komprimierbar");
     e.finish().expect("komprimierbar")
-}
-
-/// Eigener RunLength-Kodierer (PDF 32000-1, 7.4.5): nur Literalläufe, dann
-/// EOD (128). Er dient hier einem Zweck — die Nutzlast beginnt mit einem
-/// Längenbyte und ist deshalb **kein** zlib-Strom, sodass die Rohsicht sie
-/// nicht entpacken kann und allein die Objektsicht sie zu lesen hätte.
-fn rl(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for chunk in data.chunks(128) {
-        out.push(u8::try_from(chunk.len() - 1).expect("≤ 128"));
-        out.extend_from_slice(chunk);
-    }
-    out.push(128);
-    out
 }
 
 fn fuellung(size: usize) -> Vec<u8> {
@@ -71,17 +71,18 @@ fn fremder_filter(nummer: usize) -> Stream {
     .with_compression(false)
 }
 
-/// Ein Strom, der das Budget sprengt: `[/RunLengthDecode /FlateDecode]` über
-/// zlib-gepacktem Klartext. Die Vorprüfung des Laders packt nur reine
-/// Flate/LZW/ASCII85-Ketten aus und sieht ihn deshalb nicht.
+/// Ein Strom, der das Budget der **Rohsicht** sprengt: zlib-gepackter
+/// Klartext ohne `/Filter`. Die Vorprüfung des Laders zählt ihn mit seinen
+/// Rohbytes und lässt die Datei durch; die Objektsicht entpackt ihn nicht
+/// (kein Filter) und durchsucht nur die gepackten Bytes; die Rohsicht bläst
+/// jeden `stream`-Block blind auf und lehnt ihn am Budget ab.
 fn ueber_budget(plain: &[u8]) -> Stream {
-    Stream::new(
-        dictionary! {
-            "Filter" => Object::Array(vec!["RunLengthDecode".into(), "FlateDecode".into()]),
-        },
-        rl(&zlib(plain)),
-    )
-    .with_compression(false)
+    Stream::new(dictionary! {}, zlib(plain)).with_compression(false)
+}
+
+/// Die Zeile der Rohsicht über den Strom mit dieser Objekt-Id.
+fn roh_zeile(opfer: &str) -> String {
+    format!("({opfer}): nicht entpackt")
 }
 
 fn pdf(streams: Vec<Stream>) -> (Vec<u8>, Vec<ObjectId>) {
@@ -113,8 +114,8 @@ fn rest(check: &LeakCheck, schwanz: &str) -> Option<u64> {
 
 /// 60 Ströme mit unbekanntem Filter, danach der 61. mit dem Geheimnis an der
 /// Entpackgrenze: seine Zeile steht **wörtlich** da, mit Objekt-Id und Grund.
-/// Die 60 billigen Meldungen füllen einen anderen Topf (`note`), und der
-/// deckelt sich selbst.
+/// Die 60 billigen Meldungen füllen einen anderen Topf (`note` der
+/// Objektsicht), und der deckelt sich selbst.
 ///
 /// Mutationsnachweis (gefahren): in `audit_bytes::Budget` `skip` und `note`
 /// denselben Zähler benutzen lassen (`self.skipped` in `note`) → rot, die
@@ -134,14 +135,14 @@ fn r2_sechzig_fremde_filter_verdraengen_die_budgetzeile_nicht() {
 
     assert!(
         check.findings[0].is_empty(),
-        "der Klartext liegt zlib-gepackt hinter RunLength — keine Sicht sieht ihn: {:#?}",
+        "der Klartext liegt zlib-gepackt jenseits des Budgets — keine Sicht sieht ihn: {:#?}",
         check.findings[0]
     );
     assert!(
         check
             .unchecked
             .iter()
-            .any(|l| l.starts_with(&format!("{opfer} <Stream>: nicht entpackt"))),
+            .any(|l| l.starts_with("Rohdaten-Stream") && l.contains(&roh_zeile(&opfer))),
         "die Zeile über den Strom mit dem Geheimnis wurde verdrängt: {:#?}",
         check.unchecked
     );
@@ -182,8 +183,9 @@ fn r2_bei_reiner_ueberschreitung_traegt_die_summenzeile_die_last() {
         !check
             .unchecked
             .iter()
-            .any(|l| l.starts_with(&format!("{opfer} <Stream>:"))),
-        "erwartet: der 61. fällt aus der Einzelnennung heraus"
+            .any(|l| l.contains(&roh_zeile(&opfer))),
+        "erwartet: der 61. fällt aus der Einzelnennung heraus: {:#?}",
+        check.unchecked
     );
     assert_eq!(
         rest(&check, "weitere Ströme nicht entpackt"),
@@ -241,8 +243,10 @@ fn r2_zwei_summenzeilen_bei_gemischten_ursachen() {
 /// Umfang.
 ///
 /// Seit Fix-Runde 7 trägt [`LeakCheck::unchecked_places`] die Zahl der
-/// Stellen selbst: 61 Ströme + die Zeile über Sicht 7 = **62**, und damit
-/// nie weniger als die Liste darüber nennt.
+/// Stellen selbst, und damit nie weniger als die Liste darüber nennt. In der
+/// Objektsicht waren das 61 Ströme + die Zeile über Sicht 7 = 62; seit #64
+/// läuft der Topf über die Rohsicht (siehe Kopf der Datei), die Sicht 7 nicht
+/// abmeldet: 50 Einzelzeilen + Summenzeile = 51 Zeilen für **61** Stellen.
 #[test]
 fn befund_r2_b_die_schlusszahl_zaehlt_stellen_nicht_zeilen() {
     let fuell = fuellung(256 * 1024);
@@ -254,7 +258,7 @@ fn befund_r2_b_die_schlusszahl_zaehlt_stellen_nicht_zeilen() {
     let einzeln = check
         .unchecked
         .iter()
-        .filter(|l| l.contains("<Stream>: nicht entpackt"))
+        .filter(|l| l.starts_with("Rohdaten-Stream") && l.contains(": nicht entpackt"))
         .count();
     let weitere = rest(&check, "weitere Ströme nicht entpackt").expect("Summenzeile");
     let wahr = einzeln as u64 + weitere;
@@ -263,14 +267,13 @@ fn befund_r2_b_die_schlusszahl_zaehlt_stellen_nicht_zeilen() {
     assert_eq!(wahr, 61, "61 Ströme wurden nicht entpackt");
     assert_eq!(
         check.unchecked.len(),
-        52,
-        "50 Einzelzeilen + Summenzeile + Sicht 7: {:#?}",
+        51,
+        "50 Einzelzeilen + Summenzeile: {:#?}",
         check.unchecked
     );
     assert_eq!(
-        check.unchecked_places as u64,
-        wahr + 1,
-        "61 Ströme + die Zeile über Sicht 7: {:#?}",
+        check.unchecked_places as u64, wahr,
+        "61 Ströme, jeder eine Stelle: {:#?}",
         check.unchecked
     );
     assert!(
@@ -282,9 +285,10 @@ fn befund_r2_b_die_schlusszahl_zaehlt_stellen_nicht_zeilen() {
 /// Die Zahl der Stellen ist auch dann richtig, wenn die Decke **nicht**
 /// greift — sonst wäre sie nur an einem Sonderfall geprüft.
 ///
-/// Drei Ströme über dem Budget: drei Einzelzeilen, dazu die Zeile über
-/// Sicht 7 — vier Zeilen, vier Stellen. Und die Gegenrichtung: eine Datei,
-/// die ganz gelesen wurde, hat null Stellen und null Zeilen.
+/// Drei Ströme über dem Budget: drei Einzelzeilen, drei Stellen (in der
+/// Objektsicht kam bis #64 die Zeile über Sicht 7 dazu: vier und vier). Und
+/// die Gegenrichtung: eine Datei, die ganz gelesen wurde, hat null Stellen
+/// und null Zeilen.
 #[test]
 fn r2_ohne_decke_zaehlen_stellen_und_zeilen_gleich() {
     let fuell = fuellung(256 * 1024);
@@ -292,8 +296,8 @@ fn r2_ohne_decke_zaehlen_stellen_und_zeilen_gleich() {
     let (bytes, _) = pdf(streams);
 
     let check = leaks_many_within(&bytes, &[SECRET], 64 * 1024);
-    assert_eq!(check.unchecked.len(), 4, "{:#?}", check.unchecked);
-    assert_eq!(check.unchecked_places, 4, "{:#?}", check.unchecked);
+    assert_eq!(check.unchecked.len(), 3, "{:#?}", check.unchecked);
+    assert_eq!(check.unchecked_places, 3, "{:#?}", check.unchecked);
 
     let voll = leaks_many_within(&bytes, &[SECRET], u64::MAX);
     assert!(voll.unchecked.is_empty(), "{:#?}", voll.unchecked);

@@ -289,7 +289,7 @@ pub fn page_content(doc: &Document, page_id: ObjectId) -> Vec<u8> {
 /// Ein einzelner Filter mit seinem `/DecodeParms`-Eintrag. `Ok(None)` für
 /// alles, was hier nicht hingehört (Bildfilter, Unbekanntes, und das
 /// namenlose Glied aus [`filter_names`] — ein leerer Name trifft keinen Arm).
-fn decode_one(
+pub(crate) fn decode_one(
     filter: &[u8],
     data: &[u8],
     parms: Option<&Dictionary>,

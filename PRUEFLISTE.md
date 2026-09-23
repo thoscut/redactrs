@@ -43,6 +43,7 @@ Prosa.
 | Erscheinungsstrom, den niemand liest: `/MK /I`, `/RI`, `/IX`; `/AP` einer nur über `/Popup`, `/Parent`, `/IRT` gehaltenen Annotation | A | Spur-A-Runde 1 (#71) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
 | Gehaltene Spiegel in Formularen über alle Seiten, ohne Decke | A | Spur-A-Runde 1 (#68) | `crates/redact-pdf/tests/zo_c_spiegel_umgebungen.rs` |
 | Abgelehnte gewöhnliche Datei: ein Bildfilter, den das Orakel kann und der Bilddekoder nicht (`LZWDecode`) | A | Spur-A-Runde 1 (#78) | `crates/redact-pdf/tests/zo_a_maske_und_filter.rs` |
+| Filterkette: ein Glied, das die Vorprüfung nicht auspackt, nimmt der ganzen Kette die Entpackgrenze | A | Spur-A-Runde 1 (#64) | `crates/redact-cli/tests/zo_e_kettenbombe_schreibpfad.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung
 prüft ihren positiven Zweig allein im Job „Build (windows-2025)“.

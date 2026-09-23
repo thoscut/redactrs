@@ -360,14 +360,16 @@ Seiten-Scan“ messen keine Bytes, und das ist ihr Zweck; sie stehen weiter unte
 unter „Wenn Bytes die falsche Größe sind“.
 
 **Die 16-MB-Zeile gilt der Vorprüfung, nicht jedem Altlast-Filter.** Auspacken
-muss die Vorprüfung nur, was zu PDF-Syntax werden kann; das sind `FlateDecode`,
-`LZWDecode` und `ASCII85Decode`. Ist die Kette nicht reines Flate, gilt die
-16-MB-Grenze der **Rohgröße** — nachgemessen an einem 17-MB-`ASCII85Decode`-
-Strom: `Stream mit Altlast-Filter (ASCII85Decode) ist mit 17 825 795 Bytes zu
-groß (Grenze 16 777 216 Bytes)`, Rückgabewert 1. `ASCIIHexDecode`,
-`RunLengthDecode` und die Bildfilter packt die Vorprüfung **gar nicht** aus, sie
-zählt ihre Rohbytes; dieselben 17 MB laufen dort durch (Rückgabewert 0,
-nachgemessen). Ausgepackt werden sie erst beim Schwärzen und in der
+muss die Vorprüfung, was zu PDF-Syntax werden kann; das sind `FlateDecode`,
+`LZWDecode`, `ASCII85Decode` — und seit der Spur-A-Runde 1 (Register #64) auch
+`ASCIIHexDecode` und `RunLengthDecode`, jedes Glied begrenzt auf das
+Entpackbudget. Trägt die Kette `LZWDecode` oder `ASCII85Decode`, gilt zusätzlich
+die 16-MB-Grenze der **Rohgröße** — nachgemessen an einem
+17-MB-`ASCII85Decode`-Strom: `Stream mit Altlast-Filter (ASCII85Decode) ist mit
+17 825 795 Bytes zu groß (Grenze 16 777 216 Bytes)`, Rückgabewert 1. Die
+Bildfilter packt die Vorprüfung **gar nicht** aus, sie zählt ihre Rohbytes;
+ein 17-MB-`ASCIIHexDecode`-Strom lief vor der Runde roh durch (Rückgabewert 0,
+nachgemessen) und wird jetzt entpackt gezählt. Ausgepackt werden die Bildfilter erst beim Schwärzen und in der
 Nachprüfung — und dort gegen `--max-decompressed-mb`, nicht gegen 16 MB
 (nachgemessen: ein `RunLengthDecode`- und ein `ASCIIHexDecode`-Seiteninhalt mit
 demselben Geheimnis werden von `--check-leaks` gefunden, letzterer ausdrücklich
@@ -1518,11 +1520,12 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
   RUSTSEC-2026-0187 selbst ist mit `lopdf 0.42` behoben (siehe unten); die
   Vorprüfung deckt seither nicht mehr eine offene Schwachstelle zu, sondern
   begrenzt den Aufwand.
-* **`LZWDecode`.** Solche Streams packt `lopdf` aus, nicht die Vorprüfung. Sie
-  werden deshalb bis zu einer Rohgröße von 16 MB an `lopdf` durchgereicht;
-  wieviel Speicher der Dekoder dabei belegt, ist nicht vorab begrenzt. Über
-  16 MB Rohgröße wird die Datei abgelehnt. `LZWDecode` ist ein Filter aus der
-  Zeit vor PDF 1.4 und kommt in heutigen Dateien praktisch nicht mehr vor.
+* **`LZWDecode`.** Solche Streams packte bis zur Spur-A-Runde 1 `lopdf` aus,
+  nicht die Vorprüfung, ohne vorab begrenzten Speicher; seither entpackt sie
+  die Vorprüfung selbst, begrenzt auf das Entpackbudget (Register #64). Die
+  Rohgrößen-Grenze von 16 MB steht daneben weiter: darüber wird die Datei
+  abgelehnt. `LZWDecode` ist ein Filter aus der Zeit vor PDF 1.4 und kommt in
+  heutigen Dateien praktisch nicht mehr vor.
 * **Rechenzeit unterhalb der Grenzen.** Bis zu 100 000 Trefferkandidaten werden
   ohne weitere Frage aufgelöst. Wie lange das dauert, hängt nicht nur an ihrer
   Zahl, sondern an ihrer **Anordnung**: viele Treffer in derselben Spalte sind

@@ -926,6 +926,20 @@ mod messwerte {
     pub const FORMULARSPIEGEL_DATEI_JE_SEITE_KB: u64 = 10;
     pub const FORMULARSPIEGEL_NACHHER_KLEIN_MB: u64 = 20;
     pub const FORMULARSPIEGEL_NACHHER_GROSS_MB: u64 = 31;
+
+    // Die Kettenbombe auf dem Schreibpfad (Spur-A-Runde 1, Register #64).
+    //
+    // Gemessen am gebauten Binary (Weg 1, `/usr/bin/time -v`, Maximum
+    // resident set size) am Stand [`KETTENBOMBE_STAND`], an dem die
+    // Vorpruefung die Kette roh buchte — nach der Korrektur nicht mehr
+    // messbar (Weg 3 im Satz): die Datei aus `zo_e_kettenbombe_schreibpfad`
+    // (39 381 Byte), 20 000 000 RunLength-Laeufe zu 128 Byte = 2,4 GB
+    // entpackt. Die Adressraumgrenze ist die des Belegs (`ulimit -v`).
+    pub const KETTENBOMBE_STAND: &str = "14d03c7";
+    pub const KETTENBOMBE_DATEI_KB: u64 = 39;
+    pub const KETTENBOMBE_ENTPACKT_GB: &str = "2,4";
+    pub const KETTENBOMBE_SPITZE_GB: &str = "3,8";
+    pub const KETTENBOMBE_ADRESSRAUM_GIB: &str = "1,5";
 }
 
 /// Die ausgeschriebene Zahl, wie die Doku kleine Zahlen schreibt.
@@ -2233,6 +2247,22 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // --- Die Kettenbombe auf dem Schreibpfad (Spur-A-Runde 1, Register #64) --
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Am Stand `{}` stand `/Filter [/FlateDecode /RunLengthDecode]` über einem \
+             RunLength-Strom, der sich auf {} GB aufbläst, als {} KB in der Datei; am \
+             gebauten Binary brauchte der Lauf {} GB Spitze (`/usr/bin/time -v`), und \
+             unter einer Adressraumgrenze von {} GiB starb er mit Signal",
+            m::KETTENBOMBE_STAND,
+            m::KETTENBOMBE_ENTPACKT_GB,
+            m::KETTENBOMBE_DATEI_KB,
+            m::KETTENBOMBE_SPITZE_GB,
+            m::KETTENBOMBE_ADRESSRAUM_GIB
+        ),
+    );
+
     aus
 }
 
@@ -2973,6 +3003,10 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "ein Testname (Befund C-4), keine Messung",
     ),
     (
+        "`zd_orakel_budget`, `ze_p1_budget_und_filter`, `zg_r2_decke`, `zf_q2_teildekoder` und `ze_p4_check_leaks_grenzen` sind darauf umgestellt",
+        "Dateinamen (Gegenprüfungen P1, P4, Q2, R2), keine Messung",
+    ),
+    (
         "Ausgabedatei** (Register #78, Prüfer A; abgelehnte gewöhnliche Datei)",
         "eine Registernummer, keine Messung",
     ),
@@ -2987,6 +3021,18 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "LZW wieder nicht unterstützt → alle drei rot",
         "zaehlt rote Tests unter Mutation, keine Messung",
+    ),
+    (
+        "nicht auspackte** (Register #64, Prüfer E;",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "und die Bombe fällt dort mit Rückgabewert 1 und",
+        "der Rueckgabewert des Binaries, in zo_e gebunden, keine Messgroesse",
+    ),
+    (
+        "gilt weiter nur `LZWDecode` und `ASCII85Decode`.",
+        "Filternamen der Norm, keine Messung",
     ),
 ];
 

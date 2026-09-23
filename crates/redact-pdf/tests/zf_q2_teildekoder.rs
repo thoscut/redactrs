@@ -266,9 +266,19 @@ fn q2_prescan_deckt_den_klon_ab() {
 /// „entpackte Ströme über `--max-decompressed-mb`, eine vom Lader abgelehnte
 /// Vorprüfung, und Objekte tiefer als 32 Ebenen“. Der Code kennt zwei weitere,
 /// und beide sind erreichbar — hier die vierte und die fünfte in **einem** Lauf:
-/// ein `/RunLengthDecode`-Strom, den `prescan` nur mit seiner **Rohgröße**
-/// verbucht (dort steht er nicht in der auspackbaren Liste), sprengt beim
+/// ein Strom, den `prescan` nur mit seiner **Rohgröße** verbucht, sprengt beim
 /// Orakel das Budget → „nicht entpackt“ **und** „Sicht 7 nicht gelaufen“.
+///
+/// Bis zur Spur-A-Runde 1 (Register #64) war das ein reiner
+/// `/RunLengthDecode`-Strom: RunLength stand nicht in der auspackbaren Liste
+/// der Vorprüfung. Seit #64 packt die Vorprüfung jede Kette aus, deren
+/// Glieder `filters.rs` begrenzt entpacken kann, und lehnt diesen Strom
+/// selbst ab. Roh gebucht wird nur noch eine Kette mit einem Glied, das nie
+/// zu PDF-Syntax wird — hier `[/RunLengthDecode /DCTDecode]`: die Objektsicht
+/// entpackt den RunLength-Vorspann (der Bildfilter am Ende ist der benannte
+/// blinde Fleck und meldet sich nicht) und läuft damit ans Budget. Ob der
+/// Schreibpfad einen solchen Vorspann begrenzt entpackt, ist eine eigene
+/// Frage (Register #83); dieser Test hält nur die Gründe des Orakels.
 #[test]
 fn q2_unchecked_kennt_mehr_gruende_als_die_doku_aufzaehlt() {
     // 1 KB Rohbytes → 128 KB entpackt (jeder Lauf verhundertachtundzwanzigfacht).
@@ -293,7 +303,10 @@ fn q2_unchecked_kennt_mehr_gruende_als_die_doku_aufzaehlt() {
     );
     let katalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
     doc.trailer.set("Root", katalog);
-    let id = doc.add_object(Object::Stream(kette(&["RunLengthDecode"], rle)));
+    let id = doc.add_object(Object::Stream(kette(
+        &["RunLengthDecode", "DCTDecode"],
+        rle,
+    )));
     doc.get_dictionary_mut(katalog)
         .expect("Katalog")
         .set("Q2Rle", Object::Reference(id));

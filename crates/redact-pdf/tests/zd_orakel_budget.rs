@@ -122,10 +122,14 @@ fn ein_strom_ueber_dem_budget_wird_nicht_entpackt_aber_roh_durchsucht() {
 }
 
 /// RunLength (ein Byte → 128) ist für die Rohsicht kein zlib und kostet
-/// dort nichts; die Objektsicht entpackt ihn — bis zum Budget. Darüber
-/// nennt `unchecked` den Strom als Objekt, der Objektgraph selbst bleibt
-/// durchsucht. Das Geheimnis steht in Zweierläufen, die keine Kodierung
-/// roh trifft.
+/// dort nichts; die Objektsicht entpackt ihn — bis zum Budget. Seit der
+/// Spur-A-Runde 1 (Register #64) packt auch die **Vorprüfung** des Laders
+/// RunLength begrenzt aus: liegt der Strom über dem Budget, lehnt sie die
+/// Datei ab, und `unchecked` nennt den Objektgraphen mit dem Budget als
+/// Grund — vorher buchte sie ihn roh, ließ ihn durch, und erst die
+/// Objektsicht nannte den Strom als „nicht entpackt“. Die Rohsicht läuft in
+/// beiden Fällen; das Geheimnis steht in Zweierläufen, die keine Kodierung
+/// roh trifft. Mit genügend Budget wird alles entpackt und gefunden.
 #[test]
 fn ein_runlength_strom_ueber_dem_budget_wird_als_objekt_genannt() {
     let ops = text_ops(&[SECRET]);
@@ -151,27 +155,17 @@ fn ein_runlength_strom_ueber_dem_budget_wird_als_objekt_genannt() {
         tight
             .unchecked
             .iter()
-            .any(|u| u.starts_with(&format!("{named} <Stream>")) && u.contains("nicht entpackt")),
-        "{:?}",
-        tight.unchecked
-    );
-    assert!(
-        !tight.unchecked.iter().any(|u| u.contains("Objektgraph")),
-        "der Objektgraph war ladbar und musste durchsucht werden: {:?}",
-        tight.unchecked
-    );
-    assert!(
-        tight.unchecked.iter().any(|u| u.contains("Sicht 7")),
-        "{:?}",
+            .any(|u| u.contains("Objektgraph") && u.contains("Budget")),
+        "die Vorprüfung muss die Bombe mit dem Budget als Grund ablehnen: {:?}",
         tight.unchecked
     );
 
-    let enough = check(&pdf, &[SECRET, OTHER], decoded_len as u64);
+    let enough = check(&pdf, &[SECRET, OTHER], loader_sum(&pdf, decoded_len as u64));
     assert!(enough.unchecked.is_empty(), "{:?}", enough.unchecked);
     assert!(
         enough.findings[0]
             .iter()
-            .any(|h| h.contains("dekodiert: RunLengthDecode")),
+            .any(|h| h.contains("dekodiert: RunLengthDecode") && h.contains(&named)),
         "{:?}",
         enough.findings[0]
     );

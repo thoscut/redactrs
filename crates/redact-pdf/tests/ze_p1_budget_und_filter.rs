@@ -43,8 +43,11 @@ fn fuellung(size: usize) -> Vec<u8> {
     out
 }
 
-/// `[/RunLengthDecode /FlateDecode]` — die Vorprüfung des Laders packt nur
-/// reine Flate/LZW/ASCII85-Ketten aus und sieht diesen Strom deshalb nicht.
+/// `[/RunLengthDecode /FlateDecode]` — bis zur Spur-A-Runde 1 (Register #64)
+/// packte die Vorprüfung des Laders nur reine Flate/LZW/ASCII85-Ketten aus
+/// und sah diesen Strom nicht; seither packt sie jede Kette aus, deren
+/// Glieder `filters.rs` begrenzt entpacken kann, und rechnet ihn gegen
+/// dasselbe Budget wie das Orakel.
 fn rl_flate(plain: &[u8]) -> Stream {
     stream_with(
         Object::Array(vec!["RunLengthDecode".into(), "FlateDecode".into()]),
@@ -70,18 +73,22 @@ fn pdf_with_streams(streams: Vec<Stream>) -> (Vec<u8>, Vec<ObjectId>) {
 // Punkt 2: das Budget ist eine Summe — viele kleine Ströme reichen
 // ---------------------------------------------------------------------------
 
-/// Das Budget gilt je Sicht als **Summe**. Viele kleine Ströme können es
-/// deshalb aufbrauchen, sodass der Strom mit dem Geheimnis nicht mehr
-/// entpackt wird. Das ist zulässig — aber es muss **gesagt** werden: der
-/// übersprungene Strom steht mit seiner Objekt-Id in `unchecked`, und
-/// Sicht 7 meldet sich ab.
+/// Das Budget gilt als **Summe**. Viele kleine Ströme können es deshalb
+/// aufbrauchen, obwohl jeder einzelne hineinpasst — und das muss **gesagt**
+/// werden, nicht als „nicht gefunden“ durchgehen.
 ///
-/// Die Kette `[/RunLengthDecode /FlateDecode]` ist mit Absicht gewählt: die
-/// Vorprüfung des Laders packt nur reine Flate/LZW/ASCII85-Ketten aus und
-/// sieht diese Ströme deshalb gar nicht — die Sicht 3 des Orakels muss die
-/// Grenze hier allein halten. Der Klartext ist zlib-verpackt und von der
-/// Rohsicht nicht zu sehen, weil die Nutzlast mit RunLength-Längenbytes
-/// beginnt und kein zlib-Strom ist.
+/// Die Kette `[/RunLengthDecode /FlateDecode]` war mit Absicht gewählt: bis
+/// zur Spur-A-Runde 1 (Register #64) packte die Vorprüfung des Laders sie
+/// nicht aus, und die Sicht 3 des Orakels hielt die Grenze allein — sie
+/// nannte den siebzehnten Strom mit seiner Objekt-Id als „nicht entpackt“.
+/// Seit #64 packt die Vorprüfung dieselbe Kette gegen dasselbe Budget aus
+/// und lehnt die Datei **als Ganzes** ab, sobald die Summe darüber liegt;
+/// `unchecked` nennt dann den Objektgraphen mit dem Budget als Grund. Das ist
+/// die Aussage, die dieser Test seither hält (wie `zd_orakel_budget`): mit
+/// der Summe des Laders ist alles entpackt und gefunden, mit weniger sagt das
+/// Orakel, dass die Sichten 3–7 fehlen. Der Klartext ist zlib-verpackt und
+/// von der Rohsicht ohne die Kette nicht zu sehen, weil die Nutzlast mit
+/// RunLength-Längenbytes beginnt und kein zlib-Strom ist.
 #[test]
 fn viele_kleine_stroeme_brauchen_das_budget_auf_und_das_wird_gesagt() {
     let harmless = fuellung(256 * 1024);
@@ -93,30 +100,33 @@ fn viele_kleine_stroeme_brauchen_das_budget_auf_und_das_wird_gesagt() {
     let last = object(*ids.last().unwrap());
 
     // Budget: genug für die sechzehn harmlosen Ströme, nicht mehr für den
-    // siebzehnten.
+    // siebzehnten — jeder einzelne passt, die Summe nicht.
     let budget = (16 * harmless.len()) as u64;
     let tight = leaks_many_within(&pdf, &[SECRET], budget);
     assert!(
         tight.findings[0].is_empty(),
-        "das Geheimnis stand nur im übersprungenen Strom: {:?}",
+        "das Geheimnis stand nur im nicht entpackten Strom: {:?}",
         tight.findings[0]
     );
     assert!(
         tight
             .unchecked
             .iter()
-            .any(|u| u.contains(&last) && u.contains("nicht entpackt")),
-        "der übersprungene Strom wird nicht genannt: {:?}",
-        tight.unchecked
-    );
-    assert!(
-        tight.unchecked.iter().any(|u| u.contains("Sicht 7")),
-        "der Verlust der Schriftdekoder-Sicht wird nicht gesagt: {:?}",
+            .any(|u| u.contains("Objektgraph") && u.contains("Vorprüfung") && u.contains("Budget")),
+        "die Ablehnung der Vorprüfung wird nicht mit dem Budget genannt: {:?}",
         tight.unchecked
     );
 
-    // Gegenrichtung: reicht das Budget, ist nichts offen und alles gefunden.
-    let full = leaks_many_within(&pdf, &[SECRET], u64::MAX);
+    // Gegenrichtung: mit der Summe des Laders ist nichts offen und alles
+    // gefunden — ein Byte weniger, und die Vorprüfung lehnt wieder ab.
+    let sum = loader_sum(&pdf, (16 * harmless.len() + secret_plain.len()) as u64);
+    let short = leaks_many_within(&pdf, &[SECRET], sum - 1);
+    assert!(
+        short.unchecked.iter().any(|u| u.contains("Vorprüfung")),
+        "{:?}",
+        short.unchecked
+    );
+    let full = leaks_many_within(&pdf, &[SECRET], sum);
     assert!(full.unchecked.is_empty(), "{:?}", full.unchecked);
     assert!(
         full.findings[0]
@@ -127,24 +137,63 @@ fn viele_kleine_stroeme_brauchen_das_budget_auf_und_das_wird_gesagt() {
     );
 }
 
+/// Das kleinste Budget, mit dem die Vorprüfung des Laders (`prescan`) die
+/// Datei durchlässt — dieselbe Zahl, die `--max-decompressed-mb` an der
+/// Schwärzung entscheidet. Sie liegt über `n`, der Summe der entpackten
+/// Ströme: der Lader zählt ungefilterte Ströme (den Querverweis-Strom, den
+/// `lopdf` schreibt) roh mit.
+fn loader_sum(pdf: &[u8], n: u64) -> u64 {
+    use redact_pdf::document::{prescan, Limits};
+    let passes = |b: u64| {
+        prescan(
+            pdf,
+            &Limits {
+                max_decompressed_bytes: b,
+                max_parsed_bytes: u64::MAX,
+                ..Limits::default()
+            },
+        )
+        .is_ok()
+    };
+    let (mut lo, mut hi) = (n, n + pdf.len() as u64);
+    assert!(
+        !passes(lo) && passes(hi),
+        "Vorbedingung: Schwelle zwischen n und n + Dateigröße"
+    );
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if passes(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
+}
+
 /// Mehr als `MAX_UNCHECKED` (50) übersprungene Ströme: die ersten 50 werden
-/// einzeln genannt, der Rest gezählt — geschwiegen wird über keinen.
+/// einzeln genannt, der Rest gezählt — geschwiegen wird über keinen, und
+/// `unchecked_places` zählt alle.
+///
+/// Gezählt wird an der **Rohsicht**: sechzig Flate-Ströme von je 256 KB
+/// gegen ein Budget von 64 KB, jeder für sich zu groß. Die Objektsicht kommt
+/// hier nicht mehr zum Zählen — seit der Spur-A-Runde 1 (Register #64) lehnt
+/// die Vorprüfung des Laders eine Datei über dem Budget als Ganzes ab, und
+/// das steht als **eine** weitere Zeile daneben. Die Decke ist je Sicht
+/// dieselbe (`Budget`).
 #[test]
 fn ueber_fuenfzig_uebersprungene_stroeme_werden_gezaehlt_nicht_verschwiegen() {
     let big = fuellung(256 * 1024);
-    let streams: Vec<Stream> = (0..60).map(|_| rl_flate(&big)).collect();
+    let streams: Vec<Stream> = (0..60)
+        .map(|_| stream_with("FlateDecode".into(), deflate(&big)))
+        .collect();
     let (pdf, _) = pdf_with_streams(streams);
 
     let result = leaks_many_within(&pdf, &["kommtnichtvor"], 64 * 1024);
-    assert!(
-        !result.unchecked.iter().any(|u| u.contains("Vorprüfung")),
-        "die Vorprüfung sollte diese Ketten nicht sehen: {:?}",
-        result.unchecked
-    );
     let einzeln = result
         .unchecked
         .iter()
-        .filter(|u| u.starts_with("Objekt") && u.contains("<Stream>: nicht entpackt"))
+        .filter(|u| u.starts_with("Rohdaten-Stream") && u.contains(": nicht entpackt"))
         .count();
     let summen: Vec<&String> = result
         .unchecked
@@ -161,6 +210,23 @@ fn ueber_fuenfzig_uebersprungene_stroeme_werden_gezaehlt_nicht_verschwiegen() {
         summen[0].contains("10 weitere"),
         "die Summenzeile zählt falsch: {}",
         summen[0]
+    );
+    let lader: Vec<&String> = result
+        .unchecked
+        .iter()
+        .filter(|u| u.contains("Objektgraph") && u.contains("Vorprüfung"))
+        .collect();
+    assert_eq!(
+        lader.len(),
+        1,
+        "eine Zeile für den Lader: {:#?}",
+        result.unchecked
+    );
+    assert_eq!(
+        result.unchecked_places,
+        60 + 1,
+        "sechzig Ströme und der Objektgraph: {:#?}",
+        result.unchecked
     );
 }
 
@@ -379,7 +445,9 @@ fn peak_note(peak: Option<u64>) -> String {
 }
 
 /// LZW-, ASCII85-, RunLength- und Kettenbombe: jede bleibt im Budget, in
-/// Zeit und Speicher — und jede wird als übersprungener Strom genannt.
+/// Zeit und Speicher — und keine geht als „nicht gefunden“ durch: die
+/// Vorprüfung des Laders lehnt die Datei mit dem Budget als Grund ab, und
+/// `unchecked` nennt die fehlenden Sichten.
 #[test]
 fn die_neuen_filter_als_bombe_bleiben_im_budget() {
     if std::env::var_os(CHILD).is_some() {
@@ -431,10 +499,13 @@ fn bomben_im_kindprozess() {
     };
     let before = peak_rss_bytes();
 
-    // Jede Bombe steckt hinter einem RunLength-Mantel: die Vorprüfung des
-    // Laders packt nur reine Flate/LZW/ASCII85-Ketten aus und lehnt die Datei
-    // sonst schon vorher ab — dann liefe der neue Dekoder gar nicht, und der
-    // Test bewiese nichts über ihn.
+    // Jede Bombe steckt hinter einem RunLength-Mantel. Bis zur Spur-A-Runde 1
+    // (Register #64) packte die Vorprüfung des Laders nur reine
+    // Flate/LZW/ASCII85-Ketten aus; der Mantel führte an ihr vorbei zur
+    // Sicht 3 des Orakels, die den Strom dann als „nicht entpackt“ nannte.
+    // Seither packt die Vorprüfung die Kette Glied für Glied mit denselben
+    // begrenzten Dekodern aus — der Mantel bleibt, damit genau dieser Weg
+    // (Kette, nicht Einzelfilter) an der Bombe gemessen wird.
     let mantel = |inner: &str, packed: Vec<u8>| -> (Object, Vec<u8>) {
         (
             Object::Array(vec!["RunLengthDecode".into(), inner.into()]),
@@ -459,8 +530,8 @@ fn bomben_im_kindprozess() {
     };
     // ASCII85 wächst nur um den Faktor vier (`z` = vier Nullbytes); die
     // Bombe ist entsprechend kleiner gehalten.
-    // Die gepackten Bytes müssen zudem unter dem Budget bleiben: die
-    // Vorprüfung des Laders verbucht einen Strom mit unbekanntem Filter roh.
+    // Die gepackten Bytes bleiben zudem unter dem Budget: so entscheidet das
+    // Entpacken, nicht die Rohgröße.
     let a85 = vec![b'z'; out_bytes / 32];
     // RunLength allein: ein Lauf von 128 gleichen Bytes je zwei Byte.
     let rl: Vec<u8> = std::iter::repeat_n([129u8, b'0'], out_bytes / 128)
@@ -478,8 +549,7 @@ fn bomben_im_kindprozess() {
 
     for (name, filter, content) in faelle {
         let packed = content.len();
-        let (pdf, ids) = pdf_with_streams(vec![stream_with(filter, content)]);
-        let named = object(ids[0]);
+        let (pdf, _) = pdf_with_streams(vec![stream_with(filter, content)]);
         let started = Instant::now();
         let result = leaks_many_within(&pdf, &[SECRET], budget);
         let elapsed = started.elapsed();
@@ -502,16 +572,15 @@ fn bomben_im_kindprozess() {
             result.findings[0]
         );
         assert!(
-            result
-                .unchecked
-                .iter()
-                .any(|u| u.contains(&named) && u.contains("nicht entpackt")),
-            "{name}: der Strom wird nicht als ungeprüft genannt: {:?}",
+            result.unchecked.iter().any(|u| u.contains("Objektgraph")
+                && u.contains("Vorprüfung")
+                && u.contains("Budget")),
+            "{name}: die Ablehnung wird nicht mit dem Budget genannt: {:?}",
             result.unchecked
         );
         assert!(
-            result.unchecked.iter().any(|u| u.contains("Sicht 7")),
-            "{name}: der Verlust der Schriftdekoder-Sicht wird nicht gesagt: {:?}",
+            result.unchecked.iter().any(|u| u.contains("Sichten 3–7")),
+            "{name}: der Verlust der Sichten wird nicht gesagt: {:?}",
             result.unchecked
         );
     }

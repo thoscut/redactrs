@@ -47,7 +47,11 @@
 //!
 //! # Was dieser Test festhält
 //!
-//! Er ist **absichtlich rot.** Er verlangt das Verhalten, das die reine
+//! Er war **absichtlich rot** und ist seit Register #64 grün: die Vorprüfung
+//! packt jetzt jede Kette aus, deren Glieder `filters.rs` begrenzt entpacken
+//! kann (`RunLengthDecode` und `ASCIIHexDecode` eingeschlossen), Glied für
+//! Glied gegen das Budget — die Kettenbombe fällt dort, bevor aus ihr
+//! Speicher wird. Er verlangt das Verhalten, das die reine
 //! Flate-Bombe schon zeigt: unter einer Adressraumgrenze, die ein
 //! gewöhnliches Dokument nie erreicht, endet der Lauf **geordnet** — mit einem
 //! Rückgabewert (nicht mit einem Signal) und mit der Budgetmeldung, weil die
@@ -166,7 +170,8 @@ fn run_with_address_limit(kib: u64, args: &[&str]) -> Option<Output> {
         .ok()
 }
 
-/// **Befund E-1 — offen. Dieser Test ist absichtlich rot.**
+/// **Befund E-1 — behoben (Register #64).** Bis dahin war dieser Test
+/// absichtlich rot.
 ///
 /// Eine 39-KB-Datei, deren Seiteninhalt sich beim Entpacken auf ~2,4 GB
 /// aufbläst, muss der Schreibpfad **geordnet** ablehnen — das entpackte
@@ -174,7 +179,6 @@ fn run_with_address_limit(kib: u64, args: &[&str]) -> Option<Output> {
 /// weit über allem, was ein gewöhnliches Dokument braucht (ein 500-seitiger
 /// Auszug läuft in ~48 MB), aber unter der Bombe.
 #[test]
-#[ignore = "offen: Register #64 Kettenbombe auf dem Schreibpfad — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn die_entpackgrenze_gilt_auch_auf_dem_schreibpfad() {
     let dir = workdir("kette");
     let datei = "kette.pdf";

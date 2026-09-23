@@ -309,6 +309,35 @@ seiner neuen Zeile in der Probenliste.
   Mutationsnachweis: LZW wieder nicht unterstützt → alle drei rot; Grenze
   entfernt → der dritte rot.
 
+* **⚠ Sicherheit: die Entpackgrenze galt nicht für eine Filterkette, deren
+  Glied die Vorprüfung nicht auspackte** (Register #64, Prüfer E;
+  Dienstverweigerung). Die Vorprüfung des Laders buchte eine Kette mit einem
+  Glied, das sie nicht auspacken konnte (`RunLengthDecode`, `ASCIIHexDecode`),
+  **ganz** roh — auch das Flate-Glied davor —, und der Schreibpfad entpackte
+  die Kette danach ohne Grenze. Am Stand `14d03c7` stand `/Filter
+  [/FlateDecode /RunLengthDecode]` über einem RunLength-Strom, der sich auf
+  2,4 GB aufbläst, als 39 KB in der Datei; am gebauten Binary brauchte der
+  Lauf 3,8 GB Spitze (`/usr/bin/time -v`), und unter einer Adressraumgrenze
+  von 1,5 GiB starb er mit Signal statt mit einer Budgetmeldung. Jetzt packt
+  die Vorprüfung jede Kette aus, deren Glieder `filters.rs` begrenzt entpacken
+  kann — dieselben Dekoder wie der Schreibpfad, Glied für Glied gegen das
+  Budget, ohne `lopdf` —, und die Bombe fällt dort mit Rückgabewert 1 und
+  der Budgetmeldung. Die Rohgrößen-Grenze der Altlast-Filter gilt weiter nur
+  `LZWDecode` und `ASCII85Decode`. Für das Orakel heißt das: eine solche
+  Datei lehnt die Vorprüfung als Ganzes ab (`unchecked` nennt den
+  Objektgraphen mit dem Budget), wo sie vorher den einen Strom nannte —
+  `zd_orakel_budget`, `ze_p1_budget_und_filter`, `zg_r2_decke`,
+  `zf_q2_teildekoder` und `ze_p4_check_leaks_grenzen` sind darauf
+  umgestellt. Die Objektsicht läuft seither nur noch an einem Strom ans
+  Budget, den die Vorprüfung roh bucht — einer Kette mit einem Bildfilter
+  oder einem unbekannten Filter am Ende; die Kommandozeile zeigt die Zeile
+  über den nicht gelaufenen Schriftdekoder deshalb an keiner der alten
+  Proben mehr. Belege:
+  `zo_e_kettenbombe_schreibpfad::die_entpackgrenze_gilt_auch_auf_dem_schreibpfad`
+  (Linux, Adressraumgrenze über `ulimit -v`, vorher absichtlich rot).
+  Mutationsnachweis: `RunLengthDecode` wieder roh gebucht → rot (vom
+  Speicherlimit getötet).
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

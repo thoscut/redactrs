@@ -626,13 +626,31 @@ impl Prescan<'_> {
     /// und die muss stimmen, sonst ließe sich der Stream gar nicht auspacken.
     fn account(&mut self, dict: &[u8], payload: &[u8]) -> Result<()> {
         let filters = filter_names(dict);
-        // Nur diese Filter kann `lopdf` auspacken. Alles andere (DCT, JPX,
-        // CCITT, JBIG2, RunLength, Unbekanntes) wird nie zu PDF-Syntax und
-        // kann folglich auch keine Verschachtelung verstecken.
+        // Die Kette wird ausgepackt, wenn **jedes** Glied einer der Filter
+        // ist, die `crate::filters` begrenzt entpacken kann — dieselben, die
+        // der Schreibpfad später auspackt. Alles andere (DCT, JPX, CCITT,
+        // JBIG2, Unbekanntes) wird nie zu PDF-Syntax und kann keine
+        // Verschachtelung verstecken; es wird nur roh gebucht.
+        //
+        // Bis zur Spur-A-Runde 1 fehlten `RunLengthDecode` und `ASCIIHexDecode`
+        // (und die Kurznamen), und eine Kette mit einem solchen Glied wurde
+        // **ganz** roh gebucht — auch ihr Flate-Glied davor. `/Filter
+        // [/FlateDecode /RunLengthDecode]` über einem RunLength-Strom, der
+        // sich auf 2,4 GB aufbläst, stand als 39 KB in der Datei, ging durch,
+        // und der Schreibpfad entpackte ihn ohne Grenze (Register #64).
         let decodable = filters.iter().all(|f| {
             matches!(
                 f.as_slice(),
-                b"FlateDecode" | b"LZWDecode" | b"ASCII85Decode"
+                b"FlateDecode"
+                    | b"Fl"
+                    | b"LZWDecode"
+                    | b"LZW"
+                    | b"ASCII85Decode"
+                    | b"A85"
+                    | b"ASCIIHexDecode"
+                    | b"AHx"
+                    | b"RunLengthDecode"
+                    | b"RL"
             )
         });
 
@@ -650,9 +668,8 @@ impl Prescan<'_> {
         // betrachtet ohnehin nur die ersten [`BINARY_SAMPLE_BYTES`]. Erst
         // wenn diese Frage beantwortet ist, steht fest, welches Budget gilt —
         // und damit, wie viel überhaupt ausgepackt werden darf.
-        let flate_only =
-            !filters.is_empty() && filters.iter().all(|f| f.as_slice() == b"FlateDecode");
-        let (binary, decoded) = if flate_only {
+        let flate_only = !filters.is_empty() && filters.iter().all(|f| is_flate(f));
+        let (binary, decoded, room) = if flate_only {
             let probe = self.decode(&filters, payload, total_room.min(BINARY_SAMPLE_BYTES))?;
             let binary = match &probe {
                 Some((data, _)) => looks_binary(data),
@@ -665,7 +682,7 @@ impl Prescan<'_> {
             } else {
                 total_room.min(parsed_room)
             };
-            (binary, self.decode(&filters, payload, room)?)
+            (binary, self.decode(&filters, payload, room)?, room)
         } else {
             // Altlast-Filter werden nur einmal ausgepackt — ein zweiter Lauf
             // durch `lopdf` wäre bei LZW teurer als die Klassifikation wert
@@ -675,14 +692,24 @@ impl Prescan<'_> {
                 Some((data, _)) => looks_binary(data),
                 None => looks_binary(payload),
             };
-            (binary, decoded)
+            (binary, decoded, total_room)
         };
 
         let data = decoded
             .as_ref()
             .map(|(d, _)| d.as_slice())
             .unwrap_or(payload);
-        self.charge(payload.len() as u64, data.len() as u64, !binary)?;
+        // Abgeschnitten heißt: mindestens `room` und noch etwas — also mehr,
+        // als das gewährte Budget hergibt. Flate liefert diese Bytes selbst
+        // (`room + 1`); die übrigen Dekoder brechen mit `Oversize` ab und
+        // geben nichts her, gebucht wird trotzdem dasselbe.
+        let truncated = decoded.as_ref().is_some_and(|(_, hit)| *hit);
+        let size = if truncated {
+            (data.len() as u64).max(room.saturating_add(1))
+        } else {
+            data.len() as u64
+        };
+        self.charge(payload.len() as u64, size, !binary)?;
 
         // **Jeder** auspackbare Stream wird durchlaufen, auch einer, der sich
         // als Bild ausgibt. Früher stand hier eine Ausnahme für
@@ -712,7 +739,17 @@ impl Prescan<'_> {
         if filters.is_empty() {
             return Ok(None);
         }
-        let legacy = filters.iter().any(|f| f.as_slice() != b"FlateDecode");
+        // Die Rohgrößen-Grenze gilt den Filtern, die sie immer galt: LZW und
+        // ASCII85. `RunLengthDecode` und `ASCIIHexDecode` packte die
+        // Vorprüfung bis zur Spur-A-Runde 1 gar nicht aus; jetzt packt sie
+        // sie begrenzt aus — die Grenze der Rohgröße bekommen sie damit nicht
+        // obendrauf, sonst fiele eine gewöhnliche Datei, die vorher durchlief.
+        let legacy = filters.iter().any(|f| {
+            matches!(
+                f.as_slice(),
+                b"LZWDecode" | b"LZW" | b"ASCII85Decode" | b"A85"
+            )
+        });
         if legacy && payload.len() > MAX_LEGACY_STREAM_BYTES {
             return Err(RedactError::Pdf(format!(
                 "Stream mit Altlast-Filter ({}) ist mit {} Bytes zu groß \
@@ -732,7 +769,7 @@ impl Prescan<'_> {
         let mut truncated = false;
         for filter in filters {
             data = match filter.as_slice() {
-                b"FlateDecode" => match inflate_bounded(&data, room) {
+                b"FlateDecode" | b"Fl" => match inflate_bounded(&data, room) {
                     Some((out, hit)) => {
                         truncated |= hit;
                         out
@@ -741,9 +778,23 @@ impl Prescan<'_> {
                     // also wird er auch nicht geparst.
                     None => return Ok(None),
                 },
-                other => match lopdf_decode(other, &data) {
-                    Some(out) => out,
-                    None => return Ok(None),
+                // Dieselben begrenzten Dekoder wie der Schreibpfad
+                // (`crate::filters`): kein Glied erzeugt mehr als `room`
+                // Byte. Bis zur Spur-A-Runde 1 lief hier `lopdf` ohne Grenze —
+                // ein RunLength-Glied hinter einem Flate-Glied konnte das
+                // Budget um den Faktor 64 sprengen (Register #64). Die
+                // `/DecodeParms` liest die Vorprüfung nicht: für die Größe
+                // zählt der Prädiktor nicht, und ein LZW-`EarlyChange` 0
+                // liefert andere Bytes in gleicher Menge.
+                other => match crate::filters::decode_one(
+                    other,
+                    &data,
+                    None,
+                    usize::try_from(room).unwrap_or(usize::MAX),
+                ) {
+                    Ok(Some(out)) => out,
+                    Ok(None) => return Ok(None),
+                    Err(crate::filters::Oversize) => return Ok(Some((Vec::new(), true))),
                 },
             };
         }
@@ -876,13 +927,9 @@ fn inflate_bounded(data: &[u8], limit: u64) -> Option<(Vec<u8>, bool)> {
     Some((out, truncated))
 }
 
-/// Auspacken über `lopdf` — für die Filter, die wir nicht selbst können.
-fn lopdf_decode(filter: &[u8], data: &[u8]) -> Option<Vec<u8>> {
-    let mut dict = lopdf::Dictionary::new();
-    dict.set("Filter", Object::Name(filter.to_vec()));
-    lopdf::Stream::new(dict, data.to_vec())
-        .decompressed_content()
-        .ok()
+/// `FlateDecode` unter beiden Namen (PDF 32000-1, Tabelle 94).
+fn is_flate(filter: &[u8]) -> bool {
+    matches!(filter, b"FlateDecode" | b"Fl")
 }
 
 /// Filternamen aus den Rohbytes eines Stream-Dictionaries.

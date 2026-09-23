@@ -362,18 +362,26 @@ fn tiefe_33_ist_eine_stille_entwarnung() {
 /// (`belege.rs::die_fuenf_gruende_fuer_nicht_geprueft_stehen_in_security_md`
 /// hält sie gegen den Quelltext des Orakels); hier stehen die Gründe, die die
 /// **Kommandozeile** wirklich erreichen kann, gegen einen Lauf des gebauten
-/// Binaries. Drei sind es an dieser Stelle:
+/// Binaries. Zwei sind es an dieser Stelle:
 ///
-/// * die Entpackgrenze (`--max-decompressed-mb`),
-/// * der Schriftdekoder, der deshalb gar nicht erst läuft,
+/// * die Entpackgrenze (`--max-decompressed-mb`) — an einem Strom ohne
+///   `/Filter`, dessen Bytes zlib sind: die Vorprüfung des Laders zählt ihn
+///   roh, die Rohsicht bläst ihn auf und lehnt ihn am Budget ab,
 /// * die Verschachtelungstiefe der Objektsicht.
 ///
-/// Der vierte (ein unbekannter Filtername) steht in
-/// `zf_q5_unbekannter_filter.rs`; den fünften — die vom Lader abgelehnte
-/// Vorprüfung — kann die Kommandozeile nicht zeigen: `check::run` lädt die
-/// Datei vorher mit denselben Grenzen und bricht dann schon mit
-/// Rückgabewert 1 ab. Er gehört der Oberfläche, die das Orakel ohne diesen
-/// Schritt aufruft.
+/// Der dritte (ein unbekannter Filtername) steht in
+/// `zf_q5_unbekannter_filter.rs`. Die beiden übrigen kann die Kommandozeile
+/// nicht zeigen: `check::run` lädt die Datei vorher mit denselben Grenzen,
+/// und seit der Spur-A-Runde 1 (Register #64) packt die Vorprüfung jede
+/// Kette aus, die das Orakel auch auspackt — was in der Objektsicht am
+/// Budget scheiterte, lehnt sie vorher ab (Rückgabewert 1, Budget als
+/// Grund). Damit erreicht die Kommandozeile weder „Vorprüfung abgelehnt“
+/// als `NICHT GEPRÜFT`-Zeile noch den nicht gelaufenen Schriftdekoder (der
+/// einem übersprungenen Strom der Objektsicht folgt). Bis #64 zeigte eine
+/// RunLength-Bombe beides; die Probe steht unten als (a′) und hält fest,
+/// dass der Lader sie jetzt mit dem Budget ablehnt. Beide Gründe gehören
+/// der Oberfläche, die das Orakel ohne den Ladeschritt aufruft; ihr Wortlaut
+/// bleibt in `SECURITY.md` und wird hier weiter dort verlangt.
 ///
 /// Mutationsnachweis: in `SECURITY.md` die Zeile „Schriftdekoder nicht
 /// gelaufen“ aus der Gründetabelle gestrichen → dieser Test ist rot.
@@ -388,7 +396,28 @@ fn die_gruende_der_ausgabe_stehen_in_security_md() {
     let dir = workdir("gruende");
     let mut gesehen: Vec<String> = Vec::new();
 
-    // (a) Entpackgrenze — und in ihrer Folge der Schriftdekoder.
+    // (a) Entpackgrenze — an der Rohsicht, hinter einem Strom ohne /Filter.
+    std::fs::write(
+        dir.join("getarnt.pdf"),
+        pdf_mit_vielen_zu_grossen_stroemen(1, 2),
+    )
+    .unwrap();
+    let out = run_in(
+        &dir,
+        &[
+            "getarnt.pdf",
+            "--check-leaks",
+            "NICHT-DRIN",
+            "--max-decompressed-mb",
+            "1",
+        ],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", stdout(&out));
+    gesehen.extend(stdout(&out).lines().map(str::to_string));
+
+    // (a′) Dieselbe Grenze an einer RunLength-Bombe: seit #64 lehnt sie der
+    // Lader ab, bevor das Orakel läuft — Rückgabewert 1, Budget als Grund.
     std::fs::write(dir.join("rl.pdf"), pdf_mit_runlength_bombe(20_000)).unwrap();
     let out = run_in(
         &dir,
@@ -401,8 +430,12 @@ fn die_gruende_der_ausgabe_stehen_in_security_md() {
         ],
         None,
     );
-    assert_eq!(out.status.code(), Some(3), "{}", stdout(&out));
-    gesehen.extend(stdout(&out).lines().map(str::to_string));
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    let fehler = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        fehler.contains("Budget"),
+        "der Lader nennt das Budget nicht als Grund: {fehler}"
+    );
 
     // (b) Verschachtelungstiefe.
     std::fs::write(
@@ -420,7 +453,6 @@ fn die_gruende_der_ausgabe_stehen_in_security_md() {
     let ausgabe = gesehen.join("\n");
     for wortlaut in [
         "nicht entpackt — ",
-        "Sicht 7 (Schriftdekoder) nicht gelaufen: ",
         "nicht durchsucht — Verschachtelungstiefe ",
     ] {
         assert!(
@@ -430,6 +462,17 @@ fn die_gruende_der_ausgabe_stehen_in_security_md() {
         assert!(
             security.contains(wortlaut.trim_end()),
             "SECURITY.md nennt den Grund „{wortlaut}“ nicht, den der Lauf schreibt"
+        );
+    }
+    // Die Gründe, die nur ohne den Ladeschritt erreichbar sind, stehen
+    // weiter in der Tabelle — das Orakel schreibt sie unverändert.
+    for wortlaut in [
+        "Sicht 7 (Schriftdekoder) nicht gelaufen:",
+        "die Vorprüfung des Laders lehnt die Datei ab:",
+    ] {
+        assert!(
+            security.contains(wortlaut),
+            "SECURITY.md nennt den Grund „{wortlaut}“ nicht mehr"
         );
     }
 
