@@ -292,6 +292,23 @@ seiner neuen Zeile in der Probenliste.
   Mutationsnachweis: Datensatz ungekürzt gehalten → der erste rot; Decke
   entfernt → der zweite rot.
 
+* **Ein LZW-gepacktes Bild unter der Zone beendete den Lauf ohne
+  Ausgabedatei** (Register #78, Prüfer A; abgelehnte gewöhnliche Datei).
+  `LZWDecode` ist ein Filter aus PDF 1.0, den ältere Distiller, `tiff2pdf`
+  und Ghostscript ohne Flate schreiben. Das Orakel und der Textlauf
+  entpacken ihn (`filters.rs`, `weezl`); der Bilddekoder kannte ihn nicht,
+  gab einen Platzhalter zurück, und ohne `--allow-undecodable-images` endete
+  der Lauf mit Fehler — mit Zugeständnis blieb das Bild ungeschwärzt stehen,
+  gesagt, aber für eine gewöhnliche Datei. Jetzt entpackt der Bilddekoder LZW
+  über denselben Dekoder, mit Prädiktor, und mit einer Grenze aus `/Width` ×
+  `/Height`: was das Bild laut Dictionary nicht braucht, wird nicht entpackt
+  (ein Strom darüber gilt als nicht dekodierbar und wird so gemeldet).
+  Belege: `zo_a_maske_und_filter::lzw_bild_unter_der_zone_faellt` (vorher
+  absichtlich rot), `…::lzw_bild_mit_zugestaendnis_faellt_ebenso` (band das
+  alte Verhalten) und `…::lzw_bild_ueber_der_grenze_wird_nicht_entpackt`.
+  Mutationsnachweis: LZW wieder nicht unterstützt → alle drei rot; Grenze
+  entfernt → der dritte rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

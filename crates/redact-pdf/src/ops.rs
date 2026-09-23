@@ -23,8 +23,9 @@
 //!   Content-Streams).
 //! * **Inline-Bilder** werden auf Seitenebene erkannt; in Form-XObjects nicht,
 //!   weil dort die Operationsindizes zur Schwärzung passen müssen.
-//! * **`LZWDecode`/`CCITTFaxDecode`/`JPXDecode`** werden nicht dekodiert,
-//!   sondern durch einen Platzhalter ersetzt (siehe [`PageOps::notes`]).
+//! * **`CCITTFaxDecode`/`JPXDecode`** werden nicht dekodiert, sondern durch
+//!   einen Platzhalter ersetzt (siehe [`PageOps::notes`]). `LZWDecode` wird
+//!   seit der Spur-A-Runde 1 entpackt wie in `filters.rs` (Register #78).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -1013,6 +1014,19 @@ fn apply_filters(doc: &Document, dict: &Dictionary, raw: &[u8]) -> Payload {
                 Some(out) => apply_predictor(doc, out, params.as_ref()),
                 None => return Payload::Unsupported("FlateDecode".into()),
             },
+            // Derselbe Dekoder wie für Content-Streams und das Orakel
+            // (`filters::lzw_within`, `weezl`). Bis zur Spur-A-Runde 1 endete
+            // ein LZW-gepacktes Bild unter der Zone hier als „nicht
+            // unterstützt“ — und ohne `--allow-undecodable-images` der ganze
+            // Lauf ohne Ausgabedatei, für eine gewöhnliche Datei (Register
+            // #78). Die Grenze folgt dem, was das Bild laut Dictionary
+            // braucht: mehr Abtastwerte liest niemand.
+            "LZWDecode" | "LZW" => {
+                match crate::filters::lzw_within(&data, params.as_ref(), lzw_limit(doc, dict)) {
+                    Ok(out) => apply_predictor(doc, out, params.as_ref()),
+                    Err(_) => return Payload::Unsupported("LZWDecode (zu groß)".into()),
+                }
+            }
             "ASCII85Decode" | "A85" => decode_ascii85(&data),
             "ASCIIHexDecode" | "AHx" => decode_ascii_hex(&data),
             "RunLengthDecode" | "RL" => decode_run_length(&data),
@@ -1022,6 +1036,16 @@ fn apply_filters(doc: &Document, dict: &Dictionary, raw: &[u8]) -> Payload {
         };
     }
     Payload::Samples(data)
+}
+
+/// Wie viel ein LZW-gepacktes Bild höchstens entpacken darf: was `/Width` ×
+/// `/Height` an Abtastwerten brauchen — großzügig mit 8 Byte je Bildpunkt
+/// (16 Bit, vier Komponenten) — plus ein MiB Spielraum für Zeilenfüllung und
+/// Prädiktorbytes. Ein Strom, der mehr hergibt, malt kein Bild, er füllt
+/// Speicher.
+fn lzw_limit(doc: &Document, dict: &Dictionary) -> usize {
+    let pixels = usize::try_from(crate::image::declared_pixels(doc, dict)).unwrap_or(usize::MAX);
+    pixels.saturating_mul(8).saturating_add(1 << 20)
 }
 
 fn filter_names(doc: &Document, dict: &Dictionary) -> Vec<String> {

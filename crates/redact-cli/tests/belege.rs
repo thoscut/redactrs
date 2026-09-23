@@ -2972,6 +2972,22 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "`…::c4_decke_der_gehaltenen_formularspiegel_wird_gesagt`",
         "ein Testname (Befund C-4), keine Messung",
     ),
+    (
+        "Ausgabedatei** (Register #78, Prüfer A; abgelehnte gewöhnliche Datei)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "`LZWDecode` ist ein Filter aus PDF 1.0",
+        "die Fassung der Norm, keine Messung",
+    ),
+    (
+        "den ältere Distiller, `tiff2pdf` und Ghostscript",
+        "der Name eines Werkzeugs, keine Messung",
+    ),
+    (
+        "LZW wieder nicht unterstützt → alle drei rot",
+        "zaehlt rote Tests unter Mutation, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

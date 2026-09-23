@@ -12,10 +12,11 @@
 //!    Bild malt, bleiben, wie sie waren.
 //! 2. **`LZWDecode`.** Ein Filter aus PDF 1.0, den ältere Distiller, `tiff2pdf`
 //!    und Ghostscript ohne Flate schreiben. `filters.rs` dekodiert ihn für
-//!    Content-Streams (`weezl`), `ops.rs::apply_filters` kennt ihn für Bilder
+//!    Content-Streams (`weezl`), `ops.rs::apply_filters` kannte ihn für Bilder
 //!    nicht: `Payload::Unsupported` → Platzhalter → ohne
-//!    `--allow-undecodable-images` endet der Lauf mit Fehler und ohne
-//!    Ausgabedatei.
+//!    `--allow-undecodable-images` endete der Lauf mit Fehler und ohne
+//!    Ausgabedatei (Register #78, behoben: derselbe Dekoder, mit einer Grenze
+//!    aus `/Width` × `/Height`).
 //! 3. **`/Width` als Real.** `image.rs::declared_pixels` liest `as_i64` und
 //!    zählt 0, wenn die Zahl als Real geschrieben ist; `ops.rs::dict_int`
 //!    nimmt Real an. Die Budgetprüfung (`--max-image-mb`) reserviert dann 0
@@ -228,13 +229,13 @@ fn lzw_bild_mit_klartext() -> Stream {
 
 /// **Abgelehnte gewöhnliche Datei.** Ein LZW-gepacktes RGB-Bild unter der
 /// Zone. `filters.rs` kann LZW (für Content-Streams, über `weezl`), der
-/// Bilddekoder nicht. Erwartung: der Lauf endet mit Ausgabedatei und
-/// geschwärzten Bildpunkten. Befund: `Err` („Filter LZWDecode wird nicht
-/// unterstützt“), keine Ausgabedatei. Vermutung: `ops.rs::apply_filters`,
-/// Zweig `other => Payload::Unsupported`.
+/// Bilddekoder konnte es nicht. Erwartung: der Lauf endet mit Ausgabedatei
+/// und geschwärzten Bildpunkten. Befund (Register #78, behoben): `Err`
+/// („Filter LZWDecode wird nicht unterstützt“), keine Ausgabedatei —
+/// `ops.rs::apply_filters`, Zweig `other => Payload::Unsupported`. Jetzt
+/// entpackt der Bilddekoder LZW über denselben Dekoder wie das Orakel.
 #[test]
-#[ignore = "offen: Register #78 LZW-Bild beendet den Lauf — Spur-A-Runde 1, Beleg absichtlich rot"]
-fn lzw_bild_unter_der_zone_beendet_den_lauf() {
+fn lzw_bild_unter_der_zone_faellt() {
     let mut doc = Document::with_version("1.5");
     let bild_id = doc.add_object(Object::Stream(lzw_bild_mit_klartext()));
     let res = doc.add_object(dictionary! { "XObject" => dictionary! { "Im0" => bild_id } });
@@ -264,11 +265,12 @@ fn lzw_bild_unter_der_zone_beendet_den_lauf() {
     assert!(leaks(&out, GEHEIM).is_empty());
 }
 
-/// Der genannte Fluchtweg: mit `--allow-undecodable-images` läuft der Lauf
-/// durch — das Bild bleibt ungeschwärzt, **und das wird gesagt**. Grün; hält
-/// fest, dass der Rest der Klasse nicht still ist.
+/// Der Fluchtweg `--allow-undecodable-images` ändert an einem LZW-Bild nichts
+/// mehr: es ist dekodierbar, es fällt, und keine Warnung nennt LZW. Vor
+/// Register #78 hielt dieser Test fest, dass das Bild mit Zugeständnis stehen
+/// bleibt und das gesagt wird — der Rest der Klasse war nicht still.
 #[test]
-fn lzw_bild_mit_zugestaendnis_bleibt_stehen_und_wird_gemeldet() {
+fn lzw_bild_mit_zugestaendnis_faellt_ebenso() {
     let mut doc = Document::with_version("1.5");
     let bild_id = doc.add_object(Object::Stream(lzw_bild_mit_klartext()));
     let res = doc.add_object(dictionary! { "XObject" => dictionary! { "Im0" => bild_id } });
@@ -279,18 +281,60 @@ fn lzw_bild_mit_zugestaendnis_bleibt_stehen_und_wird_gemeldet() {
     let report = PdfRedactor::with_padding(0.0)
         .allowing_undecodable_images(true)
         .apply_with_report(&mut doc, &[schwaerzung(0, zone())])
-        .expect("mit Zugeständnis läuft es durch");
+        .expect("läuft durch");
     let out = save_to_bytes(&doc).expect("Speichern");
+    assert_eq!(report.redacted_images, 1, "{:?}", report.warnings);
+    assert!(leaks(&out, GEHEIM).is_empty(), "das Bild fällt");
     assert!(
-        !leaks(&out, GEHEIM).is_empty(),
-        "das Bild bleibt ungeschwärzt"
+        !report.warnings.iter().any(|w| w.contains("LZWDecode")),
+        "keine Warnung nennt LZW: {:?}",
+        report.warnings
     );
+}
+
+/// Die Grenze des LZW-Dekoders am Bild: was `/Width` × `/Height` nicht
+/// braucht, wird nicht entpackt. Ein 2 × 2-Bild, dessen Strom sich auf 3 MiB
+/// aufbläst, gilt als nicht dekodierbar — ohne Zugeständnis endet der Lauf,
+/// mit Zugeständnis bleibt das Bild stehen und die Warnung nennt den Grund.
+#[test]
+fn lzw_bild_ueber_der_grenze_wird_nicht_entpackt() {
+    let mut roh = vec![0u8; 3 << 20];
+    roh[..GEHEIM.len()].copy_from_slice(GEHEIM.as_bytes());
+    // Der Encoder zum Dekoder in `filters.rs` (`weezl`, MSB zuerst,
+    // `EarlyChange` 1); `common::lzw_encode` reicht nur für kurze Texte.
+    let gepackt = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+        .encode(&roh)
+        .expect("LZW-Encoder");
+    let bild = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => 2_i64,
+            "Height" => 2_i64,
+            "ColorSpace" => "DeviceRGB",
+            "BitsPerComponent" => 8_i64,
+            "Filter" => "LZWDecode",
+        },
+        gepackt,
+    )
+    .with_compression(false);
+    let mut doc = Document::with_version("1.5");
+    let bild_id = doc.add_object(Object::Stream(bild));
+    let res = doc.add_object(dictionary! { "XObject" => dictionary! { "Im0" => bild_id } });
+    let (mut doc, _ids) = seiten(
+        doc,
+        vec![(res, b"q 100 0 0 100 50 600 cm /Im0 Do Q\n".to_vec())],
+    );
+    let report = PdfRedactor::with_padding(0.0)
+        .allowing_undecodable_images(true)
+        .apply_with_report(&mut doc, &[schwaerzung(0, zone())])
+        .expect("mit Zugeständnis läuft es durch");
     assert!(
         report
             .warnings
             .iter()
-            .any(|w| w.contains("LZWDecode") && w.contains("nicht dekodieren")),
-        "und das wird gesagt: {:?}",
+            .any(|w| w.contains("LZWDecode (zu groß)")),
+        "die Grenze wird gesagt: {:?}",
         report.warnings
     );
 }

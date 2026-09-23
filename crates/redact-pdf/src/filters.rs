@@ -423,7 +423,11 @@ impl Write for Bounded {
 /// `LZWDecode` über `weezl` mit den Einstellungen von `lopdf`: MSB zuerst,
 /// 9-Bit-Startcodes, `/EarlyChange` (Vorgabe 1). Ein Fehler im Strom lässt
 /// das Teilergebnis stehen — wie dort.
-fn lzw_within(data: &[u8], parms: Option<&Dictionary>, limit: usize) -> Result<Vec<u8>, Oversize> {
+pub(crate) fn lzw_within(
+    data: &[u8],
+    parms: Option<&Dictionary>,
+    limit: usize,
+) -> Result<Vec<u8>, Oversize> {
     use weezl::{decode::Decoder, BitOrder};
     let early_change = parms
         .and_then(|p| p.get(b"EarlyChange").ok())

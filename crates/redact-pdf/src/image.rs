@@ -801,7 +801,7 @@ fn scan_page_images(
 /// Grundlage der Budgetprüfung: sie muss entscheiden können, *bevor* der
 /// Puffer angefordert wird. Fehlt eine Angabe oder ist sie unsinnig, zählt 0 —
 /// das Dekodieren liefert dann ohnehin nur einen Platzhalter.
-fn declared_pixels(doc: &Document, dict: &Dictionary) -> u64 {
+pub(crate) fn declared_pixels(doc: &Document, dict: &Dictionary) -> u64 {
     // Dieselbe Zahlenlesart wie `ops::dict_int`: `/Width 100.0` ist eine
     // Breite. Wer nur `as_i64` fragte, las bei einer reellen Zahl 0 — und die
     // Decke `--max-image-mb` war damit umgangen, während der Dekoder das
