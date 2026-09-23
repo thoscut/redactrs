@@ -872,6 +872,22 @@ mod messwerte {
     /// (`zg_r4_3_die_laengste_statuszeile_ist_wieder_ueber_804_zeichen`).
     /// Gebunden ist, was die Messung **heute** liefert.
     pub const STATUSZEILE_ZEICHEN: usize = 1_005;
+
+    // Debug-Information der Testbinaries (nach der Runde 9, Register #59).
+    //
+    // Gemessen mit `ls -l` und `readelf -S -W` an
+    // `target/debug/deps/zm_b_gleichzeitige_exporte-*` (Linux, ELF), MB =
+    // 1024² Byte; `du -sh target` fuer das Ganze. „Vorher“ ist der Stand
+    // `1282b16` ohne `[profile.dev]` — nach der Umstellung nicht mehr
+    // messbar, deshalb Weg 3 im Satz. „Nachher“ nach `cargo clean` und dem
+    // ganzen Gate — Weg 1, an den gebauten Binaries.
+    pub const DEBUG_BINARY_VORHER_MB: &str = "240,7";
+    pub const DEBUG_SEKTIONEN_VORHER_MB: &str = "219,4";
+    pub const DEBUG_ANTEIL_VORHER_PROZENT: &str = "91";
+    pub const DEBUG_TARGET_VORHER_GB: &str = "19";
+    pub const DEBUG_BINARY_NACHHER_MB: &str = "78,0";
+    pub const DEBUG_SEKTIONEN_NACHHER_MB: &str = "58,3";
+    pub const DEBUG_TARGET_NACHHER_GB: &str = "8,0";
 }
 
 /// Die ausgeschriebene Zahl, wie die Doku kleine Zahlen schreibt.
@@ -2059,6 +2075,50 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // --- Nach der Runde 9: die Debug-Information (Register #59) ------------
+    //
+    // Der Vorher-Satz nennt „vorher“ (Weg 3: nach der Umstellung nicht mehr
+    // messbar), der Nachher-Satz „gebauten Binaries“ (Weg 1). Dieselben Zahlen
+    // stehen in CONTRIBUTING.md, an dieselben Konstanten gebunden.
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "`target/` belegte vorher {} GB, und ein GUI-Testbinary \
+             (`zm_b_gleichzeitige_exporte`) war vorher {} MB groß, davon {} MB in \
+             `.debug_*`-Sektionen — {} %",
+            m::DEBUG_TARGET_VORHER_GB,
+            m::DEBUG_BINARY_VORHER_MB,
+            m::DEBUG_SEKTIONEN_VORHER_MB,
+            m::DEBUG_ANTEIL_VORHER_PROZENT
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Dasselbe Binary ist an den gebauten Binaries danach {} MB groß, davon \
+             {} MB `.debug_*`, und `target/` belegt nach `cargo clean` und dem ganzen \
+             Gate {} GB",
+            m::DEBUG_BINARY_NACHHER_MB,
+            m::DEBUG_SEKTIONEN_NACHHER_MB,
+            m::DEBUG_TARGET_NACHHER_GB
+        ),
+    );
+    satz(
+        "CONTRIBUTING.md",
+        format!(
+            "an einem GUI-Testbinary vorher {} MB von {} MB",
+            m::DEBUG_SEKTIONEN_VORHER_MB,
+            m::DEBUG_BINARY_VORHER_MB
+        ),
+    );
+    satz(
+        "CONTRIBUTING.md",
+        format!(
+            "sind es an demselben gebauten Binary {} MB",
+            m::DEBUG_BINARY_NACHHER_MB
+        ),
+    );
+
     aus
 }
 
@@ -2563,6 +2623,15 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "bis zum Befund des Windows-Jobs nach der Runde 9 zwei Kennungen",
         "Nummer einer Runde und Zaehlung der Kennungen, keine Messung",
+    ),
+    // --- Nach der Runde 9: das Platzproblem (Register #59) -----------------
+    (
+        "brach darin zweimal mit „No space left on device“ ab",
+        "zaehlt die Abbrueche eines Werkzeuglaufs, keine Messung am Programm",
+    ),
+    (
+        "der Commit `1282b16` nannte den Knopf als Hebel",
+        "eine Commit-Kennung, keine Messung",
     ),
 ];
 

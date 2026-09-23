@@ -108,6 +108,32 @@ die Platte.
   Original — der Nachbau in `zm_b_kennung_der_ausgabedatei` samt seinem
   Anker-Test ist weg.
 
+* **Das Gate passte nicht mehr auf die Platte — jedes Testbinary trug die
+  volle Debug-Information aller Abhängigkeiten.** Der Prüfrechner hat eine
+  feste Plattenzuteilung; `cargo test --workspace` brach darin zweimal mit „No
+  space left on device“ ab, einmal mitten in einen Schreibvorgang. Gemessen,
+  nicht geraten: `target/` belegte vorher 19 GB, und ein GUI-Testbinary
+  (`zm_b_gleichzeitige_exporte`) war vorher 240,7 MB groß, davon 219,4 MB in
+  `.debug_*`-Sektionen — 91 %. Die Workspace-`Cargo.toml` hatte nur
+  `[profile.release]`; der Knopf war unbenutzt. Jetzt steht dort
+  `[profile.dev] debug = "line-tables-only"` — `dev`, nicht `test`, weil
+  `cargo test` die Abhängigkeiten mit `dev` baut und `test` von `dev` erbt.
+  Dasselbe Binary ist an den gebauten Binaries danach 78,0 MB groß, davon
+  58,3 MB `.debug_*`, und `target/` belegt nach `cargo clean` und dem ganzen
+  Gate 8,0 GB. Backtraces nennen weiter Datei:Zeile.
+
+  Und eine Rücknahme: der Commit `1282b16` nannte den Knopf als Hebel, ließ
+  ihn aber liegen, weil er „gebundene Debug-Messzahlen verschieben“ könne. Das
+  war falsch. `debug` steuert nur die DWARF-Ausgabe; `opt-level`,
+  `debug-assertions` und `overflow-checks` bleiben, `.debug_*`-Sektionen sind
+  nicht `SHF_ALLOC` und nie im Arbeitsspeicher, und kein Test liest einen
+  Backtrace. Keine gebundene Zeit- oder Speicherzahl hängt an der Stufe.
+  `zn_a_debug_info_stufe` bindet beides: die Zeile im Manifest und die
+  Wirkung — die Größe des Binaries, in dem der Test selbst läuft, gegen eine
+  Decke. In `CONTRIBUTING.md` steht dazu die Regel, die aus beiden Befunden
+  dieses Abschnitts folgt: ein Befund, ein Commit, und nach jedem Push wird
+  der Windows-Job angesehen.
+
 ### Fix-Runde 9: was die Gegenprüfung der Runde 8 noch fand
 
 Vier Gegenprüfer lasen die Korrekturen der Runde 8 mit eigenem Material gegen.

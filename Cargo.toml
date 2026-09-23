@@ -64,3 +64,10 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Testbinaries tragen nur Zeilentabellen, keine Variablen- und Typbeschreibung.
+# `cargo test` baut die Testziele mit `test` und ihre Abhängigkeiten mit `dev`;
+# `test` erbt von `dev`, also reicht dieser eine Knopf. Backtraces behalten
+# Datei:Zeile. Warum: siehe CONTRIBUTING.md, „Das Gate“.
+[profile.dev]
+debug = "line-tables-only"

@@ -80,6 +80,28 @@ cargo clippy --workspace --all-targets --locked \
   --target x86_64-pc-windows-gnu -- -D warnings
 ```
 
+Clippy **prüft** den Windows-Zweig, es **führt** ihn nicht aus. Der einzige
+Läufer, der `cfg(not(unix))` ausführt, ist der Job „Build (windows-2025)“ der
+CI — lokal ist ein `cargo test` für Windows nicht zu haben (kein mingw-Linker;
+`zf_q5_plattformzusagen` hält die Messung fest). Er hat nach der Fix-Runde 9
+einen echten Fehler am Programm gefunden, den kein Linux-Lauf sehen konnte
+(CHANGELOG, „Nach der Runde 9“). Deshalb gilt: **ein Befund, ein Commit — und
+nach jedem Push wird der CI-Lauf angesehen, insbesondere der Windows-Job,
+bevor die nächste Runde beginnt.** Ein Commit, der sieben Befundklassen
+zugleich schließt, hinterlässt einen roten Job, dessen Ursache erst nach dem
+Push sichtbar wird.
+
+**Debug-Information.** Die Workspace-`Cargo.toml` setzt `[profile.dev]
+debug = "line-tables-only"`. Ohne das trägt jedes Testbinary seine eigene volle
+Kopie der Debug-Information aller Abhängigkeiten — an einem GUI-Testbinary
+vorher 219,4 MB von 240,7 MB, und `cargo test --workspace` passte mit seinen
+Testzielen nicht mehr in die Plattenzuteilung des Prüfrechners. Mit
+Zeilentabellen sind es an demselben gebauten Binary 78,0 MB, Backtraces nennen
+weiter Datei:Zeile, und am erzeugten Maschinencode ändert die Stufe nichts
+(`zn_a_debug_info_stufe` bindet die Zeile und die Wirkung). Für Gate-Läufe
+dazu `CARGO_INCREMENTAL=0`, wie die CI es setzt: inkrementelle Artefakte tragen
+zum Gate nichts bei und kosten Platz.
+
 Und im Release-Workflow, nicht in der CI, der Bau ohne Oberfläche:
 
 ```bash
