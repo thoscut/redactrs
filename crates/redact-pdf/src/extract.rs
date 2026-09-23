@@ -31,7 +31,8 @@ use lopdf::{Document, Object, ObjectId};
 use redact_core::{bounding_box, Glyph, Rect, Result, TextRun};
 
 use crate::content::{
-    scan_page, GlyphItem, MarkedTextRecord, ScanResult, ShowRecord, StreamKey, MIRROR_KEYS,
+    scan_page_with, AnnotationLedger, GlyphItem, MarkedTextRecord, ScanResult, ShowRecord,
+    StreamKey, MIRROR_KEYS,
 };
 
 /// Auflösung der Richtungs-Einteilung in Grad. Glyphen mit gleicher gerundeter
@@ -175,8 +176,11 @@ impl PdfExtractor {
         // [`unplaced_form_warnings`].
         let mut declared: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
         let mut placed: BTreeSet<ObjectId> = BTreeSet::new();
+        // Ein Buch für alle Seiten: eine Annotation, die sich Seiten teilen,
+        // wird unter derselben Ressourcenumgebung einmal gelesen (Register #94).
+        let mut ledger = AnnotationLedger::default();
         for (index, (_, page_id)) in doc.get_pages().iter().enumerate() {
-            let scan = match scan_page(doc, *page_id) {
+            let scan = match scan_page_with(doc, *page_id, &mut ledger) {
                 Ok(scan) => scan,
                 Err(e) if lenient => {
                     let gap = format!(

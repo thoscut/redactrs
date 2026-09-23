@@ -29,7 +29,7 @@
 //! neu geschrieben, wenn alle Formularpläne feststehen (siehe
 //! [`PendingPage`]).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
@@ -510,6 +510,13 @@ impl PdfRedactor {
         // vollständigen Liste zu filtern kostet Seiten × Schwärzungen.
         let by_page = redactions_by_page(redactions);
         let no_redactions: Vec<(usize, &Redaction)> = Vec::new();
+        // Dasselbe Buch wie im Extraktor, in derselben Seitenfolge: eine
+        // geteilte Annotation wird auf derselben Seite gelesen, auf der die
+        // Analyse ihren Text fand (Register #94).
+        let mut ledger = crate::content::AnnotationLedger::default();
+        // Die Rechtecke eines geteilten `/Annots`-Arrays, einmal gelesen —
+        // siehe [`remove_annotations`].
+        let mut annot_rects = AnnotRects::default();
 
         for (page_index, page_id) in pages.iter().enumerate() {
             // Der Index in der **übergebenen** Liste wird mitgeführt: nur so
@@ -532,7 +539,7 @@ impl PdfRedactor {
             // eine Seite, deren Text nie jemand gesehen hat. Ausgerechnet die
             // Seiten ohne Treffer sind die, bei denen das Fehlen von Treffern
             // etwas bedeuten soll.
-            let scan = crate::content::scan_page(doc, *page_id).map_err(|e| {
+            let scan = crate::content::scan_page_with(doc, *page_id, &mut ledger).map_err(|e| {
                 RedactError::Pdf(format!(
                     "Seite {} ließ sich nicht lesen: {e} Ihr Inhalt wurde nicht \
                      durchsucht; die Datei wird nicht als geschwärzt ausgegeben.",
@@ -663,8 +670,14 @@ impl PdfRedactor {
             deferred_dropped += dropped;
 
             let mut lost = Vec::new();
-            report.removed_annotations +=
-                remove_annotations(doc, page_index, *page_id, &rects, &mut lost)?;
+            report.removed_annotations += remove_annotations(
+                doc,
+                page_index,
+                *page_id,
+                &rects,
+                &mut lost,
+                &mut annot_rects,
+            )?;
             report.removed_annotation_details.append(&mut lost);
             pending_pages.push(PendingPage {
                 index: page_index,
@@ -2155,67 +2168,154 @@ fn rewrite_form(
     Ok(())
 }
 
+/// Die Rechtecke der Einträge eines `/Annots`-Arrays, das als eigenes Objekt
+/// dasteht — je Array einmal gelesen (Register #94).
+///
+/// Teilen sich Seiten ein solches Array, fragte [`remove_annotations`] früher
+/// je Seite jede Annotation neu nach ihrem `/Rect` und klonte dafür ihr
+/// Dictionary: Seiten × Annotationen Nachschlagen. Jetzt steht die Liste
+/// einmal da; je Seite bleibt der Vergleich mit ihren Schwärzungsbereichen.
+#[derive(Default)]
+struct AnnotRects {
+    arrays: HashMap<ObjectId, Vec<Option<Rect>>>,
+}
+
+/// Das `/Rect` eines Eintrags in `/Annots`, ohne das Dictionary zu kopieren.
+fn annotation_rect(doc: &Document, annot: &Object) -> Option<Rect> {
+    doc.dereference(annot)
+        .ok()
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(b"Rect").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| rect_from_object(o))
+}
+
 /// Entfernt Annotationen, die in einen Schwärzungsbereich ragen.
 ///
 /// `lost` bekommt je entfernter Annotation einen Kurzbeschreiber angehängt —
 /// siehe [`annotation_label`] und
 /// [`RedactionReport::removed_annotation_details`].
+///
+/// Ein `/Annots`, das als eigenes Objekt dasteht, wird an diesem Objekt
+/// bereinigt, nicht an einer Kopie für die Seite. Teilen es sich mehrere
+/// Seiten, fällt die Annotation damit aus allen — wie vorher auch, denn ihr
+/// Objekt wird gelöscht; nur steht kein toter Verweis mehr zurück und keine
+/// Kopie des Arrays je Seite in der Ausgabe (Register #94).
 fn remove_annotations(
     doc: &mut Document,
     page_index: usize,
     page_id: ObjectId,
     rects: &[Rect],
     lost: &mut Vec<String>,
+    annot_rects: &mut AnnotRects,
 ) -> Result<usize> {
     if rects.is_empty() {
         return Ok(0);
     }
-    let annots = match doc.get_dictionary(page_id).and_then(|d| d.get(b"Annots")) {
-        Ok(obj) => match doc.dereference(obj) {
-            Ok((_, Object::Array(items))) => items.clone(),
-            _ => return Ok(0),
-        },
-        Err(_) => return Ok(0),
+    let Ok(value) = doc.get_dictionary(page_id).and_then(|d| d.get(b"Annots")) else {
+        return Ok(0);
+    };
+    // Nur ein Verweis direkt auf ein Array wird an seinem Objekt bereinigt;
+    // eine Verweiskette bekommt wie vorher die Seite.
+    let shared = match value {
+        Object::Reference(id) if matches!(doc.get_object(*id), Ok(Object::Array(_))) => Some(*id),
+        _ => None,
+    };
+    let Ok((_, Object::Array(items))) = doc.dereference(value) else {
+        return Ok(0);
     };
 
-    let mut kept = Vec::new();
-    let mut removed = 0usize;
-    for annot in annots {
-        let dict = doc
-            .dereference(&annot)
-            .ok()
-            .and_then(|(_, o)| o.as_dict().ok())
-            .cloned();
-        let rect = dict
-            .as_ref()
-            .and_then(|d| d.get(b"Rect").ok())
-            .and_then(|o| doc.dereference(o).ok())
-            .and_then(|(_, o)| rect_from_object(o));
-        match rect {
-            Some(r) if rects.iter().any(|target| r.intersects(target)) => {
-                lost.push(format!(
-                    "Seite {} {}",
-                    page_index + 1,
-                    dict.as_ref()
-                        .map(|d| annotation_label(doc, d))
-                        .unwrap_or_else(|| "Annotation ohne Dictionary".into())
-                ));
-                if let Object::Reference(id) = annot {
-                    doc.objects.remove(&id);
-                }
-                removed += 1;
+    // Welche Einträge ragen in einen Bereich? Die Rechtecke eines Arrays mit
+    // eigener Id stehen einmal da; geprüft wird je Seite, kopiert wird nichts.
+    let fresh: Vec<Option<Rect>>;
+    let list: &[Option<Rect>] = match shared {
+        Some(id) => {
+            let cached = annot_rects
+                .arrays
+                .entry(id)
+                .or_insert_with(|| items.iter().map(|a| annotation_rect(doc, a)).collect());
+            if cached.len() != items.len() {
+                *cached = items.iter().map(|a| annotation_rect(doc, a)).collect();
             }
-            _ => kept.push(annot),
+            cached
         }
+        None => {
+            fresh = items.iter().map(|a| annotation_rect(doc, a)).collect();
+            &fresh
+        }
+    };
+    let mut hits: BTreeSet<usize> = BTreeSet::new();
+    let mut ids: Vec<ObjectId> = Vec::new();
+    for (index, rect) in list.iter().enumerate() {
+        let Some(rect) = rect else {
+            continue;
+        };
+        if !rects.iter().any(|target| rect.intersects(target)) {
+            continue;
+        }
+        let Some(annot) = items.get(index) else {
+            continue;
+        };
+        // Über ein anderes Array schon gelöscht: zählt nicht noch einmal.
+        let Ok((_, Object::Dictionary(dict))) = doc.dereference(annot) else {
+            continue;
+        };
+        lost.push(format!(
+            "Seite {} {}",
+            page_index + 1,
+            annotation_label(doc, dict)
+        ));
+        if let Object::Reference(id) = annot {
+            ids.push(*id);
+        }
+        hits.insert(index);
+    }
+    if hits.is_empty() {
+        return Ok(0);
     }
 
-    if removed > 0 {
-        let page = doc
-            .get_dictionary_mut(page_id)
-            .map_err(|e| RedactError::Pdf(e.to_string()))?;
-        page.set("Annots", Object::Array(kept));
+    for id in &ids {
+        doc.objects.remove(id);
     }
-    Ok(removed)
+    let keep = |index: usize| !hits.contains(&index);
+    match shared {
+        Some(array_id) => {
+            if let Ok(Object::Array(entries)) = doc.get_object_mut(array_id) {
+                let mut index = 0;
+                entries.retain(|_| {
+                    index += 1;
+                    keep(index - 1)
+                });
+            }
+            if let Some(list) = annot_rects.arrays.get_mut(&array_id) {
+                let mut index = 0;
+                list.retain(|_| {
+                    index += 1;
+                    keep(index - 1)
+                });
+            }
+        }
+        None => {
+            let kept: Vec<Object> = match doc
+                .get_dictionary(page_id)
+                .and_then(|d| d.get(b"Annots"))
+                .and_then(|o| doc.dereference(o))
+            {
+                Ok((_, Object::Array(entries))) => entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| keep(*index))
+                    .map(|(_, annot)| annot.clone())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let page = doc
+                .get_dictionary_mut(page_id)
+                .map_err(|e| RedactError::Pdf(e.to_string()))?;
+            page.set("Annots", Object::Array(kept));
+        }
+    }
+    Ok(hits.len())
 }
 
 /// Wie eine entfernte Annotation zu benennen ist: `/Subtype` und, falls

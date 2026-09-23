@@ -1210,6 +1210,14 @@ impl Budget {
         }
     }
 
+    /// Lehnt den Scan mit dieser Begründung ab, falls er nicht schon aus
+    /// einem anderen Grund abgelehnt ist.
+    fn refuse(&mut self, message: String) {
+        if self.exceeded.is_none() {
+            self.exceeded = Some(message);
+        }
+    }
+
     /// Der Befund, falls das Konto gerissen wurde.
     fn result(&self) -> Result<()> {
         match &self.exceeded {
@@ -2276,6 +2284,20 @@ pub(crate) fn cmyk_to_rgb(c: f64, m: f64, y: f64, k: f64) -> Rgb {
 /// Erfolg durchgehen: „0 Schwärzungen, Rückgabewert 0“ liest sich wie
 /// „nichts gefunden, also sauber“, und genau das wäre es dann nicht.
 pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
+    scan_page_with(doc, page_id, &mut AnnotationLedger::default())
+}
+
+/// Wie [`scan_page`], mit dem Annotationsbuch des **ganzen Dokuments**.
+///
+/// Die Seitenschleifen des Extraktors und des Redaktors reichen dasselbe
+/// [`AnnotationLedger`] von Seite zu Seite: eine Annotation, die eine frühere
+/// Seite unter denselben Ressourcen schon gelesen hat, wird nicht noch einmal
+/// gelesen (Register #94).
+pub(crate) fn scan_page_with(
+    doc: &Document,
+    page_id: ObjectId,
+    ledger: &mut AnnotationLedger,
+) -> Result<ScanResult> {
     // Über [`crate::filters`], nicht `Document::get_page_content`: der eigene
     // Dekoder kennt `ASCIIHexDecode` und `RunLengthDecode`, `lopdf` nicht.
     let content_data = crate::filters::page_content(doc, page_id);
@@ -2336,8 +2358,18 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
         &mut budget,
         &mut result,
     );
-    scan_annotations(doc, page_id, resources.as_ref(), &mut budget, &mut result);
+    let read = scan_annotations(
+        doc,
+        page_id,
+        resources.as_ref(),
+        ledger,
+        &mut budget,
+        &mut result,
+    );
     budget.result()?;
+    // Erst jetzt, nach dem gelungenen Scan: eine Seite, die abgelehnt wird,
+    // hat ihre Annotationen nicht gelesen, und die nächste Seite muss es tun.
+    ledger.commit(read);
     result.close_forms(&mut budget);
     result.effort = budget.effort;
     result.effort.retained_weight = budget.cached_operations;
@@ -2666,18 +2698,164 @@ pub fn stream_shows_text(doc: &Document, id: ObjectId) -> bool {
 /// `visited` ohnehin nichts Weiteres.
 const MAX_ANNOTATION_LINKS: usize = 16;
 
+/// Wie viele Annotationen ein Dokument **erneut** lesen lassen darf, weil
+/// eine weitere Seite sie unter anderen Ressourcen zeigt (Register #94).
+///
+/// Nach PDF 32000-1, 12.5.2 steht eine Annotation im `/Annots` genau einer
+/// Seite. Teilen sich Seiten sie trotzdem, liest [`AnnotationLedger`] sie
+/// unter derselben Ressourcenumgebung einmal; unter einer anderen muss sie
+/// neu gelesen werden, weil ein Erscheinungsstrom ohne eigene Ressourcen die
+/// der Seite benutzt und dort anders aussehen kann. Diese Wiederholungen sind
+/// die Vervielfachung Seiten × Annotationen; über der Decke wird die Datei
+/// abgelehnt. So viele Wiederholungen kosten so viel wie ebenso viele
+/// verschiedene Annotationen, die eine Datei ehrlich mitbringt.
+const MAX_REPEATED_ANNOTATIONS: usize = 100_000;
+
+/// Die Ressourcenumgebung einer Seite: jedes `/Resources` auf dem Weg von der
+/// Seite zur Wurzel des Seitenbaums, als Objekt-Id — oder, direkt
+/// eingebettet, als der Knoten, der es trägt.
+///
+/// Zwei Seiten mit derselben Umgebung sehen dieselben Ressourcen; dieselbe
+/// Annotation liefert unter beiden denselben Text an derselben Stelle. Zwei
+/// Seiten mit inhaltsgleichen, aber getrennt eingebetteten Verzeichnissen
+/// gelten als verschieden — die vorsichtige Richtung: dann wird noch einmal
+/// gelesen.
+fn resource_environment(doc: &Document, page_id: ObjectId) -> Vec<(ObjectId, bool)> {
+    let mut chain = Vec::new();
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    let mut current = Some(page_id);
+    while let Some(id) = current {
+        if seen.len() >= MAX_PAGE_TREE_DEPTH || !seen.insert(id) {
+            break;
+        }
+        let Ok(node) = doc.get_dictionary(id) else {
+            break;
+        };
+        match node.get(b"Resources") {
+            Ok(Object::Reference(resources)) => chain.push((*resources, false)),
+            Ok(_) => chain.push((id, true)),
+            Err(_) => {}
+        }
+        current = match node.get(b"Parent") {
+            Ok(Object::Reference(parent)) => Some(*parent),
+            _ => None,
+        };
+    }
+    chain
+}
+
+/// Was die Seiten eines Dokuments an Annotationen schon gelesen haben — über
+/// alle Seiten hinweg (Register #94).
+///
+/// Bis zur Spur-A-Runde 2 las jede Seite ihr `/Annots` von vorn. Ein Array,
+/// das sich P Seiten teilen, kostete P × N Erscheinungsströme, ohne dass ein
+/// Konto es sah: das Aufwandskonto [`Budget`] beginnt je Seite neu. Gemessen
+/// an hundert Seiten mit tausend geteilten Annotationen (Release): Extraktor
+/// 2,6 s, Redaktor 1,5 s — aus einer Datei von 287 kB, quadratisch in der
+/// Seitenzahl.
+///
+/// Übersprungen wird nur, was unter **derselben** Ressourcenumgebung schon
+/// gelesen ist (siehe [`resource_environment`]): dieselbe Annotation, dasselbe
+/// `/Rect`, dieselben Ressourcen ergeben denselben Text. Ihr Text steht dann
+/// einmal im Ergebnis, auf der ersten Seite, die sie zeigt; geschwärzt wird
+/// ihr Erscheinungsstrom ohnehin nur einmal, und eine Annotation, die in eine
+/// Schwärzung ragt, fällt als Ganzes aus dem Array aller Seiten.
+#[derive(Debug)]
+pub(crate) struct AnnotationLedger {
+    /// Die Ressourcenumgebungen, je einmal abgelegt; die Schlüssel darunter
+    /// tragen nur ihre Nummer.
+    environments: HashMap<Vec<(ObjectId, bool)>, usize>,
+    /// Gelesene Annotationen, je Umgebung.
+    read: HashSet<(ObjectId, usize)>,
+    /// `/Annots`-Arrays als eigene Objekte, deren Einträge unter einer
+    /// Umgebung vollständig gelesen sind — eine Seite, die dasselbe Array
+    /// unter derselben Umgebung zeigt, kostet dann einen Blick.
+    arrays: HashSet<(ObjectId, usize)>,
+    /// Annotationen, die unter irgendeiner Umgebung gelesen sind.
+    seen: HashSet<ObjectId>,
+    /// Wie oft eine schon gelesene Annotation unter einer weiteren Umgebung
+    /// erneut gelesen wurde.
+    repeats: usize,
+    /// Die Decke für `repeats` — [`MAX_REPEATED_ANNOTATIONS`]; nur die
+    /// Grenzprobe in diesem Modul setzt sie kleiner.
+    limit: usize,
+    /// Wie viele Einträge die Seiten zusammen angesehen haben. Die Arbeit,
+    /// die das Buch spart, ist genau diese Zahl: ohne das Buch wüchse sie mit
+    /// Seiten × Annotationen, mit ihm mit den Annotationen.
+    visits: usize,
+}
+
+impl Default for AnnotationLedger {
+    fn default() -> Self {
+        Self {
+            environments: HashMap::new(),
+            read: HashSet::new(),
+            arrays: HashSet::new(),
+            seen: HashSet::new(),
+            repeats: 0,
+            limit: MAX_REPEATED_ANNOTATIONS,
+            visits: 0,
+        }
+    }
+}
+
+/// Was eine Seite an Annotationen gelesen hat; ins [`AnnotationLedger`] geht
+/// es erst, wenn ihr Scan gelungen ist.
+struct ReadAnnotations {
+    environment: usize,
+    ids: Vec<ObjectId>,
+    array: Option<ObjectId>,
+}
+
+impl AnnotationLedger {
+    fn environment(&mut self, doc: &Document, page_id: ObjectId) -> usize {
+        let key = resource_environment(doc, page_id);
+        let next = self.environments.len();
+        *self.environments.entry(key).or_insert(next)
+    }
+
+    fn commit(&mut self, read: ReadAnnotations) {
+        for id in read.ids {
+            self.read.insert((id, read.environment));
+            self.seen.insert(id);
+        }
+        if let Some(array) = read.array {
+            self.arrays.insert((array, read.environment));
+        }
+    }
+}
+
 fn scan_annotations(
     doc: &Document,
     page_id: ObjectId,
     page_resources: Option<&Dictionary>,
+    ledger: &mut AnnotationLedger,
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
-) {
-    let annots = doc
+) -> ReadAnnotations {
+    let mut read = ReadAnnotations {
+        environment: ledger.environment(doc, page_id),
+        ids: Vec::new(),
+        array: None,
+    };
+    let Some(value) = doc
         .get_dictionary(page_id)
         .ok()
         .and_then(|d| d.get(b"Annots").ok())
-        .and_then(|o| doc.dereference(o).ok())
+    else {
+        return read;
+    };
+    // Dasselbe Array unter derselben Umgebung: alles darin ist gelesen, und
+    // der Blick darauf kostet nicht mehr als diese eine Frage.
+    if let Object::Reference(array) = value {
+        if ledger.arrays.contains(&(*array, read.environment)) {
+            return read;
+        }
+        read.array = Some(*array);
+    }
+    let annots = doc
+        .dereference(value)
+        .ok()
         .and_then(|(_, o)| o.as_array().ok())
         .cloned()
         .unwrap_or_default();
@@ -2705,8 +2883,26 @@ fn scan_annotations(
         else {
             continue;
         };
-        if id.is_some_and(|id| !visited.insert(id)) {
-            continue;
+        ledger.visits += 1;
+        if let Some(id) = id {
+            if ledger.read.contains(&(id, read.environment)) || !visited.insert(id) {
+                continue;
+            }
+            if ledger.seen.contains(&id) {
+                ledger.repeats += 1;
+                if ledger.repeats > ledger.limit {
+                    budget.refuse(format!(
+                        "Dieses Dokument zeigt dieselben Annotationen auf so vielen Seiten mit \
+                         jeweils anderen Ressourcen, dass mehr als {} Erscheinungen erneut zu \
+                         lesen wären. Eine Annotation gehört zu genau \
+                         einer Seite (PDF 32000-1, 12.5.2); hier kostet sie Seiten mal \
+                         Annotationen. Die Datei wird abgelehnt.",
+                        ledger.limit
+                    ));
+                    return read;
+                }
+            }
+            read.ids.push(id);
         }
         if depth < MAX_ANNOTATION_LINKS {
             let is_popup = dict
@@ -2809,6 +3005,7 @@ fn scan_annotations(
             scan_appearance(doc, id, page_id, rect, page_resources, budget, sink);
         }
     }
+    read
 }
 
 /// Trägt die Annotation überhaupt Text — in einem der Schlüssel, die
@@ -5120,6 +5317,125 @@ mod tests {
 
     fn ops(src: &[u8]) -> Vec<Operation> {
         Content::decode(src).unwrap().operations
+    }
+
+    /// Drei Seiten mit je eigenem `/Resources`, die sich ein `/Annots` mit
+    /// vier Annotationen teilen: Seite 2 und 3 lesen jede Annotation erneut,
+    /// zusammen acht Wiederholungen (Register #94).
+    fn geteiltes_annots_unter_drei_umgebungen() -> (Document, Vec<ObjectId>) {
+        let (mut doc, first) = page_with_font(
+            |_| dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+            b"BT /F1 10 Tf 72 700 Td (Hallo) Tj ET".to_vec(),
+        );
+        let mut annots = Vec::new();
+        for i in 0..4 {
+            let ap = doc.add_object(Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 100.into(), 20.into()],
+                },
+                format!("BT /F1 10 Tf 2 5 Td (Notiz {i}) Tj ET").into_bytes(),
+            ));
+            annots.push(Object::Reference(doc.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "FreeText",
+                "Rect" => vec![50.into(), (100 + 30 * i).into(), 150.into(), (120 + 30 * i).into()],
+                "AP" => dictionary! { "N" => ap },
+            })));
+        }
+        let array = doc.add_object(Object::Array(annots));
+        let template = {
+            let page = doc.get_dictionary_mut(first).unwrap();
+            page.set("Annots", array);
+            page.clone()
+        };
+        let font = template.get(b"Resources").ok().cloned().unwrap();
+        let mut pages = vec![first];
+        for k in 1..3 {
+            let mut page = template.clone();
+            // Inhaltsgleich, aber je Seite eingebettet: eine eigene Umgebung.
+            page.set(
+                "Resources",
+                dictionary! { "Font" => doc.get_object(font.as_reference().unwrap())
+                .unwrap().as_dict().unwrap().get(b"Font").unwrap().clone(), "K" => k },
+            );
+            pages.push(doc.add_object(page));
+        }
+        let parent = template.get(b"Parent").unwrap().as_reference().unwrap();
+        let tree = doc.get_dictionary_mut(parent).unwrap();
+        tree.set(
+            "Kids",
+            pages
+                .iter()
+                .map(|id| Object::Reference(*id))
+                .collect::<Vec<_>>(),
+        );
+        tree.set("Count", 3_i64);
+        (doc, pages)
+    }
+
+    /// Die Decke der Wiederholungen hält genau: acht erlaubt, acht gelesen;
+    /// sieben erlaubt, die dritte Seite abgelehnt — mit der Begründung.
+    #[test]
+    fn die_wiederholungsdecke_haelt_genau() {
+        let (doc, pages) = geteiltes_annots_unter_drei_umgebungen();
+
+        let mut ledger = AnnotationLedger {
+            limit: 8,
+            ..AnnotationLedger::default()
+        };
+        for page in &pages {
+            let scan = scan_page_with(&doc, *page, &mut ledger).expect("unter der Decke");
+            assert!(!scan.shows.is_empty());
+        }
+        assert_eq!(ledger.repeats, 8);
+
+        let mut ledger = AnnotationLedger {
+            limit: 7,
+            ..AnnotationLedger::default()
+        };
+        scan_page_with(&doc, pages[0], &mut ledger).expect("Seite 1");
+        scan_page_with(&doc, pages[1], &mut ledger).expect("Seite 2");
+        let err = scan_page_with(&doc, pages[2], &mut ledger).expect_err("über der Decke");
+        assert!(err.to_string().contains("dieselben Annotationen"), "{err}");
+    }
+
+    /// Dieselbe Umgebung, dasselbe Array: die zweite und dritte Seite kosten
+    /// je einen Blick auf das Array, nicht einen je Eintrag — angesehen werden
+    /// vier Einträge, nicht zwölf.
+    #[test]
+    fn ein_geteiltes_array_kostet_seine_eintraege_einmal() {
+        let (mut doc, pages) = geteiltes_annots_unter_drei_umgebungen();
+        let resources = doc
+            .get_dictionary(pages[0])
+            .unwrap()
+            .get(b"Resources")
+            .unwrap()
+            .clone();
+        for page in &pages[1..] {
+            doc.get_dictionary_mut(*page)
+                .unwrap()
+                .set("Resources", resources.clone());
+        }
+        let mut ledger = AnnotationLedger::default();
+        for page in &pages {
+            scan_page_with(&doc, *page, &mut ledger).expect("Scan");
+        }
+        assert_eq!(ledger.visits, 4);
+        assert_eq!(ledger.repeats, 0);
+    }
+
+    /// Unter derselben Umgebung zählt ein zweiter Blick nichts: dieselbe Seite
+    /// zweimal gescannt ist keine Wiederholung.
+    #[test]
+    fn dieselbe_umgebung_zaehlt_keine_wiederholung() {
+        let (doc, pages) = geteiltes_annots_unter_drei_umgebungen();
+        let mut ledger = AnnotationLedger {
+            limit: 0,
+            ..AnnotationLedger::default()
+        };
+        scan_page_with(&doc, pages[0], &mut ledger).expect("erster Blick");
+        scan_page_with(&doc, pages[0], &mut ledger).expect("zweiter Blick");
+        assert_eq!(ledger.repeats, 0);
     }
 
     /// Baut ein einseitiges PDF um ein beliebiges Font-Dictionary (`/F1`).

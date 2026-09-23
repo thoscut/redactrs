@@ -550,8 +550,15 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     // gilt (Register #90).
     let shown = shown_carriers(doc, &page_ids);
     let mut captions: BTreeMap<ObjectId, bool> = BTreeMap::new();
+    // Ein `/Annots`, das sich Seiten teilen, wird einmal an seinem Objekt
+    // bereinigt (Register #94).
+    let mut attachment_arrays: BTreeSet<ObjectId> = BTreeSet::new();
     for page_id in &page_ids {
-        attachments.extend(remove_file_attachments(doc, *page_id));
+        attachments.extend(remove_file_attachments(
+            doc,
+            *page_id,
+            &mut attachment_arrays,
+        ));
         if let Ok(page) = doc.get_dictionary_mut(*page_id) {
             take(page, b"PieceInfo", &mut piece_info);
             page.remove(b"StructParents");
@@ -918,8 +925,12 @@ fn shown_carriers(doc: &Document, page_ids: &[ObjectId]) -> BTreeSet<ObjectId> {
             continue;
         };
         let array = match annots {
+            // Ein Array, das sich Seiten teilen, einmal — nicht Seiten ×
+            // Einträge (Register #94).
             Object::Reference(id) => {
-                shown.insert(*id);
+                if !shown.insert(*id) {
+                    continue;
+                }
                 doc.get_object(*id).ok().and_then(|o| o.as_array().ok())
             }
             Object::Array(items) => Some(items),
@@ -1645,7 +1656,29 @@ fn subtree_ids(doc: &Document, root: &Object) -> BTreeSet<ObjectId> {
 /// Rückgabe: je gefundenem Anhang eine Buchung. Gezählt wird er erst nach
 /// dem Aufräumen und nur, wenn seine Datei dann wirklich fehlt — hält sie
 /// ein zweiter Verweis, steht sie weiter in der Datei.
-fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> Vec<Tally> {
+///
+/// Ein `/Annots` als eigenes Objekt wird an diesem Objekt bereinigt, einmal
+/// je Dokument (`arrays`). Bis zur Spur-A-Runde 2 bekam jede Seite, die es
+/// teilte, eine eigene Kopie ohne die Anhänge: Seiten × Einträge Arbeit und
+/// ebenso viele Verweise in der Ausgabe (Register #94).
+fn remove_file_attachments(
+    doc: &mut Document,
+    page_id: ObjectId,
+    arrays: &mut BTreeSet<ObjectId>,
+) -> Vec<Tally> {
+    let shared = match doc
+        .get_dictionary(page_id)
+        .ok()
+        .and_then(|page| page.get(b"Annots").ok())
+    {
+        Some(Object::Reference(id)) => Some(*id),
+        _ => None,
+    };
+    if let Some(id) = shared {
+        if !arrays.insert(id) {
+            return Vec::new();
+        }
+    }
     let Some(items) = doc
         .get_dictionary(page_id)
         .ok()
@@ -1699,8 +1732,18 @@ fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> Vec<Tally> 
     }
 
     if !removed.is_empty() {
-        if let Ok(page) = doc.get_dictionary_mut(page_id) {
-            page.set("Annots", Object::Array(kept));
+        // Am eigenen Objekt, wenn es ein Array ist; eine Verweiskette
+        // (`/Annots 5 0 R`, dort `6 0 R`) bekommt wie vorher die Seite.
+        match shared.and_then(|id| match doc.get_object_mut(id) {
+            Ok(Object::Array(entries)) => Some(entries),
+            _ => None,
+        }) {
+            Some(entries) => *entries = kept,
+            None => {
+                if let Ok(page) = doc.get_dictionary_mut(page_id) {
+                    page.set("Annots", Object::Array(kept));
+                }
+            }
         }
     }
     removed

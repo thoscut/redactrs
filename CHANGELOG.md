@@ -308,6 +308,32 @@ sind, jeder in seinem eigenen Commit.
   `zp_b_nicht_gezeichnete_annotation`, der Fall der langen Antwortkette.
   Mutationsnachweis: die Regel zurückgenommen → dieser Fall rot.
 
+* **Ein `/Annots`, das sich Seiten teilen, kostete Seiten mal Annotationen**
+  (Register #94, Prüfer B; Dienstverweigerung, neue Klasse). Nach der Norm
+  steht eine Annotation im `/Annots` genau einer Seite. Teilten sich viele
+  Seiten dasselbe Array, las die Analyse jede Annotation auf jeder Seite neu,
+  der Metadatenlauf gab jeder Seite eine eigene Kopie des Arrays, und der
+  Redaktor fragte je Seite jede Annotation nach ihrem Rechteck und kopierte
+  dafür ihr Dictionary. Kein Konto sah es, denn das Aufwandskonto beginnt je
+  Seite neu. Jetzt führt die Analyse ein Buch über das ganze Dokument: eine
+  Annotation, die eine frühere Seite unter derselben Ressourcenumgebung
+  gelesen hat, wird nicht noch einmal gelesen; ihr Text steht einmal im
+  Ergebnis, auf der ersten Seite, die sie zeigt. Unter einer anderen
+  Umgebung wird sie neu gelesen, weil ein Erscheinungsstrom ohne eigene
+  Ressourcen die der Seite benutzt und dort anderen Text zeigen kann. Diese
+  Wiederholungen haben eine Decke, darüber wird die Datei abgelehnt. Eine
+  abgelehnte Seite trägt nichts ins Buch ein. Metadatenlauf und Redaktor
+  bereinigen ein geteiltes Array an seinem Objekt, einmal; alle Seiten zeigen
+  danach weiter dasselbe Array, ohne toten Verweis. Benannte Lücke: der
+  Hinweis, dass eine Schwärzung in einem geteilten Formular auch andere
+  Seiten trifft, zählt die übrigen Seiten einer geteilten Annotation nicht
+  mit. Dieselbe Vervielfachung trifft einen Inhaltsstrom oder ein Formular,
+  das sich Seiten teilen; das ist ein eigener Befund (Register #106). Belege:
+  `zp_b_geteiltes_annots`, `content::tests::die_wiederholungsdecke_haelt_genau`,
+  `content::tests::ein_geteiltes_array_kostet_seine_eintraege_einmal`.
+  Mutationsnachweis: je Teil zurückgenommen → sein Fall rot; was nur Arbeit
+  spart, zeigt die Messung im Release.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile
