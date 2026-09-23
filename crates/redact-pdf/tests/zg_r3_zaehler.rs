@@ -56,7 +56,7 @@ fn notiz(d: &mut Doc, contents: Object) -> ObjectId {
 // A) Zweiter Halter: 0 — und 0 ist richtig
 // ---------------------------------------------------------------------------
 
-/// `/Contents 4 0 R` fällt, die Seite hält Objekt 4 unter `/Zusatz`. Der
+/// `/Contents 4 0 R` fällt, eine Eigenschaftsliste der Seite hält Objekt 4. Der
 /// Schlüssel ist weg, der Text nicht: der Bericht sagt 0, der eigene Zähler
 /// sieht Objekt 4, `leaks` findet den Text. Alle drei stimmen überein.
 ///
@@ -68,7 +68,7 @@ fn zweiter_halter_bericht_null_eigener_zaehler_sieht_das_objekt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let text = d.add(Object::string_literal(format!("Notiz {SECRET}")));
     let a = notiz(&mut d, Object::Reference(text));
-    d.page_dict_set("Zusatz", Object::Reference(text));
+    d.zweiter_halter(Object::Reference(text));
 
     let (report, out) = strip(&d.finish());
     let ids = ids_in(&out);
@@ -112,7 +112,7 @@ fn ohne_zweiten_halter_eins_und_das_objekt_ist_weg() {
 // ---------------------------------------------------------------------------
 
 /// `/Contents 4 0 R`, Objekt 4 ist selbst der Verweis `5 0 R`, Objekt 5 die
-/// Zeichenkette — und die Seite hält **5** unter `/Zusatz`. `Tally` merkt
+/// Zeichenkette — und eine Eigenschaftsliste der Seite hält **5**. `Tally` merkt
 /// sich 4; 4 fällt beim Aufräumen (niemand hält es), 5 bleibt. Der Bericht
 /// meldet 1 — über einen Text, den `--check-leaks` findet.
 #[test]
@@ -121,7 +121,7 @@ fn verweiskette_meldet_eine_entfernung_ueber_text_der_bleibt() {
     let ziel = d.add(Object::string_literal(format!("Notiz {SECRET}")));
     let mitte = d.add(Object::Reference(ziel));
     notiz(&mut d, Object::Reference(mitte));
-    d.page_dict_set("Zusatz", Object::Reference(ziel));
+    d.zweiter_halter(Object::Reference(ziel));
 
     let bytes = d.finish();
     assert!(
@@ -210,7 +210,7 @@ fn eine_zugeordnete_datei_faellt_und_wird_gemeldet() {
 fn eine_gehaltene_zugeordnete_datei_wird_nicht_gemeldet() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let (filespec, _) = zugeordnete_datei(&mut d);
-    d.page_dict_set("Zusatz", Object::Reference(filespec));
+    d.zweiter_halter(Object::Reference(filespec));
 
     let (report, out) = strip(&d.finish());
     assert!(ids_in(&out).contains(&filespec));
@@ -273,7 +273,7 @@ fn geteilter_titel_mit_zweitem_halter_kein_lesezeichen_gilt_als_entfernt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let title = d.add(Object::string_literal(format!("Kontoauszug {SECRET}")));
     lesezeichen(&mut d, Object::Reference(title));
-    d.page_dict_set("Zusatz", Object::Reference(title));
+    d.zweiter_halter(Object::Reference(title));
 
     let (report, out) = strip(&d.finish());
     assert!(
@@ -357,7 +357,7 @@ fn ebenenname_als_verweis_wird_entfernt_aber_nicht_gemeldet() {
 fn ebenenname_als_verweis_mit_zweitem_halter_bleibt_und_zaehlt_nicht() {
     let mut d: Doc = page(&[]);
     let name = ebene_mit_verweisnamen(&mut d);
-    d.page_dict_set("Zusatz", Object::Reference(name));
+    d.zweiter_halter(Object::Reference(name));
 
     let (report, out) = strip(&d.finish());
     assert!(ids_in(&out).contains(&name));

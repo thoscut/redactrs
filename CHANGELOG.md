@@ -359,6 +359,23 @@ sind, jeder in seinem eigenen Commit.
   Mutationsnachweis: der alte Abbruch, eine feste Stufe und der übergangene
   direkte Knoten → je ihr Fall rot.
 
+* **⚠ Sicherheit: Katalog, Seitenbaum und Seite behalten nur noch, was auf
+  der Erlaubnisliste steht** (Register #92, dritter Teil, Prüfer B; stilles
+  Leck, die Zeile zum Beiwerk mit Klartext trat weiter auf). Der
+  Metadatenlauf nahm bis hierher eine Sperrliste; was nicht auf ihr stand,
+  blieb. Prüfer B fand `/SpiderInfo` (Web Capture: die abgerufene Adresse
+  und die gesendeten Formulardaten), `/Legal` mit `/Attestation` und
+  `/Requirements` mit Text am Katalog, `/OutputIntents` an der Seite (PDF
+  2.0) und die Einheiten `/3DU` einer 3D-Annotation — jede Stelle mit
+  Rückgabewert 0 und ohne Warnung, und jede Runde fände weitere. Jetzt fällt
+  an Katalog, Seitenbaum und Seite jeder Schlüssel, den die Anzeige nicht
+  braucht, auch einer, den keine Norm kennt; `/OutputIntents` an der Seite
+  verliert seine Texte wie am Katalog, `/3DU` fällt als Ganzes. Belege:
+  `zp_b_erlaubte_schluessel`, darunter ein Fall, der zeigt, dass Aufbau,
+  Seitenrahmen und Inhalt bleiben. Mutationsnachweis: die Erlaubnisliste
+  wirkungslos, die Seiten-`/OutputIntents` übergangen und `/3DU` aus der
+  Liste genommen → je ihr Fall rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

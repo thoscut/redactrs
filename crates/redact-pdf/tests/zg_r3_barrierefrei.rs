@@ -267,7 +267,7 @@ fn irt_auf_eine_annotation_erreicht_kein_strukturelement() {
     }));
     d.catalog_set("StructTreeRoot", Object::Reference(root));
     // Ein zweiter Halter (kein Träger) rettet das Element über das Aufräumen.
-    d.page_dict_set("Zusatz", Object::Reference(figure));
+    d.zweiter_halter(Object::Reference(figure));
     let erste = d.add(Object::Dictionary(dictionary! {
         "Type" => "Annot",
         "Subtype" => "Text",

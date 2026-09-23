@@ -77,7 +77,7 @@ fn ein_anhang_mit_zweitem_halter_wird_nicht_als_entfernt_gemeldet() {
     let names = names_tree(&mut d.doc, "EmbeddedFiles", "anhang.txt", filespec);
     d.catalog_set("Names", Object::Reference(names));
     // Der zweite Halter: irgendetwas außerhalb des Metadatenlaufs.
-    d.page_dict_set("Zusatz", Object::Reference(filespec));
+    d.zweiter_halter(Object::Reference(filespec));
 
     let bytes = d.finish();
     assert!(
@@ -119,7 +119,7 @@ fn ein_javascript_mit_zweitem_halter_wird_nicht_als_entfernt_gemeldet() {
     }));
     let names = names_tree(&mut d.doc, "JavaScript", "start", action);
     d.catalog_set("Names", Object::Reference(names));
-    d.page_dict_set("Zusatz", Object::Reference(js));
+    d.zweiter_halter(Object::Reference(js));
 
     let bytes = d.finish();
     assert!(
@@ -162,7 +162,7 @@ fn ein_geteilter_xfa_strom_wird_nicht_als_entfernt_gemeldet() {
         ]),
     }));
     d.catalog_set("AcroForm", Object::Reference(acroform));
-    d.page_dict_set("Zusatz", Object::Reference(dataset));
+    d.zweiter_halter(Object::Reference(dataset));
 
     let bytes = d.finish();
     let (report, out) = strip(&bytes);

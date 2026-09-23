@@ -48,7 +48,7 @@ fn ein_geteilter_lesezeichentitel_darf_nicht_als_entfernt_gelten() {
     );
     d.catalog_set("Outlines", Object::Reference(wurzel));
     // Der zweite Halter: irgendein Objekt der Seite nennt denselben String.
-    d.page_dict_set("Zusatz", Object::Reference(titel));
+    d.zweiter_halter(Object::Reference(titel));
 
     let bytes = d.finish();
     assert!(
@@ -79,7 +79,7 @@ fn ein_geteilter_annotationstext_darf_nicht_als_entfernt_gelten() {
         "Contents" => Object::Reference(text),
     }));
     d.page_dict_set("Annots", Object::Array(vec![Object::Reference(a)]));
-    d.page_dict_set("Zusatz", Object::Reference(text));
+    d.zweiter_halter(Object::Reference(text));
 
     let bytes = d.finish();
     assert!(

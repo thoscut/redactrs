@@ -148,7 +148,7 @@
 //!   `/IRT`). Beides ist frei wählbarer Text, der gewöhnlich genau das
 //!   spiegelt, was gerade aus dem Strom verschwunden ist.
 //! * das Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`,
-//!   `/RichMediaSettings`, `/3DD`, `/3DV` und `/RO` — als Ganzes, siehe
+//!   `/RichMediaSettings`, `/3DD`, `/3DV`, `/3DU` und `/RO` — als Ganzes, siehe
 //!   [`ANNOTATION_PLATE_KEYS`]. Gemessen (vor
 //!   dieser Änderung): der Dateiname in `/Movie /F`, die
 //!   Einheitenbeschriftung in `/Measure /X[0] /U`, eine eingebettete Datei
@@ -297,7 +297,7 @@ pub struct MetadataReport {
     /// `/OverlayText`, `/NM`, `/DS` sowie `/CA`, `/RC`, `/AC` in `/MK`,
     /// dazu `/Alt` und `/ActualText` an jedem erreichten Dictionary und das
     /// Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`,
-    /// `/RichMediaSettings`, `/3DD`, `/3DV`, `/RO` sowie `/SV` (Seed-Value eines Signaturfelds: `/Reasons`,
+    /// `/RichMediaSettings`, `/3DD`, `/3DV`, `/3DU`, `/RO` sowie `/SV` (Seed-Value eines Signaturfelds: `/Reasons`,
     /// `/LegalAttestation`) und `/Lock` (`/Fields`).
     pub annotation_texts_cleared: usize,
     /// Seiten **außerhalb des Seitenbaums**, die ihren Inhalt verloren haben.
@@ -328,9 +328,13 @@ pub struct MetadataReport {
     /// `/Collection` (Portfolio-Schema), `/URI` (`/Base`), `/DPartRoot`
     /// (PDF/VT-Metadaten `/DPM` — im Kontoauszugdruck Name und Konto des
     /// Empfängers), die Präfixe `/P` in `/PageLabels` und die Texte `/Info`,
-    /// `/OutputCondition`, `/RegistryName` in `/OutputIntents`; an Seiten
-    /// `/B`, `/VP`, `/PresSteps`, `/DPart`; an Objekten `/Ref` (ein
-    /// Referenz-XObject hält eine eingebettete Datei) und `/OPI`.
+    /// `/OutputCondition`, `/RegistryName` in `/OutputIntents` (am Katalog
+    /// und an der Seite); an Seiten `/B`, `/VP`, `/PresSteps`, `/DPart`; an
+    /// Objekten `/Ref` (ein Referenz-XObject hält eine eingebettete Datei)
+    /// und `/OPI`. Dazu seit der Spur-A-Runde 2 jeder Schlüssel an Katalog,
+    /// Seitenbaum und Seite, der nicht auf der Erlaubnisliste steht
+    /// ([`CATALOG_KEEP`], [`PAGE_KEEP`], [`PAGE_TREE_KEEP`]) — etwa
+    /// `/SpiderInfo`, `/Legal`, `/Requirements` (Register #92).
     pub beiwerk_removed: usize,
 }
 
@@ -411,13 +415,13 @@ impl MetadataReport {
         );
         count(
             self.annotation_texts_cleared,
-            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /RichMediaSettings, /3DD, /3DV, /RO, /SV, /Lock)",
-            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /RichMediaSettings, /3DD, /3DV, /RO, /SV, /Lock)",
+            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /RichMediaSettings, /3DD, /3DV, /3DU, /RO, /SV, /Lock)",
+            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /RichMediaSettings, /3DD, /3DV, /3DU, /RO, /SV, /Lock)",
         );
         count(
             self.beiwerk_removed,
-            "Beiwerk mit Klartext (/Perms, /DSS, /Threads, /B, /Collection, /URI, /DPartRoot, /DPart, /PageLabels-Präfix, /OutputIntents-Text, /VP, /PresSteps, /Ref, /OPI)",
-            "Beiwerk mit Klartext (/Perms, /DSS, /Threads, /B, /Collection, /URI, /DPartRoot, /DPart, /PageLabels-Präfix, /OutputIntents-Text, /VP, /PresSteps, /Ref, /OPI)",
+            "Beiwerk mit Klartext (/Perms, /DSS, /Threads, /B, /Collection, /URI, /DPartRoot, /DPart, /PageLabels-Präfix, /OutputIntents-Text, /VP, /PresSteps, /Ref, /OPI, Schlüssel außerhalb der Erlaubnisliste)",
+            "Beiwerk mit Klartext (/Perms, /DSS, /Threads, /B, /Collection, /URI, /DPartRoot, /DPart, /PageLabels-Präfix, /OutputIntents-Text, /VP, /PresSteps, /Ref, /OPI, Schlüssel außerhalb der Erlaubnisliste)",
         );
         count(
             self.thumbnails_removed,
@@ -532,9 +536,16 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
             for key in CATALOG_BEIWERK_KEYS {
                 take(catalog, key, &mut beiwerk);
             }
+            // Und alles, was die Aufzählung nicht kennt (Register #92).
+            take_unlisted(catalog, &CATALOG_KEEP, &mut beiwerk);
         }
         clean_page_labels(doc, catalog_id, &mut beiwerk);
         clean_output_intents(doc, catalog_id, &mut beiwerk);
+        for node in page_tree_nodes(doc, catalog_id, &page_ids) {
+            if let Ok(node) = doc.get_dictionary_mut(node) {
+                take_unlisted(node, &PAGE_TREE_KEEP, &mut beiwerk);
+            }
+        }
     }
 
     // --- Träger: Annotationen, Felder, Feldwerte ------------------------
@@ -570,7 +581,10 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
             for key in PAGE_BEIWERK_KEYS {
                 take(page, key, &mut beiwerk);
             }
+            // Und alles, was die Aufzählung nicht kennt (Register #92).
+            take_unlisted(page, &PAGE_KEEP, &mut beiwerk);
         }
+        clean_output_intents(doc, *page_id, &mut beiwerk);
         cleaned += clean_annotations(doc, *page_id, &mut visited, &shown, &mut captions);
     }
     if let Some(mut fields) = form_fields {
@@ -1169,13 +1183,16 @@ const ALTERNATE_TEXT_KEYS: [&[u8]; 2] = [b"Alt", b"ActualText"];
 /// nichts, kein Betrachter bricht daran ab, und der Seitentext bleibt
 /// unverändert (Beleg:
 /// `zg_r3_beiwerk::movie_annotation_ohne_movie_laedt_und_behaelt_den_seitentext`).
-const ANNOTATION_PLATE_KEYS: [&[u8]; 9] = [
+const ANNOTATION_PLATE_KEYS: [&[u8]; 10] = [
     b"Movie",
     b"Measure",
     b"RichMediaContent",
     b"RichMediaSettings",
     b"3DD",
     b"3DV",
+    // Die Einheiten einer 3D-Annotation (PDF 2.0, 13.6.2): `/TU`, `/UU`,
+    // `/DU` sind frei wählbare Namen (Register #92).
+    b"3DU",
     b"RO",
     // Seed-Value und Sperre eines Signaturfelds (Tabellen 233/234): `/SV
     // /Reasons`, `/SV /LegalAttestation`, `/Lock /Fields` (Register #70).
@@ -1795,6 +1812,114 @@ const PAGE_BEIWERK_KEYS: [&[u8]; 4] = [b"B", b"VP", b"PresSteps", b"DPart"];
 /// und `/OPI` an einem Bild (Tabelle 397: `/F`, `/Comments`).
 const OBJECT_BEIWERK_KEYS: [&[u8]; 2] = [b"Ref", b"OPI"];
 
+/// Was ein Katalog behalten darf (ISO 32000-2, Tabelle 29) — alles andere
+/// fällt als Beiwerk, auch ein Schlüssel, den keine Norm kennt.
+///
+/// Bis zur Spur-A-Runde 2 nahm der Lauf eine **Sperrliste**; was nicht auf
+/// ihr stand, blieb. Prüfer B fand `/SpiderInfo` (Web Capture: die
+/// abgerufene Adresse und die gesendeten Formulardaten), `/Legal` mit
+/// `/Attestation` und `/Requirements` mit Text — jede Runde fände weitere
+/// (Register #92). Was hier steht, braucht die Anzeige oder wird an anderer
+/// Stelle bereinigt: `/PageLabels` und `/OutputIntents` verlieren ihre Texte
+/// ([`clean_page_labels`], [`clean_output_intents`]), `/AF` fällt mit
+/// [`clear_object_metadata`] und wird dort je Filespec gezählt.
+const CATALOG_KEEP: [&[u8]; 12] = [
+    b"Type",
+    b"Version",
+    b"Extensions",
+    b"Pages",
+    b"PageLabels",
+    b"OutputIntents",
+    b"ViewerPreferences",
+    b"PageLayout",
+    b"PageMode",
+    b"Lang",
+    b"NeedsRendering",
+    b"AF",
+];
+
+/// Was eine Seite behalten darf (ISO 32000-2, Tabelle 31): Aufbau,
+/// Seitenrahmen, Inhalt, Darstellung. `/Annots` wird als Träger bereinigt,
+/// `/OutputIntents` (PDF 2.0) verliert seine Texte wie am Katalog, `/AF`
+/// fällt mit [`clear_object_metadata`]. Alles andere fällt als Beiwerk
+/// (Register #92).
+const PAGE_KEEP: [&[u8]; 21] = [
+    b"Type",
+    b"Parent",
+    b"Resources",
+    b"MediaBox",
+    b"CropBox",
+    b"BleedBox",
+    b"TrimBox",
+    b"ArtBox",
+    b"BoxColorInfo",
+    b"Contents",
+    b"Rotate",
+    b"Group",
+    b"Dur",
+    b"Trans",
+    b"Annots",
+    b"Tabs",
+    b"UserUnit",
+    b"PZ",
+    b"TemplateInstantiated",
+    b"OutputIntents",
+    b"AF",
+];
+
+/// Was ein Knoten des Seitenbaums behalten darf (Tabelle 30): der Aufbau
+/// und die vererbbaren Seitenattribute.
+const PAGE_TREE_KEEP: [&[u8]; 9] = [
+    b"Type",
+    b"Kids",
+    b"Count",
+    b"Parent",
+    b"Resources",
+    b"MediaBox",
+    b"CropBox",
+    b"Rotate",
+    b"AF",
+];
+
+/// Nimmt `dict` jeden Schlüssel, der nicht in `keep` steht, und bucht ihn.
+fn take_unlisted(dict: &mut Dictionary, keep: &[&[u8]], into: &mut Tally) {
+    let fremd: Vec<Vec<u8>> = dict
+        .iter()
+        .map(|(key, _)| key.clone())
+        .filter(|key| !keep.contains(&key.as_slice()))
+        .collect();
+    for key in fremd {
+        take(dict, &key, into);
+    }
+}
+
+/// Die Knoten des Seitenbaums unter `/Pages` — ohne die Seiten selbst.
+fn page_tree_nodes(doc: &Document, catalog_id: ObjectId, pages: &[ObjectId]) -> Vec<ObjectId> {
+    let mut out = Vec::new();
+    let mut seen: BTreeSet<ObjectId> = pages.iter().copied().collect();
+    let mut stack: Vec<ObjectId> = doc
+        .get_dictionary(catalog_id)
+        .ok()
+        .and_then(|c| c.get(b"Pages").ok())
+        .and_then(|o| o.as_reference().ok())
+        .into_iter()
+        .collect();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Ok(node) = doc.get_dictionary(id) else {
+            continue;
+        };
+        let Some(Object::Array(kids)) = value_of(node, b"Kids") else {
+            continue;
+        };
+        out.push(id);
+        stack.extend(kids.iter().filter_map(|k| k.as_reference().ok()));
+    }
+    out
+}
+
 /// Nimmt den Seitenbeschriftungen ihr Präfix `/P` — den einzigen Klartext im
 /// Zahlenbaum `/PageLabels` (Tabelle 159). `/S` und `/St` bleiben: der
 /// Betrachter zählt weiter römisch oder arabisch, nur ohne
@@ -1883,10 +2008,14 @@ fn clean_label_node(
 /// `/OutputCondition` und `/RegistryName`. `/OutputConditionIdentifier` und
 /// `/DestOutputProfile` bleiben — sie machen die Datei PDF/A oder PDF/X, und
 /// der Bezeichner ist ein Normname (`sRGB IEC61966-2.1`), kein Freitext.
-fn clean_output_intents(doc: &mut Document, catalog_id: ObjectId, beiwerk: &mut Tally) {
+///
+/// `holder` ist der Katalog oder eine Seite: PDF 2.0 erlaubt
+/// `/OutputIntents` auch dort (14.11.5); bis zur Spur-A-Runde 2 bereinigte
+/// der Lauf nur den Katalog (Register #92).
+fn clean_output_intents(doc: &mut Document, holder: ObjectId, beiwerk: &mut Tally) {
     const TEXT_KEYS: [&[u8]; 3] = [b"Info", b"OutputCondition", b"RegistryName"];
     let Some(intents) = doc
-        .get_dictionary(catalog_id)
+        .get_dictionary(holder)
         .ok()
         .and_then(|c| c.get(b"OutputIntents").ok().cloned())
     else {
@@ -1925,8 +2054,8 @@ fn clean_output_intents(doc: &mut Document, catalog_id: ObjectId, beiwerk: &mut 
                 doc.objects.insert(id, Object::Array(direct));
             }
             None => {
-                if let Ok(catalog) = doc.get_dictionary_mut(catalog_id) {
-                    catalog.set("OutputIntents", Object::Array(direct));
+                if let Ok(holder) = doc.get_dictionary_mut(holder) {
+                    holder.set("OutputIntents", Object::Array(direct));
                 }
             }
         }

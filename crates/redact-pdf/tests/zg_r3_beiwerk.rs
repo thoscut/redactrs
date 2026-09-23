@@ -282,7 +282,7 @@ fn ein_gehaltener_filespec_wird_nicht_als_entfernt_gemeldet() {
     let (a, filespec) = dateianhang(&mut d);
     d.page_dict_set("Annots", Object::Array(vec![Object::Reference(a)]));
     // Der zweite Halter: irgendetwas außerhalb des Metadatenlaufs.
-    d.page_dict_set("Zusatz", Object::Reference(filespec));
+    d.zweiter_halter(Object::Reference(filespec));
 
     let (report, out) = strip(&d.finish());
     let doc = load_from_bytes(&out).expect("Ausgabe lädt");

@@ -478,7 +478,7 @@ fn ein_strukturelement_ohne_annotation_bleibt_unberuehrt() {
     d.catalog_set("StructTreeRoot", Object::Reference(wurzel));
     // Ein zweiter Halter, der keine Annotation ist: das Element überlebt das
     // Aufräumen.
-    d.page_dict_set("Zusatz", Object::Reference(elem));
+    d.zweiter_halter(Object::Reference(elem));
     // Eine gewöhnliche Annotation daneben — der Trägerlauf läuft, er kommt
     // nur nicht am Struktur-Element vorbei.
     let notiz = d.add(Object::Dictionary(dictionary! {

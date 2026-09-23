@@ -480,7 +480,7 @@ fn befund_p3_4_gezaehltes_lesezeichen_bleibt() {
         }),
     );
     d.catalog_set("Outlines", Object::Reference(root));
-    d.catalog_set("Zusatz", Object::Reference(item));
+    d.zweiter_halter(Object::Reference(item));
 
     let bytes = d.finish();
     let (report, out) = strip(&bytes);
@@ -528,7 +528,7 @@ fn befund_p3_6_verweis_hinter_tiefer_verschachtelung() {
     for _ in 0..70 {
         nested = Object::Array(vec![nested]);
     }
-    d.catalog_set("Tief", nested);
+    d.zweiter_halter(nested);
     let mut doc = load_from_bytes(&d.finish()).expect("PDF ladbar");
     assert!(doc.objects.contains_key(&gebraucht), "vorher da");
     strip_metadata(&mut doc);

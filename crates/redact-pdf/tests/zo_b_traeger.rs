@@ -507,8 +507,6 @@ fn a_lesezeichen_mit_zweitem_halter_und_ebenenname() {
         }),
     );
     d.catalog_set("Outlines", Object::Reference(outlines));
-    // Der zweite Halter: ein Schlüssel an der Seite, den niemand bereinigt.
-    d.page_dict_set("Zusatz", Object::Reference(item));
     // Ein Ebenenname, den nur /Resources /Properties hält.
     let name = d.add(s(format!("Ebene {SECRET}")));
     let ocg = d.add(Object::Dictionary(
@@ -519,6 +517,8 @@ fn a_lesezeichen_mit_zweitem_halter_und_ebenenname() {
         "Properties",
         dictionary! { "oc1" => Object::Reference(ocg) },
     );
+    // Der zweite Halter: eine Eigenschaftsliste, die der Lauf stehen lässt.
+    d.zweiter_halter(Object::Reference(item));
     muss_fallen(&d.finish(), "Lesezeichen mit zweitem Halter, Ebenenname");
 }
 

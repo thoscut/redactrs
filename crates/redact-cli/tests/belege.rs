@@ -3426,6 +3426,26 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "(Register #92, zweiter Teil, Prüfer B; stilles Leck, die Zeile zum Beiwerk mit Klartext trat weiter auf)",
         "eine Registernummer, keine Messung",
     ),
+    (
+        "(Register #92, dritter Teil, Prüfer B; stilles Leck, die Zeile zum Beiwerk mit Klartext trat weiter auf)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "`/OutputIntents` an der Seite (PDF 2.0) und die Einheiten `/3DU` einer 3D-Annotation",
+        "eine Versionsnummer der Norm und ein Schlüsselname, keine Messung",
+    ),
+    (
+        "jede Stelle mit Rückgabewert 0 und ohne Warnung",
+        "der Rückgabewert des Laufs vor der Änderung, keine Messgröße",
+    ),
+    (
+        "verliert seine Texte wie am Katalog, `/3DU` fällt als Ganzes",
+        "ein Schlüsselname, keine Messung",
+    ),
+    (
+        "übergangen und `/3DU` aus der Liste genommen",
+        "ein Schlüsselname, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

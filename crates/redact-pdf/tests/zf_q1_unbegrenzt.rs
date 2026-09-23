@@ -115,7 +115,7 @@ fn ein_objekt_hinter_siebzig_arrays_bleibt_erreichbar() {
     for _ in 0..69 {
         nest = Object::Array(vec![nest]);
     }
-    d.page_dict_set("Zusatz", nest);
+    d.zweiter_halter(nest);
     let bytes = d.finish();
 
     let mut doc = load_from_bytes(&bytes).expect("PDF ladbar");
