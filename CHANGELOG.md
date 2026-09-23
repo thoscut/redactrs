@@ -234,6 +234,21 @@ seiner neuen Zeile in der Probenliste.
   Formular im Muster). Mutationsnachweis: Ausstieg wieder allein am
   Textoperator → beide rot.
 
+* **Ein Spiegel über einem Kachelmuster mit Text blieb stehen** (Register
+  #66, Prüfer C; kein stilles Leck — `--check-leaks` fand ihn, Rückgabewert
+  3). `/Span <</ActualText (…)>> BDC … /P0 scn … re f … EMC` im Seitenstrom:
+  die Glyphen fielen aus dem Musterstrom, der Spiegel im Seitenstrom nicht.
+  Der Geltungsbereich eines Spiegels kannte nur die Formulare am `Do`; ein
+  Muster wird am `scn` gesetzt, und sein Strom war ihm fremd. Dasselbe über
+  ein Formular, das mit dem Muster füllt. Jetzt zählt ein Kachelmuster am
+  `scn` wie ein Formular am `Do` — in der Spiegelliste des Stroms und als
+  Verschachtelung nach außen (`form_within`), und fällt unter ihm ein
+  Zeichen, fällt der Spiegel. Belege:
+  `zo_c_spiegel_umgebungen::spiegel_ueber_kachelmuster_mit_text` (drei
+  Ausprägungen) und `…::spiegel_ueber_formular_das_mit_kachelmuster_fuellt`.
+  Mutationsnachweis: Muster aus der Spiegelliste → der erste rot;
+  `form_within` entfernt → der zweite rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

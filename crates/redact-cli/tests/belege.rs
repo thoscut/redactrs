@@ -2846,6 +2846,18 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Der Bericht zählte null geschwärzte Bilder",
         "der Zaehlerstand des Berichts im alten Zustand; gebunden durch den Mutationsnachweis, keine Messung",
     ),
+    (
+        "blieb stehen** (Register #66, Prüfer C; kein stilles Leck — `--check-leaks` fand ihn, Rückgabewert 3)",
+        "Registernummer und der Rueckgabewert des Orakels (in zo_c gebunden), keine Messung",
+    ),
+    (
+        "`zo_c_spiegel_umgebungen::spiegel_ueber_kachelmuster_mit_text` (drei Ausprägungen)",
+        "zaehlt Testauspraegungen, keine Messung",
+    ),
+    (
+        "BDC … /P0 scn … re f … EMC",
+        "der Name eines Musters im Beispiel, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

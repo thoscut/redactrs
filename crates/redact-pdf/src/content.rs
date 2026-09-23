@@ -2940,12 +2940,27 @@ fn scan_marked_text(
         .filter(|(_, op)| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
         .map(|(index, _)| index)
         .collect();
+    // Die Ströme, deren Glyphen unter einem Spiegel dieses Stroms stehen
+    // können: Form-XObjects am `Do` — und **Kachelmuster** am `scn`. Ein
+    // Muster ist ein eigener Strom mit eigenem Text; wird es unter
+    // `/Span <</ActualText …>> BDC` als Füllung gesetzt, beschreibt der
+    // Spiegel dessen Glyphen. Bis zur Spur-A-Runde 1 stand hier nur das
+    // `Do`: die Glyphen fielen aus dem Musterstrom, der Spiegel im Seitenstrom
+    // blieb stehen — `--check-leaks` fand ihn (Register #66).
     let dos: Vec<(usize, ObjectId)> = operations
         .iter()
         .enumerate()
-        .filter(|(_, op)| op.operator == "Do")
-        .filter_map(|(index, op)| match op.operands.first() {
-            Some(Object::Name(name)) => Some((index, form_id_of(doc, resources, name)?)),
+        .filter_map(|(index, op)| match op.operator.as_str() {
+            "Do" => match op.operands.first() {
+                Some(Object::Name(name)) => Some((index, form_id_of(doc, resources, name)?)),
+                _ => None,
+            },
+            "sc" | "scn" | "SC" | "SCN" => op.operands.iter().find_map(|o| match o {
+                Object::Name(name) => {
+                    tiling_pattern_id_of(doc, resources, name).map(|id| (index, id))
+                }
+                _ => None,
+            }),
             _ => None,
         })
         .collect();
@@ -3093,6 +3108,29 @@ fn form_id_of(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> Op
         .ok()?;
     let stream = object.as_stream().ok()?;
     (crate::ops::xobject_subtype(doc, &stream.dict) == Some(b"Form".as_slice())).then_some(id?)
+}
+
+/// Die Objekt-Id des **Kachelmusters** hinter einem `scn`-Namen.
+///
+/// `None` für ein Schattierungsmuster (`/PatternType 2` — ein Dictionary ohne
+/// Strom, dort steht kein Text), für einen fehlenden Eintrag und für ein
+/// Muster, das kein eigenes Objekt ist (dann liest es
+/// [`scan_tiling_pattern`] auch nicht).
+fn tiling_pattern_id_of(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    name: &[u8],
+) -> Option<ObjectId> {
+    let entry = resources?.get(b"Pattern").ok()?;
+    let (_, patterns) = doc.dereference(entry).ok()?;
+    let (id, object) = doc
+        .dereference(patterns.as_dict().ok()?.get(name).ok()?)
+        .ok()?;
+    let stream = object.as_stream().ok()?;
+    if stream.dict.get(b"PatternType").ok().and_then(as_f64) == Some(2.0) {
+        return None;
+    }
+    id
 }
 
 /// Die Objekt-Id des **Bild**-XObjects hinter einem `Do`-Namen.
@@ -3661,6 +3699,8 @@ fn scan_operations(
                 {
                     scan_tiling_pattern(
                         doc,
+                        stream,
+                        op_index,
                         resources,
                         owner,
                         fonts,
@@ -4185,6 +4225,11 @@ fn load_xobject(
 #[allow(clippy::too_many_arguments)]
 fn scan_tiling_pattern(
     doc: &Document,
+    // Der Strom, in dem das `scn` steht, und dessen Index — damit ein Spiegel
+    // eines **äußeren** Stroms auch die Glyphen dieses Musters umfasst
+    // ([`ContentSink::form_within`], Register #66).
+    parent: StreamKey,
+    op_index: usize,
     resources: Option<&Dictionary>,
     owner: Option<ObjectId>,
     fonts: &FontMap,
@@ -4268,6 +4313,11 @@ fn scan_tiling_pattern(
         ));
         return;
     };
+    // Wie ein Formular im Formular: der Spiegel eines äußeren Stroms über
+    // dem `scn` gilt auch für die Glyphen des Musters. Vor der Zyklusprobe,
+    // weil die Verschachtelung auch beim zweiten Setzen desselben Musters
+    // gilt (siehe die `Do`-Stelle in [`scan_operations`]).
+    sink.form_within(parent, op_index, id);
     // Einmal je Dokumentobjekt: ein zweiter Durchlauf brächte nur denselben
     // Text ein zweites Mal (und bei Zyklen gar keinen).
     if !visiting.insert(id) {

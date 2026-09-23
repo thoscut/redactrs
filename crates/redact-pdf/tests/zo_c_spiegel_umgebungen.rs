@@ -22,12 +22,13 @@
 //! * [`spiegel_ueber_kachelmuster_mit_text`] und
 //!   [`spiegel_ueber_formular_das_mit_kachelmuster_fuellt`] — **Befund C-2**:
 //!   ein Spiegel im Seitenstrom über einer Fläche, die mit einem Kachelmuster
-//!   gefüllt wird, das Text setzt. `MarkedTextRecord::forms` kennt nur `Do`;
-//!   der Musterstrom hängt an `scn`/`f`, und `form_within` wird für ihn nicht
-//!   gerufen. Die Glyphen fallen aus dem Muster, der Spiegel darüber bleibt
-//!   mit dem Geheimnis stehen. Die einzige Warnung ist die allgemeine über das
-//!   Muster („die übrigen Kacheln werden nicht einzeln vermessen“) — sie nennt
-//!   den Spiegel nicht.
+//!   gefüllt wird, das Text setzt. `MarkedTextRecord::forms` kannte nur `Do`;
+//!   der Musterstrom hängt an `scn`/`f`, und `form_within` wurde für ihn nicht
+//!   gerufen. Die Glyphen fielen aus dem Muster, der Spiegel darüber blieb
+//!   mit dem Geheimnis stehen; die einzige Warnung war die allgemeine über das
+//!   Muster. **Behoben** (Register #66): ein Kachelmuster am `scn` zählt wie
+//!   ein Formular am `Do` — in der Spiegelliste (`scan_marked_text`) und als
+//!   Verschachtelung (`scan_tiling_pattern` ruft `form_within`).
 //! * [`formular_mit_eigenen_ressourcen_ohne_properties_name_aus_der_seite`] —
 //!   **Befund C-3** (mit Vorbehalt): ein Formular mit eigenem `/Resources`,
 //!   aber ohne `/Properties`, dessen `/Span /MC0 BDC` sich nur in den
@@ -678,11 +679,10 @@ fn add_pattern(d: &mut Doc, holder: ObjectId, name: &str) -> ObjectId {
     pattern_id
 }
 
-/// **Befund C-2, absichtlich rot.** `/Span <</ActualText (…)>> BDC` im
-/// Seitenstrom über einer Fläche, die mit dem Textmuster gefüllt wird. Die
-/// Glyphen fallen aus dem Musterstrom, der Spiegel im Seitenstrom nicht.
+/// **Befund C-2, behoben.** `/Span <</ActualText (…)>> BDC` im Seitenstrom
+/// über einer Fläche, die mit dem Textmuster gefüllt wird. Die Glyphen fallen
+/// aus dem Musterstrom — und seit Register #66 der Spiegel im Seitenstrom mit.
 #[test]
-#[ignore = "offen: Register #66 Spiegel ueber Kachelmuster — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn spiegel_ueber_kachelmuster_mit_text() {
     let mut offen = Vec::new();
     for (liste, key) in [
@@ -719,12 +719,13 @@ fn spiegel_ueber_kachelmuster_mit_text() {
     assert!(offen.is_empty(), "{}", offen.join("\n"));
 }
 
-/// **Befund C-2 (über ein Formular), absichtlich rot.** Der Spiegel steht im
+/// **Befund C-2 (über ein Formular), behoben.** Der Spiegel steht im
 /// Seitenstrom über `/Fm0 Do`; `Fm0` füllt mit dem Textmuster. `forms` kennt
 /// `Fm0`, aber `Fm0` verliert selbst kein Zeichen — der Plan liegt am
-/// Musterstrom, und der ist kein `Do`-Kind von `Fm0`.
+/// Musterstrom, und der war kein `Do`-Kind von `Fm0`. Seit Register #66 meldet
+/// das Muster seine Verschachtelung wie ein Formular (`form_within`), und der
+/// transitive Schluss der Spiegelliste erreicht es.
 #[test]
-#[ignore = "offen: Register #66 Spiegel ueber Kachelmuster — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn spiegel_ueber_formular_das_mit_kachelmuster_fuellt() {
     let mut d = page(&[]);
     let res = d.resources_id;
