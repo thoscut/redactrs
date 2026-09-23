@@ -411,6 +411,22 @@ seiner neuen Zeile in der Probenliste.
   roh gebucht → der erste rot; Altlast-Grenze auch am Vorspann → die
   Gegenprobe rot.
 
+* **Abgelehnte gewöhnliche Datei: ein großes ASCII85-Bild fiel an einer
+  Grenze, die nichts mehr schützte** (Register #82, Prüfer D). Die
+  Vorprüfung lehnte jede Kette mit `LZWDecode` oder `ASCII85Decode` über einer
+  festen Rohgröße ab — aus der Zeit, als `lopdf` diese Filter ohne Grenze
+  auspackte. Seit #64 entpackt sie die Vorprüfung selbst, begrenzt auf das
+  Budget; die Grenze lehnte nur noch Dateien ab, etwa ein Bild unter
+  `/ASCII85Decode`, wie es Distiller mit ASCII-Ausgabe schreibt, und
+  `--max-decompressed-mb` half nicht, weil sie eine Konstante war. Sie ist
+  gefallen; die Datei wird geschwärzt. Ein LZW- oder ASCII85-Strom, der mehr
+  entpackt, als das Budget hergibt, fällt weiter — jetzt mit der
+  Budgetmeldung. Der zweite Teil des Befunds (TIFF-Prädiktor über
+  Seitentext: das Orakel findet nichts) bleibt notiert: kein Erzeuger
+  schreibt Seiteninhalt so. Beleg: `zo_d_orakel_am_binary`, der Test zum
+  Befund D5 (bis dahin absichtlich rot und ignoriert). Mutationsnachweis:
+  die Grenze wieder eingesetzt → rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

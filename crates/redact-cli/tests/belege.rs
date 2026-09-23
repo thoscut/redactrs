@@ -3153,6 +3153,30 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "`zf_q2_teildekoder` hält seither die Ablehnung fest",
         "ein Dateiname (Gegenprüfung Q2), keine Messung",
     ),
+    (
+        "ein großes ASCII85-Bild fiel an einer Grenze, die nichts mehr schützte** (Register #82, Prüfer D)",
+        "ein Filtername und eine Registernummer, keine Messung",
+    ),
+    (
+        "jede Kette mit `LZWDecode` oder `ASCII85Decode` über einer festen Rohgröße ab",
+        "Filternamen der Norm, keine Messung",
+    ),
+    (
+        "Seit #64 entpackt sie die Vorprüfung selbst",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "etwa ein Bild unter `/ASCII85Decode`, wie es Distiller",
+        "ein Filtername der Norm, keine Messung",
+    ),
+    (
+        "Ein LZW- oder ASCII85-Strom, der mehr entpackt",
+        "ein Filtername der Norm, keine Messung",
+    ),
+    (
+        "der Test zum Befund D5 (bis dahin absichtlich rot und ignoriert)",
+        "eine Befundkennung der Runde, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

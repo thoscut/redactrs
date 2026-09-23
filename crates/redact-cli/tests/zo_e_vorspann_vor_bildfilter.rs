@@ -235,8 +235,10 @@ fn ascii85(data: &[u8]) -> Vec<u8> {
 /// Gegenprobe zur Rohgrößen-Grenze: `[/ASCII85Decode /DCTDecode]` über mehr
 /// als 16 MiB ASCII85 (so schreiben ältere Distiller-Fassungen große Scans)
 /// lief vorher roh durch. Dass die Vorprüfung den Vorspann jetzt auspackt,
-/// darf die Grenze für ganze Altlast-Ketten nicht auf sie übertragen — die
-/// Datei bliebe sonst eine abgelehnte gewöhnliche Datei.
+/// durfte die damalige Grenze für ganze Altlast-Ketten nicht auf sie
+/// übertragen — die Datei wäre sonst eine abgelehnte gewöhnliche Datei
+/// geworden. Seit Register #82 gibt es die Grenze gar nicht mehr; die Probe
+/// bleibt und hält fest, dass ein solcher Vorspann durchläuft.
 #[test]
 fn ein_ascii85_vorspann_ueber_16_mib_faellt_nicht_an_der_altlast_grenze() {
     let mut rauschen = Vec::with_capacity(14 * 1024 * 1024);

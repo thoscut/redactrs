@@ -456,20 +456,21 @@ fn zo_d13_verschluesselt_wird_ehrlich_abgelehnt() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// **ABSICHTLICH ROT — BEFUND ZO-D5 (Ablehnung; Einordnung als „gewöhnlich“
-/// offen).** Ein Bild-XObject unter `/ASCII85Decode` allein, 2000×2300 RGB
+/// **BEFUND ZO-D5 — behoben (Register #82); bis dahin absichtlich rot und
+/// ignoriert.** Ein Bild-XObject unter `/ASCII85Decode` allein, 2000×2300 RGB
 /// (13,8 MB roh, 17,25 MB kodiert): die Vorprüfung lehnt die **ganze Datei**
 /// ab (`MAX_LEGACY_STREAM_BYTES`, 16 MiB), Rückgabewert 1, keine Ausgabe —
 /// obwohl ASCII85 beim Dekodieren **schrumpft** (4/5) und der Speicherbedarf
 /// damit vorab bekannt ist. `--check-leaks` lehnt dieselbe Datei ebenso ab;
 /// `--max-decompressed-mb` ändert nichts, die Grenze ist eine Konstante.
 ///
-/// Ob ein solches Bild „gewöhnlich“ ist, entscheidet die Runde: Distiller mit
-/// ASCII-Ausgabe schreibt `[/ASCII85Decode /FlateDecode]` bzw.
-/// `[/ASCII85Decode /DCTDecode]`; die zweite Form ist nicht betroffen, die
-/// erste ab rund 13 MiB gepacktem Bild.
+/// Eingeordnet als abgelehnte gewöhnliche Datei: Distiller mit ASCII-Ausgabe
+/// schreibt `[/ASCII85Decode /FlateDecode]` bzw. `[/ASCII85Decode
+/// /DCTDecode]`, und die erste Form traf die Grenze ab rund 13 MiB gepacktem
+/// Bild. Geschützt hat die Grenze seit Register #64 nichts mehr — die
+/// Vorprüfung entpackt LZW und ASCII85 selbst, begrenzt auf das Budget. Sie
+/// ist gefallen; der Lauf endet jetzt mit einer Ausgabedatei.
 #[test]
-#[ignore = "offen: Register #82 ASCII85-Altlastgrenze — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn zo_d14_altlast_filter_ueber_16_mib_wird_abgelehnt() {
     let dir = workdir("altlast");
     // Unkomprimierbare Bilddaten ohne Abhängigkeit: xorshift.

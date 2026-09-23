@@ -339,7 +339,6 @@ Einheit gemeint, nur ausdrücklich; die Schalter (`--max-input-mb` und die
 | davon: alles, woraus PDF-**Syntax** wird — geparste Streams **und** der Rumpf der Datei | 16 MB | `--max-parsed-mb` |
 | dito, in der zweiten Einheit: **gerechneter Objektspeicher** | ein Vielfaches des Byte-Budgets | `--max-parsed-mb` |
 | Trefferkandidaten je Datei | 100 000 | `--max-candidates` |
-| Rohgröße eines Streams, den die **Vorprüfung** auspacken muss (LZW, ASCII85 — jede Kette, die nicht reines Flate ist) | 16 MB | fest |
 | Bildpunkte **je Bild** (Dekodieren) | 40 000 000 | fest |
 | gleichzeitig gehaltene **dekodierte** Bildbytes | 256 MB | `--max-image-mb` |
 | **Zeichen, die eine Seite setzen darf** | **1 000 000** | fest |
@@ -359,24 +358,25 @@ Die Zeilen „Zeichen, die eine Seite setzen darf“ und „Zeichenoperationen j
 Seiten-Scan“ messen keine Bytes, und das ist ihr Zweck; sie stehen weiter unten
 unter „Wenn Bytes die falsche Größe sind“.
 
-**Die 16-MB-Zeile gilt der Vorprüfung, nicht jedem Altlast-Filter.** Auspacken
-muss die Vorprüfung, was zu PDF-Syntax werden kann; das sind `FlateDecode`,
-`LZWDecode`, `ASCII85Decode` — und seit der Spur-A-Runde 1 (Register #64) auch
-`ASCIIHexDecode` und `RunLengthDecode`, jedes Glied begrenzt auf das
-Entpackbudget. Trägt die Kette `LZWDecode` oder `ASCII85Decode`, gilt zusätzlich
-die 16-MB-Grenze der **Rohgröße** — nachgemessen an einem
+**Was die Vorprüfung auspackt.** Auspacken muss sie, was zu PDF-Syntax werden
+kann; das sind `FlateDecode`, `LZWDecode`, `ASCII85Decode` — und seit der
+Spur-A-Runde 1 (Register #64) auch `ASCIIHexDecode` und `RunLengthDecode`,
+jedes Glied begrenzt auf das Entpackbudget. Eine Grenze der **Rohgröße** gibt
+es dabei nicht mehr: bis zur Spur-A-Runde 1 lehnte die Vorprüfung jede Kette
+mit `LZWDecode` oder `ASCII85Decode` über 16 MB ab — nachgemessen an einem
 17-MB-`ASCII85Decode`-Strom: `Stream mit Altlast-Filter (ASCII85Decode) ist mit
-17 825 795 Bytes zu groß (Grenze 16 777 216 Bytes)`, Rückgabewert 1. Die
-Bildfilter packt die Vorprüfung **gar nicht** aus, sie zählt ihre Rohbytes.
-ein 17-MB-`ASCIIHexDecode`-Strom lief vor der Runde roh durch (Rückgabewert 0,
+17 825 795 Bytes zu groß (Grenze 16 777 216 Bytes)`, Rückgabewert 1. Die Grenze
+stammte aus der Zeit, als `lopdf` diese Filter ohne Grenze auspackte; seit #64
+entpackt die Vorprüfung sie selbst, und die Grenze lehnte nur noch ein großes
+ASCII85-Bild ab, wie es Distiller mit ASCII-Ausgabe schreibt (Register #82).
+Die Bildfilter packt die Vorprüfung **gar nicht** aus, sie zählt ihre Rohbytes.
+Ein 17-MB-`ASCIIHexDecode`-Strom lief vor der Runde roh durch (Rückgabewert 0,
 nachgemessen) und wird jetzt entpackt gezählt. Was **vor** einem Bildfilter
 oder einem unbekannten Filter steht — der Flate-Vorspann von `[/FlateDecode
 /DCTDecode]` —, packt sie seit Register #83 aus und zählt es gegen das ganze
 Budget; bis dahin buchte sie die ganze Kette roh, und der Bilddekoder des
-Schreibpfads entpackte den Vorspann ohne Grenze. Die Grenze der Rohgröße gilt
-einem solchen Vorspann nicht, auch wenn er `ASCII85Decode` heißt: er lief
-vorher roh durch und soll nicht erst jetzt fallen. Ausgepackt werden die Bildfilter erst beim Schwärzen und in der
-Nachprüfung — und dort gegen `--max-decompressed-mb`, nicht gegen 16 MB
+Schreibpfads entpackte den Vorspann ohne Grenze. Ausgepackt werden die Bildfilter erst beim Schwärzen und in der
+Nachprüfung — und dort gegen `--max-decompressed-mb`
 (nachgemessen: ein `RunLengthDecode`- und ein `ASCIIHexDecode`-Seiteninhalt mit
 demselben Geheimnis werden von `--check-leaks` gefunden, letzterer ausdrücklich
 als `<Stream, dekodiert: ASCIIHexDecode>`).
@@ -1529,9 +1529,9 @@ Die oben gemessenen Fälle sind begrenzt. Nicht begrenzt sind:
 * **`LZWDecode`.** Solche Streams packte bis zur Spur-A-Runde 1 `lopdf` aus,
   nicht die Vorprüfung, ohne vorab begrenzten Speicher; seither entpackt sie
   die Vorprüfung selbst, begrenzt auf das Entpackbudget (Register #64). Die
-  Rohgrößen-Grenze von 16 MB steht daneben weiter: darüber wird die Datei
-  abgelehnt. `LZWDecode` ist ein Filter aus der Zeit vor PDF 1.4 und kommt in
-  heutigen Dateien praktisch nicht mehr vor.
+  Rohgrößen-Grenze von 16 MB, die daneben stand, ist gefallen (Register
+  #82): sie schützte nichts mehr. `LZWDecode` ist ein Filter aus der Zeit vor
+  PDF 1.4 und kommt in heutigen Dateien praktisch nicht mehr vor.
 * **Rechenzeit unterhalb der Grenzen.** Bis zu 100 000 Trefferkandidaten werden
   ohne weitere Frage aufgelöst. Wie lange das dauert, hängt nicht nur an ihrer
   Zahl, sondern an ihrer **Anordnung**: viele Treffer in derselben Spalte sind

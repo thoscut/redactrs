@@ -274,11 +274,6 @@ pub fn load_from_bytes_with_limits(bytes: &[u8], limits: &Limits) -> Result<Docu
 // Vorprüfung der Rohbytes
 // ---------------------------------------------------------------------------
 
-/// Rohgröße, bis zu der ein Stream mit einem Nicht-Flate-Filter ausgepackt
-/// wird. Darüber lehnen wir ab, statt einem fremden Dekoder ein unbegrenztes
-/// Speicherbudget zu geben.
-const MAX_LEGACY_STREAM_BYTES: usize = 16 * 1024 * 1024;
-
 /// Anteil nicht druckbarer Bytes, ab dem eine Nutzlast als Binärdaten gilt.
 const BINARY_RATIO: f64 = 0.10;
 
@@ -670,7 +665,7 @@ impl Prescan<'_> {
         // und damit, wie viel überhaupt ausgepackt werden darf.
         let flate_only = whole && !filters.is_empty() && filters.iter().all(|f| is_flate(f));
         let (binary, decoded, room) = if flate_only {
-            let probe = self.decode(filters, payload, total_room.min(BINARY_SAMPLE_BYTES), true)?;
+            let probe = self.decode(filters, payload, total_room.min(BINARY_SAMPLE_BYTES))?;
             let binary = match &probe {
                 Some((data, _)) => looks_binary(data),
                 None => looks_binary(payload),
@@ -682,16 +677,11 @@ impl Prescan<'_> {
             } else {
                 total_room.min(parsed_room)
             };
-            (binary, self.decode(filters, payload, room, true)?, room)
+            (binary, self.decode(filters, payload, room)?, room)
         } else {
-            // Altlast-Filter werden nur einmal ausgepackt — ein zweiter Lauf
-            // durch `lopdf` wäre bei LZW teurer als die Klassifikation wert
-            // ist. Die Rohgröße begrenzt [`MAX_LEGACY_STREAM_BYTES`].
-            // Die Rohgrößen-Grenze der Altlast-Filter gilt nur einer ganzen
-            // Kette: `[/ASCII85Decode /DCTDecode]` über einem großen JPEG
-            // (Distiller) lief vorher roh durch und soll nicht erst jetzt
-            // fallen — die begrenzten Dekoder halten ihn auch so im Budget.
-            let decoded = self.decode(filters, payload, total_room, whole)?;
+            // Alle übrigen Ketten werden nur einmal ausgepackt — ein zweiter
+            // Lauf wäre bei LZW teurer als die Klassifikation wert ist.
+            let decoded = self.decode(filters, payload, total_room)?;
             let binary = !whole
                 || match &decoded {
                     Some((data, _)) => looks_binary(data),
@@ -732,9 +722,17 @@ impl Prescan<'_> {
 
     /// Packt einen Stream aus — speicherbegrenzt.
     ///
-    /// `FlateDecode` läuft über einen begrenzten Leser und kann deshalb nie
-    /// mehr belegen als `room`. `ASCII85Decode` schrumpft. `LZWDecode`
-    /// überlassen wir `lopdf`, begrenzen dafür aber die Rohgröße.
+    /// `FlateDecode` läuft über einen begrenzten Leser, jedes andere Glied
+    /// über die begrenzten Dekoder von `crate::filters`; keines kann mehr
+    /// belegen als `room`.
+    ///
+    /// **Eine Grenze der Rohgröße gibt es nicht mehr.** Bis zur
+    /// Spur-A-Runde 1 lehnte die Vorprüfung jede Kette mit `LZWDecode` oder
+    /// `ASCII85Decode` über 16 MiB Rohgröße ab — aus der Zeit, als `lopdf`
+    /// diese Filter ohne Grenze auspackte. Seit Register #64 packt die
+    /// Vorprüfung sie selbst aus, begrenzt auf das Budget; die Grenze schützte
+    /// nichts mehr und lehnte nur noch ein großes ASCII85-Bild ab, wie es
+    /// Distiller mit ASCII-Ausgabe schreibt (Register #82).
     ///
     /// Der zweite Rückgabewert sagt, ob `room` erreicht wurde — die Nutzlast
     /// ist dann abgeschnitten und nur noch als „mindestens so groß“ zu lesen.
@@ -743,37 +741,10 @@ impl Prescan<'_> {
         filters: &[Vec<u8>],
         payload: &[u8],
         room: u64,
-        legacy_rule: bool,
     ) -> Result<Option<(Vec<u8>, bool)>> {
         if filters.is_empty() {
             return Ok(None);
         }
-        // Die Rohgrößen-Grenze gilt den Filtern, die sie immer galt: LZW und
-        // ASCII85. `RunLengthDecode` und `ASCIIHexDecode` packte die
-        // Vorprüfung bis zur Spur-A-Runde 1 gar nicht aus; jetzt packt sie
-        // sie begrenzt aus — die Grenze der Rohgröße bekommen sie damit nicht
-        // obendrauf, sonst fiele eine gewöhnliche Datei, die vorher durchlief.
-        let legacy = filters.iter().any(|f| {
-            matches!(
-                f.as_slice(),
-                b"LZWDecode" | b"LZW" | b"ASCII85Decode" | b"A85"
-            )
-        });
-        if legacy_rule && legacy && payload.len() > MAX_LEGACY_STREAM_BYTES {
-            return Err(RedactError::Pdf(format!(
-                "Stream mit Altlast-Filter ({}) ist mit {} Bytes zu groß \
-                 (Grenze {} Bytes). Solche Streams werden nicht ausgepackt, \
-                 weil sich ihr Speicherbedarf nicht vorab begrenzen lässt.",
-                filters
-                    .iter()
-                    .map(|f| String::from_utf8_lossy(f).into_owned())
-                    .collect::<Vec<_>>()
-                    .join("+"),
-                payload.len(),
-                MAX_LEGACY_STREAM_BYTES
-            )));
-        }
-
         let mut data = payload.to_vec();
         let mut truncated = false;
         for filter in filters {
