@@ -1768,11 +1768,72 @@ fn scan_decoded_text(doc: &Document, probe: &mut Probe) {
     }
 }
 
+/// PDFDocEncoding (PDF 32000-1, Anhang D.2), wo es von Latin-1 abweicht:
+/// die Akzente 0x18–0x1F und der Block 0x80–0xA0 mit `•`, `–`, `—`, `…`,
+/// den typografischen Anführungszeichen, `™`, `ﬁ`/`ﬂ` und `€` (0xA0 — nicht
+/// das geschützte Leerzeichen). 0x9F ist unbelegt und bleibt, was Latin-1
+/// daraus macht.
+///
+/// Bis zur Spur-A-Runde 1 las [`decode_pdf_string`] jedes Byte als Latin-1;
+/// `(Betrag 5 \240)` wurde damit „Betrag 5 “ mit U+00A0, und ein
+/// `--check-leaks "Betrag 5 €"` fand nichts — ohne Meldung, Rückgabewert 0
+/// (Register #81).
+const PDFDOC_ABWEICHUNGEN: &[(u8, char)] = &[
+    (0x18, '\u{02D8}'),
+    (0x19, '\u{02C7}'),
+    (0x1A, '\u{02C6}'),
+    (0x1B, '\u{02D9}'),
+    (0x1C, '\u{02DD}'),
+    (0x1D, '\u{02DB}'),
+    (0x1E, '\u{02DA}'),
+    (0x1F, '\u{02DC}'),
+    (0x80, '\u{2022}'),
+    (0x81, '\u{2020}'),
+    (0x82, '\u{2021}'),
+    (0x83, '\u{2026}'),
+    (0x84, '\u{2014}'),
+    (0x85, '\u{2013}'),
+    (0x86, '\u{0192}'),
+    (0x87, '\u{2044}'),
+    (0x88, '\u{2039}'),
+    (0x89, '\u{203A}'),
+    (0x8A, '\u{2212}'),
+    (0x8B, '\u{2030}'),
+    (0x8C, '\u{201E}'),
+    (0x8D, '\u{201C}'),
+    (0x8E, '\u{201D}'),
+    (0x8F, '\u{2018}'),
+    (0x90, '\u{2019}'),
+    (0x91, '\u{201A}'),
+    (0x92, '\u{2122}'),
+    (0x93, '\u{FB01}'),
+    (0x94, '\u{FB02}'),
+    (0x95, '\u{0141}'),
+    (0x96, '\u{0152}'),
+    (0x97, '\u{0160}'),
+    (0x98, '\u{0178}'),
+    (0x99, '\u{017D}'),
+    (0x9A, '\u{0131}'),
+    (0x9B, '\u{0142}'),
+    (0x9C, '\u{0153}'),
+    (0x9D, '\u{0161}'),
+    (0x9E, '\u{017E}'),
+    (0xA0, '\u{20AC}'),
+];
+
+/// Ein Byte in PDFDocEncoding als Zeichen.
+fn pdfdoc_char(byte: u8) -> char {
+    PDFDOC_ABWEICHUNGEN
+        .iter()
+        .find(|(b, _)| *b == byte)
+        .map_or(byte as char, |(_, c)| *c)
+}
+
 /// Dekodiert eine PDF-Zeichenkette.
 ///
 /// UTF-16 wird am BOM erkannt (`FE FF`, in freier Wildbahn auch `FF FE`);
-/// alles andere wird als PDFDocEncoding gelesen, das im hier interessanten
-/// Bereich mit Latin-1 zusammenfällt.
+/// alles andere wird als PDFDocEncoding gelesen — Latin-1 mit den
+/// Abweichungen aus [`PDFDOC_ABWEICHUNGEN`].
 pub fn decode_pdf_string(raw: &[u8]) -> String {
     if raw.len() >= 2 && raw[0] == 0xfe && raw[1] == 0xff {
         let units: Vec<u16> = raw[2..]
@@ -1787,7 +1848,7 @@ pub fn decode_pdf_string(raw: &[u8]) -> String {
             .collect();
         String::from_utf16_lossy(&units)
     } else {
-        raw.iter().map(|&b| b as char).collect()
+        raw.iter().map(|&b| pdfdoc_char(b)).collect()
     }
 }
 

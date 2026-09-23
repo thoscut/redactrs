@@ -338,6 +338,26 @@ seiner neuen Zeile in der Probenliste.
   Mutationsnachweis: `RunLengthDecode` wieder roh gebucht → rot (vom
   Speicherlimit getötet).
 
+* **⚠ Sicherheit: das Orakel las PDFDocEncoding als Latin-1 — ein `€`, ein
+  Gedankenstrich, ein typografischer Apostroph im Suchbegriff wurden nicht
+  gefunden, ohne Meldung** (Register #81, Prüfer D). PDF 32000-1, Anhang D.2
+  weicht im Block 0x80–0xA0 und bei den Akzenten 0x18–0x1F von Latin-1 ab:
+  dort stehen `•`, `–`, `—`, `…`, die typografischen Anführungszeichen, `™`,
+  `ﬁ`, `ﬂ` und `€` (0xA0 — nicht das geschützte Leerzeichen). Der Dekoder
+  des Orakels las jedes Byte als Latin-1; `--check-leaks "Betrag 5 €"` an
+  einer Datei, die `(Betrag 5 \240)` trägt, sagte „nicht gefunden“ mit
+  Rückgabewert 0 — auch an der Ausgabedatei des Schwärzungslaufs, wenn der
+  Träger ein `/ActualText` ist, das der Lauf nicht räumt. Jetzt liest
+  `decode_pdf_string` die Abweichungen nach Anhang D.2; dieselbe Funktion
+  liest die Zeichenketten der Analyse und den Spiegelvergleich des
+  Redaktors. Belege:
+  `zo_d_altgeneration_und_kodierung::zo_d4_pdfdoc_zeichen_stilles_leck` (je
+  Begriff roh und oktal maskiert — die maskierte Form trifft keine Rohsicht,
+  nur den Dekoder) und
+  `zo_d_orakel_am_binary::zo_d12_pdfdoc_in_der_ausgabedatei_stilles_leck`
+  (am gebauten Binary, an der Ausgabedatei); beide vorher absichtlich rot.
+  Mutationsnachweis: jedes Byte wieder Latin-1 → beide rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

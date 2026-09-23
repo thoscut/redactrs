@@ -3034,6 +3034,38 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "gilt weiter nur `LZWDecode` und `ASCII85Decode`.",
         "Filternamen der Norm, keine Messung",
     ),
+    (
+        "gefunden, ohne Meldung** (Register #81, Prüfer D). PDF 32000-1, Anhang D.2 weicht im Block 0x80–0xA0 und bei den Akzenten 0x18–0x1F von Latin-1 ab",
+        "Registernummer, Norm, Anhang und Byteblöcke der Kodierung, keine Messung",
+    ),
+    (
+        "`ﬁ`, `ﬂ` und `€` (0xA0 — nicht das geschützte Leerzeichen)",
+        "ein Byte der Kodierung, keine Messung",
+    ),
+    (
+        "Latin-1; `--check-leaks \"Betrag 5 €\"` an einer Datei, die `(Betrag 5 \\240)` trägt, sagte „nicht gefunden“ mit Rückgabewert 0",
+        "der Suchbegriff des Belegs, seine oktale Schreibweise und der Rueckgabewert (in zo_d gebunden), keine Messung",
+    ),
+    (
+        "das Orakel las PDFDocEncoding als Latin-1 —",
+        "der Name einer Kodierung, keine Messung",
+    ),
+    (
+        "die Abweichungen nach Anhang D.2; dieselbe Funktion",
+        "ein Anhang der Norm, keine Messung",
+    ),
+    (
+        "`zo_d_altgeneration_und_kodierung::zo_d4_pdfdoc_zeichen_stilles_leck`",
+        "ein Testname (Befund D4), keine Messung",
+    ),
+    (
+        "`zo_d_orakel_am_binary::zo_d12_pdfdoc_in_der_ausgabedatei_stilles_leck`",
+        "ein Testname (Befund D4 am Binary), keine Messung",
+    ),
+    (
+        "Mutationsnachweis: jedes Byte wieder Latin-1 → beide rot.",
+        "der Name einer Kodierung unter Mutation, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

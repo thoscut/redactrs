@@ -598,15 +598,21 @@ fn zo_d3_altgeneration_zeichenketten_stilles_leck() {
 /// ohne Änderung in die Ausgabedatei geschrieben, wenn es einen Träger hat,
 /// den er nicht ausräumt (etwa ein `/ActualText` in einem Property-Dictionary
 /// des Seiteninhalts) — hier steht es an einer Anmerkung, weil es um das
-/// Orakel geht.
+/// Orakel geht. **Behoben** (Register #81): `decode_pdf_string` liest die
+/// Abweichungen von Latin-1 nach Anhang D.2. Je Begriff zwei Schreibweisen:
+/// die Bytes roh im Literal, und oktal maskiert (`\240`) — die zweite trifft
+/// keine Rohsicht, nur der Dekoder der Objektsicht.
 #[test]
-#[ignore = "offen: Register #81 PDFDocEncoding 0x80-0xA0 — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn zo_d4_pdfdoc_zeichen_stilles_leck() {
     // (Suchbegriff, Zeichenkette in PDFDocEncoding, roh)
     let faelle: Vec<(&str, Vec<u8>)> = vec![
         ("Betrag 5 €", b"(Betrag 5 \xA0 an Max)".to_vec()),
+        ("Betrag 5 €", b"(Betrag 5 \\240 an Max)".to_vec()),
         ("Müller–Meier", b"(Konto M\xFCller\x85Meier)".to_vec()),
+        ("Müller–Meier", b"(Konto M\\374ller\\205Meier)".to_vec()),
         ("O’Brien", b"(Inhaber O\x90Brien)".to_vec()),
+        ("O’Brien", b"(Inhaber O\\220Brien)".to_vec()),
+        ("Preis 1 000 €", b"(Preis 1\x20000\x20\xA0)".to_vec()),
     ];
     let mut still = Vec::new();
     for (needle, raw) in faelle {
@@ -634,7 +640,7 @@ fn zo_d4_pdfdoc_zeichen_stilles_leck() {
             "{needle}: Gegenprobe UTF-16BE muss gefunden werden"
         );
         if ist_still(&check(&pdf, needle)) {
-            still.push(needle);
+            still.push(String::from_utf8_lossy(&raw).into_owned());
         }
     }
     assert!(

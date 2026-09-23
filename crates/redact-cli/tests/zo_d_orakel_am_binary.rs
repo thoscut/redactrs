@@ -356,7 +356,6 @@ fn zo_d11_altgeneration_am_binary_stilles_leck() {
 /// `NICHT GEPRÜFT` (Rückgabewert 3), weil er ihn anders liest als die Glyphen.
 /// Das Orakel, das die Ausgabe nachprüfen soll, schweigt.
 #[test]
-#[ignore = "offen: Register #81 PDFDocEncoding 0x80-0xA0 — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn zo_d12_pdfdoc_in_der_ausgabedatei_stilles_leck() {
     let dir = workdir("pdfdoc");
     let content = b"BT /F1 10 Tf 72 700 Td /Span << /ActualText (Betrag 5 \xA0) >> BDC \
