@@ -2689,6 +2689,26 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "ein Raster der Seite (Tabelle 30)",
         "die Nummer einer Tabelle der PDF-Norm, keine Messung",
     ),
+    (
+        "**⚠ Sicherheit: 13 Schlüssel an Katalog, Seiten und Objekten trugen",
+        "zaehlt die Schluessel des Befundes, keine Messung",
+    ),
+    (
+        "Klartext durch den Metadatenlauf** (Register #70, Prüfer B)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "Alle mit Rückgabewert 0 und leerem Bericht",
+        "der Rueckgabewert des Binaries, in zo_b gebunden, keine Messgroesse",
+    ),
+    (
+        "Belege: dreizehn `b_*`-Tests in",
+        "zaehlt Tests, keine Messung",
+    ),
+    (
+        "Katalogschleife entfernt → sechs davon rot",
+        "zaehlt rote Tests unter Mutation, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

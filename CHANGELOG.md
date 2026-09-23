@@ -114,6 +114,26 @@ seiner neuen Zeile in der Probenliste.
   Beleg: `zo_a_bild_ohne_zeichner::vorschaubild_der_seite_ueberlebt_den_lauf_ohne_warnung`.
   Mutationsnachweis: die `take`-Zeile für `/Thumb` entfernt → rot.
 
+* **⚠ Sicherheit: 13 Schlüssel an Katalog, Seiten und Objekten trugen
+  Klartext durch den Metadatenlauf** (Register #70, Prüfer B). Der Lauf
+  kannte am Katalog, an der Seite und an den übrigen Objekten je eine feste
+  Liste; alles andere hielt das Aufräumen am Leben, weil es erreichbar war.
+  Was das im Feld heißt: `/Perms` hält das Signatur-Dictionary jeder von
+  Acrobat zertifizierten Datei ein zweites Mal — der Feldwert fiel,
+  `/Reason`, `/Location`, `/ContactInfo` und `/Name` blieben; `/DSS` trägt
+  Zertifikate mit Unterzeichnernamen; `/PageLabels` das Präfix, das jeder
+  Betrachter zeigt; `/OutputIntents` die Texte jeder PDF/A- und PDF/X-Datei;
+  `/DPartRoot` die PDF/VT-Metadaten des Kontoauszugdrucks mit Name und
+  Konto des Empfängers; `/Threads` und `/B`, `/Collection`, `/URI /Base`,
+  `/VP`, `/PresSteps`, `/Ref` (ein Referenz-XObject hält eine eingebettete
+  Datei), `/OPI`, und `/SV`, `/Lock` am Signaturfeld. Alle mit Rückgabewert
+  0 und leerem Bericht. Jetzt fallen sie — die Präfixe und Texte in
+  `/PageLabels` und `/OutputIntents` einzeln, damit Nummerierung und
+  Farbprofil bleiben, alles andere ganz — und der Bericht nennt sie
+  („Beiwerk mit Klartext“). Belege: dreizehn `b_*`-Tests in
+  `zo_b_traeger`, jeder mit seinem Träger; Mutationsnachweis: die
+  Katalogschleife entfernt → sechs davon rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

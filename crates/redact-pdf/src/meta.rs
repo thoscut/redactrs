@@ -293,8 +293,9 @@ pub struct MetadataReport {
     /// einer: `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`,
     /// `/OverlayText`, `/NM`, `/DS` sowie `/CA`, `/RC`, `/AC` in `/MK`,
     /// dazu `/Alt` und `/ActualText` an jedem erreichten Dictionary und das
-    /// Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`, `/3DD`, `/3DV`
-    /// und `/RO`.
+    /// Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`, `/3DD`, `/3DV`,
+    /// `/RO` sowie `/SV` (Seed-Value eines Signaturfelds: `/Reasons`,
+    /// `/LegalAttestation`) und `/Lock` (`/Fields`).
     pub annotation_texts_cleared: usize,
     /// Seiten **außerhalb des Seitenbaums**, die ihren Inhalt verloren haben.
     ///
@@ -316,6 +317,18 @@ pub struct MetadataReport {
     /// Seite ist ohnehin falsch; es fällt, und der Betrachter rechnet sich
     /// eines aus dem Inhalt aus.
     pub thumbnails_removed: usize,
+    /// Beiwerk an Katalog, Seiten und Objekten, das Klartext tragen kann und
+    /// bis zur Spur-A-Runde 1 (Register #70) stehen blieb — je Schlüssel
+    /// einer: am Katalog `/Perms` (hält das Signatur-Dictionary samt
+    /// `/Reason`, `/Location`, `/ContactInfo`), `/DSS` (Zertifikate mit
+    /// Unterzeichnernamen), `/Threads` (Artikel mit `/I /Title`),
+    /// `/Collection` (Portfolio-Schema), `/URI` (`/Base`), `/DPartRoot`
+    /// (PDF/VT-Metadaten `/DPM` — im Kontoauszugdruck Name und Konto des
+    /// Empfängers), die Präfixe `/P` in `/PageLabels` und die Texte `/Info`,
+    /// `/OutputCondition`, `/RegistryName` in `/OutputIntents`; an Seiten
+    /// `/B`, `/VP`, `/PresSteps`, `/DPart`; an Objekten `/Ref` (ein
+    /// Referenz-XObject hält eine eingebettete Datei) und `/OPI`.
+    pub beiwerk_removed: usize,
 }
 
 impl MetadataReport {
@@ -395,8 +408,13 @@ impl MetadataReport {
         );
         count(
             self.annotation_texts_cleared,
-            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO)",
-            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO)",
+            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO, /SV, /Lock)",
+            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO, /SV, /Lock)",
+        );
+        count(
+            self.beiwerk_removed,
+            "Beiwerk mit Klartext (/Perms, /DSS, /Threads, /B, /Collection, /URI, /DPartRoot, /DPart, /PageLabels-Präfix, /OutputIntents-Text, /VP, /PresSteps, /Ref, /OPI)",
+            "Beiwerk mit Klartext (/Perms, /DSS, /Threads, /B, /Collection, /URI, /DPartRoot, /DPart, /PageLabels-Präfix, /OutputIntents-Text, /VP, /PresSteps, /Ref, /OPI)",
         );
         count(
             self.thumbnails_removed,
@@ -425,6 +443,7 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     let mut xmp = Tally::default();
     let mut piece_info = Tally::default();
     let mut thumbs = Tally::default();
+    let mut beiwerk = Tally::default();
     let mut struct_tree = Tally::default();
     let mut names = Tally::default();
     let mut acroform = Tally::default();
@@ -504,7 +523,15 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
             take(catalog, b"AA", &mut additional_actions);
             take(catalog, b"OCProperties", &mut optional_content);
             catalog.remove(b"Outlines");
+            // Beiwerk mit Klartext, bis zur Spur-A-Runde 1 übersehen
+            // (Register #70). `/Perms` hält das Signatur-Dictionary ein
+            // zweites Mal — der Feldwert fällt, der Halter hier nicht.
+            for key in CATALOG_BEIWERK_KEYS {
+                take(catalog, key, &mut beiwerk);
+            }
         }
+        clean_page_labels(doc, catalog_id, &mut beiwerk);
+        clean_output_intents(doc, catalog_id, &mut beiwerk);
     }
 
     // --- Träger: Annotationen, Felder, Feldwerte ------------------------
@@ -524,6 +551,9 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
             take(page, b"AA", &mut additional_actions);
             // Das Vorschaubild zeigt die Seite von vorher (Register #74).
             take(page, b"Thumb", &mut thumbs);
+            for key in PAGE_BEIWERK_KEYS {
+                take(page, key, &mut beiwerk);
+            }
         }
         cleaned += clean_annotations(doc, *page_id, &mut visited);
     }
@@ -550,7 +580,13 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     //
     // XMP und `/PieceInfo` hängen nicht nur am Katalog und an den Seiten,
     // und `/AF` ist der zweite Halter jeder eingebetteten Datei.
-    clear_object_metadata(doc, &mut xmp, &mut piece_info, &mut file_specs);
+    clear_object_metadata(
+        doc,
+        &mut xmp,
+        &mut piece_info,
+        &mut file_specs,
+        &mut beiwerk,
+    );
 
     // --- Lesezeichen ----------------------------------------------------
     //
@@ -595,6 +631,7 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     report.xmp_removed = xmp.settled(doc, &chains) > 0;
     report.piece_info_removed = piece_info.settled(doc, &chains);
     report.thumbnails_removed = thumbs.settled(doc, &chains);
+    report.beiwerk_removed = beiwerk.settled(doc, &chains);
     report.struct_tree_removed = struct_tree.settled(doc, &chains) > 0;
     report.names_removed = names.settled(doc, &chains);
     report.acroform_removed = acroform.settled(doc, &chains) > 0;
@@ -1031,13 +1068,17 @@ const ALTERNATE_TEXT_KEYS: [&[u8]; 2] = [b"Alt", b"ActualText"];
 /// nichts, kein Betrachter bricht daran ab, und der Seitentext bleibt
 /// unverändert (Beleg:
 /// `zg_r3_beiwerk::movie_annotation_ohne_movie_laedt_und_behaelt_den_seitentext`).
-const ANNOTATION_PLATE_KEYS: [&[u8]; 6] = [
+const ANNOTATION_PLATE_KEYS: [&[u8]; 8] = [
     b"Movie",
     b"Measure",
     b"RichMediaContent",
     b"3DD",
     b"3DV",
     b"RO",
+    // Seed-Value und Sperre eines Signaturfelds (Tabellen 233/234): `/SV
+    // /Reasons`, `/SV /LegalAttestation`, `/Lock /Fields` (Register #70).
+    b"SV",
+    b"Lock",
 ];
 
 /// Dateiverweise an einem Träger: `/AF` (zugeordnete Datei, PDF 2.0, 14.13 —
@@ -1557,6 +1598,168 @@ fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> Vec<Tally> 
 }
 
 /// Nimmt **jedem** Objekt der Datei seine Metadaten-Anhängsel: den
+/// Katalogschlüssel mit Klartext, die bis zur Spur-A-Runde 1 stehen blieben
+/// (Register #70). Jeder fällt ganz:
+///
+/// * `/Perms` — hält das Signatur-Dictionary (Tabelle 258) ein zweites Mal;
+///   `/V` am Feld fiel, `/Reason`, `/Location`, `/ContactInfo`, `/Name` und
+///   `/Reference … /Msg` überlebten. Jedes von Acrobat zertifizierte
+///   Dokument hat es. Eine Signatur ist nach der Schwärzung ohnehin
+///   ungültig.
+/// * `/DSS` — Zertifikatsströme mit Unterzeichnernamen (PAdES-LTV).
+/// * `/Threads` — Artikel mit `/I` (`/Title`, `/Author`, `/Subject`); die
+///   Perlen hängen zusätzlich an der Seite unter `/B`.
+/// * `/Collection` — Portfolio-Schema (`/Schema … /N`, `/D`, `/Folders
+///   /Name /Desc`); die Dateien selbst fielen schon mit `/Names`.
+/// * `/URI` — `/Base` (`https://…/kunden/<Konto>/`).
+/// * `/DPartRoot` — PDF/VT-Dokumentteile mit `/DPM` (PDF 2.0, 14.12); im
+///   Kontoauszugdruck stehen dort Name, Adresse und Konto des Empfängers.
+///   Die Seite hält ihren Teil zusätzlich unter `/DPart`.
+const CATALOG_BEIWERK_KEYS: [&[u8]; 6] = [
+    b"Perms",
+    b"DSS",
+    b"Threads",
+    b"Collection",
+    b"URI",
+    b"DPartRoot",
+];
+
+/// Seitenschlüssel mit Klartext (Register #70): `/B` (Artikelperlen), `/VP`
+/// (Viewports, Tabelle 260 — `/Name` und `/Measure /R`, Geo-PDF), `/PresSteps`
+/// (Navigationsknoten mit Aktionen `/NA`, `/PA` außerhalb von `/AA`), `/DPart`
+/// (siehe `/DPartRoot`).
+const PAGE_BEIWERK_KEYS: [&[u8]; 4] = [b"B", b"VP", b"PresSteps", b"DPart"];
+
+/// Objektschlüssel mit Klartext (Register #70): `/Ref` an einem
+/// Form-XObject (Referenz-XObject, 8.10.4 — `/F` ist ein Filespec mit `/EF`,
+/// der vierte Weg für eine eingebettete Datei neben `/Names`, `/FS`, `/AF`)
+/// und `/OPI` an einem Bild (Tabelle 397: `/F`, `/Comments`).
+const OBJECT_BEIWERK_KEYS: [&[u8]; 2] = [b"Ref", b"OPI"];
+
+/// Nimmt den Seitenbeschriftungen ihr Präfix `/P` — den einzigen Klartext im
+/// Zahlenbaum `/PageLabels` (Tabelle 159). `/S` und `/St` bleiben: der
+/// Betrachter zählt weiter römisch oder arabisch, nur ohne
+/// „Kontoauszug <Konto> – “ davor.
+fn clean_page_labels(doc: &mut Document, catalog_id: ObjectId, beiwerk: &mut Tally) {
+    const MAX_DEPTH: usize = 32;
+    let Some(root) = doc
+        .get_dictionary(catalog_id)
+        .ok()
+        .and_then(|c| c.get(b"PageLabels").ok().cloned())
+    else {
+        return;
+    };
+    let mut stack: Vec<(Object, usize)> = vec![(root, 0)];
+    let mut seen: BTreeSet<ObjectId> = BTreeSet::new();
+    while let Some((node, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            continue;
+        }
+        let node_id = match node {
+            Object::Reference(id) if seen.insert(id) => Some(id),
+            Object::Reference(_) => continue,
+            _ => None,
+        };
+        let Some(Object::Dictionary(dict)) = resolve(doc, &node).cloned() else {
+            continue;
+        };
+        if let Some(Object::Array(kids)) = value_of(&dict, b"Kids") {
+            stack.extend(kids.iter().map(|k| (k.clone(), depth + 1)));
+        }
+        let Some(Object::Array(nums)) = value_of(&dict, b"Nums") else {
+            continue;
+        };
+        // Die Werte des Zahlenbaums: jedes zweite Element.
+        for value in nums.iter().skip(1).step_by(2) {
+            match value {
+                Object::Reference(id) => {
+                    if let Ok(label) = doc.get_dictionary_mut(*id) {
+                        take(label, b"P", beiwerk);
+                    }
+                }
+                Object::Dictionary(_) => {
+                    // Direkt im Feld: das Feld gehört dem Knoten, der Knoten
+                    // steht entweder als Objekt oder direkt im Katalog.
+                    let mut neu = dict.clone();
+                    if let Ok(Object::Array(items)) = neu.get_mut(b"Nums") {
+                        for item in items.iter_mut() {
+                            if let Object::Dictionary(label) = item {
+                                take(label, b"P", beiwerk);
+                            }
+                        }
+                    }
+                    match node_id {
+                        Some(id) => {
+                            doc.objects.insert(id, Object::Dictionary(neu));
+                        }
+                        None => {
+                            if let Ok(catalog) = doc.get_dictionary_mut(catalog_id) {
+                                catalog.set("PageLabels", Object::Dictionary(neu));
+                            }
+                        }
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Nimmt jedem `/OutputIntents`-Eintrag (Tabelle 365) seine Texte `/Info`,
+/// `/OutputCondition` und `/RegistryName`. `/OutputConditionIdentifier` und
+/// `/DestOutputProfile` bleiben — sie machen die Datei PDF/A oder PDF/X, und
+/// der Bezeichner ist ein Normname (`sRGB IEC61966-2.1`), kein Freitext.
+fn clean_output_intents(doc: &mut Document, catalog_id: ObjectId, beiwerk: &mut Tally) {
+    const TEXT_KEYS: [&[u8]; 3] = [b"Info", b"OutputCondition", b"RegistryName"];
+    let Some(intents) = doc
+        .get_dictionary(catalog_id)
+        .ok()
+        .and_then(|c| c.get(b"OutputIntents").ok().cloned())
+    else {
+        return;
+    };
+    let array_id = match &intents {
+        Object::Reference(id) => Some(*id),
+        _ => None,
+    };
+    let Some(Object::Array(items)) = resolve(doc, &intents).cloned() else {
+        return;
+    };
+    let mut direct = items.clone();
+    for (i, item) in items.iter().enumerate() {
+        match item {
+            Object::Reference(id) => {
+                if let Ok(intent) = doc.get_dictionary_mut(*id) {
+                    for key in TEXT_KEYS {
+                        take(intent, key, beiwerk);
+                    }
+                }
+            }
+            Object::Dictionary(_) => {
+                if let Object::Dictionary(intent) = &mut direct[i] {
+                    for key in TEXT_KEYS {
+                        take(intent, key, beiwerk);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if direct != items {
+        match array_id {
+            Some(id) => {
+                doc.objects.insert(id, Object::Array(direct));
+            }
+            None => {
+                if let Ok(catalog) = doc.get_dictionary_mut(catalog_id) {
+                    catalog.set("OutputIntents", Object::Array(direct));
+                }
+            }
+        }
+    }
+}
+
 /// Leert jede Seite, die **nicht im Seitenbaum** hängt.
 ///
 /// `/Type /Page` ohne Platz in `/Kids`: eine gelöschte Seite, die ein
@@ -1627,6 +1830,7 @@ fn clear_object_metadata(
     xmp: &mut Tally,
     piece_info: &mut Tally,
     files: &mut Tally,
+    beiwerk: &mut Tally,
 ) {
     let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
     for id in ids {
@@ -1641,6 +1845,9 @@ fn clear_object_metadata(
         take(dict, b"Metadata", xmp);
         take(dict, b"PieceInfo", piece_info);
         take_file_spec(dict, b"AF", files);
+        for key in OBJECT_BEIWERK_KEYS {
+            take(dict, key, beiwerk);
+        }
     }
 }
 

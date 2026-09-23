@@ -515,7 +515,6 @@ fn a_info_names_javascript_openaction_aa_xfa() {
 /// Zweite Form: `/Perms /UR3` (Usage Rights) mit `/Reference … /TransformParams
 /// /Msg` (Tabelle 255) — ebenfalls Text.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_perms_haelt_die_signatur_samt_grund_und_ort() {
     for form in ["DocMDP", "UR3"] {
         let mut d = probe();
@@ -561,7 +560,6 @@ fn b_perms_haelt_die_signatur_samt_grund_und_ort() {
 /// dieselben Ströme noch einmal. Nach einer Schwärzung ist jede Signatur
 /// ohnehin gebrochen — die Ströme tragen nur noch Text.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_dss_zertifikate_bleiben() {
     let mut d = probe();
     let cert = d.add(Object::Stream(Stream::new(dictionary! {}, {
@@ -587,7 +585,6 @@ fn b_dss_zertifikate_bleiben() {
 /// in der Seitenanzeige zeigt („Anhang A-1“). Frei wählbarer Text, in keinem
 /// Strom, an keiner Annotation.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_seitenbeschriftung_praefix_bleibt() {
     let mut d = probe();
     d.catalog_set(
@@ -605,7 +602,6 @@ fn b_seitenbeschriftung_praefix_bleibt() {
 /// Schlüssel wie `/Info`, das fällt. Der Thread hängt am Katalog **und** über
 /// den Bead (`/B` an der Seite, `/T` am Bead) an der Seite.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_artikel_info_bleibt() {
     let mut d = probe();
     let thread = d.doc.new_object_id();
@@ -639,7 +635,6 @@ fn b_artikel_info_bleibt() {
 /// eingebetteten Dateien selbst fallen mit `/Names`, das Schema bleibt. In
 /// PDF 2.0 dazu `/Folders` mit `/Name` und `/Desc`.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_portfolio_schema_bleibt() {
     let mut d = probe();
     d.catalog_set(
@@ -660,7 +655,6 @@ fn b_portfolio_schema_bleibt() {
 /// PDF/A- und PDF/X-Datei trägt sie; `/OutputCondition`, `/Info` und
 /// `/RegistryName` sind Textstrings.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_outputintent_info_bleibt() {
     let mut d = probe();
     d.catalog_set(
@@ -680,7 +674,6 @@ fn b_outputintent_info_bleibt() {
 /// Pfad, gegen den jeder relative Link aufgelöst wird. Die Links fallen, die
 /// Basis bleibt.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_uri_base_bleibt() {
     let mut d = probe();
     d.catalog_set(
@@ -696,7 +689,6 @@ fn b_uri_base_bleibt() {
 /// Kontoauszügen genau Name, Adresse und Kontonummer des Empfängers. Die
 /// Seite zeigt mit `/DPart` zurück.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_dokumentteile_dpm_bleiben() {
     let mut d = probe();
     let root = d.doc.new_object_id();
@@ -725,7 +717,6 @@ fn b_dokumentteile_dpm_bleiben() {
 /// Text, `/Measure` dasselbe Dictionary, das an einer Annotation fällt — an
 /// der Seite fällt es nicht. Geo-PDFs tragen dort `/GCS /WKT` mit Text.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_viewport_name_und_measure_bleiben() {
     let mut d = probe();
     d.page_dict_set(
@@ -744,7 +735,6 @@ fn b_viewport_name_und_measure_bleiben() {
 /// `/NA` und `/PA` sind Aktionen — mit JavaScript — an einem Ort, den weder
 /// `/AA` noch der Trägerlauf sieht.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_navigationsknoten_aktion_bleibt() {
     let mut d = probe();
     d.page_dict_set(
@@ -764,7 +754,6 @@ fn b_navigationsknoten_aktion_bleibt() {
 /// ein Filespec darf die Datei unter `/EF` einbetten. Der vierte Weg für eine
 /// eingebettete Datei, neben `/Names`, `/FS` und `/AF` (alle drei fallen).
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_referenz_xobject_traegt_eine_eingebettete_datei() {
     let mut d = probe();
     let fs = filespec(&mut d, &format!("Kontoauszug {SECRET}.pdf"));
@@ -790,7 +779,6 @@ fn b_referenz_xobject_traegt_eine_eingebettete_datei() {
 /// **OPI** (`/OPI`, 14.11.7, Tabelle 397/398) am Bild-XObject: der Verweis
 /// auf die Druckvorlage, mit Dateinamen (`/F`) und `/Comments`.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_opi_dateiname_bleibt() {
     let mut d = probe();
     let bild = d.add(Object::Stream(Stream::new(
@@ -815,7 +803,6 @@ fn b_opi_dateiname_bleibt() {
 /// Feldnamen. Das Widget steht in `/Annots`, der Lauf erreicht es — und nimmt
 /// `/V`, `/T`, `/TU`; diese beiden Schlüssel nicht.
 #[test]
-#[ignore = "offen: Register #70 Katalog-/Seiten-/Objektschluessel — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_seed_value_und_lock_am_signaturfeld_bleiben() {
     let mut d = probe();
     let feld = d.add(Object::Dictionary(dictionary! {
