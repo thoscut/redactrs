@@ -146,7 +146,11 @@ seiner neuen Zeile in der Probenliste.
   die Alphaebene hinaus, die `Work::fill` unter der Zone auf undurchsichtig
   setzt — außerhalb der Zone dieselbe Maske, darunter die Schwärzung, als
   `/SMask` in Bildauflösung. Der Preis, dass die Maske ihre eigene Auflösung
-  verliert, fällt nur bei einem Bild an, das wirklich geschwärzt wurde. Beleg:
+  verliert, fällt nur bei einem Bild an, das wirklich geschwärzt wurde. Eine
+  Maske, die sich nicht dekodieren ließ, kann nicht zur Alphaebene werden;
+  sie bleibt als `/Mask` stehen (sonst würden die verdeckten Bildpunkte
+  sichtbar), und der Lauf warnt, dass ihre Bits unter der Schwärzung stehen
+  bleiben — vorher ging sie stumm mit. Beleg:
   `zo_a_maske_und_filter::stencil_maske_behaelt_unter_der_zone_ihre_bits`
   (Orakel und Alphaebene). Mutationsnachweis: die Bedingung `filled == 0`
   entfernt → rot.

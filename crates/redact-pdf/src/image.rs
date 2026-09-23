@@ -337,6 +337,15 @@ fn write_work(
     if work.filled == 0 {
         return Ok(None);
     }
+    if work.mask.is_some() && work.mask_unread {
+        outcome.warnings.push(format!(
+            "Bild {} trägt einen /Mask-Strom, der sich nicht dekodieren ließ. Er kommt \
+             unverändert mit — seine Bits (die Form, die das Bild malt) bleiben unter der \
+             Schwärzung stehen; nur die Farben darunter sind geschwärzt. Trägt die Maske \
+             selbst den Text, steht er noch in der Datei.",
+            label_names(&work.targets)
+        ));
+    }
     match key {
         Key::Inline(target, op_index) => {
             let (dict, data) = encode_inline(&work)?;
@@ -926,6 +935,11 @@ struct Work {
     /// kein `/Mask`, oder die Maske steckt bereits im Alphakanal und wird von
     /// dort neu aufgebaut.
     mask: Option<Object>,
+    /// `true`, wenn der Stencil-Strom hinter `mask` **nicht** gelesen werden
+    /// konnte: dann trägt der Alphakanal ihn nicht, er muss unverändert
+    /// mitkommen — und seine Bits unter der Zone bleiben, was zu sagen ist
+    /// (Register #77).
+    mask_unread: bool,
 }
 
 /// Vermerkt eine einzelne Platzierung als „hier sind Bildpunkte gefallen".
@@ -1304,6 +1318,7 @@ fn fill_page(
                          entsteht."
                     )));
                 }
+                let mask_unread = raster.mask_unread;
                 let work = Work {
                     width: raster.width,
                     height: raster.height,
@@ -1313,6 +1328,7 @@ fn fill_page(
                     targets: BTreeSet::new(),
                     filled: 0,
                     mask,
+                    mask_unread,
                 };
                 budget.settle(reserved, &work);
                 work
@@ -1791,7 +1807,10 @@ fn encode_xobject(work: &Work) -> Encoded {
     // `/SMask` in die Ausgabe. Diese Verzweigung darf deshalb nie eine
     // Alphaebene wegwerfen, die etwas anderes sagt als das `/Mask`.
     if let Some(mask) = &work.mask {
-        if work.filled == 0 {
+        // Eine Maske, die wir nicht lesen konnten, steckt nicht im Alphakanal;
+        // sie muss mitkommen, sonst stünden die verdeckten Bildpunkte sichtbar
+        // da. Dass ihre Bits unter der Zone bleiben, sagt `write_work`.
+        if work.filled == 0 || work.mask_unread {
             dict.set("Mask", mask.clone());
             return Encoded {
                 dict,
@@ -2068,6 +2087,7 @@ mod tests {
             targets: BTreeSet::new(),
             filled: 0,
             mask: None,
+            mask_unread: false,
         };
         let (space, data) = samples(&work);
         assert_eq!(space, b"DeviceGray");
@@ -2086,6 +2106,7 @@ mod tests {
             targets: BTreeSet::new(),
             filled: 0,
             mask: None,
+            mask_unread: false,
         };
         // Bit 0 = 0 (malt), Bit 1 = 1 (malt nicht), Rest Füllbits.
         assert_eq!(mask_bits(&work), vec![0b0111_1111]);

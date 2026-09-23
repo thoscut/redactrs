@@ -224,6 +224,11 @@ pub struct RasterImage {
     /// `true`, wenn das Bild nicht dekodiert werden konnte und hier nur eine
     /// Ersatzfläche steht.
     pub placeholder: bool,
+    /// `true`, wenn das Bild einen Stencil-`/Mask`-Strom hat, der sich
+    /// **nicht** lesen ließ — dann trägt der Alphakanal die Maske nicht, und
+    /// `crate::image` muss den Strom unverändert mitschreiben (Register #77:
+    /// nur eine gelesene Maske lässt sich unter der Zone schwärzen).
+    pub mask_unread: bool,
 }
 
 impl RasterImage {
@@ -234,6 +239,7 @@ impl RasterImage {
             height: 1,
             rgba: color.to_vec(),
             placeholder,
+            mask_unread: false,
         }
     }
 
@@ -910,6 +916,7 @@ fn decode_image_inner(
                         height,
                         rgba,
                         placeholder: false,
+                        mask_unread: false,
                     },
                     None => {
                         return (
@@ -949,6 +956,7 @@ fn decode_image_inner(
                             height,
                             rgba,
                             placeholder: false,
+                            mask_unread: false,
                         }
                     }
                     None => {
@@ -1333,6 +1341,7 @@ fn decode_jpeg(data: &[u8], decode: Option<&[f64]>) -> Option<RasterImage> {
         height,
         rgba,
         placeholder: false,
+        mask_unread: false,
     })
 }
 
@@ -1410,6 +1419,9 @@ fn apply_soft_mask(
     );
     if mask.placeholder || mask.width == 0 || mask.height == 0 {
         if is_stencil {
+            // Die Maske bleibt beim Neukodieren stehen; dass sie nicht im
+            // Alphakanal steckt, muss `crate::image` wissen (Register #77).
+            image.mask_unread = true;
             return None;
         }
         return Some(format!(
