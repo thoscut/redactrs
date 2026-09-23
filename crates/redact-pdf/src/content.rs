@@ -670,7 +670,19 @@ struct Budget {
     /// zweimal abgelaufen, dasselbe Formular zwanzigmal unter derselben
     /// Umgebung weiterhin einmal. Bis Fix-Runde 6 stand hier nur der Strom —
     /// der zweite Spiegel blieb dann mit seinem Klartext stehen (Befund R1-2).
-    scanned_marked: HashSet<(StreamKey, Option<ObjectId>)>,
+    ///
+    /// Der dritte Teil des Schlüssels ist leer, außer ein Strom bringt eigene
+    /// Ressourcen mit und benennt trotzdem eine Eigenschaftsliste, die sie
+    /// nicht kennen (Register #67): dann löst sich der Name — wie in Poppler —
+    /// in den Umgebungen der **Aufrufer** auf, und dasselbe Formular unter zwei
+    /// Seiten sieht zwei Listen. Dann tragen die Eigentümer der äußeren
+    /// Umgebungen den Schlüssel mit.
+    scanned_marked: HashSet<(StreamKey, Option<ObjectId>, Vec<Option<ObjectId>>)>,
+    /// Je Strom und Eigentümer: benennt er eine Eigenschaftsliste, die seine
+    /// wirksamen Ressourcen nicht kennen? Einmal gerechnet — die Frage geht
+    /// den ganzen Strom ab, und der wird unter derselben Umgebung beliebig oft
+    /// platziert.
+    names_beyond: HashMap<(StreamKey, Option<ObjectId>), bool>,
     /// Verbleibende Spiegel-Formular-Paare, die [`scan_marked_text`] noch
     /// **aufnehmen** darf — die Decke ist [`MAX_MIRROR_FORM_PLACEMENTS`].
     ///
@@ -723,6 +735,7 @@ impl Default for Budget {
             effort: ScanEffort::default(),
             looked_at_type3: HashSet::new(),
             scanned_marked: HashSet::new(),
+            names_beyond: HashMap::new(),
             mirror_pairs: MAX_MIRROR_FORM_PLACEMENTS,
             mirror_expansions: MAX_MIRROR_FORM_PLACEMENTS,
             mirror_shows: MAX_MIRROR_FORM_PLACEMENTS,
@@ -1022,8 +1035,33 @@ impl Budget {
 
     /// `true` beim **ersten** Spiegel-Durchlauf über diesen Strom in dieser
     /// Ressourcenumgebung — siehe [`Budget::scanned_marked`].
-    fn first_marked_scan(&mut self, stream: StreamKey, owner: Option<ObjectId>) -> bool {
-        self.scanned_marked.insert((stream, owner))
+    fn first_marked_scan(
+        &mut self,
+        stream: StreamKey,
+        owner: Option<ObjectId>,
+        outer_owners: Vec<Option<ObjectId>>,
+    ) -> bool {
+        self.scanned_marked.insert((stream, owner, outer_owners))
+    }
+
+    /// Benennt dieser Strom eine Eigenschaftsliste, die `resources` nicht
+    /// kennen? Je (Strom, Eigentümer) einmal gerechnet, siehe
+    /// [`Budget::names_beyond`].
+    fn names_beyond_own(
+        &mut self,
+        doc: &Document,
+        stream: StreamKey,
+        owner: Option<ObjectId>,
+        operations: &[Operation],
+        resources: Option<&Dictionary>,
+    ) -> bool {
+        *self.names_beyond.entry((stream, owner)).or_insert_with(|| {
+            operations.iter().any(|op| {
+                matches!(op.operator.as_str(), "BDC" | "DP")
+                    && matches!(op.operands.get(1), Some(Object::Name(name))
+                        if property_entry(doc, resources, name).is_none())
+            })
+        })
     }
 
     /// Bucht bis zu `want` Spiegel-Formular-Paare beim **Aufbau** der Liste
@@ -2470,6 +2508,7 @@ fn scan_with_budget(
         resources,
         own_resources,
         owner,
+        &[],
         fonts,
         initial_ctm,
         0,
@@ -2989,9 +3028,34 @@ fn scan_marked_text(
     stream: StreamKey,
     resources: Option<&Dictionary>,
     owner: Option<ObjectId>,
+    outer: &Outer<'_>,
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
+    // Wo sich die Eigenschaftsliste einer Operation auflöst — und wem das
+    // Verzeichnis gehört, in dem sie steht. Zuerst in den eigenen Ressourcen;
+    // kennen die den Namen nicht, in den Umgebungen der Aufrufer, von innen
+    // nach außen. PDF 32000-1, 8.10.1 sieht das nicht vor: ein Formular mit
+    // eigenem `/Resources` bringt alles mit. Poppler
+    // (`GfxResources::lookupPropertiesNF`) sucht trotzdem die Kette hinauf
+    // und gibt den Spiegel aus; bis zur Spur-A-Runde 1 blieb er hier dann
+    // unaufgelöst in der Seite stehen, ohne Warnung (Register #67).
+    let resolve = |operands: &[Object]| -> Option<ResolvedMirror> {
+        if let Some((list, id, name)) = mirror_property_list(doc, resources, operands) {
+            return Some((list, id, name, owner));
+        }
+        let Some(Object::Name(name)) = operands.get(1) else {
+            return None;
+        };
+        if property_entry(doc, resources, name).is_some() {
+            return None;
+        }
+        let (found_in, found_owner) = outer
+            .iter()
+            .find(|(res, _)| property_entry(doc, *res, name).is_some())?;
+        let (list, id, name) = mirror_property_list(doc, *found_in, operands)?;
+        Some((list, id, name, *found_owner))
+    };
     let shows: Vec<usize> = operations
         .iter()
         .enumerate()
@@ -3030,8 +3094,15 @@ fn scan_marked_text(
     let mut ranges: BTreeMap<usize, std::ops::Range<usize>> = BTreeMap::new();
     // Gefundene Spiegel an Klammern und an Punkten; ein Punkt merkt sich
     // zusätzlich, worin er steht.
-    // Operationsindex, Liste, Objekt-Id der Liste, Ressourcenname der Liste.
-    type BracketMirror = (usize, Dictionary, Option<ObjectId>, Option<Vec<u8>>);
+    // Operationsindex, Liste, Objekt-Id der Liste, Ressourcenname der Liste,
+    // Eigentümer des Verzeichnisses, in dem sie sich aufgelöst hat.
+    type BracketMirror = (
+        usize,
+        Dictionary,
+        Option<ObjectId>,
+        Option<Vec<u8>>,
+        Option<ObjectId>,
+    );
     let mut brackets: Vec<BracketMirror> = Vec::new();
     // Dasselbe, plus umschließende Klammer und umschließendes Textobjekt.
     type PointMirror = (
@@ -3039,6 +3110,7 @@ fn scan_marked_text(
         Dictionary,
         Option<ObjectId>,
         Option<Vec<u8>>,
+        Option<ObjectId>,
         Option<usize>,
         Option<usize>,
     );
@@ -3048,8 +3120,8 @@ fn scan_marked_text(
         match op.operator.as_str() {
             "BDC" | "BMC" => {
                 open.push(index);
-                if let Some((list, id, name)) = mirror_property_list(doc, resources, &op.operands) {
-                    brackets.push((index, list, id, name));
+                if let Some((list, id, name, home)) = resolve(&op.operands) {
+                    brackets.push((index, list, id, name, home));
                 }
             }
             "EMC" => {
@@ -3064,8 +3136,16 @@ fn scan_marked_text(
                 }
             }
             "DP" => {
-                if let Some((list, id, name)) = mirror_property_list(doc, resources, &op.operands) {
-                    points.push((index, list, id, name, open.last().copied(), text_object));
+                if let Some((list, id, name, home)) = resolve(&op.operands) {
+                    points.push((
+                        index,
+                        list,
+                        id,
+                        name,
+                        home,
+                        open.last().copied(),
+                        text_object,
+                    ));
                 }
             }
             _ => {}
@@ -3114,7 +3194,7 @@ fn scan_marked_text(
         };
 
     // Eine Klammer bringt ihren Bereich selbst mit.
-    for (op_index, properties, property_id, property_name) in brackets {
+    for (op_index, properties, property_id, property_name, property_owner) in brackets {
         let range = ranges
             .get(&op_index)
             .cloned()
@@ -3125,14 +3205,16 @@ fn scan_marked_text(
             properties,
             property_id,
             property_name,
-            property_owner: owner,
+            property_owner,
             shows: in_range(budget, &range),
             forms: forms_in(budget, &range),
             range,
         });
     }
     // Ein Punkt erbt den Bereich, in dem er steht.
-    for (op_index, properties, property_id, property_name, bracket, text_object) in points {
+    for (op_index, properties, property_id, property_name, property_owner, bracket, text_object) in
+        points
+    {
         let range = bracket
             .or(text_object)
             .and_then(|start| ranges.get(&start).cloned())
@@ -3143,7 +3225,7 @@ fn scan_marked_text(
             properties,
             property_id,
             property_name,
-            property_owner: owner,
+            property_owner,
             shows: in_range(budget, &range),
             forms: forms_in(budget, &range),
             range,
@@ -3250,16 +3332,60 @@ fn mirror_property_list(
         Object::Dictionary(dict) => has_mirror_key(doc, dict).then(|| (dict.clone(), None, None)),
         // `/Span /MC0 BDC` — die Liste steht in `/Resources /Properties`.
         Object::Name(name) => {
-            let entry = resources
-                .and_then(|r| r.get(b"Properties").ok())
-                .and_then(|o| doc.dereference(o).ok())
-                .and_then(|(_, o)| o.as_dict().ok())
-                .and_then(|d| d.get(name.as_slice()).ok())?;
+            let entry = property_entry(doc, resources, name)?;
             let (id, resolved) = doc.dereference(entry).ok()?;
             let dict = resolved.as_dict().ok()?;
             has_mirror_key(doc, dict).then(|| (dict.clone(), id, Some(name.clone())))
         }
         _ => None,
+    }
+}
+
+/// Der Eintrag `name` in `/Resources /Properties`, falls es ihn gibt.
+fn property_entry<'a>(
+    doc: &'a Document,
+    resources: Option<&'a Dictionary>,
+    name: &[u8],
+) -> Option<&'a Object> {
+    resources
+        .and_then(|r| r.get(b"Properties").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(name).ok())
+}
+
+/// Eine aufgelöste Eigenschaftsliste mit Spiegel: Liste, Objekt-Id, Name, und
+/// der Eigentümer des Verzeichnisses, in dem sie steht.
+type ResolvedMirror = (
+    Dictionary,
+    Option<ObjectId>,
+    Option<Vec<u8>>,
+    Option<ObjectId>,
+);
+
+/// Die Ressourcenumgebungen der Aufrufer eines Stroms, von innen nach außen:
+/// je das wirksame `/Resources` und sein Eigentümer (Seite oder Strom).
+///
+/// Gebraucht nur für einen Namen, den das eigene `/Resources` eines Stroms
+/// nicht kennt — siehe [`scan_marked_text`] und Register #67.
+type Outer<'a> = [(Option<&'a Dictionary>, Option<ObjectId>)];
+
+/// Die Umgebungskette für einen Strom, den ein Aufrufer mit `resources` und
+/// `owner` platziert. Bringt der Strom eigene Ressourcen mit, kommt die des
+/// Aufrufers vorn hinzu; sonst gelten dessen Ressourcen unverändert, und die
+/// Kette bleibt, wie sie war.
+fn outer_for<'a>(
+    own: bool,
+    resources: Option<&'a Dictionary>,
+    owner: Option<ObjectId>,
+    outer: &Outer<'a>,
+) -> Vec<(Option<&'a Dictionary>, Option<ObjectId>)> {
+    if own {
+        std::iter::once((resources, owner))
+            .chain(outer.iter().copied())
+            .collect()
+    } else {
+        outer.to_vec()
     }
 }
 
@@ -3464,6 +3590,9 @@ fn scan_operations(
     // [`MarkedTextRecord::property_owner`] — dort wird aus ihm der Fundort
     // einer Eigenschaftsliste, die kein eigenes Objekt ist.
     owner: Option<ObjectId>,
+    // Die Umgebungen der Aufrufer, von innen nach außen — nur für einen
+    // Namen, den `resources` nicht kennen (Register #67, siehe [`Outer`]).
+    outer: &Outer<'_>,
     fonts: &FontMap,
     initial_ctm: Matrix,
     depth: usize,
@@ -3479,11 +3608,20 @@ fn scan_operations(
     // kommt erst danach. Dass einmal genügt, liegt an ihm selbst: er ist rein
     // syntaktisch (siehe [`scan_marked_text`]) und liefert jedes Mal dieselben
     // Abschnitte, die die Senke dann verwirft.
-    if budget.first_marked_scan(stream, owner) {
+    let outer_owners = if !outer.is_empty()
+        && budget.names_beyond_own(doc, stream, owner, operations, resources)
+    {
+        outer.iter().map(|(_, o)| *o).collect()
+    } else {
+        Vec::new()
+    };
+    if budget.first_marked_scan(stream, owner, outer_owners) {
         if !budget.operation() {
             return;
         }
-        scan_marked_text(doc, operations, stream, resources, owner, budget, sink);
+        scan_marked_text(
+            doc, operations, stream, resources, owner, outer, budget, sink,
+        );
     }
     // Einmal je Verzeichnis, nicht einmal je Platzierung und nicht einmal je
     // Strom: ein zwanzigmal gezeichnetes Formular bietet zwanzigmal dieselben
@@ -3761,6 +3899,7 @@ fn scan_operations(
                         op_index,
                         resources,
                         owner,
+                        outer,
                         fonts,
                         pattern,
                         initial_ctm,
@@ -3829,6 +3968,7 @@ fn scan_operations(
                     doc,
                     resources,
                     owner,
+                    outer,
                     fonts,
                     &op.operands,
                     &state,
@@ -3917,6 +4057,7 @@ fn scan_operations(
                         // Ohne eigenes `/Resources` bleibt der Aufrufer der
                         // Eigentümer — die Namen lösen sich dort auf.
                         let form_owner = if form_own { Some(form_id) } else { owner };
+                        let form_outer = outer_for(form_own, resources, owner, outer);
                         scan_operations(
                             doc,
                             form.operations(),
@@ -3924,6 +4065,7 @@ fn scan_operations(
                             form_resources,
                             form_own,
                             form_owner,
+                            &form_outer,
                             form_fonts,
                             form_matrix.mul(&state.ctm),
                             depth + 1,
@@ -3988,6 +4130,7 @@ fn scan_soft_mask(
     doc: &Document,
     resources: Option<&Dictionary>,
     owner: Option<ObjectId>,
+    outer: &Outer<'_>,
     fonts: &FontMap,
     operands: &[Object],
     state: &GraphicsState,
@@ -4085,6 +4228,7 @@ fn scan_soft_mask(
         _ => (resources, false, fonts),
     };
     let group_owner = if group_own { Some(group_id) } else { owner };
+    let group_outer = outer_for(group_own, resources, owner, outer);
     // Die Maske ist ein platzierter Strom wie ein Formular; sie muss auch so
     // gezählt werden, sonst hielte die Ressourcenprüfung sie für ungezeichnet.
     sink.form(group_id);
@@ -4095,6 +4239,7 @@ fn scan_soft_mask(
         group_resources,
         group_own,
         group_owner,
+        &group_outer,
         group_fonts,
         matrix.mul(&state.ctm),
         depth + 1,
@@ -4290,6 +4435,7 @@ fn scan_tiling_pattern(
     op_index: usize,
     resources: Option<&Dictionary>,
     owner: Option<ObjectId>,
+    outer: &Outer<'_>,
     fonts: &FontMap,
     name: &[u8],
     base_ctm: Matrix,
@@ -4412,6 +4558,7 @@ fn scan_tiling_pattern(
         _ => (resources, false, fonts),
     };
     let pattern_owner = if pattern_own { Some(id) } else { owner };
+    let pattern_outer = outer_for(pattern_own, resources, owner, outer);
     scan_operations(
         doc,
         pattern.operations(),
@@ -4419,6 +4566,7 @@ fn scan_tiling_pattern(
         pattern_resources,
         pattern_own,
         pattern_owner,
+        &pattern_outer,
         pattern_fonts,
         matrix.mul(&base_ctm),
         depth + 1,
@@ -5087,6 +5235,7 @@ endcmap"
             StreamKey::Page,
             None,
             None,
+            &[],
             &mut Budget::default(),
             &mut result,
         );

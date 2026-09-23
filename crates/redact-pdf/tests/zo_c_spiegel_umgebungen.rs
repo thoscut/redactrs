@@ -34,8 +34,12 @@
 //!   aber ohne `/Properties`, dessen `/Span /MC0 BDC` sich nur in den
 //!   Ressourcen der **Seite** auflöst. Nach PDF 32000-1, 8.10.1 ist das nicht
 //!   vorgesehen; Poppler (`GfxResources::lookupPropertiesNF`) sucht trotzdem
-//!   die Kette hinauf und gibt den Spiegel aus. Der Scan legt keinen Datensatz
-//!   an, die Liste in der Seite bleibt unangetastet.
+//!   die Kette hinauf und gibt den Spiegel aus. Der Scan legte keinen
+//!   Datensatz an, die Liste in der Seite blieb unangetastet. **Behoben**
+//!   (Register #67): ein Name, den das eigene `/Resources` nicht kennt, löst
+//!   sich wie in Poppler in den Umgebungen der Aufrufer auf — und der Scan
+//!   läuft dann je Umgebung, nicht je Formular
+//!   ([`c3_eigene_ressourcen_ohne_properties_auf_zwei_seiten`]).
 //! * [`mess_spiegel_in_formularen_je_seite`] (Messung, `#[ignore]`) —
 //!   **Befund C-4**, Speicher ohne Decke: Spiegel **in** Formularen wurden von
 //!   `apply_with_report` für jede Seite vollständig festgehalten
@@ -798,12 +802,11 @@ fn spiegel_im_musterstrom_selbst_wird_geleert() {
 // D. Befund C-3: Formular mit eigenen Ressourcen, Name nur in der Seite
 // ===========================================================================
 
-/// **Befund C-3, absichtlich rot (mit Vorbehalt, siehe Kopf).** `Fm0` hat
-/// eigene Ressourcen ohne `/Properties`; `/Span /MC0 BDC` darin löst sich
-/// nach 8.10.1 nicht auf, Poppler löst es über die Seite auf. Der Klartext
-/// steht in den Seitenressourcen und bleibt dort.
+/// **Befund C-3 — behoben (Register #67); bis dahin absichtlich rot und
+/// ignoriert.** `Fm0` hat eigene Ressourcen ohne `/Properties`; `/Span /MC0
+/// BDC` darin löst sich nach 8.10.1 nicht auf, Poppler löst es über die Seite
+/// auf. Der Klartext stand in den Seitenressourcen und blieb dort.
 #[test]
-#[ignore = "offen: Register #67 Formular mit /Resources ohne /Properties — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn formular_mit_eigenen_ressourcen_ohne_properties_name_aus_der_seite() {
     let mut offen = Vec::new();
     for (liste, spiegel) in [
@@ -839,6 +842,129 @@ fn formular_mit_eigenen_ressourcen_ohne_properties_name_aus_der_seite() {
         }
     }
     assert!(offen.is_empty(), "{}", offen.join("\n"));
+}
+
+/// Dasselbe Formular **mit** eigenem `/Resources` ohne `/Properties` auf zwei
+/// Seiten; jede Seite löst `/MC0` in ihren eigenen Ressourcen auf. Der
+/// Spiegel-Scan des Formulars darf dann nicht einmal je Formular laufen,
+/// sondern einmal je Umgebung — sonst bliebe die Liste der zweiten Seite
+/// stehen (die Klasse von Register #65, eine Ebene weiter).
+#[test]
+fn c3_eigene_ressourcen_ohne_properties_auf_zwei_seiten() {
+    let mut offen = Vec::new();
+    for (name, unter_seite_1, unter_seite_2, seite) in [
+        ("beide lügen, Schwärzung überall", lie(), lie(), None),
+        (
+            "harmlos auf Seite 1, Schwärzung Seite 2",
+            "Gruss".into(),
+            lie(),
+            Some(1),
+        ),
+        (
+            "beide still, Schwärzung überall",
+            SECRET.into(),
+            SECRET.into(),
+            None,
+        ),
+    ] {
+        let (found, warnings) = nach_der_pipeline_auf(
+            &zwei_seiten_eigene_ressourcen(&unter_seite_1, &unter_seite_2),
+            seite,
+        );
+        if !found.is_empty() {
+            offen.push(format!("{name}: {found:?} (Warnungen {warnings:?})"));
+        }
+    }
+    assert!(offen.is_empty(), "{}", offen.join("\n"));
+}
+
+/// Dasselbe Formular (eigene Ressourcen, kein `/Properties`) auf **einer**
+/// Seite unter zwei Umgebungen: einmal direkt (`/MC0` löst sich in der Seite
+/// auf), einmal in einem äußeren Formular `Fo`, dessen eigenes `/Resources`
+/// `/MC0` kennt. Der Spiegel-Scan wird innerhalb einer Seite je (Strom,
+/// Eigentümer) entdoppelt; ohne die äußeren Eigentümer im Schlüssel liefe er
+/// für die zweite Umgebung nicht, und deren Liste bliebe stehen.
+#[test]
+fn c3_eigene_ressourcen_ohne_properties_unter_zwei_umgebungen_einer_seite() {
+    let mut offen = Vec::new();
+    for fo_zuerst in [false, true] {
+        for (name, in_der_seite, in_fo) in [
+            ("beide lügen", lie(), lie()),
+            ("nur Fo lügt", "Gruss".to_string(), lie()),
+            ("nur die Seite lügt", lie(), "Gruss".to_string()),
+            ("beide still", SECRET.to_string(), SECRET.to_string()),
+        ] {
+            let mut d = page(&[]);
+            let res = d.resources_id;
+            set_properties(
+                &mut d,
+                res,
+                Object::Dictionary(
+                    dictionary! { "MC0" => Object::Dictionary(mirror_list(&in_der_seite)) },
+                ),
+            );
+            let (fm0, _) = add_form(
+                &mut d,
+                res,
+                "Fm0",
+                &format!("/Span /MC0 BDC\n{}EMC\n", text_at(600, SECRET)),
+            );
+            let (_, fo_res) = add_form(&mut d, res, "Fo", "q /Fm0 Do Q\n");
+            set_properties(
+                &mut d,
+                fo_res,
+                Object::Dictionary(
+                    dictionary! { "MC0" => Object::Dictionary(mirror_list(&in_fo)) },
+                ),
+            );
+            link(&mut d, fo_res, "Fm0", fm0);
+            let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+            raw.extend_from_slice(if fo_zuerst {
+                b"q /Fo Do Q\nq /Fm0 Do Q\n"
+            } else {
+                b"q /Fm0 Do Q\nq /Fo Do Q\n"
+            });
+            d.set_content(&raw);
+            let (found, warnings) = nach_der_pipeline(&d.finish());
+            if !found.is_empty() {
+                offen.push(format!(
+                    "{name} (Fo zuerst: {fo_zuerst}): {found:?} (Warnungen {warnings:?})"
+                ));
+            }
+        }
+    }
+    assert!(offen.is_empty(), "{}", offen.join("\n"));
+}
+
+/// Wie [`zwei_seiten_zwei_listen`], aber das Formular bringt eigene
+/// Ressourcen mit (nur die Schrift, kein `/Properties`).
+fn zwei_seiten_eigene_ressourcen(unter_seite_1: &str, unter_seite_2: &str) -> Vec<u8> {
+    let mut d = page(&[]);
+    let res = d.resources_id;
+    set_properties(
+        &mut d,
+        res,
+        Object::Dictionary(dictionary! { "MC0" => Object::Dictionary(mirror_list(unter_seite_1)) }),
+    );
+    let (form, _) = add_form(
+        &mut d,
+        res,
+        "Fm0",
+        &format!("/Span /MC0 BDC\n{}EMC\n", text_at(600, SECRET)),
+    );
+    let mut raw = text_ops(&["Seite eins"]);
+    raw.extend_from_slice(b"q /Fm0 Do Q\n");
+    d.set_content(&raw);
+    let mut second = text_ops(&["Seite zwei"]);
+    second.extend_from_slice(b"q /Fm0 Do Q\n");
+    let (_, res2) = add_page(&mut d, &second);
+    link(&mut d, res2, "Fm0", form);
+    set_properties(
+        &mut d,
+        res2,
+        Object::Dictionary(dictionary! { "MC0" => Object::Dictionary(mirror_list(unter_seite_2)) }),
+    );
+    d.finish()
 }
 
 // ===========================================================================

@@ -427,6 +427,26 @@ seiner neuen Zeile in der Probenliste.
   Befund D5 (bis dahin absichtlich rot und ignoriert). Mutationsnachweis:
   die Grenze wieder eingesetzt → rot.
 
+* **⚠ Sicherheit: ein Spiegel, den Poppler findet, blieb stehen, wenn das
+  Formular eigene Ressourcen ohne `/Properties` mitbringt** (Register #67,
+  Prüfer C; mit Vorbehalt, weil die Datei die Norm verlässt). `/Span /MC0
+  BDC` in einem Form-XObject mit eigenem `/Resources` löst sich nach PDF
+  32000-1 nur dort auf; Poppler sucht trotzdem die Kette der Aufrufer hinauf
+  und gibt den Spiegel aus der Seite als Text der Glyphen aus. Der Scan fand
+  keinen Datensatz, die Liste in der Seite blieb mit dem Geheimnis stehen —
+  ohne Warnung, mit Rückgabewert 0; `--check-leaks` an der Ausgabe fand sie.
+  Jetzt löst sich ein Name, den das eigene Verzeichnis nicht kennt, in den
+  Umgebungen der Aufrufer auf, von innen nach außen, und der Datensatz trägt
+  den Eigentümer des Verzeichnisses, in dem er stand. Damit hängt das
+  Ergebnis wieder an der Umgebung: der Spiegel-Scan eines solchen Stroms
+  läuft je Umgebung, nicht je Strom — die Frage, ob ein Strom solche Namen
+  trägt, wird je Strom einmal gestellt. Belege:
+  `zo_c_spiegel_umgebungen::formular_mit_eigenen_ressourcen_ohne_properties_name_aus_der_seite`
+  (bis dahin absichtlich rot und ignoriert) und Proben mit mehreren
+  Umgebungen, auf verschiedenen Seiten und auf derselben. Mutationsnachweis: keine
+  Auflösung außerhalb → der erste rot; Scan je Strom statt je Umgebung → die
+  Probe auf einer Seite rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

@@ -3177,6 +3177,18 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "der Test zum Befund D5 (bis dahin absichtlich rot und ignoriert)",
         "eine Befundkennung der Runde, keine Messung",
     ),
+    (
+        "ohne `/Properties` mitbringt** (Register #67, Prüfer C; mit Vorbehalt",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "`/Span /MC0 BDC` in einem Form-XObject mit eigenem `/Resources` löst sich nach PDF 32000-1 nur dort auf",
+        "ein Ressourcenname und die Norm, keine Messung",
+    ),
+    (
+        "blieb mit dem Geheimnis stehen — ohne Warnung, mit Rückgabewert 0; `--check-leaks` an der Ausgabe fand sie",
+        "ein Rückgabewert, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
