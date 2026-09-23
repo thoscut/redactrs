@@ -2858,6 +2858,22 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "BDC … /P0 scn … re f … EMC",
         "der Name eines Musters im Beispiel, keine Messung",
     ),
+    (
+        "eine Antwort am Leben hält** (Register #71, Prüfer B)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "**⚠ Sicherheit: zwei Erscheinungsströme, die niemand las",
+        "zaehlt die Traeger des Befunds, keine Messung",
+    ),
+    (
+        "(`/MK /I`, `/RI`, `/IX`, Tabelle 189)",
+        "die Nummer einer Tabelle der Norm, keine Messung",
+    ),
+    (
+        "`zo_b_traeger::b_mk_icon_mit_text_faellt` (drei Schlüssel)",
+        "zaehlt die geprueften Schluessel, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

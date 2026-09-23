@@ -249,6 +249,27 @@ seiner neuen Zeile in der Probenliste.
   Mutationsnachweis: Muster aus der Spiegelliste → der erste rot;
   `form_within` entfernt → der zweite rot.
 
+* **⚠ Sicherheit: zwei Erscheinungsströme, die niemand las — das Symbol
+  eines Druckknopfs und das `/AP` einer Annotation, die nur ihr Popup oder
+  eine Antwort am Leben hält** (Register #71, Prüfer B). Der Lauf las die
+  Erscheinungsströme (`/AP`) der Annotationen in `/Annots` — und nur dort.
+  Das Symbol eines Druckknopfs (`/MK /I`, `/RI`, `/IX`, Tabelle 189) ist ein
+  Form-XObject wie ein Erscheinungsstrom und darf Text zeichnen; es stand
+  nach dem Lauf unverändert in der Datei. Und eine Notiz, die ein Werkzeug
+  aus `/Annots` gestrichen, deren Popup es aber vergessen hat, erreichte der
+  Metadatenlauf über `/Parent` und nahm ihr `/Contents` — ihren
+  Erscheinungsstrom las niemand; dieselbe Form über `/IRT`. Beides ohne
+  Warnung, das Orakel fand den Text in der Ausgabe. Jetzt liest der Lauf die
+  Symbole wie die Erscheinungsströme, abgebildet in das `/Rect` des Widgets,
+  und folgt von jeder Annotation `/Popup` und `/IRT` und vom Popup aus
+  `/Parent` — die Analyse findet den Text dort, eine Mustersuche trifft ihn,
+  und die Schwärzung aus dem Fund entfernt ihn wie bei jedem `/AP`. Belege:
+  `zo_b_traeger::b_mk_icon_mit_text_faellt` (drei Schlüssel) und
+  `…::b_ap_einer_nur_ueber_popup_oder_irt_gehaltenen_annotation_faellt`
+  (beide Wege), je: die Analyse sieht den Text, die Schwärzung aus dem Fund
+  lässt nichts stehen. Mutationsnachweis: Symbole nicht gelesen → der erste
+  rot; Verfolgung entfernt → der zweite rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

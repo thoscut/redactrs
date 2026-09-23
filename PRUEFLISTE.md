@@ -40,6 +40,7 @@ Prosa.
 | Bild ohne Zeichner: das Original nach der Kopie, erreichbar hinter geerbtem oder überzähligem Namen | A | Spur-A-Runde 1 (#76) | `crates/redact-pdf/tests/zo_a_bild_ohne_zeichner.rs` |
 | Bild ohne Zeichner: Bild oder Formular im Kachelmuster ohne Text (Ausstieg allein am Textoperator) | A | Spur-A-Runde 1 (#75) | `crates/redact-pdf/tests/zo_a_bild_ohne_zeichner.rs` |
 | Spiegel über Kachelmuster: der Geltungsbereich kennt nur `Do`, nicht `scn` | A | Spur-A-Runde 1 (#66) | `crates/redact-pdf/tests/zo_c_spiegel_umgebungen.rs` |
+| Erscheinungsstrom, den niemand liest: `/MK /I`, `/RI`, `/IX`; `/AP` einer nur über `/Popup`, `/Parent`, `/IRT` gehaltenen Annotation | A | Spur-A-Runde 1 (#71) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung
 prüft ihren positiven Zweig allein im Job „Build (windows-2025)“.

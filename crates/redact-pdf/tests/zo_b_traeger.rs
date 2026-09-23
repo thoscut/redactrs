@@ -33,8 +33,8 @@ use common::{page, utf16be_bom, Doc, SECRET};
 use lopdf::{dictionary, Object, ObjectId, Stream, StringFormat};
 use redact_core::{Action, Rect, Redaction, Region, Source};
 use redact_pdf::{
-    leaks, load_from_bytes, save_to_bytes, strip_metadata, MetadataReport, PdfRedactor,
-    RedactionReport,
+    leaks, load_from_bytes, save_to_bytes, strip_metadata, MetadataReport, PdfExtractor,
+    PdfRedactor, RedactionReport,
 };
 
 // ---------------------------------------------------------------------------
@@ -115,6 +115,77 @@ fn rect() -> Object {
         .into_iter()
         .collect::<Vec<Object>>()
         .into()
+}
+
+/// Ein `/Rect` in der Größe von [`form_mit_text`], **außerhalb** der Zone von
+/// [`schwaerzung`]: für Träger, deren Text nicht als Ganzes fällt, sondern als
+/// Glyphen an einem Ort. Ein Erscheinungsstrom wird in das `/Rect` seiner
+/// Annotation abgebildet; die Analyse muss ihn dort **finden**, und die aus
+/// dem Fund gebaute Schwärzung muss ihn entfernen — der Weg, den eine
+/// Mustersuche geht ([`gefunden_und_geschwaerzt`]).
+fn rect_gross() -> Object {
+    vec![50.into(), 400.into(), 250.into(), 420.into()]
+        .into_iter()
+        .collect::<Vec<Object>>()
+        .into()
+}
+
+/// Der Weg der Mustersuche: die Analyse (`PdfExtractor`) muss das Geheimnis
+/// in der Probe **sehen** — sonst gibt es nichts, was eine Mustersuche träfe,
+/// und das ist das stille Leck dieser Klasse —, und die aus dem Fund gebaute
+/// Schwärzung muss es nach dem vollen Lauf aus der Datei genommen haben.
+#[track_caller]
+fn gefunden_und_geschwaerzt(bytes: &[u8], was: &str) {
+    assert!(
+        !leaks(bytes, SECRET).is_empty(),
+        "{was}: die Probe muss das Geheimnis vorher tragen"
+    );
+    let doc = load_from_bytes(bytes).expect("PDF ladbar");
+    let runs = PdfExtractor::new().extract(&doc).expect("Extraktion");
+    // Jeder Fund wird geschwärzt — die Seite trägt das Geheimnis auch im
+    // Seitentext, und die Probe fragt nach dem Träger **daneben**: ohne
+    // dessen Fund bleibt nach dem Lauf genau er stehen.
+    let schwaerzungen: Vec<Redaction> = runs
+        .iter()
+        .filter_map(|run| {
+            let pos = run.text.find(SECRET)?;
+            let rect = run.rect_for_byte_range(pos, pos + SECRET.len())?;
+            Some(Redaction::new(
+                Region::new(
+                    run.page,
+                    rect,
+                    Some(SECRET.to_string()),
+                    Source::Pattern {
+                        pattern_id: "iban_de".into(),
+                        confidence: 1.0,
+                    },
+                ),
+                Action::Blackout,
+            ))
+        })
+        .collect();
+    assert!(
+        schwaerzungen.len() >= 2,
+        "{was}: STILLES LECK — die Analyse sieht den Text im Träger nicht (nur {} Fund); \
+         eine Mustersuche fände dort nichts, und er bliebe in der Datei. Gesehen: {:?}",
+        schwaerzungen.len(),
+        runs.iter().map(|r| r.text.as_str()).collect::<Vec<_>>()
+    );
+    let mut doc = load_from_bytes(bytes).expect("PDF ladbar");
+    let report = PdfRedactor::new()
+        .apply_with_report(&mut doc, &schwaerzungen)
+        .expect("Schwärzung läuft durch");
+    let meta = strip_metadata(&mut doc);
+    let out = save_to_bytes(&doc).expect("Speichern");
+    let hits = leaks(&out, SECRET);
+    assert!(
+        hits.is_empty(),
+        "{was}: die Analyse fand den Text, die Schwärzung daraus ließ ihn stehen.\n  \
+         Warnungen: {:?}\n  Bericht Metadaten: {:?}\n  Fundstellen:\n{}",
+        report.warnings,
+        meta.summary(),
+        hits.join("\n")
+    );
 }
 
 fn annots(d: &mut Doc, ids: &[ObjectId]) {
@@ -866,40 +937,45 @@ fn b_verwaiste_seite_hinter_dest_oder_p_bleibt_samt_inhalt() {
 
 /// **`/MK /I`** — das Symbol eines Druckknopfs (Tabelle 189) ist ein
 /// Form-XObject und darf Text zeichnen. `zf_q1_traeger_nachbarn` hält fest,
-/// dass es **bleibt**; gelesen wird es nirgends: `crate::content` liest das
-/// `/AP`, nicht das `/MK`. Dazu `/RI` und `/IX`.
+/// dass es **bleibt**; gelesen wurde es nirgends: `crate::content` las das
+/// `/AP`, nicht das `/MK`. Dazu `/RI` und `/IX`. Behoben (Register #71): die
+/// Symbole werden wie die Erscheinungsströme gelesen, in das `/Rect` des
+/// Widgets abgebildet — die Analyse findet den Text, die Schwärzung aus dem
+/// Fund entfernt ihn.
 #[test]
-#[ignore = "offen: Register #71 Erscheinungsstroeme ausserhalb /Annots — Spur-A-Runde 1, Beleg absichtlich rot"]
-fn b_mk_icon_mit_text_bleibt() {
-    let mut d = probe();
-    let icon = form_mit_text(&mut d);
-    let leer = d.add(Object::Stream(Stream::new(
-        dictionary! { "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 20.into(), 20.into()] },
-        b"0.9 g 0 0 20 20 re f\n".to_vec(),
-    )));
-    let widget = d.add(Object::Dictionary(dictionary! {
-        "Type" => "Annot", "Subtype" => "Widget", "FT" => "Btn", "Ff" => 65536, "T" => s("knopf"),
-        "Rect" => rect(), "AP" => dictionary! { "N" => Object::Reference(leer) },
-        "MK" => dictionary! { "I" => Object::Reference(icon), "TP" => 1 },
-    }));
-    annots(&mut d, &[widget]);
-    muss_fallen(&d.finish(), "/MK /I mit Text");
+fn b_mk_icon_mit_text_faellt() {
+    for key in ["I", "RI", "IX"] {
+        let mut d = probe();
+        let icon = form_mit_text(&mut d);
+        let leer = d.add(Object::Stream(Stream::new(
+            dictionary! { "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 20.into(), 20.into()] },
+            b"0.9 g 0 0 20 20 re f\n".to_vec(),
+        )));
+        let widget = d.add(Object::Dictionary(dictionary! {
+            "Type" => "Annot", "Subtype" => "Widget", "FT" => "Btn", "Ff" => 65536, "T" => s("knopf"),
+            "Rect" => rect_gross(), "AP" => dictionary! { "N" => Object::Reference(leer) },
+            "MK" => dictionary! { key => Object::Reference(icon), "TP" => 1 },
+        }));
+        annots(&mut d, &[widget]);
+        gefunden_und_geschwaerzt(&d.finish(), &format!("/MK /{key} mit Text"));
+    }
 }
 
 /// **Der Erscheinungsstrom einer Annotation, die nur ihr `/Popup` hält.** Das
 /// Popup steht in `/Annots`, seine Elternnotiz nicht mehr (ein Werkzeug hat
 /// sie gestrichen, das Popup vergessen). Der Trägerlauf erreicht die Notiz
-/// über `/Parent` und nimmt ihr `/Contents` — ihr `/AP` liest niemand:
-/// `crate::content` läuft `/Annots` ab, nicht `/Parent`. Dieselbe Form über
-/// `/IRT`.
+/// über `/Parent` und nimmt ihr `/Contents` — ihr `/AP` las niemand:
+/// `crate::content` lief `/Annots` ab, nicht `/Parent`. Dieselbe Form über
+/// `/IRT`. Behoben (Register #71): der Lauf folgt `/Popup`, `/IRT` und vom
+/// Popup aus `/Parent` und liest die Erscheinungsströme dort mit — die
+/// Analyse findet den Text, die Schwärzung aus dem Fund entfernt ihn.
 #[test]
-#[ignore = "offen: Register #71 Erscheinungsstroeme ausserhalb /Annots — Spur-A-Runde 1, Beleg absichtlich rot"]
-fn b_ap_einer_nur_ueber_popup_oder_irt_gehaltenen_annotation_bleibt() {
+fn b_ap_einer_nur_ueber_popup_oder_irt_gehaltenen_annotation_faellt() {
     for weg in ["Popup", "IRT"] {
         let mut d = probe();
         let ap = form_mit_text(&mut d);
         let notiz = d.add(Object::Dictionary(dictionary! {
-            "Type" => "Annot", "Subtype" => "FreeText", "Rect" => rect(),
+            "Type" => "Annot", "Subtype" => "FreeText", "Rect" => rect_gross(),
             "Contents" => s("Notiz"), "AP" => dictionary! { "N" => Object::Reference(ap) },
         }));
         let halter = d.add(Object::Dictionary(match weg {
@@ -907,7 +983,7 @@ fn b_ap_einer_nur_ueber_popup_oder_irt_gehaltenen_annotation_bleibt() {
             _ => dictionary! { "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(), "IRT" => Object::Reference(notiz), "Contents" => s("Antwort") },
         }));
         annots(&mut d, &[halter]);
-        muss_fallen(
+        gefunden_und_geschwaerzt(
             &d.finish(),
             &format!("/AP einer nur über /{weg} gehaltenen Annotation"),
         );

@@ -26,7 +26,7 @@
 //! über [`ContentSink::wants_graphics`] danach fragt; für die reine
 //! Textextraktion kostet der Ausbau also nichts.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use lopdf::content::Operation;
@@ -2578,6 +2578,13 @@ pub fn stream_shows_text(doc: &Document, id: ObjectId) -> bool {
 /// Die Datensätze tragen [`StreamKey::Form`] mit der Objekt-Id des
 /// Erscheinungsstroms; die Schwärzung kann sie damit genauso neu schreiben wie
 /// ein gewöhnliches Form-XObject.
+/// Wie weit eine Annotation über `/Popup`, `/IRT` und (vom Popup aus)
+/// `/Parent` weitere Annotationen erreichen darf, deren Erscheinungsströme
+/// dann mitgelesen werden. Gewöhnliche Dateien brauchen eine Stufe; eine
+/// Antwortkette, deren Glieder alle in `/Annots` stehen, kostet über
+/// `visited` ohnehin nichts Weiteres.
+const MAX_ANNOTATION_LINKS: usize = 16;
+
 fn scan_annotations(
     doc: &Document,
     page_id: ObjectId,
@@ -2597,14 +2604,48 @@ fn scan_annotations(
     // Ein Strom, der von zwei Annotationen (oder zwei Zuständen) benutzt wird,
     // wird nur einmal gelesen — sonst stünde derselbe Text doppelt im Ergebnis.
     let mut seen: HashSet<ObjectId> = HashSet::new();
-    for annot in &annots {
-        let Some(dict) = doc
-            .dereference(annot)
+    // Die Annotationen der Seite — und die, die eine von ihnen am Leben hält,
+    // ohne dass sie selbst in `/Annots` stünde: die Elternnotiz eines
+    // `/Popup` (`/Parent`), die Annotation, auf die eine Antwort zeigt
+    // (`/IRT`), das `/Popup` selbst. Ein Werkzeug, das die Notiz aus
+    // `/Annots` streicht und das Popup vergisst, hinterlässt so einen
+    // Erscheinungsstrom, den `strip_metadata` über dieselben Schlüssel
+    // erreicht (dort fällt `/Contents`), den hier aber niemand las: sein
+    // Text stand nach dem Lauf in der Datei, ohne Warnung (Register #71).
+    // Gelesen wird er mit dem `/Rect` seiner Annotation — wie jeder andere.
+    let mut queue: VecDeque<(Object, usize)> =
+        annots.iter().map(|annot| (annot.clone(), 0)).collect();
+    let mut visited: HashSet<ObjectId> = HashSet::new();
+    while let Some((annot, depth)) = queue.pop_front() {
+        let Some((id, dict)) = doc
+            .dereference(&annot)
             .ok()
-            .and_then(|(_, o)| o.as_dict().ok())
+            .and_then(|(id, o)| o.as_dict().ok().map(|d| (id, d)))
         else {
             continue;
         };
+        if id.is_some_and(|id| !visited.insert(id)) {
+            continue;
+        }
+        if depth < MAX_ANNOTATION_LINKS {
+            let is_popup = dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|o| doc.dereference(o).ok())
+                .is_some_and(|(_, o)| o.as_name().is_ok_and(|n| n == b"Popup"));
+            // `/Parent` nur vom Popup aus: das `/Parent` eines Widgets ist
+            // ein Formularfeld, und dessen `/Kids` stehen auf anderen Seiten.
+            let links: &[&[u8]] = if is_popup {
+                &[b"Popup", b"IRT", b"Parent"]
+            } else {
+                &[b"Popup", b"IRT"]
+            };
+            for key in links {
+                if let Ok(value) = dict.get(key) {
+                    queue.push_back((value.clone(), depth + 1));
+                }
+            }
+        }
         let rect = dict
             .get(b"Rect")
             .ok()
@@ -2638,6 +2679,23 @@ fn scan_annotations(
                     continue;
                 }
                 streams.extend(appearance_streams(doc, value, selected.as_deref()));
+            }
+        }
+        // Die Symbole eines Druckknopfs (`/MK /I`, `/RI`, `/IX`, Tabelle 189)
+        // sind Form-XObjects wie ein Erscheinungsstrom und dürfen Text
+        // zeichnen; ein Betrachter, der die Erscheinung neu aufbaut, malt sie
+        // in das `/Rect` des Widgets. Bis zur Spur-A-Runde 1 las sie niemand
+        // (Register #71).
+        if let Some(mk) = dict
+            .get(b"MK")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+        {
+            for key in [b"I".as_slice(), b"RI".as_slice(), b"IX".as_slice()] {
+                if let Ok(value) = mk.get(key) {
+                    streams.extend(appearance_streams(doc, value, None));
+                }
             }
         }
 
