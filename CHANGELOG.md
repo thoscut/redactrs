@@ -259,6 +259,27 @@ sind, jeder in seinem eigenen Commit.
   Belege: `zp_d_bom_und_winansi`. Mutationsnachweis: je Teil zurückgenommen →
   sein Fall rot; die zweite Lesart auch ohne Unterschied → die Gegenprobe rot.
 
+* **Die Rohsicht arbeitete je Block, nicht je Byte** (Register #100, Prüfer
+  D; Dienstverweigerung, neue Klasse). Jeder rohe Strom suchte seinen
+  Objektkopf über ein festes Fenster rückwärts und sein Dictionary noch
+  einmal, und er baute für den blinden Entpackversuch jedes Mal neue Dekoder.
+  Eine Datei aus lauter `stream`/`endstream` kostete so je Block das ganze
+  Fenster, und der Lauf wuchs mit Blöcken mal Fenster statt mit der Datei.
+  Dieselbe Klasse stand im Vergleich mit dem Lader aus dem Befund zu
+  verlesenen Strömen: ob zwischen Querverweis und Block ein `endobj` steht,
+  suchte er je Objekt im ganzen Bereich. Jetzt endet die Rückwärtssuche am
+  Ende des vorigen Blocks, die Dekoder werden einmal gebaut und je Block
+  zurückgesetzt, und die `endobj`-Stellen stehen einmal in einem
+  Verzeichnis. Nebenbei heißt ein Block ohne eigenen Kopf nicht mehr wie das
+  Objekt davor und erbt dessen Dictionary nicht. Die Laufzeit selbst ist an
+  keinen Test gebunden — Zeitmessungen flattern auf dem Windows-Läufer —,
+  gebunden ist, was sich daran beobachten lässt. Belege:
+  `zp_d_rueckwaertssuche`,
+  `audit_bytes::tests::the_header_search_stops_at_the_previous_block`,
+  `audit_bytes::tests::blind_inflate_of_plain_text_yields_nothing` (der
+  zurückgesetzte Dekoder liefert, was der alte Weg lieferte). Mutationsnachweis:
+  je Teil zurückgenommen → sein Fall rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

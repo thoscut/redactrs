@@ -3398,6 +3398,10 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "UTF-8 am BOM",
         "der Name einer Kodierung, keine Messung",
     ),
+    (
+        "(Register #100, Prüfer D; Dienstverweigerung, neue Klasse)",
+        "eine Registernummer, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

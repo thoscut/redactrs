@@ -1330,8 +1330,18 @@ fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) -> Raw
     let mut kopf = Vec::new();
     let mut gaps = Vec::new();
     let mut definitions = RawDefinitions::new(bytes);
+    // Der Objektkopf eines Blocks steht hinter dem Ende des vorigen: dort
+    // endet die Suche rückwärts (Register #100). Ohne diese Grenze suchte
+    // jeder Block bis zu [`OBJECT_HEADER_LOOKBACK`] Byte zurück, zweimal —
+    // eine Datei aus lauter `stream`/`endstream` kostete so je Block das
+    // ganze Fenster, und der Lauf wuchs mit der Zahl der Blöcke mal Fenster
+    // statt mit der Datei.
+    let mut floor = 0usize;
+    let mut blind = BlindInflate::new();
     for (offset, payload) in raw_stream_blocks(bytes) {
-        let header = object_header(bytes, offset);
+        let davor = floor;
+        floor = offset + payload.len();
+        let header = object_header(bytes, offset, davor);
         let base = format!("Rohdaten-Stream @0x{offset:x}{}", object_label(header));
         // Der Objektkopf steht hier in **Rohbytes**, nicht im Objektgraphen:
         // was er nicht hergibt (kein Kopf in Reichweite, eine Zahl, die in
@@ -1355,7 +1365,7 @@ fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) -> Raw
         // schon das erste Glied unbekannt), bleibt der blinde Versuch mit
         // zlib und rohem Deflate: ein Block ohne Kopf, ein eingebettetes PDF.
         // Gebucht wird je Block einmal.
-        let dict = raw_stream_dict(bytes, offset);
+        let dict = raw_stream_dict(bytes, offset, davor);
         if let (Some(id), Some(_)) = (object_id(header), dict) {
             kopf.push((id, offset));
         }
@@ -1388,7 +1398,7 @@ fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) -> Raw
                 continue;
             }
         }
-        match inflate_raw(payload, budget.room()) {
+        match blind.inflate(payload, budget.room()) {
             Ok(Some(inflated)) => {
                 budget.charge(inflated.len());
                 scan_blob(
@@ -1411,9 +1421,12 @@ type RawStreams = (Vec<((u32, u16), usize)>, Vec<(usize, String)>);
 
 /// Das rohe Stream-Dictionary vor einem `stream`-Block: die Bytes zwischen
 /// dem Objektkopf `N G obj` und dem Schlüsselwort. `None`, wenn kein Kopf in
-/// Reichweite steht.
-fn raw_stream_dict(bytes: &[u8], data_offset: usize) -> Option<&[u8]> {
-    let from = data_offset.saturating_sub(OBJECT_HEADER_LOOKBACK);
+/// Reichweite steht — höchstens [`OBJECT_HEADER_LOOKBACK`] Byte zurück und
+/// nie vor `floor` (dem Ende des vorigen Blocks).
+fn raw_stream_dict(bytes: &[u8], data_offset: usize, floor: usize) -> Option<&[u8]> {
+    let from = data_offset
+        .saturating_sub(OBJECT_HEADER_LOOKBACK)
+        .max(floor.min(data_offset));
     let window = &bytes[from..data_offset];
     let keyword = memmem::rfind(window, b"stream")?;
     let obj = memmem::rfind(&window[..keyword], b"obj")?;
@@ -1685,8 +1698,14 @@ fn is_stream_keyword(bytes: &[u8], start: usize) -> bool {
 /// Zeichen dasselbe bleiben wie bisher, auch wenn eine Ziffernfolge in keinen
 /// `u32` passt. Die maschinenlesbare Fassung ([`object_id`]) gibt dann `None`
 /// zurück — der Text bleibt.
-fn object_header(bytes: &[u8], stream_offset: usize) -> Option<(&str, &str)> {
-    let from = stream_offset.saturating_sub(OBJECT_HEADER_LOOKBACK);
+///
+/// Gesucht wird höchstens [`OBJECT_HEADER_LOOKBACK`] Byte zurück und nie vor
+/// `floor`: der Kopf eines Blocks steht hinter dem Ende des vorigen, und ein
+/// Kopf davor gehört einem anderen Objekt (Register #100).
+fn object_header(bytes: &[u8], stream_offset: usize, floor: usize) -> Option<(&str, &str)> {
+    let from = stream_offset
+        .saturating_sub(OBJECT_HEADER_LOOKBACK)
+        .max(floor.min(stream_offset));
     let window = &bytes[from..stream_offset];
     let pos = memmem::rfind(window, b"obj")?;
     if window[..pos].ends_with(b"end") {
@@ -1733,14 +1752,78 @@ fn trailing_number(s: &[u8]) -> (&[u8], Option<&str>) {
 
 /// Zlib, sonst rohes Deflate — an jedem Block, ohne aufs Dictionary zu
 /// schauen: so werden auch Altrevisionen und Blöcke ohne `/Filter` sichtbar.
-/// `None`, wenn nichts dabei herauskommt.
-fn inflate_raw(data: &[u8], limit: usize) -> Result<Option<Vec<u8>>, Oversize> {
-    let out = filters::read_within(flate2::read::ZlibDecoder::new(data), limit)?;
-    if !out.is_empty() {
-        return Ok(Some(out));
+///
+/// **Ein** Paar Dekoder für den ganzen Lauf, je Block zurückgesetzt. Bis zur
+/// Spur-A-Runde 2 baute jeder Block zwei neue, und jeder belegte und nullte
+/// dabei seinen Zustand und einen Lesepuffer — bei einer Datei aus lauter
+/// leeren `stream`/`endstream` war das die Arbeit je Block (Register #100).
+struct BlindInflate {
+    zlib: flate2::Decompress,
+    raw: flate2::Decompress,
+    chunk: Vec<u8>,
+}
+
+impl BlindInflate {
+    fn new() -> Self {
+        Self {
+            zlib: flate2::Decompress::new(true),
+            raw: flate2::Decompress::new(false),
+            chunk: vec![0; 64 * 1024],
+        }
     }
-    let raw = filters::read_within(flate2::read::DeflateDecoder::new(data), limit)?;
-    Ok((!raw.is_empty()).then_some(raw))
+
+    /// `None`, wenn nichts dabei herauskommt; [`Oversize`], wenn mehr als
+    /// `limit` Byte herauskämen.
+    fn inflate(&mut self, data: &[u8], limit: usize) -> Result<Option<Vec<u8>>, Oversize> {
+        let out = blind_run(&mut self.zlib, true, data, limit, &mut self.chunk)?;
+        if !out.is_empty() {
+            return Ok(Some(out));
+        }
+        let raw = blind_run(&mut self.raw, false, data, limit, &mut self.chunk)?;
+        Ok((!raw.is_empty()).then_some(raw))
+    }
+}
+
+/// Entpackt `data` mit `decoder`, bis der Strom endet, ein Fehler kommt oder
+/// die Eingabe ausgeht. Was ein Aufruf liefert, der mit einem Fehler endet,
+/// zählt nicht — wie beim Lesen über `flate2::read`, das dieser Weg bis
+/// Register #100 war: der blinde Versuch mit rohem Deflate an gewöhnlichem
+/// Text lieferte sonst Bytesalat, der das Budget der Rohsicht verbrauchte.
+fn blind_run(
+    decoder: &mut flate2::Decompress,
+    zlib: bool,
+    data: &[u8],
+    limit: usize,
+    chunk: &mut [u8],
+) -> Result<Vec<u8>, Oversize> {
+    decoder.reset(zlib);
+    let mut out = Vec::new();
+    loop {
+        let consumed = usize::try_from(decoder.total_in()).unwrap_or(usize::MAX);
+        let before = decoder.total_out();
+        let result = decoder.decompress(
+            data.get(consumed..).unwrap_or(&[]),
+            chunk,
+            flate2::FlushDecompress::None,
+        );
+        let produced = usize::try_from(decoder.total_out() - before).unwrap_or(usize::MAX);
+        if result.is_err() {
+            return Ok(out);
+        }
+        if out.len().saturating_add(produced) > limit {
+            return Err(Oversize);
+        }
+        out.extend_from_slice(&chunk[..produced.min(chunk.len())]);
+        match result {
+            Ok(flate2::Status::StreamEnd) | Err(_) => return Ok(out),
+            Ok(_)
+                if produced == 0 && usize::try_from(decoder.total_in()).ok() == Some(consumed) =>
+            {
+                return Ok(out)
+            }
+            Ok(_) => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2227,6 +2310,11 @@ fn misread_streams(
         return (Vec::new(), None);
     }
     let mut covered = BTreeSet::new();
+    // Jedes `endobj` der Datei, einmal gesucht: ob zwischen dem Querverweis
+    // und einem Block eines steht, ist dann eine Suche im Verzeichnis, keine
+    // im Bereich — der Bereich kann bis zum Dateianfang reichen, und das je
+    // Objekt (Register #100).
+    let endobjs: Vec<usize> = memmem::find_iter(bytes, b"endobj").collect();
     let mut by_id: std::collections::BTreeMap<(u32, u16), Vec<usize>> =
         std::collections::BTreeMap::new();
     for (id, offset) in raw {
@@ -2253,7 +2341,11 @@ fn misread_streams(
             .copied()
             .filter(|&o| o > offset)
             .min()
-            .filter(|&o| memmem::find(&bytes[offset.min(o)..o], b"endobj").is_none())
+            .filter(|&o| {
+                let lo = offset.min(o);
+                let i = endobjs.partition_point(|&e| e < lo);
+                endobjs.get(i).is_none_or(|&e| e + b"endobj".len() > o)
+            })
         else {
             continue;
         };
@@ -2730,7 +2822,7 @@ mod tests {
         let pdf = b"%PDF-1.5\n12 0 obj\n<< /Length 3 >>\nstream\nabc\nendstream\nendobj\n";
         let blocks = raw_stream_blocks(pdf);
         assert_eq!(blocks.len(), 1);
-        let header = object_header(pdf, blocks[0].0);
+        let header = object_header(pdf, blocks[0].0, 0);
         assert_eq!(object_label(header), " (Objekt 12 0)");
         // Derselbe Kopf maschinenlesbar — Text und Ort sagen dasselbe.
         assert_eq!(object_id(header), Some((12, 0)));
@@ -2738,14 +2830,14 @@ mod tests {
         // kein Etikett, keine Erfindung.
         let loose = b"%PDF-1.5\nendobj\nstream\nabc\nendstream\n";
         let blocks = raw_stream_blocks(loose);
-        let header = object_header(loose, blocks[0].0);
+        let header = object_header(loose, blocks[0].0, 0);
         assert_eq!(object_label(header), "");
         assert_eq!(object_id(header), None);
         // Eine Nummer, die in keinen `u32` passt: das Etikett bleibt, der
         // maschinenlesbare Ort sagt „weiß ich nicht“ statt zu raten.
         let huge = b"%PDF-1.5\n99999999999999 0 obj\nstream\nabc\nendstream\n";
         let blocks = raw_stream_blocks(huge);
-        let header = object_header(huge, blocks[0].0);
+        let header = object_header(huge, blocks[0].0, 0);
         assert_eq!(object_label(header), " (Objekt 99999999999999 0)");
         assert_eq!(object_id(header), None);
     }
@@ -2782,6 +2874,52 @@ mod tests {
                 String::from_utf8_lossy(form)
             );
         }
+    }
+
+    /// Der blinde Versuch liefert an gewöhnlichem Text nichts — wie der Weg
+    /// über `flate2::read`, den er ersetzt (Register #100).
+    #[test]
+    fn blind_inflate_of_plain_text_yields_nothing() {
+        let mut blind = BlindInflate::new();
+        let text = b"BT /F1 12 Tf 72 700 Td (Fuelltext ohne jede Kompression) Tj ET";
+        let alt_zlib = filters::read_within(flate2::read::ZlibDecoder::new(&text[..]), 1 << 20)
+            .unwrap_or_default();
+        let alt_raw = filters::read_within(flate2::read::DeflateDecoder::new(&text[..]), 1 << 20)
+            .unwrap_or_default();
+        let alt = if alt_zlib.is_empty() {
+            alt_raw
+        } else {
+            alt_zlib
+        };
+        assert_eq!(
+            blind
+                .inflate(text, 1 << 20)
+                .unwrap_or_default()
+                .unwrap_or_default(),
+            alt
+        );
+    }
+
+    /// Register #100: die Suche nach Kopf und Dictionary endet am Ende des
+    /// vorigen Blocks.
+    #[test]
+    fn the_header_search_stops_at_the_previous_block() {
+        let pdf =
+            b"%PDF-1.5\n1 0 obj\n<< /Length 1 >>\nstream\nA\nendstream\nstream\nB\nendstream\n";
+        let blocks = raw_stream_blocks(pdf);
+        assert_eq!(blocks.len(), 2);
+        let floor = blocks[0].0 + blocks[0].1.len();
+        assert_eq!(object_label(object_header(pdf, blocks[1].0, floor)), "");
+        assert!(raw_stream_dict(pdf, blocks[1].0, floor).is_none());
+        // Ohne Grenze fände die Suche den Kopf des ersten Blocks.
+        assert_eq!(
+            object_label(object_header(pdf, blocks[1].0, 0)),
+            " (Objekt 1 0)"
+        );
+        assert_eq!(
+            object_label(object_header(pdf, blocks[0].0, 0)),
+            " (Objekt 1 0)"
+        );
     }
 
     #[test]
