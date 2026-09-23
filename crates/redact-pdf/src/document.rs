@@ -1575,7 +1575,11 @@ pub fn check_target(path: &Path, options: &WriteOptions) -> Result<Target> {
 /// Groß-/Kleinschreibung — `IN.PDF` bezeichnen alle dieselbe Datei, sehen aber
 /// verschieden aus. Deshalb wird zuerst über die Dateiidentität verglichen und
 /// nur ersatzweise über den kanonisierten Pfad.
-fn same_file(a: &Path, b: &Path) -> bool {
+///
+/// Öffentlich, damit es im Baum **eine** Antwort auf „dieselbe Datei?“ gibt:
+/// die Oberfläche misst damit, ob ein Verzeichnis Groß- und Kleinschreibung
+/// unterscheidet (`redact_gui::app::gemessene_schreibweise`).
+pub fn same_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

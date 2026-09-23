@@ -29,8 +29,13 @@ fn tmp(tag: &str) -> PathBuf {
     dir
 }
 
-/// Wörtlich `app::writing_key` (privat, darum hier nachgebaut) — Stand
-/// `af55c66`.
+/// Wörtlich `app::writing_key` — Stand `af55c66`, mit Absicht: dieser Beleg
+/// hält fest, wo der Satz der Runde 8 hielt und wo nicht. Das Original hat
+/// sich seither zweimal bewegt (Runde 9: der längste vorhandene Kopf statt
+/// `canonicalize`; Register #60: der Name wird gefaltet, wo das Verzeichnis
+/// Groß/Klein nicht unterscheidet) und ist seit #60 öffentlich
+/// (`redact_gui::app::writing_key`). Die Namen hier sind gleich geschrieben;
+/// die Faltung ändert an diesem Beleg nichts.
 fn wie_writing_key(p: &Path) -> PathBuf {
     let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
     match (dir, p.file_name()) {

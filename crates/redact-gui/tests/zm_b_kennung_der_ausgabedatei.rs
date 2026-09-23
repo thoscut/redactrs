@@ -17,10 +17,10 @@
 //!   Schreibziel festlegt (öffentlich, also prüfbar), und
 //! * die geschriebenen **Bytes** samt Inode.
 //!
-//! `writing_key` ist privat und steht deshalb hier **wörtlich nachgebaut**
-//! (`wie_writing_key`); jede Zusicherung stellt den Nachbau neben
-//! `check_target`, damit ein Auseinanderlaufen auffällt und nicht bloß
-//! behauptet wird.
+//! `writing_key` war privat und stand deshalb hier wörtlich nachgebaut; seit
+//! dem CI-Befund der Runde 9 (Register #60) ist es öffentlich, und jede
+//! Zusicherung stellt das **Original** neben `check_target`, damit ein
+//! Auseinanderlaufen auffällt und nicht bloß behauptet wird.
 //!
 //! Zwei Richtungen zählen gleich:
 //!
@@ -35,6 +35,7 @@
 //! flock /tmp/redactrs-cargo.lock cargo test -p redact-gui --test zm_b_kennung_der_ausgabedatei -- --nocapture
 //! ```
 
+use redact_gui::app::writing_key;
 use std::path::{Path, PathBuf};
 
 use redact_pdf::document::{check_target, WriteOptions};
@@ -46,93 +47,13 @@ fn tmp(tag: &str) -> PathBuf {
     dir
 }
 
-/// **Wörtlich** `crate::app::writing_key` (privat, darum hier nachgebaut) —
-/// samt der Korrektur der Gegenprüfung 9.
-///
-/// Eine Kopie ist eine Schuld: sie prüft sich selbst, sobald das Original sich
-/// bewegt. Genau das ist hier passiert — dieser Nachbau blieb rot, nachdem das
-/// Original schon stimmte, und hätte ebenso gut grün bleiben können, während
-/// das Original falsch ist. Deshalb steht daneben
-/// [`der_nachbau_haengt_am_quelltext`]: der Test liest `app.rs` und verlangt
-/// die Stellen, die diesen Nachbau tragen.
-fn wie_writing_key(p: &Path) -> PathBuf {
-    let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
-    match (dir, p.file_name()) {
-        (Some(dir), Some(name)) => wie_resolved_dir(dir).join(name),
-        (None, Some(name)) => wie_resolved_dir(Path::new(".")).join(name),
-        _ => p.to_path_buf(),
-    }
-}
-
-/// **Wörtlich** `crate::app::resolved_dir`.
-fn wie_resolved_dir(dir: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut glatt = PathBuf::new();
-    for teil in dir.components() {
-        match teil {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !glatt.pop() {
-                    glatt.push("..");
-                }
-            }
-            sonst => glatt.push(sonst.as_os_str()),
-        }
-    }
-    let mut kopf = glatt.clone();
-    let mut rest: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        if !kopf.as_os_str().is_empty() {
-            if let Ok(echt) = std::fs::canonicalize(&kopf) {
-                let mut aus = echt;
-                for teil in rest.iter().rev() {
-                    aus.push(teil);
-                }
-                return aus;
-            }
-        }
-        match kopf.file_name().map(std::ffi::OsStr::to_os_string) {
-            Some(name) => {
-                rest.push(name);
-                kopf.pop();
-            }
-            None => {
-                if glatt.is_absolute() {
-                    return glatt;
-                }
-                let mut aus = std::fs::canonicalize(".").unwrap_or_else(|_| PathBuf::from("."));
-                aus.push(&glatt);
-                return aus;
-            }
-        }
-    }
-}
-
-/// **Der Nachbau hängt am Quelltext.**
-///
-/// Ein nachgebauter Helfer prüft sein eigenes Abbild, sobald das Original sich
-/// bewegt — dieselbe Klasse, an der in dieser Runde drei Belegdateien hingen.
-/// Dagegen hilft keine Sorgfalt, sondern eine Bindung: dieser Test liest
-/// `app.rs` und verlangt genau die Stellen, ohne die der Nachbau daneben läge.
-#[test]
-fn der_nachbau_haengt_am_quelltext() {
-    let quelle = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"))
-        .expect("app.rs");
-    for stelle in [
-        "fn writing_key(path: &std::path::Path) -> PathBuf {",
-        "fn resolved_dir(dir: &std::path::Path) -> PathBuf {",
-        "Component::CurDir => {}",
-        "if !glatt.pop() {",
-        "if let Ok(echt) = std::fs::canonicalize(&kopf) {",
-        "(Some(dir), Some(name)) => resolved_dir(dir).join(name),",
-    ] {
-        assert!(
-            quelle.contains(stelle),
-            "`app.rs` trägt „{stelle}“ nicht mehr — dann prüft der Nachbau in \
-             dieser Datei etwas anderes als das Original"
-        );
-    }
-}
+// Bis zum CI-Befund der Runde 9 stand hier ein Nachbau von `app::writing_key`
+// samt `wie_resolved_dir` und einem Anker-Test, der `app.rs` nach den Zeilen
+// absuchte, die den Nachbau trugen. Eine Kopie ist eine Schuld, und der Anker
+// war ihr Zins: als `writing_key` die Schreibweise zu messen begann, hätte der
+// Nachbau weiter nicht gefaltet — und der Windows-Job wäre rot geblieben, oder
+// schlimmer umgekehrt. Seit `writing_key` öffentlich ist, ruft dieser Beleg
+// das Original, und Nachbau wie Anker sind weg.
 
 /// Das echte Schreibziel, wie `redact_pipeline::apply` es bestimmt:
 /// `check_target` mit `force` (die Oberfläche setzt `force: true`, der Dialog
@@ -146,8 +67,8 @@ fn schreibziel(p: &Path) -> Result<PathBuf, String> {
 /// Beide Auskünfte nebeneinander, und der Vergleich als Text — damit der Lauf
 /// selbst zeigt, worauf die Zusicherung sich stützt.
 fn vergleich(a: &Path, b: &Path, was: &str) -> (bool, bool) {
-    let ka = wie_writing_key(a);
-    let kb = wie_writing_key(b);
+    let ka = writing_key(a);
+    let kb = writing_key(b);
     let za = schreibziel(a);
     let zb = schreibziel(b);
     let kennung_gleich = ka == kb;
@@ -446,13 +367,13 @@ fn zm_b_ein_ordner_der_erst_entsteht_hat_dieselbe_kennung() {
         "der Ordner darf noch nicht da sein"
     );
 
-    let beim_klick = wie_writing_key(&ziel);
+    let beim_klick = writing_key(&ziel);
     let ziel_vorher = schreibziel(&ziel);
     assert!(
         basis.join("neu").exists(),
         "check_target legt den Ordner an — genau das ist der Bruch"
     );
-    let nach_dem_anlegen = wie_writing_key(&ziel);
+    let nach_dem_anlegen = writing_key(&ziel);
 
     println!("Pfad:              {}", ziel.display());
     println!("beim Klick:        {}", beim_klick.display());
@@ -499,9 +420,9 @@ fn zm_b_ein_ordner_unter_einem_link_hat_dieselbe_kennung() {
 
     let ziel = link.join("neu").join("out.pdf");
     assert!(!ziel.parent().unwrap().exists());
-    let beim_klick = wie_writing_key(&ziel);
+    let beim_klick = writing_key(&ziel);
     let ziel_vorher = schreibziel(&ziel);
-    let nach_dem_anlegen = wie_writing_key(&ziel);
+    let nach_dem_anlegen = writing_key(&ziel);
 
     println!("Pfad:              {}", ziel.display());
     println!("beim Klick:        {}", beim_klick.display());

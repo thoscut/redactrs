@@ -294,7 +294,11 @@ fn zj_c_vor_dem_anlegen_des_ordners_ist_die_kennung_eine_andere() {
     let ziel = link.join("neu").join("out.pdf");
     assert!(!ziel.parent().unwrap().exists(), "der Ordner fehlt noch");
 
-    // Wörtlich `app::writing_key` (privat, darum hier nachgebaut).
+    // Wörtlich `app::writing_key` zum Stand dieser Prüfung — mit Absicht: die
+    // Zusicherung darunter („EIN Klick, ZWEI Kennungen“) hält den Defekt der
+    // Runde 8 fest, den die Runde 9 mit `resolved_dir` geschlossen hat. Das
+    // Original (seit Register #60 öffentlich, `redact_gui::app::writing_key`)
+    // gäbe hier eine Kennung, und der Beleg des Defekts wäre keiner mehr.
     let wie_writing_key = |p: &Path| -> PathBuf {
         let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
         match (dir, p.file_name()) {

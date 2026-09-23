@@ -800,14 +800,136 @@ fn file_name_of(path: &std::path::Path) -> String {
 /// daran. Der Dateiname bleibt dabei außen vor — durch einen Link hindurch
 /// wird nicht geschrieben. Gibt es gar nichts aufzulösen, gilt der geglättete
 /// Pfad: grob wie eine getippte Schreibweise, aber nie falsch verschmolzen.
-fn writing_key(path: &std::path::Path) -> PathBuf {
+/// Öffentlich seit dem CI-Befund der Runde 9 (Register #60), damit die
+/// Belege das Original rufen statt eines Nachbaus — eine Kopie prüft sich
+/// selbst, sobald das Original sich bewegt.
+pub fn writing_key(path: &std::path::Path) -> PathBuf {
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
     match (dir, path.file_name()) {
-        (Some(dir), Some(name)) => resolved_dir(dir).join(name),
+        (Some(dir), Some(name)) => key_in(&resolved_dir(dir), name),
         // Ein nackter Dateiname: das Verzeichnis ist das laufende, und
         // `check_target` setzt dort genauso `"."` ein.
-        (None, Some(name)) => resolved_dir(std::path::Path::new(".")).join(name),
+        (None, Some(name)) => key_in(&resolved_dir(std::path::Path::new(".")), name),
         _ => path.to_path_buf(),
+    }
+}
+
+/// Die Kennung im aufgelösten Verzeichnis: der Name, gefaltet, wenn **dieses
+/// Verzeichnis** Groß- und Kleinschreibung nicht unterscheidet.
+///
+/// Auf NTFS und APFS sind `Auszug.pdf` und `auszug.pdf` eine Datei. Zwei
+/// Kennungen dafür hießen: zwei gleichzeitige Exporte schreiben dieselbe
+/// Datei, und keiner meldet `EXPORT_BUSY` — der CI-Befund der Runde 9, Job
+/// „Build (windows-2025)“, Register #60. Eine Kennung für zwei
+/// *verschiedene* Dateien wäre genauso falsch, und stiller: der zweite Export
+/// würfe in `start_export_check` die laufende Leckprüfung der ersten weg und
+/// striche in `forget_warnings_of` ihre Warnungen. Deshalb wird gemessen und
+/// nicht geraten.
+fn key_in(dir: &std::path::Path, name: &std::ffi::OsStr) -> PathBuf {
+    dir.join(gefalteter_name(name, schreibweise_von(dir)))
+}
+
+/// Unterscheidet **dieses Verzeichnis** Groß- und Kleinschreibung?
+///
+/// Keine Plattformfrage: NTFS faltet in der Voreinstellung und lässt es seit
+/// Windows 10 je Verzeichnis (`fsutil file setCaseSensitiveInfo`); ein
+/// VFAT-Stick, eine SMB-Freigabe oder ext4 mit `casefold` falten unter Linux.
+/// `cfg(windows)` sagt, dass es das *gibt*, nicht dass dieses Verzeichnis es
+/// *tut*.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Schreibweise {
+    Unterscheidet,
+    Faltet,
+}
+
+/// Die Vorgabe, wenn das Verzeichnis keine Antwort gibt — leer, ohne
+/// ASCII-Buchstaben in den ersten Einträgen, nicht lesbar: die Voreinstellung
+/// der Plattform. Ein Notnagel, keine Regel.
+const fn schreibweise_vorgabe() -> Schreibweise {
+    if cfg!(any(windows, target_os = "macos")) {
+        Schreibweise::Faltet
+    } else {
+        Schreibweise::Unterscheidet
+    }
+}
+
+fn schreibweise_von(dir: &std::path::Path) -> Schreibweise {
+    gemessene_schreibweise(dir).unwrap_or(schreibweise_vorgabe())
+}
+
+/// Wie viele Einträge [`gemessene_schreibweise`] höchstens ansieht. Öffentlich,
+/// weil der CHANGELOG die Zahl nennt und `belege.rs` sie daran bindet.
+pub const PROBEN_HOECHSTENS: usize = 8;
+
+/// Misst am **nächsten vorhandenen** Verzeichnis auf dem Weg nach oben, ohne
+/// etwas anzulegen: ein Eintrag mit einem ASCII-Buchstaben, dessen erste
+/// Schreibweise gekippt, und nachgesehen, ob die Platte unter dem gekippten
+/// Namen **dieselbe Datei** zeigt (`redact_pdf::document::same_file`).
+///
+/// Der nächste vorhandene Vorfahr, weil die Kennung vor und nach dem Anlegen
+/// des Zielordners dieselbe sein muss — und weil NTFS die Einstellung an neue
+/// Kinder vererbt. Höchstens [`PROBEN_HOECHSTENS`] Einträge, Symlinks übersprungen;
+/// ein Eintrag, dessen Probe aus einem anderen Grund als „nicht da“ scheitert
+/// (Rechte, ein Rennen), wird übergangen. Ein `read_dir` und ein bis zwei
+/// `stat` je Klick; kein Zwischenspeicher, weil die Einstellung je Verzeichnis
+/// umschaltbar ist.
+fn gemessene_schreibweise(dir: &std::path::Path) -> Option<Schreibweise> {
+    let mut vorhanden = dir;
+    while !vorhanden.is_dir() {
+        vorhanden = vorhanden.parent()?;
+    }
+    for eintrag in std::fs::read_dir(vorhanden).ok()?.take(PROBEN_HOECHSTENS) {
+        let Ok(eintrag) = eintrag else { continue };
+        let Ok(typ) = eintrag.file_type() else {
+            continue;
+        };
+        if typ.is_symlink() {
+            continue;
+        }
+        let Some(gekippt) = gekippte_schreibweise(&eintrag.file_name()) else {
+            continue;
+        };
+        let probe = vorhanden.join(gekippt);
+        match std::fs::symlink_metadata(&probe) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Some(Schreibweise::Unterscheidet);
+            }
+            Ok(_) if redact_pdf::document::same_file(&eintrag.path(), &probe) => {
+                return Some(Schreibweise::Faltet);
+            }
+            // Unter dem gekippten Namen liegt wirklich eine zweite Datei.
+            Ok(_) => return Some(Schreibweise::Unterscheidet),
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+/// Kippt die Schreibweise des ersten ASCII-Buchstabens; `None`, wenn der Name
+/// keinen hat (`2026-09-22`) oder kein UTF-8 ist. Nur ASCII, weil `ß` beim
+/// Großschreiben zu `SS` würde und die Probe dann eine andere Länge hätte.
+fn gekippte_schreibweise(name: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    let text = name.to_str()?;
+    let stelle = text.find(|c: char| c.is_ascii_alphabetic())?;
+    let c = text[stelle..].chars().next()?;
+    let mut aus = String::with_capacity(text.len());
+    aus.push_str(&text[..stelle]);
+    aus.push(if c.is_ascii_lowercase() {
+        c.to_ascii_uppercase()
+    } else {
+        c.to_ascii_lowercase()
+    });
+    aus.push_str(&text[stelle + 1..]);
+    Some(aus.into())
+}
+
+/// Rein — fragt weder Platte noch Plattform. Faltet mit derselben Regel wie
+/// `redact_pdf::document::eq_ignore_case` (`to_lowercase`), damit es im Baum
+/// eine Faltung gibt und nicht zwei.
+fn gefalteter_name(name: &std::ffi::OsStr, wie: Schreibweise) -> std::ffi::OsString {
+    match wie {
+        Schreibweise::Unterscheidet => name.to_os_string(),
+        Schreibweise::Faltet => name.to_string_lossy().to_lowercase().into(),
     }
 }
 
@@ -3104,6 +3226,13 @@ mod zh_c_export_tests;
 #[cfg(test)]
 #[path = "zh2_c_leck_tests.rs"]
 mod zh2_c_leck_tests;
+
+// CI-Befund der Runde 9, Register #60: die Kennung eines Exports auf einem
+// Dateisystem ohne Groß-/Kleinschreibung. Kindmodul, weil `Schreibweise`,
+// `gemessene_schreibweise` und `gefalteter_name` privat sind.
+#[cfg(test)]
+#[path = "zn_b_schreibweise_tests.rs"]
+mod zn_b_schreibweise_tests;
 
 // Gegenprüfung R4, Teil 2: der Prüf-Thread selbst — `start_export_check`,
 // der Haken `CheckGate`, die Warnungsliste über mehrere Ausgabedateien.

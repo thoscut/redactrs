@@ -2047,6 +2047,18 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         format!("auf höchstens {} Zeichen", statuszeilendecke()),
     );
 
+    // --- Nach der Runde 9: die Messung der Schreibweise (Register #60) -----
+    //
+    // Wie viele Einträge `gemessene_schreibweise` höchstens ansieht — eine
+    // Decke im Code, nicht gemessen, aber eine Zusage, und deshalb gebunden.
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "geprüft werden höchstens {} Einträge",
+            zahlwort(redact_gui::app::PROBEN_HOECHSTENS)
+        ),
+    );
+
     aus
 }
 
@@ -2502,6 +2514,55 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "an einer Datei mit einem 64-MiB-Strom durchläuft",
         "die Stromgroesse ist im Satz ueber die Kostenrechnung gebunden (KLON_STROM_MIB)",
+    ),
+    // --- Nach der Runde 9: der Windows-Befund (Register #60) ---------------
+    // Anzahlen im Szenario, Nummern von Runden und Commits, der Name einer
+    // Windows-Fassung. Die eine Decke des Abschnitts (hoechstens acht
+    // Eintraege) ist in `messsaetze` an `PROBEN_HOECHSTENS` gebunden.
+    (
+        "### Nach der Runde 9: ein Prüfer, der Windows heißt",
+        "die Nummer einer Fix-Runde in einer Ueberschrift, keine Messung",
+    ),
+    (
+        "Zwei Befunde außerhalb einer Gegenprüfung",
+        "zaehlt die Befunde dieses Abschnitts, keine gemessene Groesse",
+    ),
+    (
+        "oder ext4 mit `casefold` falten unter Linux",
+        "der Name eines Dateisystems, keine Messung",
+    ),
+    (
+        "gab der Kollisionsschutz der Oberfläche einer Datei zwei Kennungen",
+        "zaehlt die Kennungen fuer eine Datei — der Befund selbst, keine Messung",
+    ),
+    (
+        "aus der Runde 9: der Test schreibt",
+        "die Nummer einer Fix-Runde, keine Messung",
+    ),
+    (
+        "Zwei gleichzeitige Exporte auf diese Datei hätten sich nicht",
+        "zaehlt die Exporte des Szenarios, keine Messung",
+    ),
+    (
+        "der Stand `0f0b0f7` kanonisierte genauso nur das Verzeichnis",
+        "eine Commit-Kennung, an der der alte Stand liegt — keine Messung",
+    ),
+    (
+        "Der Satz der Fix-Runde 8 unten, zwei Schreibwege auf dieselbe Datei fielen \
+         zusammen",
+        "Nummer einer Runde und Zaehlung der Wege zu einer Datei, keine Messung",
+    ),
+    (
+        "eine gemeinsame Kennung für zwei *verschiedene* Dateien",
+        "zaehlt die Dateien des Szenarios, keine Messung",
+    ),
+    (
+        "NTFS lässt seit Windows 10 je Verzeichnis",
+        "der Name einer Windows-Fassung, keine Messung",
+    ),
+    (
+        "bis zum Befund des Windows-Jobs nach der Runde 9 zwei Kennungen",
+        "Nummer einer Runde und Zaehlung der Kennungen, keine Messung",
     ),
 ];
 

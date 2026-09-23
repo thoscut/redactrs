@@ -87,8 +87,12 @@ fn aufgeloest_zeigen_beide_auf_dieselbe_datei() {
     let umweg = std::fs::canonicalize(dir.join("unten").join("..").join("out.pdf")).expect("Umweg");
     assert_eq!(gerade, umweg);
 
-    // So, wie `writing_key` es tut: nur das Verzeichnis auflösen, den Namen
-    // unverändert daran. Das reicht für `..` — und wird gebraucht.
+    // So, wie `writing_key` es zum Stand dieser Prüfung tat: nur das
+    // Verzeichnis auflösen, den Namen unverändert daran. Das reicht für `..`
+    // — und wird gebraucht. Seit Register #60 faltet das Original den Namen,
+    // wo das Verzeichnis Groß/Klein nicht unterscheidet; für gleich
+    // geschriebene Namen wie hier ohne Unterschied. Das Original ist öffentlich
+    // (`redact_gui::app::writing_key`), wer den Satz neu belegt, ruft es.
     let wie_writing_key = |p: &Path| {
         let ordner = p.parent().expect("Ordner");
         std::fs::canonicalize(ordner)

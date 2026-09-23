@@ -64,6 +64,50 @@ verschoben. `crates/redact-cli/tests/belege.rs` hält die Regel samt Läufen;
 `die_zahlen_der_doku_sind_gebunden` und
 `jede_zahl_der_letzten_runden_ist_gebunden` prüfen sie.
 
+### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
+
+Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —
+der erste am Programm, der zweite am Werkzeug. Beide haben dieselbe Wurzel:
+das lokale Gate führt keinen Windows-Test aus, und es passte nicht mehr auf
+die Platte.
+
+* **⚠ Sicherheit: auf einem Dateisystem ohne Groß-/Kleinschreibung gab der
+  Kollisionsschutz der Oberfläche einer Datei zwei Kennungen.** Gefunden hat
+  es der Windows-Job der CI mit
+  `zm_b_verschiedene_dateien_verschiedene_kennungen` aus der Runde 9: der Test
+  schreibt `Auszug.pdf` und `auszug.pdf`, liest beide zurück, und auf NTFS ist
+  es dieselbe Datei — `writing_key` gab aber für jede Schreibweise eine eigene
+  Kennung. Zwei gleichzeitige Exporte auf diese Datei hätten sich nicht mit
+  `EXPORT_BUSY` abgewiesen, sondern beide geschrieben. Keine Regression: der
+  Stand `0f0b0f7` kanonisierte genauso nur das Verzeichnis. Der Satz der
+  Fix-Runde 8 unten, zwei Schreibwege auf dieselbe Datei fielen zusammen, galt
+  nur auf Dateisystemen **mit** Groß-/Kleinschreibung; er ist dort ergänzt.
+
+  Die Umkehrung wäre genauso falsch, und stiller: eine gemeinsame Kennung für
+  zwei *verschiedene* Dateien lehnte nicht nur den zweiten Export ab — sie
+  würfe in `start_export_check` die laufende Leckprüfung der ersten Datei weg
+  und striche in `forget_warnings_of` deren Warnungen. NTFS lässt seit
+  Windows 10 je Verzeichnis Groß/Klein zu, und ein VFAT-Stick, eine
+  SMB-Freigabe oder ext4 mit `casefold` falten unter Linux. Deshalb rät
+  `writing_key` nicht nach Plattform, sondern **misst das Verzeichnis**
+  (`gemessene_schreibweise`): am nächsten vorhandenen Vorfahren des Ziels ein
+  Eintrag mit einem ASCII-Buchstaben, dessen Schreibweise gekippt, und
+  nachgesehen, ob die Platte darunter dieselbe Datei zeigt
+  (`document::same_file`, jetzt öffentlich). Nichts wird angelegt, geprüft
+  werden höchstens acht Einträge, und ohne Antwort — leeres Verzeichnis, keine
+  Buchstaben, kein Leserecht — gilt die Voreinstellung der Plattform als
+  Notnagel. Die Faltung selbst (`gefalteter_name`) ist rein und nimmt die
+  Antwort als Parameter; so ist die Windows-Hälfte auf Linux gebunden
+  (`zn_b_schreibweise_tests`), und die Messung wird gegen dasselbe Orakel
+  geprüft wie im CI-Test: was die Platte sagt, muss sie sagen. Der
+  Windows-Läufer der CI ist damit der einzige, der den positiven Zweig der
+  Messung sieht. Offen, als Register: ein NTFS-Verzeichnis mit gesetzter
+  Case-Flagge hat in dieser CI keinen Läufer, und für den noch nicht
+  angelegten Rest eines Verzeichnispfads behält `resolved_dir` die getippte
+  Schreibweise. `writing_key` ist öffentlich, und die Belege rufen das
+  Original — der Nachbau in `zm_b_kennung_der_ausgabedatei` samt seinem
+  Anker-Test ist weg.
+
 ### Fix-Runde 9: was die Gegenprüfung der Runde 8 noch fand
 
 Vier Gegenprüfer lasen die Korrekturen der Runde 8 mit eigenem Material gegen.
@@ -178,7 +222,10 @@ dastand, wo derselbe Abschnitt die Einheit binär festlegt.
   über alte Bytes weg. Die Kennung eines Exports ist dabei nicht mehr der Pfad,
   sondern das aufgelöste Verzeichnis samt unverändertem Dateinamen
   (`writing_key`) — sie folgt keinem Symlink, und zwei Schreibwege auf dieselbe
-  Datei fallen zusammen. Und ein fertiger Export meldet nicht mehr
+  Datei fallen zusammen. Das galt auf einem Dateisystem mit
+  Groß-/Kleinschreibung; ohne sie waren es bis zum Befund des Windows-Jobs
+  nach der Runde 9 zwei Kennungen (siehe oben). Und ein fertiger Export meldet
+  nicht mehr
   „beschäftigt“: das Merkmal dafür ist, dass die Ausgabedatei entstanden ist,
   nicht dass der Lauf fehlerfrei endete.
 
