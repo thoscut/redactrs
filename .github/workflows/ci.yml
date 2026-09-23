@@ -122,6 +122,11 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
+        # Ein haengender Test lief sonst bis zur Sechs-Stunden-Grenze des
+        # Laeufers, und sein Protokoll war bis dahin unerreichbar (Lauf 125,
+        # Windows, nach der Spur-A-Runde 1). Die Stufe braucht 7-15 Minuten;
+        # nach 45 ist es ein Haenger, und der Abbruch zeigt, welcher Test.
+        timeout-minutes: 45
         run: cargo test --workspace --locked
 
   build-windows:
@@ -159,6 +164,11 @@ jobs:
         run: cargo build --release --locked -p redact-cli
 
       - name: Test
+        # Ein haengender Test lief sonst bis zur Sechs-Stunden-Grenze des
+        # Laeufers, und sein Protokoll war bis dahin unerreichbar (Lauf 125,
+        # Windows, nach der Spur-A-Runde 1). Die Stufe braucht 7-15 Minuten;
+        # nach 45 ist es ein Haenger, und der Abbruch zeigt, welcher Test.
+        timeout-minutes: 45
         run: cargo test --workspace --locked
 
       - name: Upload redact-rs.exe
