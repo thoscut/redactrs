@@ -280,6 +280,21 @@ sind, jeder in seinem eigenen Commit.
   zurückgesetzte Dekoder liefert, was der alte Weg lieferte). Mutationsnachweis:
   je Teil zurückgenommen → sein Fall rot.
 
+* **⚠ Sicherheit: das Erscheinungsbild eines Widgets, das keine Seite zeigt,
+  blieb stehen** (Register #90, Prüfer B; stilles Leck, die Zeile #71 der
+  Probenliste trat weiter auf). Ein Widget, das nur in den `/Kids` seines
+  Formularfelds hängt, nicht in `/Annots` einer Seite, zeichnet kein
+  Betrachter. Der Trägerlauf erreichte es über ein Geschwister auf der Seite
+  (`/Parent`, `/Kids`), nahm ihm die Texte und hielt es damit am Leben; sein
+  `/AP` las niemand, denn die Analyse liest, was eine Seite zeigt. Der
+  gezeichnete Feldwert stand nach dem Lauf in der Datei, ohne Warnung. Jetzt
+  steht vor dem Trägerlauf fest, welche Träger eine Seite zeigt; ein Träger
+  außerhalb davon verliert sein `/AP` und die Symbole in seinem `/MK` — ein
+  `/MK` als eigenes Objekt nur, wenn kein gezeigtes Widget es benutzt.
+  Belege: `zp_b_nicht_gezeichnete_annotation`. Mutationsnachweis: je Teil
+  zurückgenommen → sein Fall rot, auch die Gegenproben (direkt eingebettete
+  Widgets, `/Annots` als eigenes Objekt, ein geteiltes `/MK`).
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

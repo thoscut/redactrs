@@ -103,7 +103,9 @@
 //! `/IRT` (Antwortkette). Ein Träger, den nur `/AcroForm` erreichbar machte,
 //! fällt mit dem Formular; einen, den ein Widget in `/Annots` über `/Parent`
 //! hält, überlebt es — und der trägt `/T`, `/TU`, `/Opt` und `/AA` genauso
-//! wie das Widget selbst. Gemessen (vor dieser Änderung): `/Contents` eines
+//! wie das Widget selbst. Führt ihn keine Seite in `/Annots`, verliert er
+//! außerdem sein Erscheinungsbild: niemand zeichnet es, und niemand liest es
+//! (Register #90, siehe `shown_carriers`). Gemessen (vor dieser Änderung): `/Contents` eines
 //! nur über `/Popup` erreichbaren Popups, `/T` und `/TU` am Elternfeld,
 //! `/Opt` am Feld und am Widget, `/AA /K /JS` am Elternfeld, `/MK /CA`,
 //! `/OverlayText`, `/PA`, `/NM` und `/DS` an der Annotation — alle mit
@@ -542,6 +544,12 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     // Feld, das nur dort hängt, hat dieselben Klartexte und denselben Wert.
     let mut visited: BTreeSet<ObjectId> = BTreeSet::new();
     let mut cleaned = Cleaned::default();
+    // Was eine Seite zeigt, steht fest, bevor der erste Träger bereinigt
+    // wird — sonst hinge es an der Reihenfolge der Seiten, ob ein Widget,
+    // das eine andere Seite über `/Parent` und `/Kids` erreicht, als gezeigt
+    // gilt (Register #90).
+    let shown = shown_carriers(doc, &page_ids);
+    let mut captions: BTreeMap<ObjectId, bool> = BTreeMap::new();
     for page_id in &page_ids {
         attachments.extend(remove_file_attachments(doc, *page_id));
         if let Ok(page) = doc.get_dictionary_mut(*page_id) {
@@ -555,7 +563,7 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
                 take(page, key, &mut beiwerk);
             }
         }
-        cleaned += clean_annotations(doc, *page_id, &mut visited);
+        cleaned += clean_annotations(doc, *page_id, &mut visited, &shown, &mut captions);
     }
     if let Some(mut fields) = form_fields {
         // Der Feldbaum zuletzt: was von einer Seite aus erreichbar ist, ist
@@ -567,7 +575,21 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
         // war schon immer der Feldwert-Zähler. Zurückgeschrieben wird der
         // Wurzelwert nicht — er hängt am `/AcroForm`-Dictionary, und dessen
         // Schlüssel ist gerade gefallen.
-        cleaned.values += clean_carriers(doc, &mut fields, &mut visited).values;
+        cleaned.values +=
+            clean_carriers(doc, &mut fields, false, &mut visited, &shown, &mut captions).values;
+    }
+    // Ein `/MK` als eigenes Objekt — von mehreren Widgets geteilt: einmal
+    // bereinigt, nach allen Wurzeln. Seine Symbole verliert es nur, wenn kein
+    // gezeigtes Widget es benutzt.
+    for (mk, benutzt_gezeigt) in captions {
+        if let Ok(dict) = doc.get_dictionary_mut(mk) {
+            clean_captions(dict, &mut cleaned.texts);
+            if !benutzt_gezeigt {
+                for key in ICON_KEYS {
+                    take(dict, key, &mut cleaned.texts);
+                }
+            }
+        }
     }
 
     // --- Seiten außerhalb des Seitenbaums --------------------------------
@@ -825,6 +847,8 @@ fn clean_annotations(
     doc: &mut Document,
     page_id: ObjectId,
     visited: &mut BTreeSet<ObjectId>,
+    shown: &BTreeSet<ObjectId>,
+    captions: &mut BTreeMap<ObjectId, bool>,
 ) -> Cleaned {
     let Some(mut annots) = doc
         .get_dictionary(page_id)
@@ -834,7 +858,7 @@ fn clean_annotations(
     else {
         return Cleaned::default();
     };
-    let cleaned = clean_carriers(doc, &mut annots, visited);
+    let cleaned = clean_carriers(doc, &mut annots, true, visited, shown, captions);
     // Nur wenn im *direkten* Wert etwas fiel, muss er zurück an die Seite —
     // ein `/Annots 9 0 R` wird an seinem eigenen Objekt bereinigt.
     if cleaned.any() && !matches!(annots, Object::Reference(_)) {
@@ -852,16 +876,62 @@ fn clean_annotations(
 /// darin bereinigt, Verweise wandern auf den Stapel und werden an ihren
 /// eigenen Objekten bereinigt. Wer den Wurzelwert behalten will, schreibt ihn
 /// danach zurück.
+///
+/// `root_shown`: zeigt eine Seite die Träger direkt in `root`? Für `/Annots`
+/// ja, für `/Fields` nein. Ein Träger, den keine Seite zeigt, verliert sein
+/// Erscheinungsbild (Register #90, siehe [`shown_carriers`]).
 fn clean_carriers(
     doc: &mut Document,
     root: &mut Object,
+    root_shown: bool,
     visited: &mut BTreeSet<ObjectId>,
+    shown: &BTreeSet<ObjectId>,
+    captions: &mut BTreeMap<ObjectId, bool>,
 ) -> Cleaned {
     let mut stack: Vec<ObjectId> = Vec::new();
-    let mut captions: Vec<ObjectId> = Vec::new();
-    let mut cleaned = clean_embedded(doc, root, &mut stack, &mut captions);
-    cleaned += drain_carriers(doc, &mut stack, &mut captions, visited);
+    let mut cleaned = clean_embedded(doc, root, root_shown, &mut stack, captions);
+    cleaned += drain_carriers(doc, &mut stack, visited, shown, captions);
     cleaned
+}
+
+/// Die Träger, die eine Seite zeigt: jedes Objekt, das in `/Annots` einer
+/// Seite steht, und jedes `/Annots`-Array, das als eigenes Objekt dasteht
+/// (seine direkten Einträge zeigt die Seite).
+///
+/// Ein Träger außerhalb davon wird von keinem Betrachter gezeichnet — ein
+/// Widget, das nur in den `/Kids` seines Felds hängt, das Ende einer
+/// Antwortkette, weiter weg, als `crate::content` von der Seite aus geht.
+/// Bis zur Spur-A-Runde 2 hielt der Trägerlauf solche Träger über `/Parent`,
+/// `/Kids` und `/IRT` am Leben und nahm ihnen die Texte, ließ aber ihr
+/// `/AP` stehen, das niemand las: der gezeichnete Feldwert stand nach dem
+/// Lauf in der Datei, ohne Warnung (Register #90, #91). Jetzt verliert ein
+/// solcher Träger sein Erscheinungsbild — was niemand zeigt, braucht keins,
+/// und was bliebe, könnte niemand schwärzen.
+fn shown_carriers(doc: &Document, page_ids: &[ObjectId]) -> BTreeSet<ObjectId> {
+    let mut shown = BTreeSet::new();
+    for page_id in page_ids {
+        let Some(annots) = doc
+            .get_dictionary(*page_id)
+            .ok()
+            .and_then(|page| page.get(b"Annots").ok())
+        else {
+            continue;
+        };
+        let array = match annots {
+            Object::Reference(id) => {
+                shown.insert(*id);
+                doc.get_object(*id).ok().and_then(|o| o.as_array().ok())
+            }
+            Object::Array(items) => Some(items),
+            _ => None,
+        };
+        for item in array.into_iter().flatten() {
+            if let Object::Reference(id) = item {
+                shown.insert(*id);
+            }
+        }
+    }
+    shown
 }
 
 /// Arbeitet den Stapel ab: jedes erreichte Objekt wird als Träger bereinigt,
@@ -869,19 +939,12 @@ fn clean_carriers(
 fn drain_carriers(
     doc: &mut Document,
     stack: &mut Vec<ObjectId>,
-    captions: &mut Vec<ObjectId>,
     visited: &mut BTreeSet<ObjectId>,
+    shown: &BTreeSet<ObjectId>,
+    captions: &mut BTreeMap<ObjectId, bool>,
 ) -> Cleaned {
     let mut cleaned = Cleaned::default();
     loop {
-        // Ein `/MK` als eigenes Objekt — von mehreren Widgets geteilt.
-        while let Some(mk) = captions.pop() {
-            if visited.insert(mk) {
-                if let Ok(dict) = doc.get_dictionary_mut(mk) {
-                    clean_captions(dict, &mut cleaned.texts);
-                }
-            }
-        }
         let Some(id) = stack.pop() else {
             return cleaned;
         };
@@ -910,7 +973,7 @@ fn drain_carriers(
         }) else {
             continue;
         };
-        let step = clean_embedded(doc, &mut object, stack, captions);
+        let step = clean_embedded(doc, &mut object, shown.contains(&id), stack, captions);
         if step.any() {
             doc.objects.insert(id, object);
         }
@@ -924,18 +987,26 @@ fn drain_carriers(
 /// Ohne Rekursion und ohne Tiefengrenze — der Stapel hält die noch offenen
 /// Zweige, und ein direkter Baum ist endlich (er wurde als Teil *eines*
 /// Objekts geladen, Zyklen kann er nicht haben).
+///
+/// `root_shown`: zeigt eine Seite `root` — ist es ein Array, dessen direkte
+/// Einträge? Alles, was über [`ANNOTATION_LINK_KEYS`] erreicht wird, zeigt
+/// keine Seite als Teil von `root`; ein Verweis entscheidet an seinem Objekt.
 fn clean_embedded(
     doc: &Document,
     root: &mut Object,
+    root_shown: bool,
     stack: &mut Vec<ObjectId>,
-    captions: &mut Vec<ObjectId>,
+    captions: &mut BTreeMap<ObjectId, bool>,
 ) -> Cleaned {
     let mut cleaned = Cleaned::default();
-    let mut open: Vec<&mut Object> = vec![root];
-    while let Some(item) = open.pop() {
+    let mut open: Vec<(&mut Object, bool)> = match root {
+        Object::Array(items) => items.iter_mut().map(|item| (item, root_shown)).collect(),
+        other => vec![(other, root_shown)],
+    };
+    while let Some((item, shown)) = open.pop() {
         match item {
             Object::Reference(id) => stack.push(*id),
-            Object::Array(items) => open.extend(items.iter_mut()),
+            Object::Array(items) => open.extend(items.iter_mut().map(|item| (item, false))),
             Object::Dictionary(dict) => {
                 if !is_carrier(dict) {
                     // Kein Träger — aber **erreicht**. Ein `/StructElem`
@@ -949,12 +1020,20 @@ fn clean_embedded(
                 }
                 let keep_dest = keeps_destination(doc, dict);
                 if let Ok(Object::Reference(mk)) = dict.get(b"MK") {
-                    captions.push(*mk);
+                    *captions.entry(*mk).or_insert(false) |= shown;
                 }
                 cleaned += clean_carrier(dict, keep_dest);
+                if !shown {
+                    take(dict, b"AP", &mut cleaned.texts);
+                    if let Ok(Object::Dictionary(mk)) = dict.get_mut(b"MK") {
+                        for key in ICON_KEYS {
+                            take(mk, key, &mut cleaned.texts);
+                        }
+                    }
+                }
                 for (key, value) in dict.iter_mut() {
                     if ANNOTATION_LINK_KEYS.contains(&key.as_slice()) {
-                        open.push(value);
+                        open.push((value, false));
                     }
                 }
             }
@@ -999,6 +1078,11 @@ const ANNOTATION_ACTION_KEYS: [&[u8]; 3] = [b"A", b"AA", b"PA"];
 /// Die Beschriftungen im `/MK`-Dictionary eines Widgets (Tabelle 189):
 /// normal, beim Überfahren, beim Drücken.
 const CAPTION_KEYS: [&[u8]; 3] = [b"CA", b"RC", b"AC"];
+
+/// Die Symbole im `/MK`-Dictionary eines Druckknopfs (Tabelle 189) — Form-
+/// XObjects, die Text zeichnen dürfen. Ein Widget, das keine Seite zeigt,
+/// verliert sie mit seinem `/AP` (Register #90).
+const ICON_KEYS: [&[u8]; 3] = [b"I", b"RI", b"IX"];
 
 /// Die Schlüssel, über die eine Annotation weitere Träger erreichbar hält:
 /// ihr `/Popup` (Tabelle 170), das Elternfeld (`/Parent`, Tabelle 220), die
