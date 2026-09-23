@@ -160,6 +160,24 @@ sind, jeder in seinem eigenen Commit.
   gewöhnliche Kette als Gegenprobe). Mutationsnachweis: je Leser
   zurückgenommen → sein Fall rot.
 
+* **Eine Seite mit einem Kommentar vor einer Leerzeile wurde abgelehnt**
+  (Register #103, beim Befund #98 gefunden; abgelehnte gewöhnliche Datei).
+  Der Zerleger von `lopdf` bricht an einem Kommentar mit einer Leerzeile
+  dahinter ab (`… ET`, `% Kopf`, Leerzeile, `BT …`), und ebenso an NUL und
+  Seitenvorschub als Leerraum, die die Norm dazuzählt. Die Seite galt als
+  nicht zerlegbar, und die Schwärzung brach mit „ließ sich nicht in
+  Operationen zerlegen“ ab, obwohl `pdftotext` sie vollständig liest.
+  Aufgefallen bei der Korrektur zu #98: der Prüfling in `zd_orakel_budget`
+  trug genau so eine Seite, und das Orakel überging sie bis dahin stumm.
+  Jetzt schreibt der Zerleger Kommentare und diesen Leerraum außerhalb
+  literaler Zeichenketten vor dem zweiten Versuch in Leerzeichen um; was
+  keine Syntax ist — ein verirrtes `]`, ein doppeltes Minuszeichen —, bleibt
+  ein Bruch. Der Prüfling in `inline_image_boundaries`, der ein Nullbyte
+  als Beispiel für Unzerlegbares nahm, trägt dafür jetzt eine verirrte
+  Klammer. Belege: `zp_d_kommentar_und_leerraum`. Mutationsnachweis: kein
+  Umschreiben → die Fälle rot; Zeichenketten nicht ausgenommen → das
+  Prozentzeichen im Text rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

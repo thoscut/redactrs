@@ -237,9 +237,11 @@ fn page_with_trailing(rest: &[u8]) -> Vec<u8> {
 /// stand. Jetzt wird die Datei abgelehnt.
 #[test]
 fn an_undecodable_remainder_is_not_dropped_in_silence() {
-    // Ein Nullbyte gilt in PDF als Leerraum, in lopdfs Content-Parser nicht:
+    // Eine verirrte schließende Klammer ist in keinem Leser gültige Syntax:
     // ab dort bricht die Zerlegung ab, und `(IBAN …) Tj` fehlt im Ergebnis.
-    let mut rest = Vec::from(&b"BT /F1 10 Tf 72 685 Td\x00 "[..]);
+    // (Bis zur Spur-A-Runde 2 stand hier ein Nullbyte — das ist nach
+    // PDF 32000-1, 7.2.3 Leerraum und wird seit Register #103 so gelesen.)
+    let mut rest = Vec::from(&b"BT /F1 10 Tf 72 685 Td ] "[..]);
     rest.extend_from_slice(format!("(IBAN: {SECRET}) Tj ET\n").as_bytes());
     let pdf = page_with_trailing(&rest);
 
@@ -252,7 +254,7 @@ fn an_undecodable_remainder_is_not_dropped_in_silence() {
         "unerwartete Begründung: {error}"
     );
 
-    // Gegenprobe: ohne das Nullbyte läuft genau dieselbe Seite durch.
+    // Gegenprobe: ohne die Klammer läuft genau dieselbe Seite durch.
     let mut clean = Vec::from(&b"BT /F1 10 Tf 72 685 Td "[..]);
     clean.extend_from_slice(format!("(IBAN: {SECRET}) Tj ET\n").as_bytes());
     let pdf = page_with_trailing(&clean);

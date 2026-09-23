@@ -1864,11 +1864,13 @@ fn decode_chunk(chunk: &[u8], out: &mut DecodedContent) {
         out.operations.extend(content.operations);
         return;
     }
-    // Zweiter Versuch mit sauberem Abschluss: lopdf verlangt hinter einem
-    // Kommentar ein Zeilenende und kennt weder NUL noch Seitenvorschub als
-    // Leerraum, obwohl PDF 32000-1 (Tabelle 1) beide dazuzählt. Beides ist
-    // kein Inhaltsverlust und darf keinen Fehlalarm auslösen.
-    let mut tidied: Vec<u8> = chunk.to_vec();
+    // Zweiter Versuch mit dem Leerraum der Norm und sauberem Abschluss:
+    // lopdf verlangt hinter einem Kommentar ein Zeilenende, stolpert über
+    // einen Kommentar vor einer Leerzeile und kennt weder NUL noch
+    // Seitenvorschub als Leerraum, obwohl PDF 32000-1 (Tabelle 1) beide
+    // dazuzählt. Nichts davon ist Inhaltsverlust, und nichts davon darf die
+    // Seite kosten.
+    let mut tidied = pdf_whitespace_for_lopdf(chunk);
     while tidied.last().is_some_and(|b| is_pdf_whitespace(*b)) {
         tidied.pop();
     }
@@ -1878,10 +1880,53 @@ fn decode_chunk(chunk: &[u8], out: &mut DecodedContent) {
         return;
     }
     // Jetzt ist wirklich etwas abgeschnitten. Was davor steht, wird gerettet.
-    if let Ok(content) = Content::decode(chunk) {
+    if let Ok(content) = Content::decode(&tidied) {
         out.operations.extend(content.operations);
     }
     out.truncated.push(chunk.len());
+}
+
+/// Schreibt Kommentare und den Leerraum, den lopdf nicht kennt, so um, dass
+/// lopdf sie liest wie die Norm — **außerhalb** von Zeichenketten.
+///
+/// * Ein Kommentar (`%` bis vor das Zeilenende) wird zu Leerzeichen; das
+///   Zeilenende bleibt. Bis zur Spur-A-Runde 2 brach
+///   `Content::decode_strict` an einem Kommentar mit einer Leerzeile
+///   dahinter (`… ET\n% Kopf\n\nBT …`): die Seite galt als nicht
+///   zerlegbar, und eine gewöhnliche Datei wurde mit Rückgabewert 1
+///   abgelehnt, obwohl jeder Betrachter sie liest (Register #103).
+/// * NUL und Seitenvorschub werden zu Leerzeichen (PDF 32000-1, Tabelle 1).
+///
+/// Literale Zeichenketten bleiben, wie sie sind: `(100% sicher)` ist Text,
+/// kein Kommentar. (In einer Hex-Zeichenkette ist Leerraum ohnehin bedeutungslos
+/// und `%` kein zulässiges Zeichen.)
+fn pdf_whitespace_for_lopdf(chunk: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(chunk.len());
+    let mut i = 0usize;
+    while i < chunk.len() {
+        match chunk[i] {
+            b'(' => {
+                let end = skip_literal_string(chunk, i).min(chunk.len());
+                out.extend_from_slice(&chunk[i..end]);
+                i = end;
+            }
+            b'%' => {
+                while i < chunk.len() && chunk[i] != b'\n' && chunk[i] != b'\r' {
+                    out.push(b' ');
+                    i += 1;
+                }
+            }
+            0x00 | 0x0c => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Leerraum nach PDF 32000-1, Tabelle 1 — einschließlich NUL und

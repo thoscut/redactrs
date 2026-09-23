@@ -3336,6 +3336,14 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "(Register #99, Prüfer D; Dienstverweigerung, die Zeile #64/#83 der Probenliste)",
         "Registernummern, keine Messung",
     ),
+    (
+        "(Register #103, beim Befund #98 gefunden; abgelehnte gewöhnliche Datei)",
+        "Registernummern, keine Messung",
+    ),
+    (
+        "Aufgefallen bei der Korrektur zu #98",
+        "eine Registernummer, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
