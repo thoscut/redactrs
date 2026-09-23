@@ -2646,6 +2646,28 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "„Drei Spuren, eine Probenliste, ein Ende“",
         "der Titel eines CONTRIBUTING-Abschnitts, keine Messung",
     ),
+    // --- Spur-A-Runde 1: Anzahlen der Runde, keine Messungen -------------
+    (
+        "### Spur-A-Runde 1: die Probenliste hält",
+        "die Nummer einer Runde in einer Ueberschrift, keine Messung",
+    ),
+    (
+        "Fünf Prüfer, nur Schwärzung, je ein Gebiet",
+        "zaehlt die Pruefer der Runde, keine Messung",
+    ),
+    (
+        "Alle acht Zeilen der Spur A in",
+        "zaehlt die Zeilen der Probenliste, keine Messung",
+    ),
+    (
+        "**Die zweite Frage: ja, und zwar 19 Mal** (Register #64 bis #82)",
+        "zaehlt Registereintraege und nennt ihre Nummern, keine Messung",
+    ),
+    (
+        "13 stille Lecks am Schwärzungscode, drei stille Lecks am Orakel selbst, drei \
+         Dienstverweigerungen und eine abgelehnte gewöhnliche Datei",
+        "zaehlt Befunde nach Klasse, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

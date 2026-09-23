@@ -64,6 +64,28 @@ verschoben. `crates/redact-cli/tests/belege.rs` hält die Regel samt Läufen;
 `die_zahlen_der_doku_sind_gebunden` und
 `jede_zahl_der_letzten_runden_ist_gebunden` prüfen sie.
 
+### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
+
+Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile
+der Probenliste noch auftritt, und suche nach einer Klasse, die nicht auf ihr
+steht“). Fünf Prüfer, nur Schwärzung, je ein Gebiet: Bild, Metadaten, Spiegel
+über Formular, Orakel und Filterkette, Decken.
+
+**Die erste Frage: nein.** Alle acht Zeilen der Spur A in
+[`PRUEFLISTE.md`](PRUEFLISTE.md) sind mit eigenen Läufen grün — nicht durch
+Lesen der Belegdateien, sondern mit neuem Material am ehrlichen Orakel. Keine
+Klasse, die schon auf der Liste stand, tritt noch auf.
+
+**Die zweite Frage: ja, und zwar 19 Mal** (Register #64 bis #82). Die Liste
+war eine Abwesenheitsbehauptung mit anderem Namen: 13 stille Lecks am
+Schwärzungscode, drei stille Lecks am Orakel selbst, drei Dienstverweigerungen
+und eine abgelehnte gewöhnliche Datei. Die Belege der Prüfer liegen als
+`zo_*`-Dateien im Baum; jeder noch rote Test trägt `#[ignore]` mit seiner
+Registernummer und wird mit seiner Korrektur scharf — ein Befund, ein Commit,
+CI nach jedem Push. Die Runde zählt nicht gegen das Ende der Spur A; sie hat
+den Umfang sichtbar gemacht. Was geschlossen ist, steht darunter, jeweils mit
+seiner neuen Zeile in der Probenliste.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —
