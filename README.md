@@ -1280,7 +1280,10 @@ mit Buchstaben — dort fällt Latin-1 mit UTF-8 zusammen —, zehn mit Umlaut u
 sieben mit einem Zeichen jenseits von Latin-1. Fassungen, die auf dieselben
 Bytes fallen, werden nur einmal gesucht: bei einer IBAN aus Ziffern und `DE`
 ist der Hex-String in Groß- und in Kleinschreibung dieselbe Bytefolge, dort
-sind es sechs. Im Zweifel meldet die Prüfung zu viel: dieselbe
+sind es sechs. Ein Begriff mit einem Zeichen, das WinAnsi anders ablegt als
+Latin-1 (`€`, `–`, `„`), wird zusätzlich in WinAnsi gesucht, roh und als
+Hex-String — so stehen Zeichenketten in einem Inhaltsstrom mit einer
+Standardschrift. Im Zweifel meldet die Prüfung zu viel: dieselbe
 Fundstelle erscheint einmal je Sichtweise. Ein Fehlalarm wird untersucht, ein
 übersehenes Leck wird ausgeliefert.
 

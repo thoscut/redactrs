@@ -3382,6 +3382,22 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "`ze_p1_befunde`, `ze_p1_budget_und_filter`",
         "Dateinamen, keine Messung",
     ),
+    (
+        "(Register #97, Prüfer D; stilles Leck des Orakels, die Zeile #81 der Probenliste trat weiter auf)",
+        "Registernummern, keine Messung",
+    ),
+    (
+        "PDF 2.0 sie erlaubt",
+        "eine Versionsnummer der Norm, keine Messung",
+    ),
+    (
+        "UTF-8 mit BOM",
+        "der Name einer Kodierung, keine Messung",
+    ),
+    (
+        "UTF-8 am BOM",
+        "der Name einer Kodierung, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

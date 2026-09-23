@@ -361,7 +361,9 @@ pub struct Cli {
     /// jenseits von Latin-1 (dann gibt es keine Einbytefassung). Fassungen,
     /// die auf dieselben Bytes fallen, werden nur einmal gesucht: bei einer
     /// IBAN aus Ziffern und `DE` ist der Hex-String in Groß- und in
-    /// Kleinschreibung dieselbe Bytefolge, dort sind es sechs.
+    /// Kleinschreibung dieselbe Bytefolge, dort sind es sechs. Ein Begriff mit
+    /// einem Zeichen, das WinAnsi anders ablegt als Latin-1 (`€`, `–`, `„`),
+    /// wird zusätzlich in WinAnsi gesucht, roh und als Hex-String.
     /// `pdftotext … | grep …` sieht davon einen Bruchteil und gibt an der
     /// eigenen Demo-Ausgabe falsche Entwarnung.
     ///

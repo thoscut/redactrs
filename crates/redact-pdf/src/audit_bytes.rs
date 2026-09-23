@@ -793,6 +793,33 @@ impl Needle {
             variants.push(("Hex-String (Latin-1, klein)", hex_ascii(&latin1, false)));
         }
 
+        // WinAnsi: so stehen Zeichenketten in einem Inhaltsstrom mit einer
+        // Standardschrift — `€` ist dort 0x80, `–` 0x96, `„` 0x84. Latin-1
+        // kennt diese Zeichen nicht, PDFDocEncoding legt sie anders ab; bis
+        // zur Spur-A-Runde 2 fand die Bytesuche „Betrag 5 €“ in `(Betrag 5
+        // \x80) Tj` deshalb nicht (Register #97).
+        let table = crate::encoding::win_ansi_encoding();
+        let win_ansi: Option<Vec<u8>> = text
+            .chars()
+            .map(|c| {
+                table
+                    .iter()
+                    .position(|entry| *entry == Some(c))
+                    .and_then(|i| u8::try_from(i).ok())
+            })
+            .collect();
+        if let Some(win_ansi) = win_ansi {
+            let latin1: Option<Vec<u8>> = text
+                .chars()
+                .map(|c| u8::try_from(u32::from(c)).ok())
+                .collect();
+            if win_ansi != utf8 && Some(&win_ansi) != latin1.as_ref() {
+                variants.push(("WinAnsi", win_ansi.clone()));
+                variants.push(("Hex-String (WinAnsi, gross)", hex_ascii(&win_ansi, true)));
+                variants.push(("Hex-String (WinAnsi, klein)", hex_ascii(&win_ansi, false)));
+            }
+        }
+
         let utf16: Vec<u8> = text
             .encode_utf16()
             .flat_map(|u| u.to_be_bytes())
@@ -2012,7 +2039,7 @@ fn scan_blob(blob: &[u8], site: Site<'_>, probe: &mut Probe) {
 
     // Verkettung und Leerraum-Fassung hängen allein am Datenblock: einmal
     // bilden, dann von jedem Suchbegriff benutzen.
-    let joined = concat_pdf_strings(blob);
+    let (joined, win_ansi) = concat_pdf_strings_both(blob);
     if joined.is_empty() {
         return;
     }
@@ -2028,6 +2055,20 @@ fn scan_blob(blob: &[u8], site: Site<'_>, probe: &mut Probe) {
             "Zeichenketten-Verkettung, ohne Leerraum",
             |_| true,
         );
+    }
+    // Dieselben Zeichenketten als WinAnsi — nur, wo sie ein Byte tragen, das
+    // WinAnsi anders liest als PDFDocEncoding (Register #97).
+    if let Some(win_ansi) = win_ansi {
+        probe.scan_text_plain(&win_ansi, concat, "Zeichenketten-Verkettung (WinAnsi)");
+        if probe.any_squeezed {
+            let squeezed = squeeze(&win_ansi);
+            probe.scan_text_squeezed(
+                &squeezed,
+                concat,
+                "Zeichenketten-Verkettung (WinAnsi), ohne Leerraum",
+                |_| true,
+            );
+        }
     }
 }
 
@@ -2385,11 +2426,16 @@ fn pdfdoc_char(byte: u8) -> char {
 
 /// Dekodiert eine PDF-Zeichenkette.
 ///
-/// UTF-16 wird am BOM erkannt (`FE FF`, in freier Wildbahn auch `FF FE`);
-/// alles andere wird als PDFDocEncoding gelesen — Latin-1 mit den
-/// Abweichungen aus [`PDFDOC_ABWEICHUNGEN`].
+/// UTF-16 wird am BOM erkannt (`FE FF`, in freier Wildbahn auch `FF FE`),
+/// UTF-8 ebenso (`EF BB BF`, PDF 2.0, 7.9.2.2); alles andere wird als
+/// PDFDocEncoding gelesen — Latin-1 mit den Abweichungen aus
+/// [`PDFDOC_ABWEICHUNGEN`]. Bis zur Spur-A-Runde 2 fehlte UTF-8: eine
+/// Zeichenkette `(\357\273\277Gr\303\274\303\237e)`, wie ein Erzeuger für
+/// PDF 2.0 sie schreibt, las sich als „ï»¿GrÃ¼ÃŸe“ (Register #97).
 pub fn decode_pdf_string(raw: &[u8]) -> String {
-    if raw.len() >= 2 && raw[0] == 0xfe && raw[1] == 0xff {
+    if let Some(utf8) = raw.strip_prefix(b"\xef\xbb\xbf") {
+        String::from_utf8_lossy(utf8).into_owned()
+    } else if raw.len() >= 2 && raw[0] == 0xfe && raw[1] == 0xff {
         let units: Vec<u16> = raw[2..]
             .chunks_exact(2)
             .map(|c| u16::from_be_bytes([c[0], c[1]]))
@@ -2412,25 +2458,58 @@ pub fn decode_pdf_string(raw: &[u8]) -> String {
 /// Bewusst ein eigener Mini-Lexer statt `lopdf::content::Content::decode`:
 /// dessen Parser verliert bei einem Inline-Bild (`BI … ID … EI`) den Rest des
 /// Streams — genau der Fehler, den dieses Modell aufdecken soll.
+#[cfg(test)]
 fn concat_pdf_strings(blob: &[u8]) -> String {
+    concat_pdf_strings_both(blob).0
+}
+
+/// Wie [`concat_pdf_strings`], dazu dieselbe Verkettung mit WinAnsi gelesen
+/// — `Some` nur, wenn eine Zeichenkette ein Byte trägt, das WinAnsi anders
+/// liest als PDFDocEncoding.
+///
+/// Eine Zeichenkette in einem Inhaltsstrom ist in der Kodierung ihrer Schrift
+/// geschrieben, nicht in PDFDocEncoding; bei den Standardschriften ist das
+/// meist WinAnsi. `(Betrag 5 \200) Tj` heißt dort „Betrag 5 €“, in
+/// PDFDocEncoding „Betrag 5 •“ (Register #97). Welche Schrift gilt, weiß
+/// diese Sicht nicht — sie liest beides.
+fn concat_pdf_strings_both(blob: &[u8]) -> (String, Option<String>) {
+    let table = crate::encoding::win_ansi_encoding();
     let mut out = String::new();
+    let mut win_ansi = String::new();
+    let mut differs = false;
+    let mut push = |bytes: &[u8]| {
+        out.push_str(&decode_pdf_string(bytes));
+        let bom = bytes.starts_with(b"\xef\xbb\xbf")
+            || bytes.starts_with(b"\xfe\xff")
+            || bytes.starts_with(b"\xff\xfe");
+        if bom {
+            win_ansi.push_str(&decode_pdf_string(bytes));
+            return;
+        }
+        for &b in bytes {
+            let pdfdoc = pdfdoc_char(b);
+            let win = table[usize::from(b)].unwrap_or(pdfdoc);
+            differs |= win != pdfdoc;
+            win_ansi.push(win);
+        }
+    };
     let mut i = 0usize;
     while i < blob.len() {
         match blob[i] {
             b'(' => {
                 let (bytes, next) = read_literal_string(blob, i + 1);
-                out.push_str(&decode_pdf_string(&bytes));
+                push(&bytes);
                 i = next;
             }
             b'<' if blob.get(i + 1) != Some(&b'<') => {
                 let (bytes, next) = read_hex_string(blob, i + 1);
-                out.push_str(&decode_pdf_string(&bytes));
+                push(&bytes);
                 i = next;
             }
             _ => i += 1,
         }
     }
-    out
+    (out, differs.then_some(win_ansi))
 }
 
 fn read_literal_string(blob: &[u8], mut i: usize) -> (Vec<u8>, usize) {

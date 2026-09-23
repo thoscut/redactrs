@@ -243,6 +243,22 @@ sind, jeder in seinem eigenen Commit.
   `zp_d_rohes_dictionary`, `ze_p1_befunde`, `ze_p1_budget_und_filter`.
   Mutationsnachweis: je Teil zurückgenommen → sein Fall rot.
 
+* **⚠ Sicherheit: UTF-8 mit BOM und WinAnsi im Inhaltsstrom las das Orakel
+  nicht** (Register #97, Prüfer D; stilles Leck des Orakels, die Zeile #81
+  der Probenliste trat weiter auf). Eine Zeichenkette in UTF-8 mit BOM, wie
+  PDF 2.0 sie erlaubt, las sich als PDFDocEncoding — „Grüße“ als Zeichensalat.
+  Eine Zeichenkette in einem Inhaltsstrom mit einer Standardschrift ist
+  WinAnsi: das Byte für `€` ist dort ein anderes als in PDFDocEncoding, die
+  Verkettung las das Euro als Aufzählungspunkt, und die Bytesuche kannte
+  keine WinAnsi-Form des Begriffs. Beides fiel vor allem in der Altrevision
+  auf, die nur die Rohsicht liest; „nicht gefunden“ ohne jede Meldung. Jetzt
+  liest der Zeichenkettendekoder UTF-8 am BOM, die Bytesuche sucht einen
+  Begriff mit solchen Zeichen auch in WinAnsi (roh und als Hex-String), und
+  die Verkettung liest dieselben Zeichenketten ein zweites Mal als WinAnsi —
+  nur, wo ein Byte darin anders gelesen würde. README und `--help` sagen es.
+  Belege: `zp_d_bom_und_winansi`. Mutationsnachweis: je Teil zurückgenommen →
+  sein Fall rot; die zweite Lesart auch ohne Unterschied → die Gegenprobe rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile
