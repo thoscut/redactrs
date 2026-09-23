@@ -888,6 +888,23 @@ mod messwerte {
     pub const DEBUG_BINARY_NACHHER_MB: &str = "78,0";
     pub const DEBUG_SEKTIONEN_NACHHER_MB: &str = "58,3";
     pub const DEBUG_TARGET_NACHHER_GB: &str = "8,0";
+
+    // Die Verweiskette (Spur-A-Runde 1, Register #72).
+    //
+    // Gemessen mit `zo_b_traeger::c_mess_verweiskette` (`--ignored
+    // --nocapture`): `strip_metadata` an einer Kette aus n Objekten, die
+    // nichts als ein Verweis sind — im Testprozess, Profil Debug (Weg 2; die
+    // Kommandozeile gibt die Dauer dieses einen Schritts nicht her).
+    // „Vorher“ ist der Stand [`VERWEISKETTE_STAND`], an dem `Chains::of`
+    // jedes Glied bis zum Ende laeuft — nach der Korrektur nicht mehr
+    // messbar, deshalb Weg 3 im Satz. Die Dateigroesse ist die der Kette
+    // mit `KETTENGLIEDER` Gliedern (`zo_b_traeger.rs`).
+    pub const VERWEISKETTE_STAND: &str = "456d669";
+    pub const VERWEISKETTE_GLIEDER_VORHER: u64 = 8_000;
+    pub const VERWEISKETTE_VORHER_8000_S: &str = "33";
+    pub const VERWEISKETTE_VORHER_20000_S: &str = "223";
+    pub const VERWEISKETTE_NACHHER_S: &str = "0,08";
+    pub const VERWEISKETTE_DATEI_KB: u64 = 936;
 }
 
 /// Die ausgeschriebene Zahl, wie die Doku kleine Zahlen schreibt.
@@ -2119,7 +2136,47 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // --- Die Verweiskette (Spur-A-Runde 1, Register #72) -------------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Am Stand `{}` brauchte `strip_metadata` an einer Kette aus {} Gliedern \
+             {} s, an {} Gliedern {} s im Testprozess (Debug)",
+            m::VERWEISKETTE_STAND,
+            mit_tausendertrenner(m::VERWEISKETTE_GLIEDER_VORHER),
+            m::VERWEISKETTE_VORHER_8000_S,
+            mit_tausendertrenner(kettenglieder() as u64),
+            m::VERWEISKETTE_VORHER_20000_S
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "die Datei dazu ist {} kB groß",
+            mit_tausendertrenner(m::VERWEISKETTE_DATEI_KB)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Dieselben {} Glieder laufen im Testprozess (Debug) jetzt in {} s; die \
+             Decke des Belegs liegt bei {} s",
+            mit_tausendertrenner(kettenglieder() as u64),
+            m::VERWEISKETTE_NACHHER_S,
+            kettendecke_s()
+        ),
+    );
+
     aus
+}
+
+/// Glieder und Decke des Verweisketten-Belegs, aus `zo_b_traeger.rs`.
+fn kettenglieder() -> usize {
+    konstante_aus("crates/redact-pdf/tests/zo_b_traeger.rs", "KETTENGLIEDER")
+}
+
+fn kettendecke_s() -> usize {
+    konstante_aus("crates/redact-pdf/tests/zo_b_traeger.rs", "KETTEN_DECKE_S")
 }
 
 /// Wie viele Zeilen `LeakCheck::unchecked` höchstens trägt: die Decke je
@@ -2764,6 +2821,18 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "Mutationsnachweis: reelle Zahl wieder als null gelesen",
         "der gelesene Wert unter Mutation, keine Messung",
+    ),
+    (
+        "an** (Register #72, Prüfer B)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "sind (`4 0 obj 5 0 R`)",
+        "ein Beispiel aus der Norm, keine Messung",
+    ),
+    (
+        "bis zum Ende, Aufwand n²/2",
+        "der Aufwand als Formel in der Objektzahl, keine Messung",
     ),
 ];
 

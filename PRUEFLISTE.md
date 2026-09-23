@@ -36,6 +36,7 @@ Prosa.
 | Spiegel über Formular: zwei Umgebungen, beide mit eigenem Spiegel | A | Spur-A-Runde 1 (#65) | `crates/redact-pdf/tests/zo_c_spiegel_umgebungen.rs` |
 | Stencil-`/Mask` eines geschwärzten Bildes trägt die Form unter der Zone | A | Spur-A-Runde 1 (#77) | `crates/redact-pdf/tests/zo_a_maske_und_filter.rs` |
 | Beiwerk mit Klartext an Katalog, Seite, Objekt und Signaturfeld (`/Perms`, `/DSS`, `/PageLabels`, `/Threads`, `/Collection`, `/OutputIntents`, `/URI`, `/DPartRoot`, `/VP`, `/PresSteps`, `/Ref`, `/OPI`, `/SV`, `/Lock`) | A | Spur-A-Runde 1 (#70) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
+| Verweiskette: eine Karte, die je Glied die ganze Kette läuft (quadratisch) | A | Spur-A-Runde 1 (#72) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung
 prüft ihren positiven Zweig allein im Job „Build (windows-2025)“.

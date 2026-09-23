@@ -183,6 +183,22 @@ seiner neuen Zeile in der Probenliste.
   ganzzahligen Kontrolle. Mutationsnachweis: reelle Zahl wieder als null
   gelesen → rot.
 
+* **Eine Kette aus Verweisobjekten hielt den Metadatenlauf für Minuten
+  an** (Register #72, Prüfer B). Die Verweiskarte `Chains::of` hält vor jeder
+  Änderung fest, wo eine Kette aus Objekten endet, die nichts als ein Verweis
+  sind (`4 0 obj 5 0 R`) — damit der Bericht das richtige Objekt zählt. Sie
+  lief dafür von **jedem** Glied aus bis zum Ende, Aufwand n²/2. Am Stand
+  `456d669` brauchte `strip_metadata` an einer Kette aus 8 000 Gliedern 33 s,
+  an 20 000 Gliedern 223 s im Testprozess (Debug); die Datei dazu ist 936 kB
+  groß und liegt unter jeder Grenze des Laders. Jetzt übernimmt ein Glied das
+  Ende, das ein früheres schon gefunden hat, und der ganze gelaufene Pfad
+  bekommt es eingetragen, Ringe eingeschlossen — jedes Glied wird genau einmal
+  gelaufen. Dieselben 20 000 Glieder laufen im Testprozess (Debug) jetzt in
+  0,08 s; die Decke des Belegs liegt bei 5 s, in beiden Richtungen der Kette.
+  Beleg: `zo_b_traeger::c_verweiskette_kostet_nicht_quadratisch`.
+  Mutationsnachweis: die Übernahme bekannter Enden entfernt → rot (die
+  absteigende Kette).
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

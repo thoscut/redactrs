@@ -1370,24 +1370,49 @@ impl Tally {
 struct Chains(BTreeMap<ObjectId, ObjectId>);
 
 impl Chains {
+    /// Kosten: **linear** in der Zahl der Objekte. Jedes Glied wird genau
+    /// einmal gelaufen — wer ein schon aufgelöstes Glied trifft, übernimmt
+    /// dessen Ende, und der ganze gelaufene Pfad bekommt es eingetragen.
+    /// Bis zur Spur-A-Runde 1 lief jedes Glied seine Kette bis zum Ende
+    /// (n²/2): eine 365-kB-Datei mit 8 000 Gliedern brauchte 33 s, 20 000
+    /// Glieder (936 kB) 223 s im Testprozess, Debug, am Stand `456d669`
+    /// (Register #72; die Zahlen bindet `belege.rs`).
     fn of(doc: &Document) -> Self {
         let mut map: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
+        // Glieder, deren Kette in einem Ring endet — auch die gelten als
+        // erledigt, sonst liefe jeder Ring je Glied noch einmal.
+        let mut done: BTreeSet<ObjectId> = BTreeSet::new();
         for (id, object) in &doc.objects {
-            if !matches!(object, Object::Reference(_)) {
+            if !matches!(object, Object::Reference(_)) || done.contains(id) {
                 continue;
             }
-            // Der Kette folgen, bis ein Objekt kein Verweis mehr ist; die
-            // Besuchsmenge endet einen Ring (`4 0 obj 5 0 R`, `5 0 obj 4 0 R`).
+            // Der Kette folgen, bis ein Objekt kein Verweis mehr ist, ein
+            // schon bekanntes Ende auftaucht, oder der Pfad sich schließt
+            // (`4 0 obj 5 0 R`, `5 0 obj 4 0 R`).
+            let mut path: Vec<ObjectId> = vec![*id];
             let mut seen: BTreeSet<ObjectId> = BTreeSet::from([*id]);
             let mut at = *id;
-            while let Some(Object::Reference(next)) = doc.objects.get(&at) {
-                if !seen.insert(*next) {
-                    break;
+            let end = loop {
+                if let Some(end) = map.get(&at) {
+                    break *end;
                 }
-                at = *next;
-            }
-            if at != *id {
-                map.insert(*id, at);
+                match doc.objects.get(&at) {
+                    Some(Object::Reference(next)) => {
+                        if !seen.insert(*next) {
+                            // Ring: das zuletzt erreichte Glied ist das Ende.
+                            break at;
+                        }
+                        at = *next;
+                        path.push(at);
+                    }
+                    _ => break at,
+                }
+            };
+            for link in path {
+                done.insert(link);
+                if link != end {
+                    map.insert(link, end);
+                }
             }
         }
         Self(map)

@@ -999,6 +999,15 @@ fn b_randfaelle_normstrings() {
 /// Ein Dokument mit `n` Objekten, die nichts als ein Verweis auf das nächste
 /// sind (`4 0 obj 5 0 R endobj`), plus ein gewöhnlicher Rumpf.
 fn verweiskette(n: u32) -> Vec<u8> {
+    verweiskette_mit(n, false)
+}
+
+/// Wie [`verweiskette`]; `absteigend` lässt jedes Glied auf das **vorige**
+/// zeigen (`5 0 obj 4 0 R`). Das ist die Richtung, in der ein Lauf in
+/// Id-Reihenfolge das Ende der Kette **zuerst** sieht — ohne die Übernahme
+/// schon bekannter Enden wäre er hier wieder quadratisch, auch mit einer
+/// Menge der gelaufenen Glieder (Mutationsnachweis zu Register #72).
+fn verweiskette_mit(n: u32, absteigend: bool) -> Vec<u8> {
     let d = probe();
     let base = d.finish();
     let start = d.doc.max_id + 10;
@@ -1023,7 +1032,17 @@ fn verweiskette(n: u32) -> Vec<u8> {
     for i in 0..n {
         let id = start + i;
         offsets.push((id, out.len()));
-        let next = if i + 1 < n { start + i + 1 } else { 1 };
+        let next = if absteigend {
+            if i == 0 {
+                1
+            } else {
+                start + i - 1
+            }
+        } else if i + 1 < n {
+            start + i + 1
+        } else {
+            1
+        };
         out.extend_from_slice(format!("{id} 0 obj\n{next} 0 R\nendobj\n").as_bytes());
     }
     let xref_offset = out.len();
@@ -1054,7 +1073,7 @@ fn strip_dauer(bytes: &[u8]) -> Duration {
 #[test]
 #[ignore = "Messung, keine Prüfung: cargo test … -- --ignored --nocapture"]
 fn c_mess_verweiskette() {
-    for n in [1_000u32, 2_000, 4_000, 8_000] {
+    for n in [1_000u32, 2_000, 4_000, 8_000, 20_000] {
         let bytes = verweiskette(n);
         let dauer = strip_dauer(&bytes);
         println!(
@@ -1064,23 +1083,30 @@ fn c_mess_verweiskette() {
     }
 }
 
-/// **Decke:** 20 000 Verweisobjekte in einer Kette müssen `strip_metadata`
-/// in unter 5 s durchlaufen. `Chains::of` folgt von **jedem** Verweisobjekt
-/// aus der ganzen Kette bis zu ihrem Ende (`meta.rs`, `impl Chains::of`):
-/// Aufwand n²/2 — bei 20 000 Objekten 2·10⁸ Schritte, jeder mit einer
-/// `BTreeSet`-Einfügung. Die Datei ist 0,5 MB groß und liegt weit unter jeder
-/// Grenze des Laders.
+/// Glieder der Kette im Beleg und die Decke in Sekunden, unter der
+/// `strip_metadata` sie durchlaufen muss. Beide bindet `belege.rs`.
+const KETTENGLIEDER: usize = 20_000;
+const KETTEN_DECKE_S: usize = 5;
+
+/// **Decke:** [`KETTENGLIEDER`] Verweisobjekte in einer Kette müssen
+/// `strip_metadata` in unter [`KETTEN_DECKE_S`] Sekunden durchlaufen — in
+/// beiden Richtungen der Kette. Bis zur Spur-A-Runde 1 folgte `Chains::of`
+/// von **jedem** Verweisobjekt aus der ganzen Kette bis zu ihrem Ende
+/// (`meta.rs`, `impl Chains::of`): Aufwand n²/2 — bei 20 000 Objekten 2·10⁸
+/// Schritte, jeder mit einer `BTreeSet`-Einfügung. Die Datei ist unter 1 MB
+/// groß und liegt weit unter jeder Grenze des Laders.
 #[test]
-#[ignore = "offen: Register #72 Chains::of quadratisch (224 s im Debug) — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn c_verweiskette_kostet_nicht_quadratisch() {
-    let bytes = verweiskette(20_000);
-    let dauer = strip_dauer(&bytes);
-    assert!(
-        dauer < Duration::from_secs(5),
-        "DIENSTVERWEIGERUNG — strip_metadata braucht {dauer:?} für 20 000 verkettete \
-         Verweisobjekte ({} kB); Chains::of ist quadratisch",
-        bytes.len() / 1024
-    );
+    for (richtung, absteigend) in [("aufsteigend", false), ("absteigend", true)] {
+        let bytes = verweiskette_mit(KETTENGLIEDER as u32, absteigend);
+        let dauer = strip_dauer(&bytes);
+        assert!(
+            dauer < Duration::from_secs(KETTEN_DECKE_S as u64),
+            "DIENSTVERWEIGERUNG — strip_metadata braucht {dauer:?} für {KETTENGLIEDER} \
+             {richtung} verkettete Verweisobjekte ({} kB); Chains::of ist quadratisch",
+            bytes.len() / 1024
+        );
+    }
 }
 
 // ===========================================================================
