@@ -97,6 +97,11 @@ pub struct RedactionReport {
     pub redacted_images: usize,
     /// Davon: Kopien, die angelegt wurden, weil das Bild mehrfach benutzt wird.
     pub copied_images: usize,
+    /// Originale, die nach dem Kopieren niemand mehr zeichnet und die durch ein
+    /// leeres Bild ersetzt wurden — sonst blieben ihre unversehrten Bildpunkte
+    /// hinter einem geerbten oder überzähligen Namen in der Datei
+    /// ([`crate::image::ImageOutcome::retired_originals`]).
+    pub retired_originals: usize,
     /// Höchstzahl der **gleichzeitig** dekodiert gehaltenen Bilder.
     ///
     /// Siehe [`crate::image::ImageOutcome::peak_decoded_images`]: der
@@ -418,6 +423,7 @@ impl PdfRedactor {
         )?;
         report.redacted_images = images.redacted_images;
         report.copied_images = images.copied_images;
+        report.retired_originals = images.retired_originals;
         report.peak_decoded_images = images.peak_decoded_images;
         report.peak_decoded_image_bytes = images.peak_decoded_bytes;
         for warning in images.warnings {

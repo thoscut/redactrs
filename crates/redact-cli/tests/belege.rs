@@ -2834,6 +2834,10 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "bis zum Ende, Aufwand n²/2",
         "der Aufwand als Formel in der Objektzahl, keine Messung",
     ),
+    (
+        "den niemand zeichnet** (Register #76, Prüfer A)",
+        "eine Registernummer, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

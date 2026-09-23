@@ -68,7 +68,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use lopdf::content::Operation;
-use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
+use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 use redact_core::{Point, Rect, RedactError, Redaction, Result};
 
 use crate::content::{ContentSink, ImageEvent, SinkContext, StreamKey};
@@ -138,6 +138,17 @@ pub struct ImageOutcome {
     /// Davon: Bilder, die kopiert werden mussten, weil sie mehrfach benutzt
     /// werden.
     pub copied_images: usize,
+    /// Originale, die nach dem Kopieren **niemand mehr zeichnet** und die
+    /// deshalb durch ein leeres Bild ersetzt wurden
+    /// ([`retire_copied_originals`], Register #76).
+    pub retired_originals: usize,
+    /// Buchführung für [`retire_copied_originals`]: je kopiertem Original die
+    /// Seiten, auf denen die Kopie angelegt wurde. Am Ende des Laufs geleert.
+    copied_on: BTreeMap<ObjectId, BTreeSet<usize>>,
+    /// Originale, die auf mindestens einer Seite nach dem Kopieren **noch
+    /// gezeichnet** werden — eine Platzierung, die nicht umgebogen wurde, weil
+    /// keine Zone auf ihr lag. Die bleiben, wie sie sind.
+    original_shown: BTreeSet<ObjectId>,
     /// Höchstzahl der **gleichzeitig** dekodiert gehaltenen Bilder.
     ///
     /// Der Speicherbedarf selbst lässt sich im Test kaum messen; diese Zahl
@@ -316,9 +327,78 @@ pub fn redact_images(
         let _ = write_work(doc, key, work, &image_pages, &form_pages, &mut outcome)?;
     }
 
+    // Nachlese — Originale, die nach dem Kopieren niemand mehr zeichnet.
+    retire_copied_originals(doc, &image_pages, &mut outcome);
+
     outcome.peak_decoded_images = budget.peak_images;
     outcome.peak_decoded_bytes = budget.peak_bytes;
     Ok(outcome)
+}
+
+/// Nachlese zu [`Fate::Copy`]: ein Original, das auf **jeder** Seite, die es
+/// zeichnet, kopiert wurde und dessen Platzierungen dort alle auf die Kopie
+/// zeigen, zeichnet niemand mehr. Erreichbar bleibt es trotzdem — über das
+/// geerbte `/Resources` des `/Pages`-Knotens, über einen überzähligen Namen
+/// der Seite, den kein `Do` nennt —, und `prune_unreachable` lässt es darum
+/// stehen: mit den unversehrten Bildpunkten in der Datei (Register #76).
+///
+/// Die Verweise darauf sind nicht abschließend aufzählbar; der Gegenstand ist
+/// es. Er wird durch ein leeres Bild ersetzt, ein Bildpunkt Schwarz: jeder
+/// Verweis, wo er auch steht, zeigt danach nichts mehr. Das ist die Richtung,
+/// in der ein Irrtum erlaubt ist — ein Name, den doch jemand zeichnet (etwa
+/// ein Erscheinungsstrom, den der Bildlauf nicht liest), zeigt dann Schwarz
+/// statt Klartext.
+///
+/// `image_pages` ist aus den **Platzierungen** aller Seiten gebaut, nicht aus
+/// den Ressourcen: eine Seite steht dort nur, wenn ein `Do` das Bild zeichnet.
+/// Deshalb heißt „auf jeder Seite kopiert“ auch „nirgends mehr gezeichnet“.
+fn retire_copied_originals(
+    doc: &mut Document,
+    image_pages: &BTreeMap<ObjectId, BTreeSet<usize>>,
+    outcome: &mut ImageOutcome,
+) {
+    let copied = std::mem::take(&mut outcome.copied_on);
+    for (id, pages) in copied {
+        if outcome.original_shown.contains(&id) || image_pages.get(&id) != Some(&pages) {
+            continue;
+        }
+        doc.objects.insert(id, Object::Stream(blank_image()));
+        outcome.retired_originals += 1;
+    }
+}
+
+/// Ein Bildpunkt Schwarz: der Ersatz für ein Original, das niemand mehr
+/// zeichnet.
+fn blank_image() -> Stream {
+    Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => 1_i64,
+            "Height" => 1_i64,
+            "ColorSpace" => "DeviceGray",
+            "BitsPerComponent" => 8_i64,
+        },
+        vec![0u8],
+    )
+}
+
+/// Zeigt auf dieser Seite nach dem Schreiben noch eine Platzierung das
+/// **Original** `id`? Nach einer Kopie sind es die Paare, die nicht umgebogen
+/// wurden; trug der Rückfall auf die Seitenressourcen weiter als das einzelne
+/// Paar ([`Shown::Alle`]), ist die Frage hier nicht billig zu beantworten,
+/// und die Antwort ist die vorsichtige: ja.
+fn original_still_shown(id: ObjectId, placements: &[Placement], shown: &Shown) -> bool {
+    let Shown::Nur(erreichbar) = shown else {
+        return true;
+    };
+    placements.iter().any(|placement| {
+        matches!(
+            &placement.target,
+            Target::XObject { id: Some(own), name, .. }
+                if *own == id && !erreichbar.contains(&(placement.stream, name.clone()))
+        )
+    })
 }
 
 /// Schreibt ein fertig gefülltes Bild in das Dokument und gibt seine Bytes frei.
@@ -369,7 +449,7 @@ fn write_work(
             // einzuschränken.
             Ok(Some(Shown::Alle))
         }
-        Key::XObject(_, id) => {
+        Key::XObject(page_index, id) => {
             let stream = build_stream(doc, encode_xobject(&work));
             let shown = match fate(id, &work, image_pages, form_pages) {
                 Fate::Overwrite => {
@@ -403,6 +483,7 @@ fn write_work(
                         erreichbar.insert((*source, name.clone()));
                     }
                     outcome.copied_images += 1;
+                    outcome.copied_on.entry(id).or_default().insert(page_index);
                     if ueber_die_seite {
                         Shown::Alle
                     } else {
@@ -1369,6 +1450,11 @@ fn fill_page(
         // Seitenressourcen weiter trug als das einzelne Paar. Wer vorher
         // vermerkt, rät — daran hing das Pendel dreier Runden.
         let shown = write_work(doc, key, work, image_pages, form_pages, outcome)?;
+        if let (Key::XObject(_, id), Some(shown)) = (key, &shown) {
+            if original_still_shown(id, placements, shown) {
+                outcome.original_shown.insert(id);
+            }
+        }
         if gefallen {
             if let Some(shown) = shown {
                 note_lost_pixels(outcome, page_id, placements, key, &shown);

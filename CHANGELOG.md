@@ -199,6 +199,25 @@ seiner neuen Zeile in der Probenliste.
   Mutationsnachweis: die Übernahme bekannter Enden entfernt → rot (die
   absteigende Kette).
 
+* **⚠ Sicherheit: nach dem Kopieren eines geteilten Bildes blieb das
+  Original mit unversehrten Bildpunkten in der Datei — hinter einem Namen,
+  den niemand zeichnet** (Register #76, Prüfer A). Hängt ein Bild an mehreren
+  Seiten, wird es je Seite kopiert und jeder getroffene Name auf die Kopie
+  umgebogen (`Fate::Copy`). Das Original bleibt erreichbar, wo kein `Do` es
+  nennt: im geerbten `/Resources` des `/Pages`-Knotens, unter einem
+  überzähligen Eintrag der Seite. `prune_unreachable` sah es als erreichbar,
+  und das Orakel fand in der Ausgabe die Klartext-Bildpunkte, ohne Warnung.
+  Die Verweise sind nicht abschließend aufzählbar; der Gegenstand ist es: ein
+  Original, das auf jeder Seite, die es zeichnet, kopiert wurde und dessen
+  Platzierungen dort alle auf die Kopie zeigen, wird durch ein leeres Bild
+  ersetzt (ein Bildpunkt Schwarz) und im Bericht gezählt
+  (`retired_originals`). Zeigt eine Platzierung noch das Original — keine
+  Zone lag auf ihr —, bleibt es. Belege:
+  `zo_a_bild_ohne_zeichner::geerbte_ressourcen_halten_das_original_nach_der_kopie`
+  und `…::ueberzaehliger_name_haelt_das_original_nach_der_kopie`, Gegenprobe
+  `…::ueberzaehliger_name_ist_harmlos_wenn_ueberschrieben_wird`.
+  Mutationsnachweis: die Nachlese entfernt → beide rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

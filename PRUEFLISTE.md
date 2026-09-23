@@ -37,6 +37,7 @@ Prosa.
 | Stencil-`/Mask` eines geschwärzten Bildes trägt die Form unter der Zone | A | Spur-A-Runde 1 (#77) | `crates/redact-pdf/tests/zo_a_maske_und_filter.rs` |
 | Beiwerk mit Klartext an Katalog, Seite, Objekt und Signaturfeld (`/Perms`, `/DSS`, `/PageLabels`, `/Threads`, `/Collection`, `/OutputIntents`, `/URI`, `/DPartRoot`, `/VP`, `/PresSteps`, `/Ref`, `/OPI`, `/SV`, `/Lock`) | A | Spur-A-Runde 1 (#70) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
 | Verweiskette: eine Karte, die je Glied die ganze Kette läuft (quadratisch) | A | Spur-A-Runde 1 (#72) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
+| Bild ohne Zeichner: das Original nach der Kopie, erreichbar hinter geerbtem oder überzähligem Namen | A | Spur-A-Runde 1 (#76) | `crates/redact-pdf/tests/zo_a_bild_ohne_zeichner.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung
 prüft ihren positiven Zweig allein im Job „Build (windows-2025)“.

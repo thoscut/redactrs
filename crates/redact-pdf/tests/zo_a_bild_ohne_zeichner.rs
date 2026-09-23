@@ -16,7 +16,8 @@
 //!    (`Fate::Copy`) unter einem Namen erreichbar bleibt, den niemand zeichnet:
 //!    im geerbten `/Resources` des `/Pages`-Knotens oder als überzähliger
 //!    Eintrag der Seite. `prune_unreachable` sieht es als erreichbar; die
-//!    Klartext-Bildpunkte bleiben in der Datei.
+//!    Klartext-Bildpunkte blieben in der Datei (Register #76, behoben durch
+//!    `image.rs::retire_copied_originals`).
 //!
 //! Maßstab: `redact_pdf::leaks` an den **Ausgabebytes** — die Bildpunkte tragen
 //! den Suchbegriff buchstäblich als Abtastwerte, die Ströme sind unkomprimiert.
@@ -326,10 +327,12 @@ fn bild_im_kachelmuster_mit_text_wird_gesehen() {
 /// Trailer aus erreichbar, `prune_unreachable` lässt es stehen.
 ///
 /// Erwartung: kein Klartext in der Ausgabe (jede gezeichnete Platzierung ist
-/// geschwärzt, kein Betrachter zeigt das Original mehr). Befund: das Orakel
-/// findet die Klartext-Bildpunkte im Original hinter `/Pages /Resources`.
+/// geschwärzt, kein Betrachter zeigt das Original mehr). Befund (Register #76,
+/// behoben): das Orakel fand die Klartext-Bildpunkte im Original hinter
+/// `/Pages /Resources`. Seit der Nachlese `retire_copied_originals` wird ein
+/// Original, das nach dem Kopieren niemand mehr zeichnet, durch ein leeres
+/// Bild ersetzt — der Bericht zählt es (`retired_originals`).
 #[test]
-#[ignore = "offen: Register #76 Original hinter nicht gezeichnetem Namen — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn geerbte_ressourcen_halten_das_original_nach_der_kopie() {
     let mut doc = Document::with_version("1.5");
     let bild_id = doc.add_object(Object::Stream(bild_mit_klartext()));
@@ -357,6 +360,11 @@ fn geerbte_ressourcen_halten_das_original_nach_der_kopie() {
         "beide Seiten kopieren: {:?}",
         report.warnings
     );
+    assert_eq!(
+        report.retired_originals, 1,
+        "das Original zeichnet niemand mehr — es muss ersetzt sein: {:?}",
+        report.warnings
+    );
     let funde = leaks(&out, GEHEIM);
     assert!(
         funde.is_empty(),
@@ -369,9 +377,9 @@ fn geerbte_ressourcen_halten_das_original_nach_der_kopie() {
 /// (gezeichnet) **und** `/ImAlt` (nie gezeichnet — ein überzähliger Eintrag,
 /// wie ihn Erzeuger häufig hinterlassen). Seite 2 zeichnet es unter `/Im0`.
 /// Beide Platzierungen unter einer Zone → zwei Kopien; `/ImAlt` zeigt weiter
-/// auf das Original. Erwartung: kein Klartext in der Ausgabe.
+/// auf das Original. Erwartung: kein Klartext in der Ausgabe (Register #76,
+/// behoben: das Original wird ersetzt, `/ImAlt` zeigt danach ein leeres Bild).
 #[test]
-#[ignore = "offen: Register #76 Original hinter nicht gezeichnetem Namen — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn ueberzaehliger_name_haelt_das_original_nach_der_kopie() {
     let mut doc = Document::with_version("1.5");
     let bild_id = doc.add_object(Object::Stream(bild_mit_klartext()));
@@ -396,6 +404,7 @@ fn ueberzaehliger_name_haelt_das_original_nach_der_kopie() {
         ],
     );
     assert_eq!(report.redacted_images, 2, "{:?}", report.warnings);
+    assert_eq!(report.retired_originals, 1, "{:?}", report.warnings);
     let funde = leaks(&out, GEHEIM);
     assert!(
         funde.is_empty(),
@@ -407,7 +416,8 @@ fn ueberzaehliger_name_haelt_das_original_nach_der_kopie() {
 /// Gegenprobe zur Vermutung: hängt das Bild nur an **einer** Seite, wird es
 /// überschrieben (`Fate::Overwrite`), und dann zeigt auch der nie gezeichnete
 /// Name die geschwärzten Bildpunkte. Grün — und damit die Abgrenzung: der
-/// Befund hängt an der Kopie, nicht am überzähligen Namen allein.
+/// Befund hängt an der Kopie, nicht am überzähligen Namen allein. Ersetzt wird
+/// hier nichts (`retired_originals` bleibt null).
 #[test]
 fn ueberzaehliger_name_ist_harmlos_wenn_ueberschrieben_wird() {
     let mut doc = Document::with_version("1.5");
@@ -425,6 +435,7 @@ fn ueberzaehliger_name_ist_harmlos_wenn_ueberschrieben_wird() {
         &[schwaerzung(0, Rect::new(40.0, 590.0, 160.0, 710.0))],
     );
     assert_eq!(report.copied_images, 0, "{:?}", report.warnings);
+    assert_eq!(report.retired_originals, 0, "{:?}", report.warnings);
     assert!(leaks(&out, GEHEIM).is_empty());
 }
 
