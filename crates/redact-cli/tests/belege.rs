@@ -3257,6 +3257,13 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "`zo_c_spiegel_umgebungen::c3_erscheinung_mit_eigenen_ressourcen_ohne_properties_name_aus_der_seite`",
         "ein Testname (Befund C-3 der Runde 1), keine Messung",
+    ),    (
+        "galt als nicht gezeichnet** (Register #88, Prüfer C; neue Klasse)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "`/Properties` folgt weiter der Regel aus #67",
+        "eine Registernummer, keine Messung",
     ),
 ];
 

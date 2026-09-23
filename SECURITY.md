@@ -1769,6 +1769,19 @@ Formularpläne feststehen. Die Warnung zum geteilten Formular nennt weiterhin
 die Seiten, auf denen das Formular steht; ein Spiegel bleibt auf keiner davon
 stehen (gemessen mit `leaks`: 0 Fundstellen).
 
+### Namen, die sich nur beim Aufrufer auflösen
+
+Ein Formular mit eigenem `/Resources` darf nach der Norm nur Namen aus diesem
+Verzeichnis benutzen. Poppler sucht einen fehlenden Namen trotzdem in den
+Ressourcen der Aufrufer bis hinauf zur Seite und zeichnet, was es dort
+findet. Der Scan folgt dem: kennt das eigene Verzeichnis eine benutzte
+Schrift, ein Formular, einen Grafikzustand, ein Muster oder eine
+Schattierung nicht, liest er den Strom unter den Kategorien der Aufrufer, mit
+dem eigenen Verzeichnis darüber. Ein eigener Eintrag geht vor. Für
+Eigenschaftslisten (`/Properties`) gilt dieselbe Suche, Name für Name. Die
+Nachprüfung liest dieselbe Sicht. Belege: `zp_c_ressourcen_beim_aufrufer`,
+`zo_c_spiegel_umgebungen`.
+
 ### Ein Struktur-Element, das keine Annotation erreicht
 
 Der Metadatenlauf erreicht Struktur-Elemente nur über die Annotationen einer

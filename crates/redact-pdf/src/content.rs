@@ -683,6 +683,10 @@ struct Budget {
     /// den ganzen Strom ab, und der wird unter derselben Umgebung beliebig oft
     /// platziert.
     names_beyond: HashMap<(StreamKey, Option<ObjectId>), bool>,
+    /// Dasselbe für Schriften, XObjects, Grafikzustände, Muster und
+    /// Schattierungen: benennt der Strom eines davon, das seine eigenen
+    /// Ressourcen nicht kennen? Siehe [`merged_resources`] (Register #88).
+    names_beyond_resources: HashMap<(StreamKey, Option<ObjectId>), bool>,
     /// Verbleibende Spiegel-Formular-Paare, die [`scan_marked_text`] noch
     /// **aufnehmen** darf — die Decke ist [`MAX_MIRROR_FORM_PLACEMENTS`].
     ///
@@ -736,6 +740,7 @@ impl Default for Budget {
             looked_at_type3: HashSet::new(),
             scanned_marked: HashSet::new(),
             names_beyond: HashMap::new(),
+            names_beyond_resources: HashMap::new(),
             mirror_pairs: MAX_MIRROR_FORM_PLACEMENTS,
             mirror_expansions: MAX_MIRROR_FORM_PLACEMENTS,
             mirror_shows: MAX_MIRROR_FORM_PLACEMENTS,
@@ -1042,6 +1047,40 @@ impl Budget {
         outer_owners: Vec<Option<ObjectId>>,
     ) -> bool {
         self.scanned_marked.insert((stream, owner, outer_owners))
+    }
+
+    /// Benennt dieser Strom eine Schrift, ein XObject, einen Grafikzustand,
+    /// ein Muster oder eine Schattierung, die `resources` nicht kennen? Je
+    /// (Strom, Eigentümer) einmal gerechnet.
+    fn names_beyond_own_resources(
+        &mut self,
+        doc: &Document,
+        stream: StreamKey,
+        owner: Option<ObjectId>,
+        operations: &[Operation],
+        resources: Option<&Dictionary>,
+    ) -> bool {
+        *self
+            .names_beyond_resources
+            .entry((stream, owner))
+            .or_insert_with(|| {
+                operations.iter().any(|op| {
+                    let category: &[u8] = match op.operator.as_str() {
+                        "Tf" => b"Font",
+                        "Do" => b"XObject",
+                        "gs" => b"ExtGState",
+                        "sh" => b"Shading",
+                        "sc" | "scn" | "SC" | "SCN" => b"Pattern",
+                        _ => return false,
+                    };
+                    op.operands.iter().any(|o| match o {
+                        Object::Name(name) => {
+                            category_entry(doc, resources, category, name).is_none()
+                        }
+                        _ => false,
+                    })
+                })
+            })
     }
 
     /// Benennt dieser Strom eine Eigenschaftsliste, die `resources` nicht
@@ -3378,6 +3417,68 @@ fn property_entry<'a>(
     }
 }
 
+/// Der Eintrag `name` in `/Resources /<category>`, falls es ihn gibt — mit
+/// derselben Regel für `null` wie [`property_entry`].
+fn category_entry<'a>(
+    doc: &'a Document,
+    resources: Option<&'a Dictionary>,
+    category: &[u8],
+    name: &[u8],
+) -> Option<&'a Object> {
+    let entry = resources
+        .and_then(|r| r.get(category).ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(name).ok())?;
+    match doc.dereference(entry) {
+        Ok((_, Object::Null)) | Err(_) => None,
+        Ok(_) => Some(entry),
+    }
+}
+
+/// Die Nachschlage-Sicht eines Stroms mit eigenen Ressourcen, der Namen
+/// seiner Aufrufer benutzt (Register #88).
+///
+/// Je Art — `/Font`, `/XObject`, `/ExtGState`, `/Pattern`, `/Shading`,
+/// `/ColorSpace` — die Einträge der Aufrufer von außen nach innen, darüber die
+/// eigenen: ein Name, den der Strom selbst kennt, gewinnt, wie in Poppler.
+/// `/Properties` bleibt, wie es ist; die Eigenschaftslisten löst
+/// [`scan_marked_text`] mit ihrem Eigentümer auf, damit die Räumung sie dort
+/// findet, wo sie stehen.
+fn merged_resources(doc: &Document, own: Option<&Dictionary>, outer: &Outer<'_>) -> Dictionary {
+    let mut out = own.cloned().unwrap_or_default();
+    for category in [
+        &b"Font"[..],
+        b"XObject",
+        b"ExtGState",
+        b"Pattern",
+        b"Shading",
+        b"ColorSpace",
+    ] {
+        let mut merged = Dictionary::new();
+        for level in outer
+            .iter()
+            .rev()
+            .map(|(res, _)| *res)
+            .chain(std::iter::once(own))
+        {
+            if let Some(dict) = level
+                .and_then(|r| r.get(category).ok())
+                .and_then(|o| doc.dereference(o).ok())
+                .and_then(|(_, o)| o.as_dict().ok())
+            {
+                for (key, value) in dict.iter() {
+                    merged.set(key.clone(), value.clone());
+                }
+            }
+        }
+        if !merged.is_empty() {
+            out.set(category, Object::Dictionary(merged));
+        }
+    }
+    out
+}
+
 /// Eine aufgelöste Eigenschaftsliste mit Spiegel: Liste, Objekt-Id, Name, und
 /// der Eigentümer des Verzeichnisses, in dem sie steht.
 type ResolvedMirror = (
@@ -3632,6 +3733,28 @@ fn scan_operations(
     // kommt erst danach. Dass einmal genügt, liegt an ihm selbst: er ist rein
     // syntaktisch (siehe [`scan_marked_text`]) und liefert jedes Mal dieselben
     // Abschnitte, die die Senke dann verwirft.
+    // Bringt der Strom eigene Ressourcen mit und benennt trotzdem eine
+    // Schrift, ein XObject, einen Grafikzustand, ein Muster oder eine
+    // Schattierung, die sie nicht kennen, schlägt er — wie in Poppler und
+    // MuPDF — bei den Aufrufern nach. PDF 32000-1 sieht das nicht vor; bis zur
+    // Spur-A-Runde 2 hieß ein solcher Name hier „nichts gezeichnet“: die
+    // Glyphen eines Formulars mit der Schrift der Seite blieben stehen, ein
+    // Formular hinter dem `/XObject` des Aufrufers wurde nie gelesen, und
+    // auch die Nachprüfung sah sie nicht (Register #88). Die Nachschlage-Sicht
+    // gilt für alles, was dieser Strom nachschlägt; angeboten (`declare_forms`)
+    // werden weiter nur seine eigenen Einträge, und die Eigenschaftslisten
+    // behält [`scan_marked_text`] mit ihrem Eigentümer für sich.
+    let merged = (own_resources
+        && !outer.is_empty()
+        && budget.names_beyond_own_resources(doc, stream, owner, operations, resources))
+    .then(|| merged_resources(doc, resources, outer));
+    let merged_fonts = merged
+        .as_ref()
+        .map(|m| budget.load_font_map(doc, Some(m)).0);
+    let own_dict = resources;
+    let resources = merged.as_ref().or(resources);
+    let fonts: &FontMap = merged_fonts.as_ref().unwrap_or(fonts);
+
     let outer_owners = if !outer.is_empty()
         && budget.names_beyond_own(doc, stream, owner, operations, resources)
     {
@@ -3652,7 +3775,7 @@ fn scan_operations(
     // Ressourcen an, und zwanzig Formulare, die sich dasselbe Verzeichnis
     // teilen, ebenfalls.
     if own_resources {
-        declare_forms(doc, resources, stream, budget, sink);
+        declare_forms(doc, own_dict, stream, budget, sink);
     }
     let graphics = sink.wants_graphics();
     // Bilder können auch ohne den vollen Grafikzustand gebraucht werden —

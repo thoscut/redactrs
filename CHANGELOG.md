@@ -106,6 +106,22 @@ sind, jeder in seinem eigenen Commit.
   `zo_c_spiegel_umgebungen::c3_erscheinung_mit_eigenen_ressourcen_ohne_properties_name_aus_der_seite`.
   Mutationsnachweis: keine Umgebung unter der Erscheinung → rot.
 
+* **⚠ Sicherheit: eine Schrift, ein Formular, ein Grafikzustand oder ein
+  Muster, deren Name nur beim Aufrufer stand, galt als nicht gezeichnet**
+  (Register #88, Prüfer C; neue Klasse). Ein Formular mit eigenem
+  `/Resources` benutzt einen Namen aus `/Font`, `/XObject`, `/ExtGState` oder
+  `/Pattern`, der nur in den Ressourcen der Seite steht. Die Norm sieht das
+  nicht vor; Poppler löst den Namen trotzdem in der Kette der Aufrufer auf
+  und zeichnet. Der Scan sah nichts: keinen Text, keine Schwärzung, und auch
+  `--check-leaks` fand das Geheimnis weder im Eingang noch in der Ausgabe.
+  Jetzt liest der Scan einen solchen Strom unter einer zusammengesetzten
+  Sicht — die Kategorien der Aufrufer, das eigene Verzeichnis darüber; ein
+  eigener Eintrag geht vor, wie in Poppler. `/Properties` folgt weiter der
+  Regel aus #67. Belege: `zp_c_ressourcen_beim_aufrufer` (je Kategorie ein
+  Fall, das Orakel am Eingang, und die Grenze „eigener Eintrag geht vor“).
+  Mutationsnachweis: keine zusammengesetzte Sicht → jeder Fall rot; der
+  Aufrufer geht vor → die Grenze rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

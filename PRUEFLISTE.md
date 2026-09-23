@@ -49,6 +49,7 @@ Prosa.
 | Orakel: eine Zeichenkettenkodierung der Norm, die der Dekoder nicht kennt (PDFDocEncoding 0x80–0xA0) | A | Spur-A-Runde 1 (#81) | `crates/redact-pdf/tests/zo_d_altgeneration_und_kodierung.rs`, `crates/redact-cli/tests/zo_d_orakel_am_binary.rs` |
 | Orakel: eine Altgeneration unter einem Filter, den nur die Objektsicht kann, oder als maskierte Zeichenkette | A | Spur-A-Runde 1 (#80) | `crates/redact-pdf/tests/zo_d_altgeneration_und_kodierung.rs`, `crates/redact-cli/tests/zo_d_orakel_am_binary.rs` |
 | Bilddecke: der Dekoder belegt andere Maße als die, gegen die die Decke geprüft hat (JPEG-Kopf gegen Dictionary) | A | Spur-A-Runde 2 (#101) | `crates/redact-cli/tests/zp_a_jpeg_groesser_als_angegeben.rs` |
+| Ressourcenname nur beim Aufrufer auflösbar: `/Font`, `/XObject`, `/ExtGState`, `/Pattern` aus einem Formular mit eigenem `/Resources` (Poppler zeichnet) | A | Spur-A-Runde 2 (#88) | `crates/redact-pdf/tests/zp_c_ressourcen_beim_aufrufer.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung
 prüft ihren positiven Zweig allein im Job „Build (windows-2025)“.
