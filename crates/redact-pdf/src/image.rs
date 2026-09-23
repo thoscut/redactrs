@@ -1754,28 +1754,42 @@ fn encode_xobject(work: &Work) -> Encoded {
     let (space, data) = samples(work);
     dict.set("ColorSpace", Object::Name(space.to_vec()));
 
-    // Ein `/Mask` der Eingabe wird unverändert mitgeschrieben. Es steht neben
-    // dem Bild, beschreibt es im Einheitsquadrat und übersteht das Neukodieren
-    // deshalb in voller Auflösung und mit seinen harten Kanten. Ein `/SMask`
-    // gibt es dann nicht: beides nebeneinander ist regelwidrig (PDF 32000-1,
-    // Tabelle 89), und die Alphaebene, die hier vorläge, wäre nichts anderes
-    // als dieselbe Maske — auf die Auflösung des Bildes heruntergebrochen.
+    // Ein `/Mask` der Eingabe wird unverändert mitgeschrieben — solange
+    // **kein** Bildpunkt gefallen ist. Es steht neben dem Bild, beschreibt es
+    // im Einheitsquadrat und übersteht das Neukodieren deshalb in voller
+    // Auflösung und mit seinen harten Kanten. Ein `/SMask` gibt es dann
+    // nicht: beides nebeneinander ist regelwidrig (PDF 32000-1, Tabelle 89),
+    // und die Alphaebene, die hier vorläge, wäre nichts anderes als dieselbe
+    // Maske — auf die Auflösung des Bildes heruntergebrochen.
     //
-    // Dass die Alphaebene hier wirklich *dieselbe* Maske trägt, ist keine
-    // Annahme, sondern folgt aus `crate::ops::Honoured`: `work.mask` ist genau
-    // dann gesetzt, wenn der Stencil-`/Mask`-Strom die befolgte Maske ist —
-    // und dann hat `apply_soft_mask` genau ihn in den Alphakanal gerechnet.
-    // Steht daneben ein `/SMask`, gilt das `/SMask`, `mask_plan` liefert
-    // `InAlpha`, `work.mask` bleibt leer, und der Alphakanal geht unten als
-    // neues `/SMask` in die Ausgabe. Diese Verzweigung darf deshalb nie eine
+    // Sind Bildpunkte gefallen, ist die Maske **selbst** Bildinhalt: ihre
+    // Bits sind die Form, die das Bild malt — ein Textumriss als Stencil
+    // trägt den Text, auch wenn darunter jede Farbe schwarz ist. Die
+    // Spur-A-Runde 1 fand den Suchbegriff im unverändert mitgeschriebenen
+    // Maskenstrom der Ausgabe (Register #77). Deshalb geht dann die
+    // Alphaebene hinaus, die [`Work::fill`] unter der Zone auf undurchsichtig
+    // gesetzt hat: außerhalb der Zone dieselbe Maske, unter der Zone die
+    // Schwärzung — als `/SMask` in Bildauflösung. Der Preis (die Maske
+    // verliert ihre eigene Auflösung) fällt nur bei einem Bild an, das
+    // wirklich geschwärzt wurde.
+    //
+    // Dass die Alphaebene wirklich *dieselbe* Maske trägt, ist keine Annahme,
+    // sondern folgt aus `crate::ops::Honoured`: `work.mask` ist genau dann
+    // gesetzt, wenn der Stencil-`/Mask`-Strom die befolgte Maske ist — und
+    // dann hat `apply_soft_mask` genau ihn in den Alphakanal gerechnet. Steht
+    // daneben ein `/SMask`, gilt das `/SMask`, `mask_plan` liefert `InAlpha`,
+    // `work.mask` bleibt leer, und der Alphakanal geht unten als neues
+    // `/SMask` in die Ausgabe. Diese Verzweigung darf deshalb nie eine
     // Alphaebene wegwerfen, die etwas anderes sagt als das `/Mask`.
     if let Some(mask) = &work.mask {
-        dict.set("Mask", mask.clone());
-        return Encoded {
-            dict,
-            data,
-            smask: None,
-        };
+        if work.filled == 0 {
+            dict.set("Mask", mask.clone());
+            return Encoded {
+                dict,
+                data,
+                smask: None,
+            };
+        }
     }
 
     let transparent = work.rgba.chunks_exact(4).any(|p| p[3] != 255);

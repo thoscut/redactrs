@@ -2709,6 +2709,14 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Katalogschleife entfernt → sechs davon rot",
         "zaehlt rote Tests unter Mutation, keine Messung",
     ),
+    (
+        "und die Bits sind die Form** (Register #77, Prüfer A)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "Mutationsnachweis: die Bedingung `filled == 0`",
+        "eine Bedingung im Code, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

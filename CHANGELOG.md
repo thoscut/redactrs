@@ -134,6 +134,23 @@ seiner neuen Zeile in der Probenliste.
   `zo_b_traeger`, jeder mit seinem Träger; Mutationsnachweis: die
   Katalogschleife entfernt → sechs davon rot.
 
+* **⚠ Sicherheit: die Stencil-Maske eines geschwärzten Bildes behielt unter
+  der Zone ihre Bits — und die Bits sind die Form** (Register #77, Prüfer A).
+  Ein `/Mask`-Strom wurde beim Neukodieren unverändert mitgeschrieben, weil
+  er das Bild in eigener Auflösung beschreibt; der Modulkopf nannte das einen
+  Schutz. Er übersah, dass die Maske selbst Bildinhalt ist: ein Textumriss als
+  Stencil trägt den Text, auch wenn darunter jede Farbe schwarz ist. Das
+  Orakel fand den Suchbegriff im Maskenstrom der Ausgabe, die gezeigte
+  Alphaebene war dieselbe wie vorher, keine Warnung. Jetzt wird die Maske nur
+  dann unverändert übernommen, wenn kein Bildpunkt gefallen ist; sonst geht
+  die Alphaebene hinaus, die `Work::fill` unter der Zone auf undurchsichtig
+  setzt — außerhalb der Zone dieselbe Maske, darunter die Schwärzung, als
+  `/SMask` in Bildauflösung. Der Preis, dass die Maske ihre eigene Auflösung
+  verliert, fällt nur bei einem Bild an, das wirklich geschwärzt wurde. Beleg:
+  `zo_a_maske_und_filter::stencil_maske_behaelt_unter_der_zone_ihre_bits`
+  (Orakel und Alphaebene). Mutationsnachweis: die Bedingung `filled == 0`
+  entfernt → rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

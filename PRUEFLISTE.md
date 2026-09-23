@@ -32,6 +32,7 @@ Prosa.
 | Das Gate passt nicht auf die Platte | B | nach R9 | `crates/redact-gui/tests/zn_a_debug_info_stufe.rs` |
 | Seite außerhalb des Seitenbaums, gehalten von `/Dest` oder `/P` | A | Spur-A-Runde 1 (#69) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
 | Bild ohne Zeichner: `/Thumb` der Seite | A | Spur-A-Runde 1 (#74) | `crates/redact-pdf/tests/zo_a_bild_ohne_zeichner.rs` |
+| Stencil-`/Mask` eines geschwärzten Bildes trägt die Form unter der Zone | A | Spur-A-Runde 1 (#77) | `crates/redact-pdf/tests/zo_a_maske_und_filter.rs` |
 | Beiwerk mit Klartext an Katalog, Seite, Objekt und Signaturfeld (`/Perms`, `/DSS`, `/PageLabels`, `/Threads`, `/Collection`, `/OutputIntents`, `/URI`, `/DPartRoot`, `/VP`, `/PresSteps`, `/Ref`, `/OPI`, `/SV`, `/Lock`) | A | Spur-A-Runde 1 (#70) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung

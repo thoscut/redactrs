@@ -1498,12 +1498,16 @@ fn apply_color_key(
 pub enum MaskPlan {
     /// Kein `/Mask` (ein `/SMask` läuft über den Alphakanal).
     None,
-    /// `/Mask` verweist auf einen Stencil-Strom: **unverändert übernehmen**.
+    /// `/Mask` verweist auf einen Stencil-Strom: **unverändert übernehmen**,
+    /// solange kein Bildpunkt gefallen ist.
     ///
     /// Der Strom steht neben dem Bild und beschreibt es im Einheitsquadrat,
     /// nicht im Pixelraster — er überlebt das Neukodieren des Bildes
     /// unbeschadet und in voller Auflösung. Ihn in eine Alphaebene des Bildes
-    /// umzurechnen, hieße ihn auf dessen Auflösung herunterzubrechen.
+    /// umzurechnen, hieße ihn auf dessen Auflösung herunterzubrechen. Fällt
+    /// aber ein Bildpunkt, ist die Maske selbst Bildinhalt (ihre Bits sind
+    /// die Form, die gemalt wird), und `crate::image` schreibt statt ihrer
+    /// die unter der Zone geschwärzte Alphaebene als `/SMask` (Register #77).
     Keep(Object),
     /// Die Maske steckt bereits im Alphakanal; ein `/Mask` darf **nicht**
     /// übernommen werden.

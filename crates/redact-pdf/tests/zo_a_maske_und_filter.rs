@@ -118,7 +118,6 @@ fn gezeigte_alpha(bytes: &[u8]) -> Vec<u8> {
 /// Zweig `if let Some(mask) = &work.mask { dict.set("Mask", …) }`, gespeist von
 /// `mask_to_carry` → `MaskPlan::Keep`.
 #[test]
-#[ignore = "offen: Register #77 /Mask-Strom behaelt seine Bits — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn stencil_maske_behaelt_unter_der_zone_ihre_bits() {
     let breite = 216u32;
     let hoehe = 4u32;
