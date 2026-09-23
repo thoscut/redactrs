@@ -1060,6 +1060,58 @@ fn erscheinungsstrom_mit_spiegel_in_eigenen_properties() {
     assert!(found.is_empty(), "Lecks {found:?}, Warnungen {warnings:?}");
 }
 
+/// **Befund C-1 der Spur-A-Runde 2 — behoben (Register #85).** Derselbe
+/// Erscheinungsstrom, aber seine eigenen Ressourcen kennen `/MC0` nicht — der
+/// Spiegel steht in den `/Properties` der **Seite**. Poppler legt die
+/// Seitenressourcen unter jede Erscheinung und gibt ihn aus. Bis dahin reichte
+/// der Scan der Erscheinung keine äußere Umgebung weiter; der Spiegel mit dem
+/// Geheimnis blieb in der Seite stehen, ohne Warnung.
+#[test]
+fn c3_erscheinung_mit_eigenen_ressourcen_ohne_properties_name_aus_der_seite() {
+    let mut offen = Vec::new();
+    for spiegel in [lie(), SECRET.to_string()] {
+        let mut d = page(&["Kontoinhaber: Max Mustermann"]);
+        let font_id = d.font_id;
+        let res = d.resources_id;
+        set_properties(
+            &mut d,
+            res,
+            Object::Dictionary(dictionary! { "MC0" => Object::Dictionary(mirror_list(&spiegel)) }),
+        );
+        let ap_content = format!(
+            "/Span /MC0 BDC\nBT /F1 8 Tf 0 4 Td (Notiz: {}) Tj ET\nEMC\n",
+            escape(SECRET)
+        );
+        let ap_id = d.add(Object::Stream(
+            Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 240.into(), 20.into()],
+                    "Resources" => dictionary! {
+                        "Font" => dictionary! { "F1" => font_id },
+                    },
+                },
+                ap_content.into_bytes(),
+            )
+            .with_compression(false),
+        ));
+        let annot_id = d.add(Object::Dictionary(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "FreeText",
+            "Rect" => vec![300.into(), 100.into(), 540.into(), 120.into()],
+            "F" => 4_i64,
+            "AP" => dictionary! { "N" => ap_id },
+        }));
+        d.page_dict_set("Annots", Object::Array(vec![Object::Reference(annot_id)]));
+        let (found, warnings) = nach_der_pipeline(&d.finish());
+        if !found.is_empty() {
+            offen.push(format!("{spiegel}: {found:?} (Warnungen {warnings:?})"));
+        }
+    }
+    assert!(offen.is_empty(), "{}", offen.join("\n"));
+}
+
 /// Die Zeichen des Geheimnisses, je einmal.
 fn zeichenvorrat() -> Vec<char> {
     let mut seen = Vec::new();

@@ -2291,6 +2291,7 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
         resources.as_ref(),
         true,
         Some(page_id),
+        &[],
         None,
         Matrix::IDENTITY,
         &mut budget,
@@ -2456,6 +2457,7 @@ pub fn interpret(
         resources,
         true,
         None,
+        &[],
         None,
         initial_ctm,
         &mut budget,
@@ -2486,6 +2488,7 @@ fn scan_with_budget(
     resources: Option<&Dictionary>,
     own_resources: bool,
     owner: Option<ObjectId>,
+    outer: &Outer<'_>,
     fonts: Option<&FontMap>,
     initial_ctm: Matrix,
     budget: &mut Budget,
@@ -2508,7 +2511,7 @@ fn scan_with_budget(
         resources,
         own_resources,
         owner,
-        &[],
+        outer,
         fonts,
         initial_ctm,
         0,
@@ -2908,6 +2911,16 @@ fn scan_appearance(
         _ => (page_resources.map(|d| Rc::new(d.clone())), false, None),
     };
     let owner = if own_resources { id } else { page_id };
+    // Mit eigenen Ressourcen liegt die Seite als äußere Umgebung darunter —
+    // so legt Poppler sie unter jede Erscheinung, und ein Name, den das
+    // eigene Verzeichnis nicht kennt, löst sich dort auf. Bis zur
+    // Spur-A-Runde 2 stand hier keine Umgebung: der Spiegel aus der Seite
+    // über einer Erscheinung blieb stehen, ohne Warnung (Register #85).
+    let outer: Vec<(Option<&Dictionary>, Option<ObjectId>)> = if own_resources {
+        vec![(page_resources, Some(page_id))]
+    } else {
+        Vec::new()
+    };
 
     scan_with_budget(
         doc,
@@ -2916,6 +2929,7 @@ fn scan_appearance(
         resources.as_deref(),
         own_resources,
         Some(owner),
+        &outer,
         fonts,
         appearance_matrix(&matrix, bbox, rect),
         budget,

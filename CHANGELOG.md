@@ -95,6 +95,17 @@ sind, jeder in seinem eigenen Commit.
   `zo_c_spiegel_umgebungen::c3_null_eintrag_im_eigenen_verzeichnis_gilt_als_fehlend`.
   Mutationsnachweis: `null` wieder als vorhanden → rot.
 
+* **⚠ Sicherheit: unter der Erscheinung einer Annotation lag keine Seite**
+  (Register #85, Prüfer C; Variante der Korrektur #67). Bringt ein
+  Erscheinungsstrom — ein `/AP`, ein Druckknopf-Symbol unter `/MK` — eigene
+  Ressourcen ohne `/Properties` mit, löst Poppler `/MC0` in den Ressourcen der
+  Seite auf und gibt deren Spiegel als Text der Glyphen aus. Der Scan der
+  Erscheinung reichte keine äußere Umgebung weiter; der Spiegel blieb mit
+  dem Geheimnis in der Seite stehen, ohne Warnung. Jetzt liegt die Seite als
+  äußere Umgebung unter jeder Erscheinung mit eigenen Ressourcen. Beleg:
+  `zo_c_spiegel_umgebungen::c3_erscheinung_mit_eigenen_ressourcen_ohne_properties_name_aus_der_seite`.
+  Mutationsnachweis: keine Umgebung unter der Erscheinung → rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

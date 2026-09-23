@@ -3246,6 +3246,18 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Mutationsnachweis: `null` wieder als vorhanden",
         "das PDF-Schlüsselwort null, keine Messung",
     ),
+    (
+        "lag keine Seite** (Register #85, Prüfer C; Variante der Korrektur #67)",
+        "Registernummern, keine Messung",
+    ),
+    (
+        "löst Poppler `/MC0` in den Ressourcen der Seite auf",
+        "ein Ressourcenname, keine Messung",
+    ),
+    (
+        "`zo_c_spiegel_umgebungen::c3_erscheinung_mit_eigenen_ressourcen_ohne_properties_name_aus_der_seite`",
+        "ein Testname (Befund C-3 der Runde 1), keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
