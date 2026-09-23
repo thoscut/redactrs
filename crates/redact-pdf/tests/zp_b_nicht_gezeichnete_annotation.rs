@@ -1,11 +1,17 @@
-//! Spur A, Runde 2, Prüfer B-1 (Register #90): Erscheinungsströme von
-//! Annotationen, die auf keiner Seite stehen.
+//! Spur A, Runde 2, Prüfer B-1 und B-2 (Register #90, #91): Erscheinungsströme
+//! von Annotationen, die auf keiner Seite stehen.
 //!
 //! * **#90:** ein Widget, das nur in den `/Kids` seines Formularfelds hängt,
 //!   nicht in `/Annots` einer Seite. `meta.rs` erreicht es über `/Fields` und
 //!   nimmt ihm die Texte, hält es damit aber am Leben; sein `/AP` las
 //!   niemand — `crate::content` liest, was eine Seite zeigt. Der gezeichnete
 //!   Feldwert stand nach dem Lauf in der Datei, ohne Warnung.
+//! * **#91:** eine Antwortkette (`/IRT`), länger als die Stufen, die
+//!   `crate::content` von einer Seitenannotation aus verfolgt. Der Trägerlauf
+//!   ging bis zum Ende, die Analyse nicht: das `/AP` am Ende blieb. Seit #90
+//!   verliert es sein Erscheinungsbild wie jeder Träger, den keine Seite
+//!   zeigt — die Stufengrenze der Analyse bleibt, und was hinter ihr liegt,
+//!   hat kein Bild mehr.
 //!
 //! Ein solcher Träger steht auf keiner Seite und wird von keinem Betrachter gezeichnet.
 //! Jetzt verliert ein Träger, der in keinem `/Annots` steht, sein
@@ -121,6 +127,26 @@ fn ein_widget_nur_in_den_kids_seines_felds_verliert_sein_erscheinungsbild() {
         Object::Dictionary(dictionary! { "Fields" => vec![Object::Reference(feld)] }),
     );
     muss_fallen(&d.finish(), "Widget nur in /Kids");
+}
+
+/// #91: eine Antwortkette, deren letztes Glied weiter weg ist, als die
+/// Analyse von der Seite aus geht.
+#[test]
+fn das_ende_einer_langen_antwortkette_verliert_sein_erscheinungsbild() {
+    let mut d = probe();
+    let ap = form_mit_text(&mut d);
+    let mut glied = d.add(Object::Dictionary(dictionary! {
+        "Type" => "Annot", "Subtype" => "FreeText", "Rect" => rect(),
+        "AP" => dictionary! { "N" => Object::Reference(ap) },
+    }));
+    for _ in 0..24 {
+        glied = d.add(Object::Dictionary(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(),
+            "IRT" => Object::Reference(glied),
+        }));
+    }
+    d.page_dict_set("Annots", Object::Array(vec![Object::Reference(glied)]));
+    muss_fallen(&d.finish(), "Ende einer langen /IRT-Kette");
 }
 
 /// Gegenprobe: ein Widget, das in `/Annots` steht, behält sein

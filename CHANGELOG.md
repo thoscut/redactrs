@@ -295,6 +295,19 @@ sind, jeder in seinem eigenen Commit.
   zurückgenommen → sein Fall rot, auch die Gegenproben (direkt eingebettete
   Widgets, `/Annots` als eigenes Objekt, ein geteiltes `/MK`).
 
+* **⚠ Sicherheit: das Ende einer langen Antwortkette behielt sein
+  Erscheinungsbild** (Register #91, Prüfer B; stilles Leck, die Zeile #71
+  der Probenliste trat weiter auf). Die Analyse folgt von einer
+  Seitenannotation aus `/Popup` und `/IRT` nur bis zu einer festen Stufe;
+  der Trägerlauf ging bis zum Ende der Kette und hielt sie am Leben, ohne
+  Meldung. Das `/AP` am Ende stand nach dem Lauf in der Datei. Die Regel aus
+  dem Punkt davor schließt es: ein Glied, das in keinem `/Annots` steht,
+  zeichnet niemand, und es verliert sein Erscheinungsbild — die Stufengrenze
+  der Analyse bleibt, und was hinter ihr liegt, hat kein Bild mehr. Ein
+  eigener Commit mit eigenem Beleg, weil es ein eigener Befund war:
+  `zp_b_nicht_gezeichnete_annotation`, der Fall der langen Antwortkette.
+  Mutationsnachweis: die Regel zurückgenommen → dieser Fall rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile
