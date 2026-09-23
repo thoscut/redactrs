@@ -1332,11 +1332,13 @@ fn looks_binary(data: &[u8]) -> bool {
     odd as f64 / sample.len() as f64 > BINARY_RATIO
 }
 
-fn is_whitespace(b: u8) -> bool {
+/// Leerraum nach PDF 32000-1, Tabelle 1 (mit NUL und Seitenvorschub).
+pub(crate) fn is_whitespace(b: u8) -> bool {
     matches!(b, 0 | 9 | 10 | 12 | 13 | 32)
 }
 
-fn is_delimiter(b: u8) -> bool {
+/// Trennzeichen nach PDF 32000-1, Tabelle 2.
+pub(crate) fn is_delimiter(b: u8) -> bool {
     matches!(
         b,
         b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'

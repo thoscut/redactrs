@@ -202,6 +202,24 @@ sind, jeder in seinem eigenen Commit.
   geladenen Bytes `endstream` folgt, ist verteidigend und bleibt unter ihrer
   Rücknahme grün — `lopdf` übernimmt einen Strom nur so.
 
+* **⚠ Sicherheit: ein Wort auf „stream“ verschluckte in der Rohsicht einen
+  echten Strom** (Register #96, Prüfer D; stilles Leck des Orakels, neue
+  Klasse). Die Rohsicht findet Ströme an den Bytes `stream` … `endstream`,
+  unabhängig von der Querverweistabelle — so liest sie die Altrevisionen
+  eines inkrementellen Updates, die keine andere Sicht erreicht. Ob `stream`
+  dort ein Schlüsselwort war, prüfte sie nicht: ein Titel „Protokoll
+  Livestream“ oder eine Schrift `/BitstreamVeraSans` öffnete einen Block bis
+  zum nächsten `endstream`, der Flate-Strom einer Altrevision darin wurde nie
+  entpackt, und `--check-leaks` meldete „nicht gefunden“. Jetzt steht das
+  Schlüsselwort nach Leerraum oder einem Trennzeichen und vor dem
+  Zeilenende. Benannte Lücke: ein Wort `stream` am Zeilenende eines Literals
+  sieht weiter aus wie das Schlüsselwort. Der Entwurf des Belegs war ein
+  Scheintest — Flate legte den kurzen Klartext ungepackt ab, und die
+  Rohsicht fand das Geheimnis ohne jeden Strom; der Prüfling packt jetzt
+  wirklich und prüft das. Belege: `zp_d_scheinstrom`,
+  `audit_bytes::tests::only_the_stream_keyword_opens_a_raw_block`.
+  Mutationsnachweis: jede Hälfte der Prüfung zurückgenommen → ihr Fall rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

@@ -188,7 +188,7 @@ use aho_corasick::{AhoCorasick, MatchKind};
 use lopdf::{Dictionary, Document, Object, ObjectStream, Stream, StringFormat};
 use memchr::memmem;
 
-use crate::document::{prescan, Limits};
+use crate::document::{is_delimiter, is_whitespace, prescan, Limits};
 use crate::extract::PdfExtractor;
 use crate::filters::{self, Oversize};
 
@@ -1535,6 +1535,9 @@ fn raw_stream_blocks(bytes: &[u8]) -> Vec<(usize, &[u8])> {
         if start >= 3 && &bytes[start - 3..start] == b"end" {
             continue;
         }
+        if !is_stream_keyword(bytes, start) {
+            continue;
+        }
         let mut data = i;
         if bytes.get(data) == Some(&b'\r') {
             data += 1;
@@ -1549,6 +1552,32 @@ fn raw_stream_blocks(bytes: &[u8]) -> Vec<(usize, &[u8])> {
         i = data + rel_end + 9;
     }
     out
+}
+
+/// Steht an `start` das **Schlüsselwort** `stream` — oder nur die Bytes?
+///
+/// Das Schlüsselwort steht nach einem Trennzeichen oder Leerraum (meist
+/// `>>`, das Ende des Stream-Dictionarys) und vor dem Zeilenende; davor darf
+/// noch Leerraum stehen (`stream \r\n`, PDF 32000-1, 7.3.8.1 verlangt das
+/// Zeilenende, manche Erzeuger schreiben ein Leerzeichen davor).
+///
+/// Bis zur Spur-A-Runde 2 genügten die sechs Bytes: ein Titel „Protokoll
+/// Livestream“ oder eine Schrift `/BitstreamVeraSans` öffnete einen Block
+/// bis zum nächsten `endstream` — und der echte Strom dahinter, etwa der
+/// Flate-Strom einer Altrevision, die keine Objektsicht mehr erreicht, wurde
+/// nie entpackt (Register #96). Was bleibt: ein Wort `stream` am Ende einer
+/// Zeile in einem Literal (`(… Live stream` mit Zeilenumbruch) sieht aus wie
+/// das Schlüsselwort und öffnet weiter einen Block — benannte Lücke.
+fn is_stream_keyword(bytes: &[u8], start: usize) -> bool {
+    let getrennt = start
+        .checked_sub(1)
+        .is_none_or(|j| is_whitespace(bytes[j]) || is_delimiter(bytes[j]));
+    let hinten = bytes.get(start + 6..).unwrap_or_default();
+    let leer = hinten
+        .iter()
+        .take_while(|b| matches!(b, b' ' | b'\t'))
+        .count();
+    getrennt && matches!(hinten.get(leer), Some(b'\r' | b'\n'))
 }
 
 /// Objektnummer und Generation aus dem Kopf `N G obj` vor einem rohen Strom
@@ -2556,6 +2585,40 @@ mod tests {
         let header = object_header(huge, blocks[0].0);
         assert_eq!(object_label(header), " (Objekt 99999999999999 0)");
         assert_eq!(object_id(header), None);
+    }
+
+    /// Register #96: nur das Schlüsselwort öffnet einen Block. Je Fall genau
+    /// ein Block, und er beginnt hinter dem echten `stream`.
+    #[test]
+    fn only_the_stream_keyword_opens_a_raw_block() {
+        let echt = b"<< /Length 3 >>\nstream\nabc\nendstream";
+        for vorher in [
+            &b""[..],
+            b"(Protokoll Livestream)\n",
+            b"<< /BaseFont /BitstreamVeraSans >>\n",
+            b"(Live stream heute)\n",
+            b"(streams)\n",
+            b"(Protokoll Livestream\nTeil 2)\n",
+        ] {
+            let pdf = [vorher, &echt[..]].concat();
+            let blocks = raw_stream_blocks(&pdf);
+            assert_eq!(blocks.len(), 1, "{}", String::from_utf8_lossy(vorher));
+            assert_eq!(blocks[0].1, b"abc\n", "{}", String::from_utf8_lossy(vorher));
+        }
+        // Die Formen des Schlüsselworts: direkt hinter `>>`, mit Leerzeichen
+        // vor dem Zeilenende, mit CR LF.
+        for form in [
+            &b"<<>>stream\nabc\nendstream"[..],
+            b"<< >>\nstream \r\nabc\nendstream",
+            b"<< >>\r\nstream\r\nabc\nendstream",
+        ] {
+            assert_eq!(
+                raw_stream_blocks(form).len(),
+                1,
+                "{}",
+                String::from_utf8_lossy(form)
+            );
+        }
     }
 
     #[test]

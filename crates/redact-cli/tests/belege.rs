@@ -3354,6 +3354,10 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "(Register #98, Prüfer D; stilles Leck des Orakels, neue Klassen)",
         "eine Registernummer, keine Messung",
     ),
+    (
+        "(Register #96, Prüfer D; stilles Leck des Orakels, neue Klasse)",
+        "eine Registernummer, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
