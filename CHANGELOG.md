@@ -134,6 +134,18 @@ die Platte.
   dieses Abschnitts folgt: ein Befund, ein Commit, und nach jedem Push wird
   der Windows-Job angesehen.
 
+* **Die Schleife hat jetzt einen Gegenstand, an dem sie endet.** Die
+  Fix-Runden hatten drei Aufgaben in einer Runde — Schwärzung, Prüfapparat,
+  Doku —, und die konvergieren verschieden; die Runde 9 hatte alle drei in
+  einem Commit. Jetzt sind es drei Spuren, und nur die Schwärzung zählt gegen
+  das Ende. Das Ende selbst ist keine Abwesenheitsbehauptung mehr („nichts
+  gefunden“), sondern eine Checkliste: [`PRUEFLISTE.md`](PRUEFLISTE.md) nennt
+  jede Fehlerklasse, die in dieser Schleife aufgetreten ist, mit der Runde
+  ihres ersten Auftretens und den Belegdateien, die sie festhalten;
+  `zn_c_probenliste` prüft, dass es jede genannte Datei gibt. Die Bedingung,
+  das Mandat der letzten Runden und die Regeln zur Arbeitsweise stehen in
+  `CONTRIBUTING.md`, „Drei Spuren, eine Probenliste, ein Ende“.
+
 ### Fix-Runde 9: was die Gegenprüfung der Runde 8 noch fand
 
 Vier Gegenprüfer lasen die Korrekturen der Runde 8 mit eigenem Material gegen.

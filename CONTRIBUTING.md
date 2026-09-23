@@ -118,6 +118,40 @@ Konfigurationsschema zwischen den Reihen ändert.
 abzuschalten ist eine Entscheidung mit Begründung im Code, kein Weg am Gate
 vorbei.
 
+### Drei Spuren, eine Probenliste, ein Ende
+
+Die Fix-Runden seit 0.6.0 hatten drei Aufgaben in einer Runde, und die
+konvergieren verschieden. Seit der Runde 9 sind sie getrennt:
+
+* **Spur A — Schwärzung.** `image.rs`, `meta.rs`, Spiegel und Formular,
+  Orakel, Filterkette, Tiefe. **Nur sie zählt gegen das Ende.** Ende, wenn
+  zwei aufeinanderfolgende Runden keinen Befund der Klassen *stilles Leck*,
+  *abgelehnte gewöhnliche Datei* oder *Dienstverweigerung* liefern **und**
+  jede Zeile der Probenliste in [`PRUEFLISTE.md`](PRUEFLISTE.md) in zwei
+  Runden hintereinander grün und mutationsfest ist. Die Runde 9 hätte das nicht
+  erfüllt (ein Leck, eine Ablehnung) — so streng soll es sein.
+* **Spur B — Prüfapparat.** Die Bindungsmaschine (`zi_e`, `zj_e`, `zl_e`,
+  `belege.rs`), Kopien von Helfern, Wächter, die an Zahlen hängen. Wird
+  gesammelt und in einer eigenen, seltenen Runde geschlossen; zählt nicht
+  gegen das Ende. **Die Bindungsmaschine ist eingefroren:** eine Verschärfung
+  braucht einen Fall, in dem eine Zahl im geprüften Block tatsächlich falsch
+  war — nicht ein Merkmal, das fehlen könnte.
+* **Spur C — Doku.** Sätze hinter dem Code, Messzahlen ohne Weg. Wird beim
+  Release-Schnitt bereinigt, nicht je Runde.
+
+Das Mandat der letzten zwei Runden ist nicht mehr *widerlege* — eine Runde
+mit diesem Auftrag kann nicht mit „nichts“ enden, das ist ihr Sinn —, sondern:
+*prüfe, ob eine Zeile der Probenliste noch auftritt, und suche nach einer
+Klasse, die nicht auf ihr steht.* Die erste Frage kann „nein“ beantworten, die
+zweite hält die Liste ehrlich. Eine neue Klasse kommt als neue Zeile dazu, und
+dann steht sichtbar, dass der Umfang gewachsen ist.
+
+**Mutationsnachweis je Korrektur, mit Skript.** Jede Korrektur wird einmal
+zurückgenommen, und der Test, der sie bindet, muss dabei rot werden — als
+Skript, das den Baum aus einer Sicherungskopie wiederherstellt (nicht per
+`git checkout`, das stellt den *committeten* Stand her, in dem die Korrektur
+fehlen kann), mit `md5sum` vor und nach.
+
 ### Vor dem Commit zusätzlich: die Belege in `docs/`
 
 Wer den **Rasterizer** (`redact-render`) oder die **Schwärzung** angefasst hat,

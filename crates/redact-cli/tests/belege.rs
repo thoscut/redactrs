@@ -2633,6 +2633,19 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "der Commit `1282b16` nannte den Knopf als Hebel",
         "eine Commit-Kennung, keine Messung",
     ),
+    // --- Nach der Runde 9: die Arbeitsweise (drei Spuren) ------------------
+    (
+        "Die Fix-Runden hatten drei Aufgaben in einer Runde",
+        "zaehlt die Aufgaben der Schleife, keine Messung am Programm",
+    ),
+    (
+        "die Runde 9 hatte alle drei in einem Commit. Jetzt sind es drei Spuren",
+        "Nummer einer Runde und Zaehlung von Aufgaben und Spuren, keine Messung",
+    ),
+    (
+        "„Drei Spuren, eine Probenliste, ein Ende“",
+        "der Titel eines CONTRIBUTING-Abschnitts, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
