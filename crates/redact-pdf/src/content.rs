@@ -4237,13 +4237,20 @@ fn scan_tiling_pattern(
             pattern.affected_bytes()
         ));
     }
-    // Ein Muster ohne Textoperator ist ein Schraffur- oder Logomuster: kein
-    // Befund, keine Meldung.
-    if !pattern
+    // Ein Muster, dessen Strom weder Text setzt noch etwas platziert (`Do`,
+    // `BI`), ist ein Schraffur- oder Logomuster aus Pfaden: kein Befund, keine
+    // Meldung. Bis zur Spur-A-Runde 1 entschied hier allein der Textoperator —
+    // ein Bild im Muster ohne Text bekam der Bildsammler so nie zu sehen, und
+    // ein Formular im Muster (mit Text darin) niemand (Register #75).
+    let setzt_text = pattern
         .operations()
         .iter()
-        .any(|op| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
-    {
+        .any(|op| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""));
+    let platziert = pattern
+        .operations()
+        .iter()
+        .any(|op| matches!(op.operator.as_str(), "Do" | "BI"));
+    if !setzt_text && !platziert {
         return;
     }
     if depth >= MAX_FORM_DEPTH {
@@ -4268,9 +4275,14 @@ fn scan_tiling_pattern(
     }
     budget.credit(Some(id), pattern.operations().len());
 
+    let inhalt = match (setzt_text, platziert) {
+        (true, false) => "enthält Text",
+        (false, _) => "platziert Bilder oder Formulare",
+        (true, true) => "enthält Text und platziert Bilder oder Formulare",
+    };
     sink.warn(format!(
-        "Kachelmuster „{label}“ enthält Text. Er wird an der Stelle der ersten Kachel \
-         gesucht und beim Schwärzen aus dem Muster entfernt — die übrigen Kacheln \
+        "Kachelmuster „{label}“ {inhalt}. Was darin steht, wird an der Stelle der ersten \
+         Kachel gesucht und beim Schwärzen aus dem Muster entfernt — die übrigen Kacheln \
          werden dabei nicht einzeln vermessen. Bitte das Ergebnis dort prüfen."
     ));
 

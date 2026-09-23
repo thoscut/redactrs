@@ -279,11 +279,11 @@ mod tests {
         ),
         (
             true,
-            "Kachelmuster „{label}“ enthält Text. Er wird an der Stelle der ersten \
-             Kachel gesucht und beim Schwärzen aus dem Muster entfernt — die übrigen \
-             Kacheln werden dabei nicht einzeln vermessen. Bitte das Ergebnis dort \
-             prüfen.",
-            &["P0"],
+            "Kachelmuster „{label}“ {inhalt}. Was darin steht, wird an der Stelle der \
+             ersten Kachel gesucht und beim Schwärzen aus dem Muster entfernt — die \
+             übrigen Kacheln werden dabei nicht einzeln vermessen. Bitte das Ergebnis \
+             dort prüfen.",
+            &["P0", "platziert Bilder oder Formulare"],
         ),
         (
             true,

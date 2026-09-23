@@ -9,9 +9,10 @@
 //!    Raster der ganzen Seite, samt allem, was darauf steht. Niemand zeichnet
 //!    es mit `Do`, `strip_metadata` kennt den Schlüssel nicht.
 //! 2. **Kachelmuster** (`/Pattern`, `PatternType 1`) — `content.rs::
-//!    scan_tiling_pattern` verlässt ein Muster **ohne Textoperator** vor dem
+//!    scan_tiling_pattern` verließ ein Muster **ohne Textoperator** vor dem
 //!    Durchlaufen („Schraffur- oder Logomuster: kein Befund“). Ein Bild darin
-//!    wird nie gemeldet und nie gefüllt.
+//!    wurde nie gemeldet und nie gefüllt (Register #75, behoben: der Ausstieg
+//!    fragt jetzt auch nach `Do` und `BI`).
 //! 3. **Nicht gezeichneter Name** — ein Bild, das nach dem Kopieren
 //!    (`Fate::Copy`) unter einem Namen erreichbar bleibt, den niemand zeichnet:
 //!    im geerbten `/Resources` des `/Pages`-Knotens oder als überzähliger
@@ -232,15 +233,14 @@ fn kachelmuster_mit_bild(doc: &mut Document, bild_id: ObjectId, inhalt: &[u8]) -
 /// Rechteck füllt — genau die Fläche unter der Zone. Kein Textoperator im
 /// Muster.
 ///
-/// Erwartung: die Bildpunkte fallen, oder der Lauf sagt, dass er das Muster
-/// nicht durchsucht hat. Befund: `redacted_images == 0`, keine Warnung, das
-/// Orakel findet den Klartext in der Ausgabe. Vermutung:
-/// `content.rs::scan_tiling_pattern` kehrt vor dem Durchlaufen zurück, wenn
-/// das Muster keinen Textoperator hat — der Bildsammler (`image.rs::Collector`)
-/// erhält kein Ereignis.
+/// Erwartung: die Bildpunkte fallen, und die Musterwarnung sagt, was sie an
+/// der ersten Kachel vermessen hat. Befund (Register #75, behoben):
+/// `redacted_images == 0`, keine Warnung, das Orakel fand den Klartext in der
+/// Ausgabe — `content.rs::scan_tiling_pattern` kehrte vor dem Durchlaufen
+/// zurück, wenn das Muster keinen Textoperator hatte, und der Bildsammler
+/// (`image.rs::Collector`) erhielt kein Ereignis.
 #[test]
-#[ignore = "offen: Register #75 Bild im Kachelmuster ohne Text — Spur-A-Runde 1, Beleg absichtlich rot"]
-fn bild_im_kachelmuster_ohne_text_bleibt_ungeschwaerzt_und_ungemeldet() {
+fn bild_im_kachelmuster_ohne_text_faellt() {
     let mut doc = Document::with_version("1.5");
     let bild_id = doc.add_object(Object::Stream(bild_mit_klartext()));
     let muster_id = kachelmuster_mit_bild(&mut doc, bild_id, b"q 100 0 0 100 0 0 cm /Im0 Do Q\n");
@@ -254,15 +254,76 @@ fn bild_im_kachelmuster_ohne_text_bleibt_ungeschwaerzt_und_ungemeldet() {
         &[schwaerzung(0, Rect::new(40.0, 590.0, 160.0, 710.0))],
     );
     let funde = leaks(&out, GEHEIM);
-    let gewarnt = report
-        .warnings
-        .iter()
-        .any(|w| w.contains("Kachelmuster") || w.contains("Muster"));
+    assert_eq!(
+        report.redacted_images, 1,
+        "Bild im Kachelmuster unter der Zone: Warnungen {:?}",
+        report.warnings
+    );
     assert!(
-        funde.is_empty() || gewarnt,
-        "Bild im Kachelmuster unter der Zone: {} geschwärzte Bilder, Klartext in der \
-         Ausgabe {funde:?}, Warnungen {:?}",
-        report.redacted_images,
+        funde.is_empty(),
+        "Bild im Kachelmuster unter der Zone: Klartext in der Ausgabe {funde:?}, \
+         Warnungen {:?}",
+        report.warnings
+    );
+    // Und die Meldung sagt, dass das Muster nur an der ersten Kachel vermessen
+    // wurde — mit dem, was darin steht.
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("Kachelmuster") && w.contains("platziert Bilder")),
+        "die Musterwarnung fehlt oder nennt das Bild nicht: {:?}",
+        report.warnings
+    );
+}
+
+/// Dieselbe Wurzel eine Ebene tiefer: das Muster setzt keinen Text und zeichnet
+/// kein Bild, es platziert ein **Formular** (`/Fm0 Do`), und erst das Formular
+/// zeichnet das Bild. Der frühe Ausstieg sah nur die Operatoren des
+/// Musterstroms selbst — ein `Do` darin galt als Schraffur.
+#[test]
+fn bild_im_formular_im_kachelmuster_faellt() {
+    let mut doc = Document::with_version("1.5");
+    let bild_id = doc.add_object(Object::Stream(bild_mit_klartext()));
+    let form_res = doc.add_object(dictionary! { "XObject" => dictionary! { "Im0" => bild_id } });
+    let form_id = doc.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+            "Resources" => form_res,
+        },
+        b"q 100 0 0 100 0 0 cm /Im0 Do Q\n".to_vec(),
+    ));
+    let muster_res = doc.add_object(dictionary! { "XObject" => dictionary! { "Fm0" => form_id } });
+    let muster_id = doc.add_object(Stream::new(
+        dictionary! {
+            "Type" => "Pattern",
+            "PatternType" => 1_i64,
+            "PaintType" => 1_i64,
+            "TilingType" => 1_i64,
+            "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+            "XStep" => 100_i64,
+            "YStep" => 100_i64,
+            "Matrix" => vec![1.into(), 0.into(), 0.into(), 1.into(), 50.into(), 600.into()],
+            "Resources" => muster_res,
+        },
+        b"/Fm0 Do\n".to_vec(),
+    ));
+    let res = doc.add_object(dictionary! { "Pattern" => dictionary! { "P0" => muster_id } });
+    let inhalt = b"/Pattern cs /P0 scn 50 600 100 100 re f\n".to_vec();
+    let (mut doc, _ids) = seiten(doc, vec![(res, inhalt)]);
+    vorbedingung_orakel_findet(&doc);
+
+    let (report, out) = lauf(
+        &mut doc,
+        &[schwaerzung(0, Rect::new(40.0, 590.0, 160.0, 710.0))],
+    );
+    assert_eq!(report.redacted_images, 1, "{:?}", report.warnings);
+    let funde = leaks(&out, GEHEIM);
+    assert!(
+        funde.is_empty(),
+        "Bild im Formular im Kachelmuster: Klartext in der Ausgabe {funde:?}, Warnungen {:?}",
         report.warnings
     );
 }

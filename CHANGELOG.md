@@ -218,6 +218,22 @@ seiner neuen Zeile in der Probenliste.
   `…::ueberzaehliger_name_ist_harmlos_wenn_ueberschrieben_wird`.
   Mutationsnachweis: die Nachlese entfernt → beide rot.
 
+* **⚠ Sicherheit: ein Bild in einem Kachelmuster ohne Text blieb
+  ungeschwärzt und ungemeldet** (Register #75, Prüfer A). Der Musterlauf
+  stieg vor dem Durchlaufen aus, wenn der Musterstrom keinen Textoperator
+  hatte („Schraffur- oder Logomuster“) — und sah dabei nur die Operatoren des
+  Musterstroms selbst. Ein `Do` darin galt als Schraffur: ein Bild im Muster
+  bekam der Bildsammler nie zu sehen, ein Formular im Muster (mit Text oder
+  Bild darin) niemand. Der Bericht zählte null geschwärzte Bilder, keine
+  Warnung, das Orakel fand die Klartext-Bildpunkte in der Ausgabe. Jetzt
+  steigt der Lauf nur aus einem Muster aus, das weder Text setzt noch etwas
+  platziert; die Musterwarnung sagt, was sie an der ersten Kachel vermessen
+  hat („enthält Text“, „platziert Bilder oder Formulare“). Belege:
+  `zo_a_bild_ohne_zeichner::bild_im_kachelmuster_ohne_text_faellt` (Bild
+  direkt im Muster) und `…::bild_im_formular_im_kachelmuster_faellt` (Bild im
+  Formular im Muster). Mutationsnachweis: Ausstieg wieder allein am
+  Textoperator → beide rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

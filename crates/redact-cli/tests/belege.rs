@@ -2838,6 +2838,14 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "den niemand zeichnet** (Register #76, Prüfer A)",
         "eine Registernummer, keine Messung",
     ),
+    (
+        "ungeschwärzt und ungemeldet** (Register #75, Prüfer A)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "Der Bericht zählte null geschwärzte Bilder",
+        "der Zaehlerstand des Berichts im alten Zustand; gebunden durch den Mutationsnachweis, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
