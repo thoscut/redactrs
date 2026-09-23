@@ -348,7 +348,6 @@ fn budget_greift_bei_ganzzahliger_breite() {
 /// wird die **wählbare** Grenze `--max-image-mb`. Vermutung:
 /// `image.rs::declared_pixels` (`as_i64`) gegen `ops.rs::dict_int` (nimmt Real).
 #[test]
-#[ignore = "offen: Register #79 /Width als Real umgeht --max-image-mb — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn budget_wird_von_reeller_breite_umgangen() {
     let ergebnis = lauf_mit_budget(Object::Real(100.0), Object::Real(100.0));
     assert!(

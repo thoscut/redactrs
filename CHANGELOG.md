@@ -169,6 +169,16 @@ seiner neuen Zeile in der Probenliste.
   beide Spiegel wortgleich mit den Glyphen sind). Mutationsnachweis: Herkunft
   aus dem Schlüssel des Scans entfernt → der Ein-Seiten-Beleg rot.
 
+* **Eine reelle Breite umging die Bilddecke** (Register #79, Prüfer A).
+  `/Width 100.0` ist nach PDF 32000-1 eine Breite; die Vorprüfung des
+  Bildlaufs las eine reelle Zahl aber als null und ließ ein Bild unter jeder
+  Decke durch, während der Dekoder es in voller Größe auspackte. Die harte
+  Pixeldecke stand, umgangen war `--max-image-mb`. Jetzt liest die Vorprüfung
+  dieselbe Zahlenart wie der Dekoder, eine reelle Zahl aufgerundet. Beleg:
+  `zo_a_maske_und_filter::budget_wird_von_reeller_breite_umgangen` neben der
+  ganzzahligen Kontrolle. Mutationsnachweis: reelle Zahl wieder als null
+  gelesen → rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

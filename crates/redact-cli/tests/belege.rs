@@ -2749,6 +2749,22 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "ohne Warnung, mit Rückgabewert 0; `--check-leaks` an der Ausgabe fand ihn",
         "der Rueckgabewert des Laufs, in zo_c gebunden, keine Messgroesse",
     ),
+    (
+        "**Eine reelle Breite umging die Bilddecke** (Register #79, Prüfer A)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "`/Width 100.0` ist nach PDF 32000-1 eine Breite",
+        "ein Beispielwert und die Nummer der Norm, keine Messung",
+    ),
+    (
+        "las eine reelle Zahl aber als null und ließ ein Bild",
+        "der gelesene Wert im alten Code, keine Messung",
+    ),
+    (
+        "Mutationsnachweis: reelle Zahl wieder als null gelesen",
+        "der gelesene Wert unter Mutation, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

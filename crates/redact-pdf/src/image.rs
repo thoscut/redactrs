@@ -712,12 +712,21 @@ fn scan_page_images(
 /// Puffer angefordert wird. Fehlt eine Angabe oder ist sie unsinnig, zählt 0 —
 /// das Dekodieren liefert dann ohnehin nur einen Platzhalter.
 fn declared_pixels(doc: &Document, dict: &Dictionary) -> u64 {
+    // Dieselbe Zahlenlesart wie `ops::dict_int`: `/Width 100.0` ist eine
+    // Breite. Wer nur `as_i64` fragte, las bei einer reellen Zahl 0 — und die
+    // Decke `--max-image-mb` war damit umgangen, während der Dekoder das
+    // Bild in voller Größe auspackte (Spur-A-Runde 1, Register #79). Eine
+    // reelle Zahl wird aufgerundet: die Decke zählt eher zu viel als zu wenig.
     let value = |long: &[u8], short: &[u8]| -> u64 {
         dict.get(long)
             .or_else(|_| dict.get(short))
             .ok()
             .and_then(|o| doc.dereference(o).ok())
-            .and_then(|(_, o)| o.as_i64().ok())
+            .map(|(_, o)| match o {
+                Object::Integer(i) => *i,
+                Object::Real(r) if r.is_finite() => r.ceil() as i64,
+                _ => 0,
+            })
             .unwrap_or(0)
             .max(0) as u64
     };
