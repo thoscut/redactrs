@@ -2681,6 +2681,14 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Mutationsnachweis: `empty_orphan_pages` gibt null zurück",
         "der Rueckgabewert einer mutierten Funktion, keine Messung",
     ),
+    (
+        "mit den Bildpunkten von vorher** (Register #74, Prüfer A)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "ein Raster der Seite (Tabelle 30)",
+        "die Nummer einer Tabelle der PDF-Norm, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

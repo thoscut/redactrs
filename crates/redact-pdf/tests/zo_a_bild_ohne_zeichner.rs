@@ -167,7 +167,6 @@ fn vorbedingung_orakel_findet(doc: &Document) {
 /// Vermutung: `/Thumb` kommt weder in `image.rs` (kein `Do`) noch in `meta.rs`
 /// (kein Schlüssel der Liste) vor.
 #[test]
-#[ignore = "offen: Register #74 /Thumb ueberlebt — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn vorschaubild_der_seite_ueberlebt_den_lauf_ohne_warnung() {
     let mut doc = Document::with_version("1.5");
     let bild_id = doc.add_object(Object::Stream(bild_mit_klartext()));

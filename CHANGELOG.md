@@ -103,6 +103,17 @@ seiner neuen Zeile in der Probenliste.
   (beide Halter). Mutationsnachweis: `empty_orphan_pages` gibt null zurück,
   ohne zu leeren → rot.
 
+* **⚠ Sicherheit: das Vorschaubild `/Thumb` einer Seite überlebte den Lauf
+  mit den Bildpunkten von vorher** (Register #74, Prüfer A). Ein `/Thumb` ist
+  ein Raster der Seite (Tabelle 30) — ein Bild-XObject, das kein `Do`
+  zeichnet und darum am Bildlauf vorbeiging; `/Thumb` kam in keiner Datei des
+  Crates vor. Nach der Schwärzung des gezeichneten Bildes fand das Orakel die
+  Klartext-Bildpunkte im Vorschaubild, ohne Warnung. Jetzt fällt `/Thumb` an
+  jeder Seite im Metadatenlauf und steht im Bericht („Vorschaubild
+  (/Thumb)“) — ein Vorschaubild einer geschwärzten Seite wäre ohnehin falsch.
+  Beleg: `zo_a_bild_ohne_zeichner::vorschaubild_der_seite_ueberlebt_den_lauf_ohne_warnung`.
+  Mutationsnachweis: die `take`-Zeile für `/Thumb` entfernt → rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

@@ -31,6 +31,7 @@ Prosa.
 | Scheintest, ungebundene Zahl, Kopie eines Helfers | B | R3, R5, R6 | `crates/redact-cli/tests/belege.rs`; Mutationsnachweis je Korrektur, mit Skript |
 | Das Gate passt nicht auf die Platte | B | nach R9 | `crates/redact-gui/tests/zn_a_debug_info_stufe.rs` |
 | Seite außerhalb des Seitenbaums, gehalten von `/Dest` oder `/P` | A | Spur-A-Runde 1 (#69) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
+| Bild ohne Zeichner: `/Thumb` der Seite | A | Spur-A-Runde 1 (#74) | `crates/redact-pdf/tests/zo_a_bild_ohne_zeichner.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung
 prüft ihren positiven Zweig allein im Job „Build (windows-2025)“.

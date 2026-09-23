@@ -307,6 +307,15 @@ pub struct MetadataReport {
     /// solche Seite `/Contents`, `/Annots`, `/Resources` und ihr Beiwerk — der
     /// Verweis führt danach auf eine leere Seite.
     pub orphan_pages_emptied: usize,
+    /// Vorschaubilder (`/Thumb`, PDF 32000-1 Tabelle 30) — je Seite eines.
+    ///
+    /// Ein Raster der Seite, wie sie **vor** der Schwärzung aussah: ein
+    /// Bild-XObject, das kein `Do` zeichnet und darum am Bildlauf vorbeiging.
+    /// Die Spur-A-Runde 1 fand die Klartext-Bildpunkte darin nach dem Lauf
+    /// unverändert wieder (Register #74). Ein Vorschaubild einer geschwärzten
+    /// Seite ist ohnehin falsch; es fällt, und der Betrachter rechnet sich
+    /// eines aus dem Inhalt aus.
+    pub thumbnails_removed: usize,
 }
 
 impl MetadataReport {
@@ -390,6 +399,11 @@ impl MetadataReport {
             "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO)",
         );
         count(
+            self.thumbnails_removed,
+            "Vorschaubild (/Thumb)",
+            "Vorschaubilder (/Thumb)",
+        );
+        count(
             self.orphan_pages_emptied,
             "Seite außerhalb des Seitenbaums geleert",
             "Seiten außerhalb des Seitenbaums geleert",
@@ -410,6 +424,7 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     let mut info = Tally::default();
     let mut xmp = Tally::default();
     let mut piece_info = Tally::default();
+    let mut thumbs = Tally::default();
     let mut struct_tree = Tally::default();
     let mut names = Tally::default();
     let mut acroform = Tally::default();
@@ -507,6 +522,8 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
             page.remove(b"StructParents");
             take(page, b"Metadata", &mut xmp);
             take(page, b"AA", &mut additional_actions);
+            // Das Vorschaubild zeigt die Seite von vorher (Register #74).
+            take(page, b"Thumb", &mut thumbs);
         }
         cleaned += clean_annotations(doc, *page_id, &mut visited);
     }
@@ -577,6 +594,7 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     report.info_removed = info.settled(doc, &chains) > 0;
     report.xmp_removed = xmp.settled(doc, &chains) > 0;
     report.piece_info_removed = piece_info.settled(doc, &chains);
+    report.thumbnails_removed = thumbs.settled(doc, &chains);
     report.struct_tree_removed = struct_tree.settled(doc, &chains) > 0;
     report.names_removed = names.settled(doc, &chains);
     report.acroform_removed = acroform.settled(doc, &chains) > 0;
