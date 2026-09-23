@@ -981,6 +981,21 @@ mod messwerte {
     pub const SCHRANKE_NULLEN_GIB: u64 = 1;
     pub const SCHRANKE_SPITZE_GB: &str = "2,1";
     pub const SCHRANKE_BUDGET_MB: u64 = 64;
+
+    // Die Arbeit der Kette (Spur-A-Runde 2, Register #99). Gemessen am
+    // gebauten Binary (Weg 1, Debug, `/usr/bin/time -v`) am Stand
+    // [`ARBEIT_STAND`], an dem nur die Ausgabe des letzten Glieds zählte (Weg 3
+    // im Satz): 73 610 Byte Datei, zweihundert Ströme
+    // `[/FlateDecode /FlateDecode /ASCIIHexDecode]` über je 60 MiB Nullen;
+    // Schwärzen 3:52,32 Wanduhr, Rückgabewert 0; `--check-leaks` von
+    // `timeout 400` beendet. Nach der Korrektur beide 1,22 s, Budgetmeldung.
+    pub const ARBEIT_STAND: &str = "9bda3b6";
+    pub const ARBEIT_DATEI_KB: u64 = 72;
+    pub const ARBEIT_STROEME: u64 = 200;
+    pub const ARBEIT_NULLEN_MIB: u64 = 60;
+    pub const ARBEIT_DAUER: &str = "3 min 52 s";
+    pub const ARBEIT_BUDGET_MB: u64 = 64;
+    pub const ARBEIT_ORAKEL_S: u64 = 400;
 }
 
 /// Die ausgeschriebene Zahl, wie die Doku kleine Zahlen schreibt.
@@ -2319,6 +2334,24 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // --- Die Arbeit der Kette (Spur-A-Runde 2, Register #99) ----------------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Am Stand `{}` brauchte eine Datei von {} KB mit {} solcher Ströme zu je {} MiB \
+             Nullen am gebauten Binary {} (`/usr/bin/time -v`), bei \
+             `--max-decompressed-mb {}`, und endete mit Rückgabewert 0; `--check-leaks` \
+             lief nach {} s noch",
+            m::ARBEIT_STAND,
+            m::ARBEIT_DATEI_KB,
+            m::ARBEIT_STROEME,
+            m::ARBEIT_NULLEN_MIB,
+            m::ARBEIT_DAUER,
+            m::ARBEIT_BUDGET_MB,
+            m::ARBEIT_ORAKEL_S
+        ),
+    );
+
     // --- Die Vorprüfung als Schranke (Spur-A-Runde 2, Register #89) ---------
     satz(
         "CHANGELOG.md",
@@ -3297,6 +3330,10 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     ),
     (
         "(Register #89, Prüfer E; Dienstverweigerung, die Zeile #64/#83 der Probenliste)",
+        "Registernummern, keine Messung",
+    ),
+    (
+        "(Register #99, Prüfer D; Dienstverweigerung, die Zeile #64/#83 der Probenliste)",
         "Registernummern, keine Messung",
     ),
 ];

@@ -682,7 +682,7 @@ impl Prescan<'_> {
         // mit der aufgelösten Kette). Bis dahin zählt die Rohgröße, wie bei
         // Nutzlast.
         let Some(filters) = filter_names(dict) else {
-            return self.charge(payload.len() as u64, payload.len() as u64, false);
+            return self.charge(payload.len() as u64, payload.len() as u64, 0);
         };
         // Ausgepackt wird der **Vorspann** der Kette, soweit jedes Glied
         // einer der Filter ist, die `crate::filters` begrenzt entpacken kann
@@ -707,7 +707,7 @@ impl Prescan<'_> {
         // (Register #83).
         let decodable = filters.iter().take_while(|f| is_decodable(f)).count();
         if decodable == 0 && !filters.is_empty() {
-            return self.charge(payload.len() as u64, payload.len() as u64, false);
+            return self.charge(payload.len() as u64, payload.len() as u64, 0);
         }
         // Blieb die Kette stehen, sind die ausgepackten Bytes die Eingabe
         // eines Bild- oder unbekannten Filters: Nutzlast, keine Syntax. Sie
@@ -730,7 +730,7 @@ impl Prescan<'_> {
         let (binary, decoded, room) = if flate_only {
             let probe = self.decode(filters, payload, total_room.min(BINARY_SAMPLE_BYTES))?;
             let binary = match &probe {
-                Some((data, _)) => looks_binary(data),
+                Some((data, _, _)) => looks_binary(data),
                 None => looks_binary(payload),
             };
             // Syntax bekommt sofort das enge Budget: die Bombe fliegt auf,
@@ -747,7 +747,7 @@ impl Prescan<'_> {
             let decoded = self.decode(filters, payload, total_room)?;
             let binary = !whole
                 || match &decoded {
-                    Some((data, _)) => looks_binary(data),
+                    Some((data, _, _)) => looks_binary(data),
                     None => looks_binary(payload),
                 };
             (binary, decoded, total_room)
@@ -755,19 +755,25 @@ impl Prescan<'_> {
 
         let data = decoded
             .as_ref()
-            .map(|(d, _)| d.as_slice())
+            .map(|(d, _, _)| d.as_slice())
             .unwrap_or(payload);
         // Abgeschnitten heißt: mindestens `room` und noch etwas — also mehr,
         // als das gewährte Budget hergibt. Flate liefert diese Bytes selbst
         // (`room + 1`); die übrigen Dekoder brechen mit `Oversize` ab und
         // geben nichts her, gebucht wird trotzdem dasselbe.
-        let truncated = decoded.as_ref().is_some_and(|(_, hit)| *hit);
+        let truncated = decoded.as_ref().is_some_and(|(_, hit, _)| *hit);
         let size = if truncated {
             (data.len() as u64).max(room.saturating_add(1))
         } else {
             data.len() as u64
         };
-        self.charge(payload.len() as u64, size, !binary)?;
+        // Gegen das Entpackbudget zählt die **Arbeit** der ganzen Kette, nicht
+        // die Ausgabe ihres letzten Glieds (Register #99); gegen das der
+        // Syntax nur, was am Ende geparst wird.
+        let work = decoded
+            .as_ref()
+            .map_or(size, |(_, _, work)| (*work).max(size));
+        self.charge(payload.len() as u64, work, if binary { 0 } else { size })?;
         if !whole {
             return Ok(());
         }
@@ -804,13 +810,17 @@ impl Prescan<'_> {
         filters: &[Vec<u8>],
         payload: &[u8],
         room: u64,
-    ) -> Result<Option<(Vec<u8>, bool)>> {
+    ) -> Result<Option<(Vec<u8>, bool, u64)>> {
         if filters.is_empty() {
             return Ok(None);
         }
         let mut data = payload.to_vec();
         let mut truncated = false;
+        // Die Arbeit der Kette: jedes Glied bekommt, was die davor übrig
+        // ließen (Register #99).
+        let mut work = 0u64;
         for filter in filters {
+            let room = room.saturating_sub(work);
             data = match filter.as_slice() {
                 b"FlateDecode" | b"Fl" => {
                     let (out, hit) = inflate_bounded(&data, room);
@@ -833,15 +843,26 @@ impl Prescan<'_> {
                 ) {
                     Ok(Some(out)) => out,
                     Ok(None) => return Ok(None),
-                    Err(crate::filters::Oversize) => return Ok(Some((Vec::new(), true))),
+                    Err(crate::filters::Oversize) => {
+                        return Ok(Some((
+                            Vec::new(),
+                            true,
+                            work.saturating_add(room).saturating_add(1),
+                        )))
+                    }
                 },
             };
+            work = work.saturating_add(data.len() as u64);
+            if truncated {
+                break;
+            }
         }
-        Ok(Some((data, truncated)))
+        Ok(Some((data, truncated, work)))
     }
 
     /// Verbucht einen Stream: `packed` seine Größe in der Datei, `size` die
-    /// nach dem Auspacken.
+    /// Arbeit beim Auspacken (die Ausgaben aller Glieder zusammen), `syntax`
+    /// die Bytes, die danach als PDF-Syntax geparst werden (0 bei Nutzlast).
     ///
     /// **Die Meldung nennt die Ursache, die sie belegen kann.** Sie sprach
     /// früher von einer Dekompressionsbombe — „eine kleine Datei, die sich
@@ -855,7 +876,7 @@ impl Prescan<'_> {
     /// mehr als das **Doppelte** heißt vervielfacht, alles darunter heißt
     /// schlicht „zu viel Strominhalt“. Beide Zahlen stehen in der Meldung, so
     /// dass der Leser das Verhältnis selbst nachrechnen kann.
-    fn charge(&mut self, packed: u64, size: u64, syntax: bool) -> Result<()> {
+    fn charge(&mut self, packed: u64, size: u64, syntax: u64) -> Result<()> {
         self.packed = self.packed.saturating_add(packed);
         self.decompressed = self.decompressed.saturating_add(size);
         if self.decompressed > self.limits.max_decompressed_bytes {
@@ -874,9 +895,9 @@ impl Prescan<'_> {
                 self.decompressed
             )));
         }
-        if syntax {
+        if syntax > 0 {
             self.charge_parsed(
-                size,
+                syntax,
                 "die zu parsenden Streams (Seiteninhalt, Objekt-Streams)",
             )?;
         }
@@ -897,18 +918,23 @@ impl Prescan<'_> {
             .saturating_sub(self.decompressed);
         let packed = stream.content.len() as u64;
         let limit = usize::try_from(room).unwrap_or(usize::MAX);
-        match crate::filters::decoded_prefix_within(doc, stream, limit) {
-            Ok((data, applied)) => {
+        match crate::filters::decoded_prefix_counted(doc, stream, limit) {
+            Ok((data, applied, work)) => {
                 let total = crate::filters::filter_names(doc, &stream.dict).map_or(0, |f| f.len());
                 let whole = applied == total;
                 let binary = !whole || looks_binary(&data);
-                self.charge(packed, data.len() as u64, !binary)?;
+                let size = data.len() as u64;
+                self.charge(
+                    packed,
+                    (work as u64).max(size),
+                    if binary { 0 } else { size },
+                )?;
                 if whole {
                     self.walk(&data, false, binary)?;
                 }
                 Ok(())
             }
-            Err(crate::filters::Oversize) => self.charge(packed, room.saturating_add(1), false),
+            Err(crate::filters::Oversize) => self.charge(packed, room.saturating_add(1), 0),
         }
     }
 

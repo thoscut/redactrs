@@ -143,6 +143,23 @@ sind, jeder in seinem eigenen Commit.
   Kette mit Verweis), `zp_e_teilergebnis_zaehlt`, die Einheitstests der Kette
   in `document.rs`. Mutationsnachweis: je Teil zurückgenommen → sein Fall rot.
 
+* **⚠ Sicherheit: gebucht wurde die Ausgabe des letzten Glieds, nicht die
+  Arbeit der Kette** (Register #99, Prüfer D; Dienstverweigerung, die Zeile
+  #64/#83 der Probenliste). Die Vorprüfung, das Orakel und der Dekoder der
+  Filterketten ließen jedes Glied für sich bis an die Grenze entpacken und
+  buchten, was das letzte ausgab. Ein schrumpfendes letztes Glied verbarg
+  alles davor: `[/FlateDecode /FlateDecode /ASCIIHexDecode]` über Nullen, die
+  ASCIIHex als Leerraum überliest, buchte nichts. Am Stand `9bda3b6` brauchte
+  eine Datei von 72 KB mit 200 solcher Ströme zu je 60 MiB Nullen am gebauten
+  Binary 3 min 52 s (`/usr/bin/time -v`), bei `--max-decompressed-mb 64`, und
+  endete mit Rückgabewert 0; `--check-leaks` lief nach 400 s noch. Jetzt gilt
+  die Grenze für die ganze Kette — jedes Glied bekommt, was die davor übrig
+  ließen —, und Vorprüfung wie Orakel buchen die Summe der Ausgaben aller
+  Glieder; dieselbe Datei fällt in gut einer Sekunde am Budget. Belege:
+  `zp_d_arbeit_der_kette` (Vorprüfung, Orakel, die Grenze der Kette, eine
+  gewöhnliche Kette als Gegenprobe). Mutationsnachweis: je Leser
+  zurückgenommen → sein Fall rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

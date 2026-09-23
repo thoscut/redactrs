@@ -94,7 +94,7 @@ pub fn decoded_content_within(
     stream: &Stream,
     limit: usize,
 ) -> Result<Option<Vec<u8>>, Oversize> {
-    let (data, applied, total) = decode_chain(doc, stream, limit)?;
+    let (data, applied, total, _) = decode_chain(doc, stream, limit)?;
     Ok((applied == total).then_some(data))
 }
 
@@ -142,11 +142,38 @@ pub fn decoded_prefix_within(
     stream: &Stream,
     limit: usize,
 ) -> Result<(Vec<u8>, usize), Oversize> {
-    let (data, applied, _) = decode_chain(doc, stream, limit)?;
+    let (data, applied, _, _) = decode_chain(doc, stream, limit)?;
     Ok((data, applied))
 }
 
-/// Die Filterkette, so weit sie läuft: (Bytes, angewandte Filter, Kettenlänge).
+/// Wie [`decoded_prefix_within`], dazu die **Arbeit**: die Summe der
+/// Ausgaben aller angewandten Glieder.
+///
+/// Die Arbeit ist, was ein Budget buchen muss, nicht die Ausgabe des letzten
+/// Glieds. Bis zur Spur-A-Runde 2 buchte das Orakel nur diese: ein
+/// schrumpfendes letztes Glied (`[/FlateDecode /FlateDecode
+/// /ASCIIHexDecode]` über 60 MiB Nullen, die ASCIIHex als Leerraum
+/// überliest) entpackte je Strom zweimal das ganze Restbudget und buchte
+/// null Byte — zweihundert solcher Ströme in einer 72-KB-Datei, und die
+/// Grenze griff nie (Register #99).
+pub fn decoded_prefix_counted(
+    doc: &Document,
+    stream: &Stream,
+    limit: usize,
+) -> Result<(Vec<u8>, usize, usize), Oversize> {
+    let (data, applied, _, work) = decode_chain(doc, stream, limit)?;
+    Ok((data, applied, work))
+}
+
+/// Die Filterkette, so weit sie läuft: (Bytes, angewandte Filter,
+/// Kettenlänge, Arbeit).
+///
+/// **`limit` gilt für die ganze Kette**, nicht je Glied: jedes Glied bekommt,
+/// was die Glieder davor noch übrig ließen, und die Arbeit ist die Summe
+/// ihrer Ausgaben. Bis zur Spur-A-Runde 2 durfte jedes Glied bis `limit`
+/// ausgeben — eine Kette aus zwei Flate-Gliedern kostete das Doppelte ihres
+/// Budgets, und was ein schrumpfendes letztes Glied übrig ließ, verbarg die
+/// Arbeit davor ganz (Register #99).
 ///
 /// Geklont wird erst, **nachdem** ein Filter wirklich etwas geliefert hat:
 /// die Eingabe des ersten Gliedes sind die Rohbytes des Stroms, geborgt.
@@ -156,29 +183,32 @@ fn decode_chain(
     doc: &Document,
     stream: &Stream,
     limit: usize,
-) -> Result<(Vec<u8>, usize, usize), Oversize> {
+) -> Result<(Vec<u8>, usize, usize, usize), Oversize> {
     // Ohne `/Filter` (oder mit dem Wert `null`) ist der Strom nicht
     // gefiltert, und die Rohbytes sind das Einzige, was es zu lesen gibt.
     // Ein Wert, der da steht und **kein** Name ist, ist etwas anderes:
     // `filter_names` gibt dafür ein namenloses Glied zurück.
     let Some(filters) = filter_names(doc, &stream.dict) else {
-        return Ok((stream.content.clone(), 0, 0));
+        return Ok((stream.content.clone(), 0, 0, 0));
     };
     let total = filters.len();
     if total == 0 {
         // Eine leere Kette ist vollständig gelaufen.
-        return Ok((stream.content.clone(), 0, 0));
+        return Ok((stream.content.clone(), 0, 0, 0));
     }
     let mut data: Option<Vec<u8>> = None;
+    let mut work = 0usize;
     for (index, filter) in filters.iter().enumerate() {
         let parms = decode_parms(doc, &stream.dict, index);
         let input = data.as_deref().unwrap_or(&stream.content);
-        let Some(next) = decode_one(filter, input, parms.as_ref(), limit)? else {
-            return Ok((data.unwrap_or_default(), index, total));
+        let room = limit.saturating_sub(work);
+        let Some(next) = decode_one(filter, input, parms.as_ref(), room)? else {
+            return Ok((data.unwrap_or_default(), index, total, work));
         };
+        work = work.saturating_add(next.len());
         data = Some(next);
     }
-    Ok((data.unwrap_or_default(), total, total))
+    Ok((data.unwrap_or_default(), total, total, work))
 }
 
 /// Ein Filter, den dieses Modul **bewusst** nicht dekodiert: Bilddaten.

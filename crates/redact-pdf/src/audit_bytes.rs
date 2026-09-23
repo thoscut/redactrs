@@ -1297,8 +1297,10 @@ fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) {
             None => Ok(None),
         };
         match chain {
-            Ok(Some((decoded, names))) => {
-                budget.charge(decoded.len());
+            Ok(Some((decoded, names, work))) => {
+                // Die Arbeit der Kette, nicht die Ausgabe ihres letzten
+                // Glieds (Register #99).
+                budget.charge(work);
                 // Reines Flate ohne Prädiktor ist, was der blinde Versuch
                 // immer schon tat — und heißt in der Fundstelle weiter so.
                 let wie = if names == "FlateDecode" {
@@ -1355,7 +1357,7 @@ fn decode_raw_chain(
     dict: &[u8],
     payload: &[u8],
     limit: usize,
-) -> Result<Option<(Vec<u8>, String)>, Oversize> {
+) -> Result<Option<(Vec<u8>, String, usize)>, Oversize> {
     let filters = raw_filter_value(dict);
     if filters.is_empty() {
         return Ok(None);
@@ -1366,7 +1368,7 @@ fn decode_raw_chain(
         stream_dict.set("DecodeParms", parms);
     }
     let stream = lopdf::Stream::new(stream_dict, payload.to_vec());
-    let (data, applied) = filters::decoded_prefix_within(&Document::new(), &stream, limit)?;
+    let (data, applied, work) = filters::decoded_prefix_counted(&Document::new(), &stream, limit)?;
     if applied == 0 {
         return Ok(None);
     }
@@ -1382,7 +1384,7 @@ fn decode_raw_chain(
     if stream.dict.has(b"DecodeParms") {
         names.push_str(" mit DecodeParms");
     }
-    Ok(Some((data, names)))
+    Ok(Some((data, names, work)))
 }
 
 /// Der `/Filter`-Wert aus den Rohbytes eines Dictionaries, Glied für Glied
@@ -1733,8 +1735,9 @@ fn scan_stream(
             if let Some(reason) = view.unchecked {
                 budget.note(format!("{path} <Stream>: {reason}"));
             }
+            let work = view.work;
             view.data.map(|(label, data)| {
-                budget.charge(data.len());
+                budget.charge(work.max(data.len()));
                 scan_blob(
                     &data,
                     content.with_text(&format!("{path} <Stream, {label}>")),
@@ -1788,6 +1791,10 @@ struct Decoded {
     /// der Kette lief — dann gibt es nichts zu durchsuchen, was die schon
     /// gelaufene Rohsicht nicht bereits gelesen hätte.
     data: Option<(String, Vec<u8>)>,
+    /// Die Arbeit der Kette: die Ausgaben aller angewandten Glieder
+    /// zusammen. Sie bucht das Budget, nicht die Größe von `data` — ein
+    /// schrumpfendes letztes Glied verbarg sonst alles davor (Register #99).
+    work: usize,
     /// Der Grund für eine Zeile in [`LeakCheck::unchecked`] — ohne den
     /// Objektpfad, den der Aufrufer davorsetzt.
     ///
@@ -1827,11 +1834,12 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
     if names.is_empty() {
         return Ok(Decoded {
             data: None,
+            work: 0,
             unchecked: None,
         });
     }
     let total = names.len();
-    let (data, applied) = filters::decoded_prefix_within(doc, stream, room)?;
+    let (data, applied, work) = filters::decoded_prefix_counted(doc, stream, room)?;
 
     // Der Filter, an dem die Kette stehen blieb — falls sie stehen blieb.
     // Ob er der erste ist oder der letzte, ändert nichts daran, was hinter
@@ -1910,7 +1918,11 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
         }
         false => Some((format!("dekodiert: {}", chain(&names)), data)),
     };
-    Ok(Decoded { data, unchecked })
+    Ok(Decoded {
+        data,
+        work,
+        unchecked,
+    })
 }
 
 // ---------------------------------------------------------------------------

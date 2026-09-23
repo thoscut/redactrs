@@ -394,6 +394,11 @@ gilt. Von Flate zählt sie jedes Byte, das der Dekoder liefert, auch das vor
 einem Fehler, und fällt wie die anderen auf rohes Deflate zurück. Eine Kette
 mit Verweis bucht sie nach dem Laden mit der aufgelösten Kette gegen dasselbe
 Budget; deren Rohgröße zählt dabei doppelt, eine Abweichung nach oben.
+Gebucht wird die **Arbeit** der ganzen Kette, die Ausgaben aller Glieder
+zusammen, und die Grenze gilt für die Kette, nicht je Glied — in der
+Vorprüfung wie im Orakel. Bis zur Spur-A-Runde 2 zählte nur, was das letzte
+Glied ausgab: ein schrumpfendes letztes Glied verbarg alles davor
+(Register #99).
 
 **Der Spitzenspeicher hängt am größten Einzelstrom, nicht am Budget.** „1024 MB“
 ist die *Summe* der entpackten Bytes über alle Ströme, nicht der Bedarf. Wer
