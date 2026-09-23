@@ -2668,6 +2668,19 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
          Dienstverweigerungen und eine abgelehnte gewöhnliche Datei",
         "zaehlt Befunde nach Klasse, keine Messung",
     ),
+    (
+        "ungeschwärzt in die Ausgabe** (Register #69, Prüfer B)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "Am gebauten Binary: Rückgabewert 0, `--check-leaks` an der Ausgabe \
+         Rückgabewert 3 mit dem Rohstrom der alten Seite",
+        "Rueckgabewerte des Binaries — Zusagen, in zo_b und cli-Tests gebunden, keine Messgroesse",
+    ),
+    (
+        "Mutationsnachweis: `empty_orphan_pages` gibt null zurück",
+        "der Rueckgabewert einer mutierten Funktion, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

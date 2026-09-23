@@ -30,6 +30,7 @@ Prosa.
 | Plattformfremder Test: eine Einrichtung des Systems beim Namen genannt, ohne `cfg` und ohne Ausweg | B | #13, #33, #43 | `crates/redact-cli/tests/zf_q5_plattformzusagen.rs` |
 | Scheintest, ungebundene Zahl, Kopie eines Helfers | B | R3, R5, R6 | `crates/redact-cli/tests/belege.rs`; Mutationsnachweis je Korrektur, mit Skript |
 | Das Gate passt nicht auf die Platte | B | nach R9 | `crates/redact-gui/tests/zn_a_debug_info_stufe.rs` |
+| Seite außerhalb des Seitenbaums, gehalten von `/Dest` oder `/P` | A | Spur-A-Runde 1 (#69) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung
 prüft ihren positiven Zweig allein im Job „Build (windows-2025)“.

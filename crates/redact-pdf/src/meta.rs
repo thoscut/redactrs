@@ -119,8 +119,13 @@
 //!   **Feld**, elementweise aufgelöst: ein `/Dest 12 0 R` wird aufgelöst, und
 //!   ein Verweis *im* Feld muss auf ein Seitenobjekt (`/Type /Page`) führen —
 //!   `[12 0 R /XYZ …]` mit einer Zeichenkette in Objekt 12 ist kein Ziel,
-//!   sondern ein Versteck. Preis: Verweise ins Netz und in andere Dateien
-//!   funktionieren danach nicht mehr,
+//!   sondern ein Versteck. Und eine Seite, auf die so ein Ziel (oder das
+//!   `/P` einer Annotation) führt, die aber **nicht im Seitenbaum** hängt,
+//!   trug ihren ganzen Content-Stream ungeschwärzt in die Ausgabe — der
+//!   Schwärzungslauf kennt nur die Seiten des Baums (Spur-A-Runde 1,
+//!   Register #69). Sie wird jetzt geleert, siehe `empty_orphan_pages`.
+//!   Preis: Verweise ins Netz und in andere Dateien funktionieren danach
+//!   nicht mehr,
 //! * die Klartexte `/Contents`, `/RC`, `/T` (Verfasser; an einem Feld der
 //!   Feldname) und `/Subj`, dazu `/TU` (der alternative Feldname — das ist
 //!   der Tooltip, den der Betrachter beim Überfahren zeigt), `/TM` (der
@@ -291,6 +296,17 @@ pub struct MetadataReport {
     /// Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`, `/3DD`, `/3DV`
     /// und `/RO`.
     pub annotation_texts_cleared: usize,
+    /// Seiten **außerhalb des Seitenbaums**, die ihren Inhalt verloren haben.
+    ///
+    /// Eine Seite, die nicht in `/Kids` hängt — gelöscht, aber von einem
+    /// stehen gebliebenen Verweis gehalten (`/Dest [7 0 R /Fit]` eines Links,
+    /// `/P` einer Annotation) —, kennt `get_pages` nicht: sie geht durch keine
+    /// Schwärzung, keine Warnung, und `prune_unreachable` behält sie, weil sie
+    /// erreichbar ist. Gefunden hat das die Spur-A-Runde 1 (Register #69): ihr
+    /// Content-Stream stand ungeschwärzt in der Ausgabe. Jetzt verliert jede
+    /// solche Seite `/Contents`, `/Annots`, `/Resources` und ihr Beiwerk — der
+    /// Verweis führt danach auf eine leere Seite.
+    pub orphan_pages_emptied: usize,
 }
 
 impl MetadataReport {
@@ -372,6 +388,11 @@ impl MetadataReport {
             self.annotation_texts_cleared,
             "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO)",
             "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /3DD, /3DV, /RO)",
+        );
+        count(
+            self.orphan_pages_emptied,
+            "Seite außerhalb des Seitenbaums geleert",
+            "Seiten außerhalb des Seitenbaums geleert",
         );
         out
     }
@@ -501,6 +522,12 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
         // Schlüssel ist gerade gefallen.
         cleaned.values += clean_carriers(doc, &mut fields, &mut visited).values;
     }
+
+    // --- Seiten außerhalb des Seitenbaums --------------------------------
+    //
+    // Vor dem Durchgang über alle Objekte, damit auch das Beiwerk einer
+    // solchen Seite (`/Metadata`, `/PieceInfo`) noch mitgezählt wird.
+    report.orphan_pages_emptied = empty_orphan_pages(doc, &page_ids);
 
     // --- Metadaten an jedem übrigen Objekt -------------------------------
     //
@@ -1512,6 +1539,57 @@ fn remove_file_attachments(doc: &mut Document, page_id: ObjectId) -> Vec<Tally> 
 }
 
 /// Nimmt **jedem** Objekt der Datei seine Metadaten-Anhängsel: den
+/// Leert jede Seite, die **nicht im Seitenbaum** hängt.
+///
+/// `/Type /Page` ohne Platz in `/Kids`: eine gelöschte Seite, die ein
+/// stehen gebliebener Verweis hält — das `/Dest` eines Links, das `/P` einer
+/// Annotation, oder irgendein anderer Schlüssel, den niemand kennt. Der
+/// Schwärzungslauf sieht nur die Seiten des Baums (`get_pages`); diese hier
+/// ginge mit ihrem ganzen Content-Stream ungeschwärzt in die Ausgabe, und
+/// `prune_unreachable` behielte sie, weil sie erreichbar ist (Register #69).
+///
+/// Es wird nicht der Halter gekappt, sondern die Seite geleert: welcher
+/// Schlüssel sie hält, ist nicht abschließend aufzählbar, und ohne Inhalt
+/// trägt sie nichts mehr, wer immer sie hält. Was fällt: `/Contents`,
+/// `/Annots`, `/Resources`, `/Thumb`, `/AA`, `/B`, `/VP`, `/PresSteps` —
+/// alles, was Text, Bilder oder Aktionen tragen kann. `/MediaBox` und
+/// `/Parent` bleiben, damit ein Betrachter, der dem Verweis folgt, eine
+/// leere Seite bekommt und keinen Fehler. Rückgabe: geleerte Seiten.
+fn empty_orphan_pages(doc: &mut Document, tree: &[ObjectId]) -> usize {
+    const CONTENT_KEYS: [&[u8]; 8] = [
+        b"Contents",
+        b"Annots",
+        b"Resources",
+        b"Thumb",
+        b"AA",
+        b"B",
+        b"VP",
+        b"PresSteps",
+    ];
+    let tree: BTreeSet<ObjectId> = tree.iter().copied().collect();
+    let mut emptied = 0usize;
+    let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
+    for id in ids {
+        if tree.contains(&id) {
+            continue;
+        }
+        let Some(Object::Dictionary(dict)) = doc.objects.get_mut(&id) else {
+            continue;
+        };
+        if dict.get(b"Type").and_then(Object::as_name).ok() != Some(b"Page") {
+            continue;
+        }
+        let mut lost = false;
+        for key in CONTENT_KEYS {
+            lost |= dict.remove(key).is_some();
+        }
+        if lost {
+            emptied += 1;
+        }
+    }
+    emptied
+}
+
 /// XMP-Strom `/Metadata`, die Privatdaten `/PieceInfo` und die zugeordnete
 /// Datei `/AF`.
 ///

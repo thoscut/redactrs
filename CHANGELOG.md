@@ -86,6 +86,23 @@ CI nach jedem Push. Die Runde zählt nicht gegen das Ende der Spur A; sie hat
 den Umfang sichtbar gemacht. Was geschlossen ist, steht darunter, jeweils mit
 seiner neuen Zeile in der Probenliste.
 
+* **⚠ Sicherheit: eine Seite außerhalb des Seitenbaums ging mit ihrem ganzen
+  Inhalt ungeschwärzt in die Ausgabe** (Register #69, Prüfer B). Eine
+  gelöschte Seite, die ein stehen gebliebener Verweis hält — das `/Dest
+  [Seite /Fit]` eines Links oder das `/P` einer Annotation —, hängt nicht mehr
+  in `/Kids`; `get_pages` kennt sie nicht, sie geht durch keine Schwärzung
+  und keine Warnung, und das Aufräumen behält sie, weil sie erreichbar ist.
+  Am gebauten Binary: Rückgabewert 0, `--check-leaks` an der Ausgabe
+  Rückgabewert 3 mit dem Rohstrom der alten Seite. Jetzt verliert jede Seite,
+  die nicht im Baum hängt, ihren Inhalt — `/Contents`, `/Annots`,
+  `/Resources`, `/Thumb`, `/AA`, `/B`, `/VP`, `/PresSteps` —, wer immer sie
+  hält; der Verweis führt danach auf eine leere Seite, und der Bericht nennt
+  sie („Seite außerhalb des Seitenbaums geleert“). Geleert statt gekappt,
+  weil die Halter nicht abschließend aufzählbar sind. Beleg:
+  `zo_b_traeger::b_verwaiste_seite_hinter_dest_oder_p_bleibt_samt_inhalt`
+  (beide Halter). Mutationsnachweis: `empty_orphan_pages` gibt null zurück,
+  ohne zu leeren → rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

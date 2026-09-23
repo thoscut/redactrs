@@ -837,7 +837,6 @@ fn b_seed_value_und_lock_am_signaturfeld_bleiben() {
 /// Schwärzung: `get_pages()` kennt sie nicht. Zweite Form: `/P` einer
 /// Annotation (Tabelle 164) auf dieselbe Seite.
 #[test]
-#[ignore = "offen: Register #69 Seite ausserhalb des Seitenbaums — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_verwaiste_seite_hinter_dest_oder_p_bleibt_samt_inhalt() {
     for halter in ["Dest", "P"] {
         let mut d = probe();
