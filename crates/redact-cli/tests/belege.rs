@@ -905,6 +905,27 @@ mod messwerte {
     pub const VERWEISKETTE_VORHER_20000_S: &str = "223";
     pub const VERWEISKETTE_NACHHER_S: &str = "0,08";
     pub const VERWEISKETTE_DATEI_KB: u64 = 936;
+
+    // Die gehaltenen Formularspiegel (Spur-A-Runde 1, Register #68).
+    //
+    // Gemessen mit `zo_c_spiegel_umgebungen::mess_spiegel_in_formularen_je_seite`
+    // (`ZO_C_PAGES=…`, eigener Prozess, VmHWM in MB = 1024 kB): der Redaktor
+    // an je Seite einem eigenen Formular mit 100 × 999 Spiegel-Paaren —
+    // Testprozess, Profil Debug (Weg 2). „Vorher“ ist der Stand
+    // [`FORMULARSPIEGEL_STAND`], an dem `form_marked` den Datensatz des Scans
+    // ungekuerzt haelt — nach der Korrektur nicht mehr messbar, deshalb Weg 3
+    // im Satz. Die Zahl der Seiten und die Decke der Probe bindet
+    // `konstante_aus` an der Belegdatei, die Decke des Kontos an `redact.rs`.
+    pub const FORMULARSPIEGEL_STAND: &str = "e016a2f";
+    pub const FORMULARSPIEGEL_SEITEN_KLEIN: u64 = 10;
+    pub const FORMULARSPIEGEL_KLAMMERN: u64 = 100;
+    pub const FORMULARSPIEGEL_PLATZIERUNGEN: u64 = 999;
+    pub const FORMULARSPIEGEL_VORHER_KLEIN_MB: u64 = 78;
+    pub const FORMULARSPIEGEL_VORHER_GROSS_MB: u64 = 637;
+    pub const FORMULARSPIEGEL_VORHER_GROSS_S: &str = "9,8";
+    pub const FORMULARSPIEGEL_DATEI_JE_SEITE_KB: u64 = 10;
+    pub const FORMULARSPIEGEL_NACHHER_KLEIN_MB: u64 = 20;
+    pub const FORMULARSPIEGEL_NACHHER_GROSS_MB: u64 = 31;
 }
 
 /// Die ausgeschriebene Zahl, wie die Doku kleine Zahlen schreibt.
@@ -2167,7 +2188,72 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
 
+    // --- Die gehaltenen Formularspiegel (Spur-A-Runde 1, Register #68) ------
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Am Stand `{}` brauchte der Redaktor an je Seite einem eigenen Formular mit \
+             {} × {} Paaren im Testprozess (Debug, eigener Prozess) für {} Seiten {} MB \
+             und für {} Seiten {} MB bei {} s — aus rund {} kB Datei je Seite",
+            m::FORMULARSPIEGEL_STAND,
+            m::FORMULARSPIEGEL_KLAMMERN,
+            m::FORMULARSPIEGEL_PLATZIERUNGEN,
+            m::FORMULARSPIEGEL_SEITEN_KLEIN,
+            m::FORMULARSPIEGEL_VORHER_KLEIN_MB,
+            formularspiegel_seiten(),
+            m::FORMULARSPIEGEL_VORHER_GROSS_MB,
+            m::FORMULARSPIEGEL_VORHER_GROSS_S,
+            m::FORMULARSPIEGEL_DATEI_JE_SEITE_KB
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "deckelt sie bei {} Einträgen",
+            mit_tausendertrenner(gehaltene_formularspiegel() as u64)
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "Dieselben {} Seiten brauchen im Testprozess (Debug, eigener Prozess) jetzt \
+             {} MB, {} Seiten {} MB",
+            m::FORMULARSPIEGEL_SEITEN_KLEIN,
+            m::FORMULARSPIEGEL_NACHHER_KLEIN_MB,
+            formularspiegel_seiten(),
+            m::FORMULARSPIEGEL_NACHHER_GROSS_MB
+        ),
+    );
+    satz(
+        "CHANGELOG.md",
+        format!(
+            "(im Testprozess, Debug, als Kindprozess: {} Seiten unter {} MB)",
+            formularspiegel_seiten(),
+            formularspiegel_decke_mb()
+        ),
+    );
+
     aus
+}
+
+/// Seiten und Decke der Speicherprobe zu Register #68, aus
+/// `zo_c_spiegel_umgebungen.rs`; die Decke des Kontos aus `redact.rs`.
+fn formularspiegel_seiten() -> usize {
+    konstante_aus(
+        "crates/redact-pdf/tests/zo_c_spiegel_umgebungen.rs",
+        "C4_SEITEN",
+    )
+}
+
+fn formularspiegel_decke_mb() -> usize {
+    konstante_aus(
+        "crates/redact-pdf/tests/zo_c_spiegel_umgebungen.rs",
+        "C4_DECKE_MB",
+    )
+}
+
+fn gehaltene_formularspiegel() -> usize {
+    konstante_aus("crates/redact-pdf/src/redact.rs", "MAX_HELD_FORM_MIRRORS")
 }
 
 /// Glieder und Decke des Verweisketten-Belegs, aus `zo_b_traeger.rs`.
@@ -2873,6 +2959,18 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     (
         "`zo_b_traeger::b_mk_icon_mit_text_faellt` (drei Schlüssel)",
         "zaehlt die geprueften Schluessel, keine Messung",
+    ),
+    (
+        "gehalten, ohne Decke** (Register #68, Prüfer C)",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "`zo_c_spiegel_umgebungen::c4_spiegel_in_formularen_kosten_je_seite_wenig`",
+        "ein Testname (Befund C-4), keine Messung",
+    ),
+    (
+        "`…::c4_decke_der_gehaltenen_formularspiegel_wird_gesagt`",
+        "ein Testname (Befund C-4), keine Messung",
     ),
 ];
 

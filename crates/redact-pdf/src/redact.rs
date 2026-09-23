@@ -493,6 +493,10 @@ impl PdfRedactor {
         // [`MAX_DEFERRED_MIRRORS`].
         let mut deferred_left = MAX_DEFERRED_MIRRORS;
         let mut deferred_dropped = 0usize;
+        // Dasselbe Konto für die Spiegel **in** Formularen, die bis zur
+        // Formularschleife gehalten werden — siehe [`MAX_HELD_FORM_MIRRORS`].
+        let mut held_left = MAX_HELD_FORM_MIRRORS;
+        let mut held_dropped = 0usize;
         let no_inline: BTreeMap<usize, Operation> = BTreeMap::new();
         let no_plans: BTreeMap<usize, Plan> = BTreeMap::new();
         let no_marked: Vec<MarkedTextRecord> = Vec::new();
@@ -553,7 +557,17 @@ impl PdfRedactor {
                         record.property_owner,
                         record.property_id,
                     )) {
-                        form_marked.entry(id).or_default().push(record.clone());
+                        // Gehalten wird, was [`mirrors_to_clear`] später
+                        // braucht — nicht der Datensatz, wie der Scan ihn
+                        // liefert (Register #68, siehe [`held_form_record`]).
+                        let held = held_form_record(record);
+                        let weight = 1 + held.forms.len() + held.shows.len();
+                        if held_left < weight {
+                            held_dropped += 1;
+                            continue;
+                        }
+                        held_left -= weight;
+                        form_marked.entry(id).or_default().push(held);
                     }
                 }
             }
@@ -671,6 +685,19 @@ impl PdfRedactor {
                      nach dem Neuschreiben der Formulare — für diese Abschnitte wurde die \
                      Frage nicht mehr gestellt. Verliert eines der Formulare darunter \
                      Zeichen, bleibt der Textspiegel darüber stehen."
+                ),
+            );
+        }
+        if held_dropped > 0 {
+            push_warning(
+                &mut report,
+                format!(
+                    "Dieses Dokument trägt in seinen Form-XObjects mehr Textspiegel, als \
+                     bis zum Neuschreiben der Formulare gehalten werden \
+                     ({MAX_HELD_FORM_MIRRORS} Einträge); {held_dropped} Abschnitte wurden \
+                     nicht mehr mitgeführt. Ob eine Schwärzung sie berührt, wurde für \
+                     diese Abschnitte nicht mehr gefragt. Verliert das Formular darunter \
+                     Zeichen, bleibt der Textspiegel darin stehen."
                 ),
             );
         }
@@ -1306,6 +1333,38 @@ impl MirrorFixes {
 /// zurückgestellt — und **gesagt**, dass für diese Abschnitte die Frage
 /// „berührt eine Schwärzung das Formular darunter?“ nicht mehr gestellt wurde.
 const MAX_DEFERRED_MIRRORS: usize = 100_000;
+
+/// Wie viele Einträge die Spiegel **in** Form-XObjects über den ganzen Lauf
+/// halten dürfen, bis die Formulare neu geschrieben werden — je Abschnitt
+/// einer, plus einer je Formular und je Textoperation in seinem
+/// Geltungsbereich (siehe [`held_form_record`]).
+///
+/// Bis zur Spur-A-Runde 1 hielt `form_marked` die Datensätze, wie der Scan sie
+/// liefert: je Platzierung im Geltungsbereich einen Pfad auf dem Haufen, und
+/// das für jede Seite bis zum Ende — [`MAX_MIRROR_FORM_PLACEMENTS`] gilt nur
+/// je Seite, [`MAX_DEFERRED_MIRRORS`] nur für den **Seitenstrom**. Gemessen
+/// (Debug, eigener Prozess, `zo_c_spiegel_umgebungen`): je Seite ein eigenes
+/// Formular mit 100 × 999 Paaren, 10 Seiten 78 MB, 100 Seiten 637 MB und
+/// 9,8 s — aus rund 10 kB Datei je Seite, ohne Schwärzung, ohne Warnung
+/// (Register #68). Erst die schlanke Fassung, dann diese Decke; wird sie
+/// erreicht, wird nicht mehr gehalten — und **gesagt**.
+const MAX_HELD_FORM_MIRRORS: usize = 100_000;
+
+/// Der Datensatz eines Spiegels **in** einem Formular, wie er bis zur
+/// Formularschleife gehalten wird: die Formulare im Geltungsbereich **je
+/// Formular einmal** und ohne ihre Pfade. [`mirrors_to_clear`] fragt nur nach
+/// der Objekt-Id ([`touches_form_plan`], [`touches_form_image`]); der Pfad
+/// ordnet Glyphen in Stromreihenfolge und wird hier nie gelesen — dieselbe Id
+/// stand unter einem Spiegel tausendfach, mit je einem eigenen `Vec` auf dem
+/// Haufen. Alles andere (Liste, Spanne, Textoperationen, Herkunft) braucht
+/// die späte Entscheidung so, wie es ist.
+fn held_form_record(record: &MarkedTextRecord) -> MarkedTextRecord {
+    let ids: BTreeSet<ObjectId> = record.forms.iter().map(|(_, id)| *id).collect();
+    MarkedTextRecord {
+        forms: ids.into_iter().map(|id| (Vec::new(), id)).collect(),
+        ..record.clone()
+    }
+}
 
 /// Ein Abschnitt, dessen Spiegel erst nach der Formularschleife entschieden
 /// wird — mit genau dem, was diese Entscheidung noch braucht.

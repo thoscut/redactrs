@@ -37,7 +37,7 @@
 //!   die Kette hinauf und gibt den Spiegel aus. Der Scan legt keinen Datensatz
 //!   an, die Liste in der Seite bleibt unangetastet.
 //! * [`mess_spiegel_in_formularen_je_seite`] (Messung, `#[ignore]`) —
-//!   **Befund C-4**, Speicher ohne Decke: Spiegel **in** Formularen werden von
+//!   **Befund C-4**, Speicher ohne Decke: Spiegel **in** Formularen wurden von
 //!   `apply_with_report` für jede Seite vollständig festgehalten
 //!   (`form_marked`, je Formular einmal, mit `forms` und `shows`), bis zum
 //!   Ende des Laufs. Die Decke `MAX_MIRROR_FORM_PLACEMENTS` gilt je Seite,
@@ -45,7 +45,10 @@
 //!   eigenes Formular mit 100 × 999 Paaren, gemessen (Debug, eigener Prozess):
 //!   10 Seiten 78 MB, 40 Seiten 264 MB, 100 Seiten 636 MB — rund 6,2 MB und
 //!   0,1 s je Seite, aus rund 10 kB Datei je Seite, ohne Schwärzung, ohne
-//!   Warnung.
+//!   Warnung. **Behoben** (Register #68): gehalten wird die schlanke Fassung
+//!   (`held_form_record`), gedeckelt durch `MAX_HELD_FORM_MIRRORS` mit
+//!   Meldung — [`c4_spiegel_in_formularen_kosten_je_seite_wenig`] und
+//!   [`c4_decke_der_gehaltenen_formularspiegel_wird_gesagt`].
 
 mod common;
 
@@ -1242,16 +1245,25 @@ fn hwm_kb() -> u64 {
         .unwrap_or(0)
 }
 
+/// Seiten der Speicherprobe [`c4_spiegel_in_formularen_kosten_je_seite_wenig`]
+/// und ihre Decke in MB (VmHWM des Kindprozesses, Debug). Vor Register #68
+/// lagen dieselben Seiten bei 637 MB; die Decke liegt weit darunter und weit
+/// über dem, was der Lauf jetzt braucht. Beide bindet `belege.rs`.
+const C4_SEITEN: usize = 100;
+#[cfg(target_os = "linux")]
+const C4_DECKE_MB: usize = 200;
+
 /// Messung: `ZO_C_PAGES=… cargo test -p redact-pdf --test zo_c_spiegel_umgebungen
 /// -- --ignored --nocapture mess_spiegel_in_formularen_je_seite`. Eigener
-/// Prozess je Wert, damit VmHWM die Messung ist.
+/// Prozess je Wert, damit VmHWM die Messung ist — so ruft es auch
+/// [`c4_spiegel_in_formularen_kosten_je_seite_wenig`] auf.
 #[test]
 #[ignore = "Messung"]
 fn mess_spiegel_in_formularen_je_seite() {
     let pages: usize = std::env::var("ZO_C_PAGES")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(10);
+        .unwrap_or(C4_SEITEN);
     assert!(pages <= 2_000, "Decke der Messung");
     let bytes = spiegel_in_formularen_je_seite(pages, 100, 999);
     let before = hwm_kb();
@@ -1272,4 +1284,86 @@ fn mess_spiegel_in_formularen_je_seite() {
     for w in report.warnings.iter().take(3) {
         println!("  {w}");
     }
+}
+
+/// **Befund C-4, behoben (Register #68).** Die Spiegel in den Formularen aller
+/// Seiten werden bis zur Formularschleife gehalten; gehalten wird jetzt die
+/// schlanke Fassung (`held_form_record`: je Formular eine Id, keine Pfade).
+/// Gemessen im eigenen Prozess (VmHWM), weil im Testprozess jeder Nachbar
+/// mitzählt. Linux: die Spitze kommt aus `/proc/self/status`.
+#[cfg(target_os = "linux")]
+#[test]
+fn c4_spiegel_in_formularen_kosten_je_seite_wenig() {
+    let exe = std::env::current_exe().expect("Testbinary");
+    let output = std::process::Command::new(&exe)
+        .args([
+            "--exact",
+            "mess_spiegel_in_formularen_je_seite",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ZO_C_PAGES", C4_SEITEN.to_string())
+        .output()
+        .expect("Kindprozess");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "Kindprozess: {}\n{stdout}",
+        output.status
+    );
+    // libtest schreibt „test … ... “ vor die Ausgabe des Kindes auf dieselbe
+    // Zeile; gesucht wird die Messzeile deshalb **in** der Zeile.
+    let zeile = stdout
+        .lines()
+        .find_map(|l| l.find("Seiten ").map(|at| &l[at..]))
+        .unwrap_or_else(|| panic!("keine Messzeile:\n{stdout}"));
+    let mb: usize = zeile
+        .split("VmHWM ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("VmHWM nicht lesbar: {zeile}"));
+    assert!(
+        mb < C4_DECKE_MB,
+        "DIENSTVERWEIGERUNG — {C4_SEITEN} Seiten mit Spiegeln in eigenen Formularen \
+         brauchen {mb} MB (Decke {C4_DECKE_MB} MB): {zeile}"
+    );
+    // Und zwar **gehalten**, nicht fallen gelassen: unter der Decke des Kontos
+    // bleibt der Bericht leer. Ohne diese Zeile deckte die Decke die
+    // ungekürzte Fassung — ihre Einträge sprengten das Konto nach einer
+    // Seite, der Speicher blieb klein, und der Lauf hätte es nur gesagt.
+    assert!(
+        zeile.ends_with("Warnungen 0"),
+        "die Probe muss ohne Warnung durchlaufen — sonst wurde nicht gehalten, sondern \
+         fallen gelassen: {zeile}"
+    );
+}
+
+/// Die Decke der gehaltenen Formularspiegel wird **gesagt**: mehr Abschnitte,
+/// als `MAX_HELD_FORM_MIRRORS` Einträge fassen, und der Bericht nennt es;
+/// darunter schweigt er. Je Seite 1 000 Klammern über einer Platzierung, also
+/// 2 000 Einträge je Seite.
+#[test]
+fn c4_decke_der_gehaltenen_formularspiegel_wird_gesagt() {
+    let lauf = |pages: usize| -> Vec<String> {
+        let bytes = spiegel_in_formularen_je_seite(pages, 1_000, 1);
+        let mut doc = load_from_bytes(&bytes).expect("ladbar");
+        PdfRedactor::new()
+            .apply_with_report(&mut doc, &[])
+            .expect("Schwärzung")
+            .warnings
+    };
+    let unter = lauf(40);
+    assert!(
+        !unter.iter().any(|w| w.contains("gehalten werden")),
+        "unter der Decke darf nichts gesagt werden: {unter:?}"
+    );
+    let ueber = lauf(60);
+    assert!(
+        ueber
+            .iter()
+            .any(|w| w.contains("Textspiegel") && w.contains("nicht mehr mitgeführt")),
+        "über der Decke muss der Bericht es sagen: {ueber:?}"
+    );
 }

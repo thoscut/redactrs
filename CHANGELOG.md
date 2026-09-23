@@ -270,6 +270,28 @@ seiner neuen Zeile in der Probenliste.
   lässt nichts stehen. Mutationsnachweis: Symbole nicht gelesen → der erste
   rot; Verfolgung entfernt → der zweite rot.
 
+* **Die Spiegel in den Formularen aller Seiten wurden bis zum Ende des Laufs
+  gehalten, ohne Decke** (Register #68, Prüfer C). Ein Spiegel in einem
+  Form-XObject wird erst geleert, wenn das Formular neu geschrieben wird —
+  nach der Seitenschleife. Bis dahin hielt der Lauf den Datensatz, wie der
+  Scan ihn liefert: je Platzierung im Geltungsbereich einen Pfad auf dem
+  Haufen, für jede Seite. Die Decke je Seite fing das nicht (sie zählt nur
+  eine Seite), die Decke der zurückgestellten Spiegel auch nicht (sie gilt nur
+  dem Seitenstrom). Am Stand `e016a2f` brauchte der Redaktor an je Seite
+  einem eigenen Formular mit 100 × 999 Paaren im Testprozess (Debug, eigener
+  Prozess) für 10 Seiten 78 MB und für 100 Seiten 637 MB bei 9,8 s — aus rund
+  10 kB Datei je Seite, ohne Schwärzung, ohne Warnung. Jetzt wird die
+  schlanke Fassung gehalten (je Formular eine Id, keine Pfade — mehr fragt
+  die späte Entscheidung nicht), und ein Konto über den ganzen Lauf deckelt
+  sie bei 100 000 Einträgen; darüber wird nicht mehr gehalten, und der Bericht
+  sagt es. Dieselben 10 Seiten brauchen im Testprozess (Debug, eigener
+  Prozess) jetzt 20 MB, 100 Seiten 31 MB. Belege:
+  `zo_c_spiegel_umgebungen::c4_spiegel_in_formularen_kosten_je_seite_wenig`
+  (im Testprozess, Debug, als Kindprozess: 100 Seiten unter 200 MB) und
+  `…::c4_decke_der_gehaltenen_formularspiegel_wird_gesagt`.
+  Mutationsnachweis: Datensatz ungekürzt gehalten → der erste rot; Decke
+  entfernt → der zweite rot.
+
 ### Nach der Runde 9: ein Prüfer, der Windows heißt, und das Gate auf der Platte
 
 Zwei Befunde außerhalb einer Gegenprüfung, jeder in seinem eigenen Commit —

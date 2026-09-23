@@ -235,6 +235,16 @@ mod tests {
         // ---------------------------------------------- Deckungslücken
         (
             true,
+            "Dieses Dokument trägt in seinen Form-XObjects mehr Textspiegel, als \
+             bis zum Neuschreiben der Formulare gehalten werden \
+             ({MAX_HELD_FORM_MIRRORS} Einträge); {held_dropped} Abschnitte wurden \
+             nicht mehr mitgeführt. Ob eine Schwärzung sie berührt, wurde für \
+             diese Abschnitte nicht mehr gefragt. Verliert das Formular darunter \
+             Zeichen, bleibt der Textspiegel darin stehen.",
+            &["3"],
+        ),
+        (
+            true,
             "Unter den Textspiegeln dieser Seite stehen mehr als \
              {MAX_MIRROR_FORM_PLACEMENTS} Zuordnungen zwischen einem Spiegel und \
              einer Formularplatzierung; ab dort wurden die Glyphen den Spiegeln \
