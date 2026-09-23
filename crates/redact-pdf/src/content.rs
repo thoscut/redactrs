@@ -3342,16 +3342,26 @@ fn mirror_property_list(
 }
 
 /// Der Eintrag `name` in `/Resources /Properties`, falls es ihn gibt.
+///
+/// Ein Eintrag mit dem Wert `null` — direkt oder als Verweis ins Leere — ist
+/// nach PDF 32000-1, 7.3.9 wie ein fehlender. Poppler und MuPDF suchen dann
+/// in den Umgebungen der Aufrufer weiter; bis zur Spur-A-Runde 2 galt er hier
+/// als vorhanden, die Suche brach ab, und der Spiegel in der Seite blieb
+/// stehen (Register #86).
 fn property_entry<'a>(
     doc: &'a Document,
     resources: Option<&'a Dictionary>,
     name: &[u8],
 ) -> Option<&'a Object> {
-    resources
+    let entry = resources
         .and_then(|r| r.get(b"Properties").ok())
         .and_then(|o| doc.dereference(o).ok())
         .and_then(|(_, o)| o.as_dict().ok())
-        .and_then(|d| d.get(name).ok())
+        .and_then(|d| d.get(name).ok())?;
+    match doc.dereference(entry) {
+        Ok((_, Object::Null)) | Err(_) => None,
+        Ok(_) => Some(entry),
+    }
 }
 
 /// Eine aufgelöste Eigenschaftsliste mit Spiegel: Liste, Objekt-Id, Name, und

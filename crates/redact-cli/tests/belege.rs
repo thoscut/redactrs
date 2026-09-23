@@ -3226,6 +3226,26 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "### Spur-A-Runde 2: die Varianten der eigenen Korrekturen",
         "eine Rundennummer in der Überschrift, keine Messung",
     ),
+    (
+        "hielt die Suche nach dem Spiegel an** (Register #86, Prüfer C; Variante der Korrektur #67)",
+        "Registernummern, keine Messung",
+    ),
+    (
+        "`zo_c_spiegel_umgebungen::c3_null_eintrag_im_eigenen_verzeichnis_gilt_als_fehlend`",
+        "ein Testname (Befund C-3 der Runde 1), keine Messung",
+    ),
+    (
+        "ein Eintrag `null` im eigenen Verzeichnis hielt die Suche",
+        "das PDF-Schlüsselwort null, keine Messung",
+    ),
+    (
+        "den Namen mit dem Wert `null` — direkt oder als Verweis ins Leere",
+        "das PDF-Schlüsselwort null, keine Messung",
+    ),
+    (
+        "Mutationsnachweis: `null` wieder als vorhanden",
+        "das PDF-Schlüsselwort null, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

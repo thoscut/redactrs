@@ -844,6 +844,56 @@ fn formular_mit_eigenen_ressourcen_ohne_properties_name_aus_der_seite() {
     assert!(offen.is_empty(), "{}", offen.join("\n"));
 }
 
+/// **Befund C-2 der Spur-A-Runde 2 — behoben (Register #86).** Das eigene
+/// Verzeichnis nennt `/MC0`, aber mit dem Wert `null` — direkt oder als
+/// Verweis ins Leere. Nach PDF 32000-1, 7.3.9 ist das wie ein fehlender
+/// Eintrag; Poppler und MuPDF suchen in der Seite weiter und geben deren
+/// Spiegel aus. Bis dahin brach die Suche hier ab, und der Spiegel mit dem
+/// Geheimnis blieb in der Seite stehen (Rückgabewert 0, keine Warnung).
+#[test]
+fn c3_null_eintrag_im_eigenen_verzeichnis_gilt_als_fehlend() {
+    let mut offen = Vec::new();
+    for (name, als_verweis) in [("null direkt", false), ("Verweis ins Leere", true)] {
+        for spiegel in [lie(), SECRET.to_string()] {
+            let mut d = page(&[]);
+            let res = d.resources_id;
+            set_properties(
+                &mut d,
+                res,
+                Object::Dictionary(
+                    dictionary! { "MC0" => Object::Dictionary(mirror_list(&spiegel)) },
+                ),
+            );
+            let (_, form_res) = add_form(
+                &mut d,
+                res,
+                "Fm0",
+                &format!("/Span /MC0 BDC\n{}EMC\n", text_at(600, SECRET)),
+            );
+            let leer = if als_verweis {
+                Object::Reference((9999, 0))
+            } else {
+                Object::Null
+            };
+            set_properties(
+                &mut d,
+                form_res,
+                Object::Dictionary(dictionary! { "MC0" => leer }),
+            );
+            let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+            raw.extend_from_slice(b"q /Fm0 Do Q\n");
+            d.set_content(&raw);
+            let (found, warnings) = nach_der_pipeline(&d.finish());
+            if !found.is_empty() {
+                offen.push(format!(
+                    "{name}/{spiegel}: {found:?} (Warnungen {warnings:?})"
+                ));
+            }
+        }
+    }
+    assert!(offen.is_empty(), "{}", offen.join("\n"));
+}
+
 /// Dasselbe Formular **mit** eigenem `/Resources` ohne `/Properties` auf zwei
 /// Seiten; jede Seite löst `/MC0` in ihren eigenen Ressourcen auf. Der
 /// Spiegel-Scan des Formulars darf dann nicht einmal je Formular laufen,

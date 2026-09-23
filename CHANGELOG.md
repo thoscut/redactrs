@@ -84,6 +84,17 @@ sind, jeder in seinem eigenen Commit.
   (der große Fall und die Gegenproben). Mutationsnachweis: Kopf ungeprüft →
   der große Fall rot.
 
+* **⚠ Sicherheit: ein Eintrag `null` im eigenen Verzeichnis hielt die Suche
+  nach dem Spiegel an** (Register #86, Prüfer C; Variante der Korrektur #67).
+  Nennt das eigene `/Properties` eines Formulars den Namen mit dem Wert
+  `null` — direkt oder als Verweis ins Leere —, ist der Eintrag nach der Norm
+  wie ein fehlender; Poppler und MuPDF suchen in der Seite weiter und geben
+  deren Spiegel aus. Hier galt er als vorhanden, die Suche brach ab, und der
+  Spiegel mit dem Geheimnis blieb in der Seite stehen, ohne Warnung. Jetzt
+  zählt ein solcher Eintrag als fehlend. Beleg:
+  `zo_c_spiegel_umgebungen::c3_null_eintrag_im_eigenen_verzeichnis_gilt_als_fehlend`.
+  Mutationsnachweis: `null` wieder als vorhanden → rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

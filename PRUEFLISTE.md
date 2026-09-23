@@ -34,7 +34,7 @@ Prosa.
 | Bild ohne Zeichner: `/Thumb` der Seite | A | Spur-A-Runde 1 (#74) | `crates/redact-pdf/tests/zo_a_bild_ohne_zeichner.rs` |
 | Decke umgangen durch die Zahlenart (`/Width` als reelle Zahl) | A | Spur-A-Runde 1 (#79) | `crates/redact-pdf/tests/zo_a_maske_und_filter.rs` |
 | Spiegel über Formular: zwei Umgebungen, beide mit eigenem Spiegel | A | Spur-A-Runde 1 (#65) | `crates/redact-pdf/tests/zo_c_spiegel_umgebungen.rs` |
-| Spiegel im Formular mit eigenen Ressourcen ohne `/Properties`, Name nur beim Aufrufer auflösbar (Poppler) | A | Spur-A-Runde 1 (#67) | `crates/redact-pdf/tests/zo_c_spiegel_umgebungen.rs` |
+| Spiegel im Formular mit eigenen Ressourcen ohne `/Properties`, Name nur beim Aufrufer auflösbar (Poppler) | A | Spur-A-Runde 1 (#67), Runde 2 (#86: Eintrag `null`) | `crates/redact-pdf/tests/zo_c_spiegel_umgebungen.rs` |
 | Stencil-`/Mask` eines geschwärzten Bildes trägt die Form unter der Zone | A | Spur-A-Runde 1 (#77) | `crates/redact-pdf/tests/zo_a_maske_und_filter.rs` |
 | Beiwerk mit Klartext an Katalog, Seite, Objekt und Signaturfeld (`/Perms`, `/DSS`, `/PageLabels`, `/Threads`, `/Collection`, `/OutputIntents`, `/URI`, `/DPartRoot`, `/VP`, `/PresSteps`, `/Ref`, `/OPI`, `/SV`, `/Lock`) | A | Spur-A-Runde 1 (#70) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
 | Verweiskette: eine Karte, die je Glied die ganze Kette läuft (quadratisch) | A | Spur-A-Runde 1 (#72) | `crates/redact-pdf/tests/zo_b_traeger.rs` |
