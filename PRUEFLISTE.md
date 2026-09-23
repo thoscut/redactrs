@@ -50,6 +50,7 @@ Prosa.
 | Orakel: eine Altgeneration unter einem Filter, den nur die Objektsicht kann, oder als maskierte Zeichenkette | A | Spur-A-Runde 1 (#80) | `crates/redact-pdf/tests/zo_d_altgeneration_und_kodierung.rs`, `crates/redact-cli/tests/zo_d_orakel_am_binary.rs` |
 | Bilddecke: der Dekoder belegt andere Maße als die, gegen die die Decke geprüft hat (JPEG-Kopf gegen Dictionary) | A | Spur-A-Runde 2 (#101) | `crates/redact-cli/tests/zp_a_jpeg_groesser_als_angegeben.rs` |
 | Abgelehnte gewöhnliche Datei: Leerraum der Norm, den der Zerleger nicht kennt (Kommentar vor einer Leerzeile, NUL, Seitenvorschub) | A | Spur-A-Runde 2 (#103) | `crates/redact-pdf/tests/zp_d_kommentar_und_leerraum.rs` |
+| Orakel: eine Seite, die der Interpreter ablehnt, oder ein Strom, den der Lader anders las als die Rohbytes, fehlt ohne Meldung in einer Sicht | A | Spur-A-Runde 2 (#98) | `crates/redact-pdf/tests/zp_d_seite_und_lader.rs` |
 | Ressourcenname nur beim Aufrufer auflösbar: `/Font`, `/XObject`, `/ExtGState`, `/Pattern` aus einem Formular mit eigenem `/Resources` (Poppler zeichnet) | A | Spur-A-Runde 2 (#88) | `crates/redact-pdf/tests/zp_c_ressourcen_beim_aufrufer.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung

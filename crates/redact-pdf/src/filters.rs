@@ -227,6 +227,28 @@ pub(crate) fn is_image_filter(name: &[u8]) -> bool {
     )
 }
 
+/// Kennt [`decode_one`] diesen Filter — lässt er sich hier auspacken?
+///
+/// Dieselben Namen wie in den Armen von [`decode_one`]; der Test
+/// `decodable_names_match_decode_one` hält beide Listen gleich. Ein Aufrufer,
+/// der wissen will, ob eine Kette ganz durchläuft, **ohne** sie auszupacken
+/// (die Sicht des Schriftdekoders im Orakel, Register #98), fragt hier.
+pub(crate) fn is_decodable_filter(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"FlateDecode"
+            | b"Fl"
+            | b"LZWDecode"
+            | b"LZW"
+            | b"ASCIIHexDecode"
+            | b"AHx"
+            | b"ASCII85Decode"
+            | b"A85"
+            | b"RunLengthDecode"
+            | b"RL"
+    )
+}
+
 /// Die Filterkette aus `/Filter` — aufgelöst, in Dekodierreihenfolge.
 ///
 /// Wie `lopdf::Stream::filters`, nur dass der Wert und jedes Element einer
@@ -616,6 +638,41 @@ mod tests {
     use lopdf::dictionary;
 
     const PLAIN: &[u8] = b"BT /F1 10 Tf 72 700 Td (IBAN: DE89 3704 0044 0532 0130 00) Tj ET";
+
+    /// [`is_decodable_filter`] nennt genau die Namen, die [`decode_one`]
+    /// auspackt — sonst sagte das Orakel „die Kette läuft durch“ über eine,
+    /// die der Dekoder aufgibt, oder umgekehrt.
+    #[test]
+    fn decodable_names_match_decode_one() {
+        let names: [&[u8]; 17] = [
+            b"FlateDecode",
+            b"Fl",
+            b"LZWDecode",
+            b"LZW",
+            b"ASCIIHexDecode",
+            b"AHx",
+            b"ASCII85Decode",
+            b"A85",
+            b"RunLengthDecode",
+            b"RL",
+            b"DCTDecode",
+            b"JPXDecode",
+            b"CCITTFaxDecode",
+            b"JBIG2Decode",
+            b"Crypt",
+            b"FooDecode",
+            b"",
+        ];
+        for name in names {
+            let packs = matches!(decode_one(name, &[], None, 1 << 20), Ok(Some(_)));
+            assert_eq!(
+                is_decodable_filter(name),
+                packs,
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
 
     /// Ein leeres Dokument — genug, um `/DecodeParms` ohne Verweise
     /// aufzulösen.

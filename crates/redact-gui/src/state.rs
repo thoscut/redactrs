@@ -375,14 +375,16 @@ impl HitOutcome {
 /// So viele ungeprüfte Stellen nennt der Satz beim Namen; der Rest wird
 /// gezählt.
 ///
-/// [`redact_pdf::LeakCheck::unchecked`] darf **154** Zeilen tragen, nicht 51.
+/// [`redact_pdf::LeakCheck::unchecked`] darf **255** Zeilen tragen, nicht 51.
 /// Die Decke von 50 einzeln genannten Stellen plus Summenzeile (`redact-pdf`,
-/// `MAX_UNCHECKED`) gilt je **Zähler**, und davon gibt es drei: nicht
+/// `MAX_UNCHECKED`) gilt je **Zähler**, und davon gibt es fünf: nicht
 /// entpackte Ströme der Rohsicht, dieselben der Objektsicht (jede Sicht hat
-/// ihr eigenes Budget) und Stellen aus anderem Grund — etwa die
-/// Verschachtelungstiefe. Dazu kommt die Zeile über Sicht 7. Gemessen
+/// ihr eigenes Budget), Stellen aus anderem Grund — etwa die
+/// Verschachtelungstiefe —, verlesene Ströme und abgelehnte Seiten (seit der
+/// Spur-A-Runde 2; bis dahin drei Zähler und die Zeile über Sicht 7, zusammen
+/// 154). Gemessen
 /// (`zf_q4_tests::zf_q4_3_die_zahl_der_ungepruefeten_stellen_sprengt_die_zusage`):
-/// 60 zu große Ströme ergeben **52** Zeilen; die 154 sind die aus dem Code
+/// 60 zu große Ströme ergeben **52** Zeilen; die 255 sind die aus dem Code
 /// abgeleitete Obergrenze, keine gemessene Zahl.
 ///
 /// Alle in die Statuszeile zu schreiben hieße, sie unlesbar zu machen; gar

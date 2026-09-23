@@ -583,6 +583,10 @@ mod messwerte {
     pub const STELLEN_STROEME: usize = 57;
     pub const ZUSAGEN_ZU_VIEL: usize = 3;
     pub const GRUENDE_ALT: usize = 3;
+    /// So viele Gründe kannte das Orakel nach der Fix-Runde 7 — die Zahl, die
+    /// der CHANGELOG jener Runde nennt. Seit der Spur-A-Runde 2 sind es
+    /// [`super::GRUENDE`] (Register #98).
+    pub const GRUENDE_FIX_RUNDE_7: usize = 5;
     pub const GRUENDE_AM_BINARY: usize = 3;
     pub const KODIERUNGEN_UMLAUT: usize = 10;
     pub const KODIERUNGEN_JENSEITS: usize = 7;
@@ -1497,7 +1501,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         format!(
             "zählte {} Gründe für „nicht geprüft“ auf, das Orakel kennt {}**",
             zahlwort(m::GRUENDE_ALT),
-            zahlwort(GRUENDE.len())
+            zahlwort(m::GRUENDE_FIX_RUNDE_7)
         ),
     );
     satz(
@@ -1506,7 +1510,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
             "Alle {} stehen jetzt mit ihrem Wortlaut in einer Tabelle; ein Test hält \
              jeden gegen den Quelltext des Orakels, {} davon zusätzlich gegen einen \
              Lauf des gebauten Binaries",
-            zahlwort(GRUENDE.len()),
+            zahlwort(m::GRUENDE_FIX_RUNDE_7),
             zahlwort(m::GRUENDE_AM_BINARY)
         ),
     );
@@ -1897,20 +1901,22 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     );
     // Und die Begründung in SECURITY.md rechnet die Zahl vor, statt sie zu
     // behaupten — hier stand „51 Zeilen“, die Decke **eines** Zählers.
+    // Seit der Spur-A-Runde 2 (Register #98) fünf Zähler; die Zeile über
+    // Sicht 7 und die abgelehnten Seiten schließen einander aus.
     satz(
         "SECURITY.md",
         format!(
             "denn `LeakCheck::unchecked` darf bis zu **{}** Zeilen tragen",
-            ungepruefte_zeilen()
+            5 * (konstante_aus("crates/redact-pdf/src/audit_bytes.rs", "MAX_UNCHECKED") + 1)
         ),
     );
     satz(
         "SECURITY.md",
         format!(
-            "die Decke `MAX_UNCHECKED = {}` einzeln genannter Stellen plus Summenzeile gilt je **Zähler**, und davon gibt es {} (zu große Ströme der Rohsicht, dieselben der Objektsicht, Stellen aus anderem Grund), dazu die Zeile über Sicht 7: {} × {} + 1",
+            "die Decke `MAX_UNCHECKED = {}` einzeln genannter Stellen plus Summenzeile gilt je **Zähler**, und davon gibt es {} (zu große Ströme der Rohsicht, dieselben der Objektsicht, Stellen aus anderem Grund, verlesene Ströme, abgelehnte Seiten): {} × {}",
             konstante_aus("crates/redact-pdf/src/audit_bytes.rs", "MAX_UNCHECKED"),
-            zahlwort(3),
-            3,
+            zahlwort(5),
+            5,
             konstante_aus("crates/redact-pdf/src/audit_bytes.rs", "MAX_UNCHECKED") + 1
         ),
     );
@@ -3344,6 +3350,10 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Aufgefallen bei der Korrektur zu #98",
         "eine Registernummer, keine Messung",
     ),
+    (
+        "(Register #98, Prüfer D; stilles Leck des Orakels, neue Klassen)",
+        "eine Registernummer, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
@@ -3898,14 +3908,15 @@ fn in_neun_byte_kodierungen_wird_gesucht_und_so_steht_es_in_der_doku() {
 // E3 — die Gründe für „nicht geprüft“
 // ---------------------------------------------------------------------------
 
-/// Die **fünf** Gründe, aus denen eine Stelle als `NICHT GEPRÜFT` gemeldet
+/// Die **sieben** Gründe, aus denen eine Stelle als `NICHT GEPRÜFT` gemeldet
 /// wird: Name (so nennt ihn `SECURITY.md`) und ein Stück des Wortlauts, den
-/// `redact_pdf::leaks_many_within` wirklich schreibt.
+/// `redact_pdf::leaks_many_within` wirklich schreibt. Die letzten beiden
+/// kamen mit der Spur-A-Runde 2 dazu (Register #98).
 ///
 /// `SECURITY.md` zählte bis zur Fix-Runde 6 **drei** auf — und ließ genau die
 /// beiden weg, die die Fix-Runde 5 hinzugefügt hatte. Eine Aufzählung, die
 /// weniger nennt, als es gibt, liest sich wie eine vollständige.
-const GRUENDE: [(&str, &str); 5] = [
+const GRUENDE: [(&str, &str); 7] = [
     ("Entpackgrenze", "nicht entpackt — "),
     (
         "Vorprüfung des Laders abgelehnt",
@@ -3923,23 +3934,31 @@ const GRUENDE: [(&str, &str); 5] = [
         "Schriftdekoder nicht gelaufen",
         "Sicht 7 (Schriftdekoder) nicht gelaufen: ",
     ),
+    (
+        "Strom anders geladen, als er in den Rohbytes steht",
+        "der Lader übernahm nicht den Strom, der in den Rohbytes",
+    ),
+    (
+        "Seite, die der Interpreter ablehnt",
+        "Sicht 7 (Schriftdekoder): ",
+    ),
 ];
 
 /// **E3.** Jeder Grund, den das Orakel kennt, steht in `SECURITY.md` — und
 /// jeder Wortlaut steht wirklich im Quelltext des Orakels.
 ///
 /// Der Quelltext ist hier das Messgerät, weil die Kommandozeile nicht jeden
-/// der fünf Gründe erreichen kann: „die Vorprüfung des Laders lehnt die Datei
-/// ab“ meldet nur, wer das Orakel **ohne** den Ladeschritt von
-/// `check::run` aufruft — also die Oberfläche. Vier der fünf werden
-/// zusätzlich am gebauten Binary gefahren
-/// (`ze_p4_check_leaks_grenzen::die_gruende_der_ausgabe_stehen_in_security_md`
-/// und `zf_q5_unbekannter_filter::*`).
+/// Grund erreichen kann: „die Vorprüfung des Laders lehnt die Datei ab“
+/// meldet nur, wer das Orakel **ohne** den Ladeschritt von `check::run`
+/// aufruft — also die Oberfläche. Die übrigen werden zusätzlich am gebauten
+/// Binary oder an der Bibliothek gefahren
+/// (`ze_p4_check_leaks_grenzen::die_gruende_der_ausgabe_stehen_in_security_md`,
+/// `zf_q5_unbekannter_filter::*`, `zp_d_seite_und_lader`).
 ///
-/// Mutationsnachweis: in `SECURITY.md` eine Tabellenzeile der fünf Gründe
+/// Mutationsnachweis: in `SECURITY.md` eine Tabellenzeile der Gründe
 /// gestrichen → dieser Test ist rot und nennt den fehlenden Grund.
 #[test]
-fn die_fuenf_gruende_fuer_nicht_geprueft_stehen_in_security_md() {
+fn die_gruende_fuer_nicht_geprueft_stehen_in_security_md() {
     let orakel = glatt(&lf(&std::fs::read_to_string(
         repo_root().join("crates/redact-pdf/src/audit_bytes.rs"),
     )
@@ -3950,7 +3969,7 @@ fn die_fuenf_gruende_fuer_nicht_geprueft_stehen_in_security_md() {
     .expect("SECURITY.md lesbar")));
 
     assert!(
-        security.contains("**Fünf Gründe gibt es, nicht drei**"),
+        security.contains("**Sieben Gründe gibt es, nicht drei**"),
         "SECURITY.md zählt die Gründe nicht mehr"
     );
     for (name, wortlaut) in GRUENDE {
@@ -3973,8 +3992,8 @@ fn die_fuenf_gruende_fuer_nicht_geprueft_stehen_in_security_md() {
         &std::fs::read_to_string(repo_root().join("README.md")).expect("README lesbar")
     ));
     assert!(
-        security.contains("Fünf Gründe gibt es dafür")
-            || readme.contains("Fünf Gründe gibt es dafür"),
+        security.contains("Sieben Gründe gibt es dafür")
+            || readme.contains("Sieben Gründe gibt es dafür"),
         "die README nennt die Zahl der Gründe nicht"
     );
     // Und die Rückgabewert-Tabelle nennt dieselbe Zahl: sie war bis zur

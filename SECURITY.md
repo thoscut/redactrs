@@ -1964,20 +1964,25 @@ Sie nennt außerdem jede ungeprüfte Stelle mit **ihrem eigenen** Grund und nimm
 keine Ursache an — in der Statuszeile höchstens drei beim Namen, der Rest
 gezählt („… und N weitere“); `MAX_NAMED_PLACES = 3` in
 `crates/redact-gui/src/state.rs`, denn `LeakCheck::unchecked` darf bis zu
-**154** Zeilen tragen, und so viele liest in einer Statuszeile niemand. Die 154
+**255** Zeilen tragen, und so viele liest in einer Statuszeile niemand. Die 255
 sind abgeleitet, nicht gemessen: die Decke `MAX_UNCHECKED = 50` einzeln
-genannter Stellen plus Summenzeile gilt je **Zähler**, und davon gibt es drei
+genannter Stellen plus Summenzeile gilt je **Zähler**, und davon gibt es fünf
 (zu große Ströme der Rohsicht, dieselben der Objektsicht, Stellen aus anderem
-Grund), dazu die Zeile über Sicht 7: 3 × 51 + 1. Gemessen wurden 52 Zeilen aus
+Grund, verlesene Ströme, abgelehnte Seiten): 5 × 51. Die Zeile, Sicht 7 sei
+nicht gelaufen, schließt die abgelehnten Seiten aus — wo Sicht 7 nicht lief,
+lehnte sie auch keine Seite ab. Bis zur Spur-A-Runde 2 waren es drei Zähler
+und die Zeile über Sicht 7. Gemessen wurden 52 Zeilen aus
 60 zu großen Strömen
 (`zf_q4_tests::zf_q4_3_die_zahl_der_ungepruefeten_stellen_sprengt_die_zusage`).
 Die Kommandozeile schreibt jede Stelle als eigene `NICHT GEPRÜFT:`-Zeile und
 zählt im Ergebnissatz **Stellen**, nicht Zeilen.
 
-**Fünf Gründe gibt es, nicht drei** — so viele kennt
+**Sieben Gründe gibt es, nicht drei** — so viele kennt
 `redact_pdf::leaks_many_within` heute. Bis zur Fix-Runde 6 zählte dieser
 Abschnitt drei auf; die beiden fehlenden waren gerade die, die die Fix-Runde 5
-hinzugefügt hatte:
+hinzugefügt hatte. Die letzten beiden kamen mit der Spur-A-Runde 2 dazu
+(Register #98): bis dahin fehlten eine abgelehnte Seite und ein verlesener
+Strom ohne jede Meldung.
 
 | Grund | Wortlaut in der Meldung |
 |---|---|
@@ -1986,9 +1991,11 @@ hinzugefügt hatte:
 | Verschachtelungstiefe des Objektgraphen | `nicht durchsucht — Verschachtelungstiefe 32 erreicht` |
 | Filtername, den das Programm nicht kennt | `nur bis Filter N von M dekodiert` bzw. `gar nicht dekodiert — /FooDecode ist hier kein bekannter Filter` |
 | Schriftdekoder nicht gelaufen | `Sicht 7 (Schriftdekoder) nicht gelaufen: N Strom/Ströme wurden nicht entpackt` |
+| Strom anders geladen, als er in den Rohbytes steht | `Objekt N G: der Lader übernahm nicht den Strom, der in den Rohbytes steht …` |
+| Seite, die der Interpreter ablehnt | `Sicht 7 (Schriftdekoder): Seite N ließ sich nicht lesen und fehlt in dieser Sicht: …` |
 
-Die letzte Zeile ist eine Folge der ersten: bleibt auch nur ein Strom
-ungepackt, läuft Sicht 7 gar nicht erst, weil der Schriftdekoder ohne eigene
+Die Zeile „Schriftdekoder nicht gelaufen“ ist eine Folge der ersten: bleibt
+auch nur ein Strom ungepackt, läuft Sicht 7 gar nicht erst, weil der Schriftdekoder ohne eigene
 Grenze entpackt. Seit Register #83 bucht die Vorprüfung jeden Strom
 mindestens so groß, wie die Objektsicht ihn mit demselben Dekoder entpackt;
 eine Datei, die sie mit demselben Budget durchlässt, erreicht die Zeile
@@ -1997,6 +2004,15 @@ Dekoder aus einem Strom verschieden viel holen. Beide bleiben als Rückfall;
 die Entpackgrenze der **Rohsicht** — ein zlib-Strom ohne `/Filter`, den die
 Vorprüfung roh zählt — ist die Zeile, die man an einer gewöhnlichen
 Kommandozeile noch sieht.
+
+Die beiden letzten Zeilen nennen, was eine Sicht übersprang, obwohl sie lief.
+Eine Seite, deren Inhaltsströme **alle** hinter einem Bildfilter oder einem
+unbekannten Filter stehen, bekommt keine Zeile „Seite N ließ sich nicht
+lesen“: dort konnte Sicht 7 nie etwas lesen, den unbekannten Filter nennt
+schon seine eigene Zeile, und Text hinter einem Bildfilter ist der benannte
+blinde Fleck aus der Tabelle der Filterketten weiter unten. Steht ein lesbarer Strom
+daneben, behält die Seite ihre Zeile — was darin steht, hat Sicht 7 nicht
+gesehen (`crates/redact-pdf/tests/zp_d_seite_und_lader.rs`).
 
 ### Interpreter und Orakel lesen verschieden
 

@@ -582,7 +582,7 @@ pub fn leaks_many_within(
     scan_raw_file(pdf_bytes, &mut probe);
     scan_raw_string_literals(pdf_bytes, &mut probe);
     let mut raw_budget = Budget::new(max_decompressed_bytes);
-    scan_raw_streams(pdf_bytes, &mut probe, &mut raw_budget);
+    let raw_streams = scan_raw_streams(pdf_bytes, &mut probe, &mut raw_budget);
     // Stellen zählen, bevor die Decke aus vielen Stellen eine Zeile macht.
     let mut places = raw_budget.places();
     let mut unchecked = raw_budget.into_unchecked();
@@ -602,13 +602,26 @@ pub fn leaks_many_within(
     };
     match doc {
         Ok(doc) => {
+            // Was der Lader anders las, als es in den Rohbytes steht, haben
+            // die Sichten 3–7 nicht gesehen (Register #98).
+            let misread = misread_streams(pdf_bytes, &raw_streams, &doc);
+            places += misread.len();
+            push_capped(&mut unchecked, misread, "Ströme");
             let mut budget = Budget::new(max_decompressed_bytes);
             scan_object_graph(&doc, &mut probe, &mut budget);
             let skipped = budget.skipped;
             places += budget.places();
             unchecked.extend(budget.into_unchecked());
             if skipped == 0 {
-                scan_decoded_text(&doc, &mut probe);
+                let gaps = scan_decoded_text(&doc, &mut probe);
+                places += gaps.len();
+                push_capped(
+                    &mut unchecked,
+                    gaps.into_iter()
+                        .map(|gap| format!("Sicht 7 (Schriftdekoder): {gap}"))
+                        .collect(),
+                    "Seiten",
+                );
             } else {
                 // Eine ganze Sicht, die nicht lief: eine Stelle mehr, auch
                 // wenn sie kein einzelnes Objekt nennt.
@@ -1266,7 +1279,14 @@ fn scan_raw_file(bytes: &[u8], probe: &mut Probe) {
 /// Findet jeden `stream … endstream`-Block anhand der Rohbytes — unabhängig
 /// davon, ob die xref-Tabelle das Objekt noch kennt. Genau so überlebt die
 /// Historie inkrementeller Updates.
-fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) {
+fn scan_raw_streams(
+    bytes: &[u8],
+    probe: &mut Probe,
+    budget: &mut Budget,
+) -> Vec<((u32, u16), usize)> {
+    // Die Ströme mit Objektkopf und Dictionary — für den Vergleich mit dem,
+    // was der Lader daraus machte ([`misread_streams`]).
+    let mut kopf = Vec::new();
     for (offset, payload) in raw_stream_blocks(bytes) {
         let header = object_header(bytes, offset);
         let base = format!("Rohdaten-Stream @0x{offset:x}{}", object_label(header));
@@ -1292,7 +1312,11 @@ fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) {
         // schon das erste Glied unbekannt), bleibt der blinde Versuch mit
         // zlib und rohem Deflate: ein Block ohne Kopf, ein eingebettetes PDF.
         // Gebucht wird je Block einmal.
-        let chain = match raw_stream_dict(bytes, offset) {
+        let dict = raw_stream_dict(bytes, offset);
+        if let (Some(id), Some(_)) = (object_id(header), dict) {
+            kopf.push((id, offset));
+        }
+        let chain = match dict {
             Some(dict) => decode_raw_chain(dict, payload, budget.room()),
             None => Ok(None),
         };
@@ -1330,6 +1354,7 @@ fn scan_raw_streams(bytes: &[u8], probe: &mut Probe, budget: &mut Budget) {
             Err(Oversize) => budget.skip(&base, payload.len()),
         }
     }
+    kopf
 }
 
 /// Das rohe Stream-Dictionary vor einem `stream`-Block: die Bytes zwischen
@@ -2014,8 +2039,23 @@ fn scan_text(text: &str, site: Site<'_>, how: &str, probe: &mut Probe) {
 /// 8,7 s für das **ganze Dokument** gegenüber 1,3 s für
 /// [`PdfExtractor::extract`]; heute misst `zb_rueckfall_linear.rs` den
 /// Speicher, und der wächst linear.
-fn scan_decoded_text(doc: &Document, probe: &mut Probe) {
-    let (runs, _) = PdfExtractor::new().extract_lenient(doc);
+///
+/// Liefert je Seite, die der Interpreter ablehnte, eine Zeile: dort hat
+/// diese Sicht nichts gelesen (Register #98). Ausgenommen ist eine Seite,
+/// deren Inhaltsströme **alle** hinter einem Filter stehen, den hier niemand
+/// auspackt ([`page_content_undecodable`]): dort konnte diese Sicht nie etwas
+/// lesen, und die Stelle ist schon benannt — ein unbekannter Filter steht als
+/// eigene Zeile der Objektsicht in `unchecked`, Text hinter einem Bildfilter
+/// ist der benannte blinde Fleck aus dem Modulkopf. Eine zweite Zeile dafür
+/// machte aus jeder solchen Datei einen Befund mehr, und aus der Zusage
+/// „Bildfilter am Kettenende: keine Meldung“ (`SECURITY.md`) eine falsche.
+fn scan_decoded_text(doc: &Document, probe: &mut Probe) -> Vec<String> {
+    let (runs, _, gaps) = PdfExtractor::new().extract_lenient_with_gaps(doc);
+    let gaps = gaps
+        .into_iter()
+        .filter(|(page_id, _)| !page_content_undecodable(doc, *page_id))
+        .map(|(_, gap)| gap)
+        .collect();
     // Die Zeilen kommen seitenweise sortiert; je Seite ein Text.
     for page_runs in runs.chunk_by(|a, b| a.page == b.page) {
         let text: String = page_runs
@@ -2033,6 +2073,140 @@ fn scan_decoded_text(doc: &Document, probe: &mut Probe) {
             probe,
         );
     }
+    gaps
+}
+
+/// Steht **jeder** Inhaltsstrom der Seite hinter einer Kette, die hier nicht
+/// ganz durchläuft — ein Glied, das [`filters::is_decodable_filter`] nicht
+/// kennt (Bildfilter, unbekannter Name, ein Glied ohne Namen)?
+///
+/// Gefragt wird nach den Namen, ausgepackt wird nichts. Eine Seite mit einem
+/// lesbaren und einem unlesbaren Strom ist **nicht** unlesbar: der
+/// Interpreter lehnt sie als Ganzes ab, und was im lesbaren Strom steht, hat
+/// diese Sicht nicht gesehen — sie behält ihre Zeile. Eine Seite ohne
+/// Inhaltsstrom auch; sie lehnt der Interpreter nie ab.
+fn page_content_undecodable(doc: &Document, page_id: lopdf::ObjectId) -> bool {
+    let contents = doc.get_page_contents(page_id);
+    !contents.is_empty()
+        && contents.into_iter().all(|id| {
+            let Ok(stream) = doc.get_object(id).and_then(Object::as_stream) else {
+                return false;
+            };
+            filters::filter_names(doc, &stream.dict)
+                .unwrap_or_default()
+                .iter()
+                .any(|name| !filters::is_decodable_filter(name))
+        })
+}
+
+/// Hängt `lines` an `unchecked` an — höchstens [`MAX_UNCHECKED`] davon,
+/// der Rest als eine Summenzeile. Gezählt werden die Stellen beim Aufrufer.
+fn push_capped(unchecked: &mut Vec<String>, lines: Vec<String>, was: &str) {
+    let rest = lines.len().saturating_sub(MAX_UNCHECKED);
+    unchecked.extend(lines.into_iter().take(MAX_UNCHECKED));
+    if rest > 0 {
+        unchecked.push(format!("… und {rest} weitere {was} nicht geprüft"));
+    }
+}
+
+/// Ströme, die der Lader **anders** übernommen hat, als sie in den Rohbytes
+/// stehen — je Objekt eine Zeile.
+///
+/// Verglichen wird nur, was die Querverweistabelle als gewöhnliches Objekt
+/// führt: ein Strom einer Altrevision, den ein inkrementelles Update ersetzt
+/// oder freigegeben hat, steht auch in den Rohbytes und ist trotzdem nicht
+/// verlesen. Verglichen wird deshalb nur der Block des aktuellen Objekts
+/// (der erste seiner Nummer hinter dem Offset der Querverweistabelle); er
+/// gilt als richtig gelesen, wenn er mit genau den geladenen Bytes beginnt
+/// und dahinter, nach Leerraum, `endstream` folgt — dann stimmte `/Length`. Sonst: das Objekt
+/// fehlt, ist kein Strom, oder der Lader las eine andere Länge (eine zu
+/// kurze oder zu lange `/Length`, ein versetzter Querverweis).
+///
+/// Bis zur Spur-A-Runde 2 fehlte ein solches Objekt stumm in den Sichten
+/// 3–7: `pdftotext` las das Geheimnis, das Orakel meldete „nicht gefunden“
+/// mit Rückgabewert 0 (Register #98). Ein verschlüsseltes Dokument wird
+/// nicht verglichen — der Lader entschlüsselt, die Rohbytes nicht —, und
+/// ebenso wenig ein Objekt-Strom, den der Lader entpackt ablegt.
+fn misread_streams(bytes: &[u8], raw: &[((u32, u16), usize)], doc: &Document) -> Vec<String> {
+    if doc.is_encrypted() {
+        return Vec::new();
+    }
+    let mut by_id: std::collections::BTreeMap<(u32, u16), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (id, offset) in raw {
+        by_id.entry(*id).or_default().push(*offset);
+    }
+    let mut out = Vec::new();
+    for (id, offsets) in by_id {
+        let Some(lopdf::xref::XrefEntry::Normal { offset, generation }) =
+            doc.reference_table.get(id.0)
+        else {
+            continue;
+        };
+        if *generation != id.1 {
+            continue;
+        }
+        // Der Block des **aktuellen** Objekts: der erste dieser Nummer hinter
+        // dem Offset aus der Querverweistabelle, ohne `endobj` dazwischen.
+        // Ältere Blöcke derselben Nummer stehen davor (ein inkrementelles
+        // Update hängt an) und sind Altrevisionen — auch dann, wenn die
+        // Nummer jetzt ein Objekt ohne Strom trägt.
+        let offset = *offset as usize;
+        let Some(block) = offsets
+            .iter()
+            .copied()
+            .filter(|&o| o > offset)
+            .min()
+            .filter(|&o| memmem::find(&bytes[offset.min(o)..o], b"endobj").is_none())
+        else {
+            continue;
+        };
+        let gelesen = match doc.objects.get(&id) {
+            // Einen Objekt-Strom entpackt der Lader beim Laden und legt ihn
+            // entpackt ab — seine Bytes gleichen den Rohbytes nie. Eine
+            // falsche `/Length` an ihm bleibt hier ungemeldet (benannte
+            // Lücke); die Objekte darin sehen die Sichten 3–7 trotzdem, so
+            // weit der Lader sie fand.
+            Some(Object::Stream(stream))
+                if stream.dict.get(b"Type").and_then(Object::as_name).ok() == Some(b"ObjStm") =>
+            {
+                true
+            }
+            Some(Object::Stream(stream)) => {
+                // `stream` darf vor dem Zeilenende noch Leerraum tragen
+                // (`stream \r\n`); der Rohblock beginnt dann davor.
+                let vorn = bytes[block..]
+                    .iter()
+                    .take(4)
+                    .take_while(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                    .count();
+                (0..=vorn).any(|skip| {
+                    let rest = &bytes[block + skip..];
+                    rest.starts_with(&stream.content) && {
+                        // Und dahinter, nach Leerraum, `endstream`: dann
+                        // stimmte die Länge. (Verteidigend — `lopdf` 0.42
+                        // übernimmt einen Strom nur, wenn es so ist.)
+                        let hinten = &rest[stream.content.len()..];
+                        let leer = hinten
+                            .iter()
+                            .take_while(|b| matches!(b, b'\r' | b'\n' | b' ' | b'\t' | b'\x0c' | 0))
+                            .count();
+                        hinten[leer..].starts_with(b"endstream")
+                    }
+                })
+            }
+            _ => false,
+        };
+        if !gelesen {
+            out.push(format!(
+                "Objekt {} {}: der Lader übernahm nicht den Strom, der in den Rohbytes \
+                 steht (Länge im Dictionary oder Querverweis passt nicht) — die Sichten \
+                 3–7 haben ihn nicht gelesen, nur die Rohsichten",
+                id.0, id.1
+            ));
+        }
+    }
+    out
 }
 
 /// PDFDocEncoding (PDF 32000-1, Anhang D.2), wo es von Latin-1 abweicht:

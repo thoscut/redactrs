@@ -372,7 +372,7 @@ fn tiefe_33_ist_eine_stille_entwarnung() {
 ///
 /// `SECURITY.md` zählte drei Gründe für eine `NICHT GEPRÜFT`-Zeile auf, das
 /// Orakel kennt fünf. Die Aufzählung ist jetzt vollständig
-/// (`belege.rs::die_fuenf_gruende_fuer_nicht_geprueft_stehen_in_security_md`
+/// (`belege.rs::die_gruende_fuer_nicht_geprueft_stehen_in_security_md`
 /// hält sie gegen den Quelltext des Orakels); hier stehen die Gründe, die die
 /// **Kommandozeile** wirklich erreichen kann, gegen einen Lauf des gebauten
 /// Binaries. Zwei sind es an dieser Stelle:

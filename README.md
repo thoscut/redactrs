@@ -345,12 +345,14 @@ ausdrücklich **kein** `1` — die Datei wurde gelesen, die Suche lief vollstän
 durch, die Antwort steht fest. Sie lautet nur „ja, es steht noch drin“.
 
 Der dritte Fall ist der stillste und deshalb der wichtigste: `--check-leaks`
-endet **auch ohne Fund** mit `3`, wenn es eine Stelle nicht lesen konnte. Fünf
+endet **auch ohne Fund** mit `3`, wenn es eine Stelle nicht lesen konnte. Sieben
 Gründe gibt es dafür — ein Strom über dem Restbudget von
 `--max-decompressed-mb`, eine Verschachtelung unterhalb der Tiefe, bis zu der
 die Objektsicht liest, ein Filtername, den das Programm nicht kennt, eine vom
-Lader abgelehnte Vorprüfung, und der Schriftdekoder, der deshalb gar nicht erst
-lief; `SECURITY.md` zählt sie mit ihren Meldungen auf. Über
+Lader abgelehnte Vorprüfung, der Schriftdekoder, der deshalb gar nicht erst
+lief, eine Seite, die der Interpreter ablehnt, und ein Strom, den der Lader
+anders übernahm, als er in den Rohbytes steht; `SECURITY.md` zählt sie mit
+ihren Meldungen auf. Über
 eine solche Stelle sagt „nicht gefunden“ nichts, und genau deshalb darf sie
 nicht als `0` durchgehen. Sie steht als `NICHT GEPRÜFT: …` in der Ausgabe.
 
@@ -1292,7 +1294,7 @@ nichts nach.
 | Wert | heißt |
 |---|---|
 | `0` | Keiner der Begriffe steht noch in der Datei — **und** jede Stelle konnte geprüft werden. **Kein Freibrief** — siehe unten. |
-| `3` | Mindestens einer steht noch darin — **oder** eine Stelle konnte nicht geprüft werden (`NICHT GEPRÜFT: …`, fünf mögliche Gründe, siehe unten), auch ohne einen einzigen Fund. Der Lauf ist gelungen, das *Ergebnis* nicht. |
+| `3` | Mindestens einer steht noch darin — **oder** eine Stelle konnte nicht geprüft werden (`NICHT GEPRÜFT: …`, sieben mögliche Gründe, siehe unten), auch ohne einen einzigen Fund. Der Lauf ist gelungen, das *Ergebnis* nicht. |
 | `1` | Verarbeitungsfehler: die Datei ist keine PDF-Datei, nicht lesbar, zu groß oder verschlüsselt. |
 | `2` | Bedienfehler: kein Suchbegriff, mehr als eine Datei, oder ein Schalter, der nicht dazugehört. |
 

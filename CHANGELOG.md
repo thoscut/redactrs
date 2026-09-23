@@ -178,6 +178,30 @@ sind, jeder in seinem eigenen Commit.
   Umschreiben → die Fälle rot; Zeichenketten nicht ausgenommen → das
   Prozentzeichen im Text rot.
 
+* **⚠ Sicherheit: das Orakel übersah Stellen, ohne es zu sagen**
+  (Register #98, Prüfer D; stilles Leck des Orakels, neue Klassen). Eine
+  Seite, die der Interpreter nicht zerlegen kann — ein verirrtes `]`, ein
+  doppeltes Minuszeichen, geschweifte Klammern, bis zum Punkt davor auch ein
+  Seitenvorschub oder ein Nullbyte als Leerraum —, fehlte in der Sicht des
+  Schriftdekoders ohne Meldung. Ein Strom, den der Lader anders übernahm, als er in den Rohbytes
+  steht — eine falsche `/Length`, ein versetzter Querverweis —, fehlte in
+  den Objektsichten ebenso. `pdftotext` las in beiden Fällen das Geheimnis
+  in einer Schrift mit eigener Kodierung; `--check-leaks` meldete „nicht
+  gefunden“. Jetzt steht jede abgelehnte Seite und jedes verlesene Objekt
+  als eigene Zeile unter NICHT GEPRÜFT. Eine Seite, deren Inhaltsstrom
+  hinter einem Bildfilter oder einem unbekannten Filter steht, bekommt keine
+  zweite Zeile: den unbekannten nennt schon die Objektsicht, der Bildfilter
+  ist der benannte blinde Fleck. Verglichen wird nur der Block des
+  aktuellen Objekts: Altrevisionen, freigegebene Ströme und Objekt-Ströme,
+  die der Lader entpackt ablegt, bleiben still. `LeakCheck::unchecked` trägt
+  damit mehr gedeckelte Zähler als zuvor, und die Tabelle der Gründe in
+  `SECURITY.md` ist um beide länger. Belege:
+  `zp_d_seite_und_lader` (beide Fälle und die Gegenproben), dazu die
+  Tabelle, gebunden in `belege.rs`. Mutationsnachweis: je
+  Teil zurückgenommen → sein Fall rot; die Prüfung, dass hinter den
+  geladenen Bytes `endstream` folgt, ist verteidigend und bleibt unter ihrer
+  Rücknahme grün — `lopdf` übernimmt einen Strom nur so.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

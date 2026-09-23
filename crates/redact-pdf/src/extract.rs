@@ -91,6 +91,11 @@ const SPACE_RATIO: f64 = 0.5;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PdfExtractor;
 
+/// Eine Seite, die der Interpreter ablehnte: ihre Kennung und die Zeile, die
+/// sagt, warum sie in der Sicht fehlt
+/// ([`PdfExtractor::extract_lenient_with_gaps`], Register #98).
+pub type PageGap = (ObjectId, String);
+
 impl PdfExtractor {
     pub fn new() -> Self {
         Self
@@ -110,6 +115,7 @@ impl PdfExtractor {
     /// vollständig gesehen hat.
     pub fn extract_with_warnings(&self, doc: &Document) -> Result<(Vec<TextRun>, Vec<String>)> {
         self.extract_pages(doc, false)
+            .map(|(runs, warnings, _)| (runs, warnings))
     }
 
     /// Wie [`PdfExtractor::extract_with_warnings`], nur **nachsichtig**: eine
@@ -133,15 +139,38 @@ impl PdfExtractor {
     pub fn extract_lenient(&self, doc: &Document) -> (Vec<TextRun>, Vec<String>) {
         // `lenient` liefert nie `Err` — der Rückfall steht nur der
         // Signatur wegen da.
+        let (runs, warnings, _) = self.extract_pages(doc, true).unwrap_or_default();
+        (runs, warnings)
+    }
+
+    /// Wie [`PdfExtractor::extract_lenient`], dazu **je abgelehnter Seite
+    /// ihre Kennung und eine Zeile** — getrennt von den übrigen Warnungen.
+    ///
+    /// Für das Orakel: eine Seite, die der Interpreter nicht zerlegen kann,
+    /// fehlt in der Sicht des Schriftdekoders, und das ist eine Stelle, die
+    /// nicht geprüft wurde. Bis zur Spur-A-Runde 2 verwarf das Orakel die
+    /// Warnungen ganz; eine Seite mit einem Seitenvorschub als Leerraum
+    /// (`q\x0cQ`, nach PDF 32000-1, 7.2.3 zulässig) fehlte stumm, und ein
+    /// Geheimnis in einer Schrift mit eigener Kodierung darauf kam als „nicht
+    /// gefunden“ mit Rückgabewert 0 zurück (Register #98).
+    pub fn extract_lenient_with_gaps(
+        &self,
+        doc: &Document,
+    ) -> (Vec<TextRun>, Vec<String>, Vec<PageGap>) {
         self.extract_pages(doc, true).unwrap_or_default()
     }
 
     /// Die eine Seitenschleife hinter [`PdfExtractor::extract_with_warnings`]
     /// und [`PdfExtractor::extract_lenient`]; `lenient` entscheidet, was
     /// eine abgelehnte Seite bewirkt: Abbruch oder Warnung.
-    fn extract_pages(&self, doc: &Document, lenient: bool) -> Result<(Vec<TextRun>, Vec<String>)> {
+    fn extract_pages(
+        &self,
+        doc: &Document,
+        lenient: bool,
+    ) -> Result<(Vec<TextRun>, Vec<String>, Vec<PageGap>)> {
         let mut runs = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
+        let mut gaps: Vec<PageGap> = Vec::new();
         // Angeboten und gezeichnet — über **alle** Seiten hinweg, siehe
         // [`unplaced_form_warnings`].
         let mut declared: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
@@ -150,10 +179,12 @@ impl PdfExtractor {
             let scan = match scan_page(doc, *page_id) {
                 Ok(scan) => scan,
                 Err(e) if lenient => {
-                    warnings.push(format!(
+                    let gap = format!(
                         "Seite {} ließ sich nicht lesen und fehlt in dieser Sicht: {e}",
                         index + 1
-                    ));
+                    );
+                    warnings.push(gap.clone());
+                    gaps.push((*page_id, gap));
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -181,7 +212,7 @@ impl PdfExtractor {
                 warnings.push(warning);
             }
         }
-        Ok((runs, warnings))
+        Ok((runs, warnings, gaps))
     }
 
     /// Setzt aus einzelnen Glyphen Zeilen zusammen.
