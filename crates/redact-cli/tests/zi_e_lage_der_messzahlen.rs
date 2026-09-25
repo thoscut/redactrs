@@ -80,7 +80,14 @@ fn schnitt_wie_belege(text: &str) -> (usize, usize) {
     // dieser Runde die Begruendung des Schnitts als Kommentar, und die
     // entscheidende Zeile stand sonst jenseits des Fensters — der Nachbau haette
     // eine geschlossene Luecke fuer offen gehalten.
-    let rumpf = &quelle[ab..ab + 1_800.min(quelle.len() - ab)];
+    // Die Kante auf eine Zeichengrenze zurueckgenommen: faellt sie in ein
+    // Mehrbytezeichen (ein Gedankenstrich im Kommentar), gaebe der Schnitt
+    // sonst eine Panik statt einer Aussage.
+    let mut ende = ab + 1_800.min(quelle.len() - ab);
+    while !quelle.is_char_boundary(ende) {
+        ende -= 1;
+    }
+    let rumpf = &quelle[ab..ende];
     // Lücke 1 IST geschlossen: `changelog_block` schneidet seit dieser Runde ab
     // `## Unveröffentlicht`, nicht mehr ab der ersten `### Fix-Runde`. Der
     // Nachbau hier liest das aus dem Quelltext, statt es anzunehmen — fällt das
