@@ -3496,15 +3496,16 @@ fn changelog_block() -> String {
         "weniger als drei Fix-Runden im CHANGELOG — der Block lässt sich nicht \
          schneiden"
     );
-    // Der Schnitt beginnt bei `## Unveröffentlicht`, nicht bei der ersten
+    // Der Schnitt beginnt beim jüngsten Abschnitt — der ersten Zeile, die mit
+    // `## ` beginnt: bis zum Release-Schnitt `## Unveröffentlicht`, danach
+    // `## <Version> — <Datum>`; am Namen hängt er nicht mehr, sonst bräche
+    // jeder Release-Schnitt diese Prüfung. Nicht bei der ersten
     // `### Fix-Runde`: der VORSPANN der Release-Notizen lag sonst ausserhalb des
     // geprueften Bereichs, und genau dort stehen die Zahlen, die den Abschnitt
     // zusammenfassen („sieben Fix-Runden“, „vier stille Lecks“). Eine Zahl, die
     // eine Zusammenfassung traegt, ist so viel eine Zusage wie eine im Text —
     // und sie war ungebunden. Beleg: `zi_e_lage_der_messzahlen`.
-    let anfang = text
-        .find("\n## Unveröffentlicht")
-        .map_or(ueberschriften[0], |i| i + 1);
+    let anfang = text.find("\n## ").map_or(ueberschriften[0], |i| i + 1);
     assert!(
         anfang < ueberschriften[0],
         "der Vorspann liegt vor der ersten Fix-Runde — sonst schneidet der Block \
@@ -3771,7 +3772,7 @@ fn jede_zahl_der_letzten_runden_ist_gebunden() {
         .map(|(i, _)| block[i..].split(':').next().unwrap_or_default())
         .collect();
     assert!(
-        block.contains("## Unveröffentlicht"),
+        block.trim_start().starts_with("## "),
         "der Vorspann liegt nicht im Block — der Schnitt greift nicht mehr"
     );
     assert_eq!(

@@ -54,7 +54,9 @@ fn glatt(text: &str) -> String {
 /// `zl_e_gegenwartszahl_ohne_weg`).
 fn ganzer_abschnitt() -> String {
     let text = lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG"));
-    let marke = "\n## Unveröffentlicht";
+    // Der jüngste Abschnitt: die erste `## `-Überschrift, gleich ob sie noch
+    // `Unveröffentlicht` heißt oder schon die Fassung nennt.
+    let marke = "\n## ";
     let von = text.find(marke).expect("der Abschnitt") + 1;
     let bis = text[von + marke.len()..]
         .find("\n## ")

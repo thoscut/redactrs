@@ -42,7 +42,9 @@ fn lies(pfad: &str) -> String {
 /// Release-Notizen (`.github/workflows/release.yml`).
 fn unveroeffentlicht() -> String {
     let text = lies("CHANGELOG.md");
-    let marke = "\n## Unveröffentlicht";
+    // Der jüngste Abschnitt: die erste `## `-Überschrift, gleich ob sie noch
+    // `Unveröffentlicht` heißt oder schon die Fassung nennt.
+    let marke = "\n## ";
     let von = text.find(marke).expect("der Abschnitt") + 1;
     let bis = text[von + marke.len()..]
         .find("\n## ")

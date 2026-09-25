@@ -87,8 +87,8 @@ fn schnitt_wie_belege(text: &str) -> (usize, usize) {
     // Original zurück, wird diese Zusicherung rot.
     assert!(
         rumpf.contains("glatt(&text[anfang..ueberschriften[2]])")
-            && rumpf.contains("## Unveröffentlicht"),
-        "`changelog_block` schneidet nicht mehr ab `## Unveröffentlicht` — die \
+            && rumpf.contains(r#".find("\n## ")"#),
+        "`changelog_block` schneidet nicht mehr ab dem jüngsten `## `-Abschnitt — die \
          Lücke, die diese Datei belegt hat, ist wieder offen"
     );
 
@@ -100,9 +100,7 @@ fn schnitt_wie_belege(text: &str) -> (usize, usize) {
         ueberschriften.len() >= 3,
         "weniger als drei Fix-Runden im CHANGELOG"
     );
-    let anfang = text
-        .find("\n## Unveröffentlicht")
-        .map_or(ueberschriften[0], |i| i + 1);
+    let anfang = text.find("\n## ").map_or(ueberschriften[0], |i| i + 1);
     (anfang, ueberschriften[2])
 }
 
@@ -113,9 +111,9 @@ fn vorspann(text: &str) -> (usize, usize) {
     // Zeilenumbruch. Ein Unterschied von einem Byte liesse den Vergleich unten
     // scheitern, ohne dass an der Sache etwas faul waere.
     let von = text
-        .find("\n## Unveröffentlicht")
+        .find("\n## ")
         .map(|i| i + 1)
-        .expect("Abschnitt `## Unveröffentlicht` steht im CHANGELOG");
+        .expect("ein `## `-Abschnitt steht im CHANGELOG");
     let bis = text[von..]
         .find("\n### Fix-Runde ")
         .map(|i| von + i)

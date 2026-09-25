@@ -61,11 +61,10 @@ fn glatt(text: &str) -> String {
 /// gelesen und nicht sein jüngstes Fenster.
 fn changelog_block() -> String {
     let text = lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG"));
-    let marke = "\n## Unveröffentlicht";
-    let von = text
-        .find(marke)
-        .expect("der Abschnitt `## Unveröffentlicht`")
-        + 1;
+    // Der jüngste Abschnitt: die erste `## `-Überschrift, gleich ob sie noch
+    // `Unveröffentlicht` heißt oder schon die Fassung nennt.
+    let marke = "\n## ";
+    let von = text.find(marke).expect("der jüngste `## `-Abschnitt") + 1;
     // Das Ende ist die nächste `## `-Überschrift — aber nur **außerhalb** eines
     // eingezäunten Codeblocks. Eine Zeile `## …` in einem Block beendete den
     // Schnitt sonst still: der geprüfte Abschnitt war um Hunderte Zeilen
