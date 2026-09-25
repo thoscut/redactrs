@@ -69,16 +69,41 @@ fn a_file_beyond_the_limit_is_refused_before_it_is_read() {
 /// Ohne Schreiber am anderen Ende, und das ist der Punkt: schon das *Öffnen*
 /// einer Pipe ohne Schreiber blockiert endlos. Dass dieser Test zurückkehrt,
 /// ist die Aussage.
+///
+/// `cfg(unix)` sagt, dass es benannte Pipes gibt — nicht, dass `mkfifo` im
+/// `PATH` steht. Auf einem schlanken Unix-Bild ohne die Werkzeuge (BusyBox
+/// ohne `mkfifo`, ein Container mit `scratch`-Basis) ließ
+/// `expect("mkfifo startbar")` den Testlauf platzen, obwohl am Programm nichts
+/// falsch war — derselbe Fehler, den `belege.rs` bei `python3` schon
+/// vermeidet: fehlt das Werkzeug, ist hier nichts zu prüfen, und der Test
+/// **sagt das** und endet grün.
+///
+/// Dasselbe gilt für **jeden** Ausgang außer null — und das ist die Korrektur
+/// der Korrektur. Der Anlassfall selbst war damit nicht gedeckt: auf einem
+/// BusyBox-Bild steht der Name als Symlink im `PATH` und das Applet fehlt;
+/// `status()` liefert `Ok(exit status: 127)` und nicht `Err`. Ein Ziel ohne
+/// FIFOs (vfat, ein 9p-Bindmount), eine Verweigerung von `mknod` durch seccomp
+/// oder ein BusyBox-Wrapper tun es ebenso. Scheitert `mkfifo`, gibt es **keine**
+/// Pipe — es ist genauso nichts zu prüfen wie bei fehlendem Werkzeug, und ein
+/// harter `assert` auf das Startergebnis wäre derselbe Fehler eine Ebene höher.
 #[cfg(unix)]
 #[test]
 fn a_named_pipe_is_refused_without_opening_it() {
     let dir = tempdir("pipe");
     let path = dir.join("muster.yaml");
-    let status = std::process::Command::new("mkfifo")
-        .arg(&path)
-        .status()
-        .expect("mkfifo startbar");
-    assert!(status.success(), "mkfifo ist fehlgeschlagen");
+    let fehlt = match std::process::Command::new("mkfifo").arg(&path).status() {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!("mkfifo endete mit {status}")),
+        Err(e) => Some(format!("kein mkfifo im Pfad: {e}")),
+    };
+    if let Some(grund) = fehlt {
+        eprintln!(
+            "keine benannte Pipe angelegt ({grund}) — dass `PatternMatcher::from_config_file` \
+             eine benannte Pipe ablehnt, bleibt hier ungeprüft"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        return;
+    }
 
     match PatternMatcher::from_config_file(&path) {
         Err(RedactError::Pattern(msg)) => {

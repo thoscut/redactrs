@@ -46,8 +46,8 @@ use redact_core::{
 };
 use redact_patterns::PatternMatcher;
 use redact_pdf::document::{
-    check_target, load_from_bytes_with_limits, prescan, save_to_bytes, validate, write_file,
-    Limits, WriteOptions,
+    check_target, load_from_bytes_with_limits, prescan_pending, sane_page_boxes, save_to_bytes,
+    validate, write_file, Limits, SaneBox, WriteOptions,
 };
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
@@ -55,7 +55,7 @@ pub use crate::audit::{
     sha256_bytes, sha256_file, Applied, AuditLog, Effects, EntryEffect, PatternRecord,
 };
 pub use crate::coverage::is_coverage_gap;
-pub use crate::settings::Settings;
+pub use crate::settings::{check_padding, Settings, MAX_PADDING};
 
 /// Vorgabe für `--padding`, in Punkt.
 pub const DEFAULT_PADDING: f64 = 1.0;
@@ -564,17 +564,156 @@ pub fn load_document(bytes: &[u8], config: &Config) -> Result<Document> {
 /// `Operation`-Vektor allein**; der Spitzenbedarf eines Laufs liegt höher,
 /// siehe `SECURITY.md`) — und der kommt erst nach dieser Prüfung.
 pub fn check_limits_after_decryption(doc: &Document, limits: &Limits) -> Result<()> {
+    // 1. Die bereits im Speicher stehenden Objekte, **ohne Waisen zu übergehen**.
+    //    Siehe [`check_expanded_objects`] — das ist die Hälfte, die
+    //    [`save_to_bytes`] nicht sieht.
+    check_expanded_objects(doc, limits)?;
+
+    // 2. Die serialisierte Datei, damit auch Streams (Content-Bomben) am selben
+    //    Budget gemessen werden — die stehen im Speicher noch komprimiert und
+    //    fallen unter Schritt 1 nicht auf.
     let bytes = save_to_bytes(doc)?;
-    prescan(&bytes, limits).map_err(|e| match e {
-        // Der Zusatz sagt, welcher der beiden Durchgänge angeschlagen hat —
-        // die Datei sah von außen harmlos aus, und das gehört in die Meldung.
-        //
-        // Bewusst „entschlüsselt“ und nicht „verschlüsselt“: [`password_required`]
-        // sucht nach letzterem, und die Oberfläche fragte sonst wieder nach
-        // einem Passwort, das längst gepasst hat.
-        RedactError::Pdf(msg) => RedactError::Pdf(format!("entschlüsselt gilt weiter: {msg}")),
-        other => other,
-    })
+    prescan_pending(&bytes, limits)
+        .and_then(|pending| pending.finish(doc))
+        .map_err(|e| match e {
+            // Der Zusatz sagt, welcher der beiden Durchgänge angeschlagen hat —
+            // die Datei sah von außen harmlos aus, und das gehört in die Meldung.
+            //
+            // Bewusst „entschlüsselt“ und nicht „verschlüsselt“: [`password_required`]
+            // sucht nach letzterem, und die Oberfläche fragte sonst wieder nach
+            // einem Passwort, das längst gepasst hat.
+            RedactError::Pdf(msg) => RedactError::Pdf(format!("entschlüsselt gilt weiter: {msg}")),
+            other => other,
+        })
+}
+
+/// Prüft die **schon entpackten** Objekte im Speicher gegen `max_parsed_bytes`.
+///
+/// ## Warum diese zweite Prüfung nötig ist — gemessen
+///
+/// [`check_limits_after_decryption`] serialisierte bisher nur über
+/// [`save_to_bytes`] und ließ [`prescan`] über die Bytes laufen. Das hat eine
+/// Lücke, und die ist ausgemessen: `save_to_bytes` ruft `prune_unreachable`,
+/// **bevor** es serialisiert. Ein Objekt, das nur über die Querverweistabelle
+/// erreichbar ist und von keinem anderen Objekt referenziert wird — eine
+/// **Waise** —, fliegt dabei heraus und wird nie gemessen.
+///
+/// Eine Dictionary-Bombe in einem verschlüsselten Objekt-Stream nutzt genau
+/// das aus. Die Vorprüfung der Rohbytes ([`load_from_bytes_with_limits`]) sieht
+/// den Objekt-Stream nur als RC4-Rauschen und kann ihn nicht auspacken.
+/// `Document::load_mem_with_options` entschlüsselt ihn dann und expandiert den
+/// darin steckenden Riesen-Dict in `document.objects` — **vor** dieser Prüfung.
+///
+/// Gemessen (Release): eine 4,7-MB-Datei mit einem einzigen Dictionary aus zwei
+/// Millionen Einträgen, als Waise gebaut, trieb VmHWM auf **+824 MB** und lief
+/// mit dem Vorgabebudget von 16 MB **fehlerfrei durch** — `save_to_bytes` warf
+/// die Waise weg, `prescan` sah nichts. Dieselbe Bombe *erreichbar* gebaut wurde
+/// bei genau demselben Budget abgelehnt. Der Unterschied war allein die
+/// Erreichbarkeit, und die entscheidet ein Angreifer. Die committete, kleine
+/// Fassung samt Nachweis steht in `redact-pipeline/tests/z7_objstm_bombe.rs` und
+/// `redact-pipeline/src/testdata/bombe_objstm_verschluesselt.pdf`.
+///
+/// ## Was hier gemessen wird
+///
+/// Die **serialisierte Syntaxgröße** aller Objekte — der einzelne Dict-Eintrag
+/// mit denselben paar Byte, mit denen ihn `prescan` im Datei-Rumpf zählt, und
+/// gegen dasselbe Budget. So bekommt ein erreichbares und ein verwaistes Objekt
+/// dieselbe Antwort, und ein gewöhnliches verschlüsseltes Dokument (dessen
+/// Objekte zusammen weit unter dem Budget liegen) läuft weiter durch.
+///
+/// **Streams zählen hier nur mit ihrem Dictionary.** Ihr Inhalt steht im
+/// Speicher noch komprimiert; ihn misst Schritt 2 über `prescan`, das ihn
+/// auspackt. Hier ihn aufzublasen hieße, die Bombe zum Messen erst scharf zu
+/// machen.
+///
+/// ## Was diese Prüfung **nicht** heilt
+///
+/// Der Spitzenspeicher entsteht **in** `load_mem_with_options`, also bevor eine
+/// einzige Zeile hier läuft — die 824 MB oben sind schon belegt, wenn diese
+/// Funktion beginnt. `lopdf` bietet keinen Haken, um das Auspacken eines
+/// verschlüsselten Objekt-Streams zu begrenzen, und der Inhalt lässt sich vor
+/// dem Entschlüsseln nicht sehen. Was diese Prüfung leistet: die Datei wird
+/// **abgelehnt statt angenommen**, und zwar bevor die Analyse (Extraktion,
+/// Konfliktauflösung, Schwärzung) auf demselben Riesen-Dict noch einmal
+/// Speicher darauflegt — und bevor `save_to_bytes` ihn für eine *erreichbare*
+/// Bombe ein zweites Mal klont. Der Rest ist eine Grenze von `lopdf`, nicht von
+/// dieser Stelle; sie ist hier benannt, damit niemand sie für geschlossen hält.
+fn check_expanded_objects(doc: &Document, limits: &Limits) -> Result<()> {
+    let budget = limits.max_parsed_bytes;
+    let mut total: u64 = 0;
+    // Ein ausdrücklicher Arbeitsstapel statt Rekursion: eine tief verschachtelte
+    // Struktur soll die Prüfung nicht ihrerseits über den Stack kippen. `lopdf`
+    // deckelt die Tiefe zwar bei 100, aber diese Prüfung verlässt sich nicht auf
+    // fremde Grenzen.
+    let mut stack: Vec<&lopdf::Object> = doc.objects.values().collect();
+    while let Some(obj) = stack.pop() {
+        total = total.saturating_add(object_syntax_bytes(obj, &mut stack));
+        if total > budget {
+            return Err(RedactError::Pdf(format!(
+                "entschlüsselt gilt weiter: die entpackten Objekte überschreiten \
+                 das Budget von {} MB. Nach dem Entschlüsseln stehen sie als \
+                 `lopdf::Object` im Speicher — je Dictionary-Eintrag 200 bis 270 \
+                 Byte, unabhängig davon, wie kurz er geschrieben ist. Ein \
+                 verschlüsselter Objekt-Stream lässt sich vorher nicht auspacken; \
+                 deshalb wird hier gemessen. Ein wirklich so großes Dokument \
+                 lässt sich mit --max-parsed-mb durchlassen.",
+                budget / (1024 * 1024)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Die serialisierte Syntaxgröße **dieses einen** Objekts (ohne seine Kinder);
+/// Kinder werden auf `stack` gelegt, damit die Prüfung früh abbrechen kann.
+///
+/// Die Zahlen sind Näherungen an das, was `lopdf` schreiben würde — es kommt
+/// nicht auf das einzelne Byte an, sondern darauf, dass eine Bombe aus vielen
+/// Einträgen die Größenordnung ihrer Serialisierung erreicht (gemessen: rund 12
+/// Byte je Eintrag, hier `1 + Schlüssellänge + 1 + Wert`).
+fn object_syntax_bytes<'a>(obj: &'a lopdf::Object, stack: &mut Vec<&'a lopdf::Object>) -> u64 {
+    use lopdf::Object::*;
+    match obj {
+        Null => 4,
+        Boolean(_) => 5,
+        Integer(i) => integer_digits(*i),
+        Real(_) => 12,
+        Name(v) => 1 + v.len() as u64,
+        String(v, _) => 2 + v.len() as u64,
+        Reference(_) => 8,
+        Array(items) => {
+            for it in items {
+                stack.push(it);
+            }
+            2 + items.len() as u64
+        }
+        Dictionary(dict) => {
+            let mut own = 4u64;
+            for (k, v) in dict.iter() {
+                own += 2 + k.len() as u64;
+                stack.push(v);
+            }
+            own
+        }
+        Stream(s) => {
+            // Nur das Dictionary — der Inhalt steht komprimiert da und wird von
+            // `prescan` gemessen.
+            let mut own = 4u64;
+            for (k, v) in s.dict.iter() {
+                own += 2 + k.len() as u64;
+                stack.push(v);
+            }
+            own
+        }
+    }
+}
+
+/// Stellenzahl einer ganzen Zahl in Dezimalschreibweise (mit Vorzeichen).
+fn integer_digits(i: i64) -> u64 {
+    if i == 0 {
+        return 1;
+    }
+    (i < 0) as u64 + i.unsigned_abs().ilog10() as u64 + 1
 }
 
 /// Liest die Eingabedatei — mit einer Obergrenze **vor** dem ersten Byte.
@@ -802,6 +941,31 @@ pub fn run(config: &Config) -> Result<Outcome> {
                 }
                 write_review_file(&path, &review, config)?;
                 outcome.review_out = Some(path.display().to_string());
+
+                // **Und die geheilte Seite gehört auch hier gesagt** — aus
+                // demselben Grund wie [`detection_notice`] drei Dutzend Zeilen
+                // weiter oben, nur schärfer: `--review` ist die Stelle, an der
+                // jemand die Koordinaten von Hand prüft, und die in der Datei
+                // stehenden Rechtecke sind auf einem Blatt gerechnet, das
+                // dieses Dokument nicht angibt. Gemessen (vor dieser Zeile):
+                // `--review` über eine Seite mit `/MediaBox [0 0 0 0]` schrieb
+                // `{ll:(100.9,697.8), ur:(239.89,707.5)}` — A4-Koordinaten für
+                // ein Blatt, das sich selbst als 0 x 0 ausgibt —, sagte kein
+                // Wort dazu und endete mit Rückgabewert 0, Zeile für Zeile wie
+                // dieselbe Datei mit gesunder MediaBox.
+                //
+                // Die Trennlinie, an der das hier entschieden wird: eine
+                // Aussage über das **gelesene Dokument** gehört auf beide Wege,
+                // eine Aussage über das **Ergebnis der Schwärzung** nur auf den
+                // Weg, der schwärzt. Der Satz kommt aus `sane_page_boxes(doc)`,
+                // fragt also allein das geladene Dokument — und steht deshalb
+                // hier. Was [`apply`] danach anfügt (Wirkungsprüfung,
+                // Bildkodierung), gibt es ohne Schwärzung nicht und fehlt hier
+                // zu Recht.
+                push_warnings(
+                    &mut outcome.warnings,
+                    healed_page_warnings(&sane_page_boxes(&doc)),
+                );
                 return Ok(outcome);
             }
 
@@ -863,10 +1027,19 @@ pub fn apply(
     // `redact_pdf::document::sane_page_boxes` genauso. Nähme diese Stelle die
     // Rohangabe, fiele auf so einer Seite **jedes** Rechteck als „neben dem
     // Blatt“ heraus — dieselbe Divergenz, nur andersherum.
-    let sheets: Vec<Rect> = redact_pdf::document::sane_page_boxes(doc)
-        .into_iter()
-        .map(|box_| box_.rect)
-        .collect();
+    let checked = sane_page_boxes(doc);
+
+    // **Und die Heilung gehört gesagt**, auf beiden Wegen. Bis hierher war sie
+    // still: die Kommandozeile ersetzte die unbrauchbare Angabe, rechnete
+    // weiter und schrieb eine Zusammenfassung, die von einer gewöhnlichen
+    // Datei nicht zu unterscheiden war. Die Oberfläche sagte es (ihr eigener
+    // Satz beim Laden) — dieselbe Klasse Fehler wie eine Kette, die nur eines
+    // der beiden Programme durchläuft. Der Satz kommt deshalb aus derselben
+    // Quelle wie die Entscheidung selbst, [`SaneBox::warning`], und steht hier
+    // in der gemeinsamen Hälfte.
+    push_warnings(&mut outcome.warnings, healed_page_warnings(&checked));
+
+    let sheets: Vec<Rect> = checked.iter().map(|box_| box_.rect).collect();
 
     let output = plan_outputs(config)?.ok_or_else(|| {
         RedactError::Config("ohne --review muss das Ausgabeziel feststehen".into())
@@ -941,12 +1114,161 @@ pub fn apply(
 /// Wirkungsprüfung — und beschreiben teils denselben Befund (etwa ein
 /// Rasterbild, das sowohl beim Lesen als auch beim Überdecken auffällt). Im
 /// Audit-Log soll jeder Befund genau einmal stehen.
+///
+/// # Warum ein Set und keine lineare Suche
+///
+/// `target.contains(&warning)` vergleicht die neue Warnung mit **jeder** schon
+/// eingetragenen; über eine ganze Liste ist das Aufwand mal Aufwand. Gemessen
+/// an Warnungen von je rund 130 Zeichen (`cargo test -p redact-pipeline
+/// --release`): 10 000 Stück 0,148 s, 20 000 Stück 0,359 s, 40 000 Stück
+/// 2,528 s — die vierfache Menge kostete das Siebzehnfache.
+///
+/// Ein Absturz oder Hänger war das nicht (die Seitenzahl ist durch das
+/// Parse-Budget gedeckelt), aber es ist dieselbe Bauart, die in dieser Runde an
+/// drei anderen Stellen ersetzt wurde. Das Set macht daraus einen Durchgang je
+/// Aufruf. Gegen präparierte Eingaben trägt es zusätzlich: Rusts
+/// Vorgabe-Hasher ist je Prozess zufällig gesalzen, Kollisionen lassen sich
+/// also nicht aus einer Datei heraus erzwingen.
+///
+/// Die Reihenfolge bleibt die alte — erste Nennung gewinnt, spätere Dubletten
+/// fallen weg. Das Audit-Log vergleicht `cli_and_gui_agree` Feld für Feld.
 pub fn push_warnings(target: &mut Vec<String>, warnings: Vec<String>) {
-    for warning in warnings {
-        if !target.contains(&warning) {
+    // Zwei Durchgänge, damit `bekannt` (das in `target` **und** `warnings`
+    // hineinzeigt) ausgelaufen ist, bevor `target` wächst. Kopiert wird dabei
+    // nichts: der Merkzettel ist ein Bit je Warnung.
+    let behalten: Vec<bool> = {
+        let mut bekannt: std::collections::HashSet<&str> =
+            target.iter().map(String::as_str).collect();
+        warnings
+            .iter()
+            .map(|w| bekannt.insert(w.as_str()))
+            .collect()
+    };
+    for (warning, behalten) in warnings.into_iter().zip(behalten) {
+        if behalten {
             target.push(warning);
         }
     }
+}
+
+/// Was einer geheilten Seite hinterhergesagt werden muss.
+///
+/// Der Schlussteil jedes Satzes aus [`healed_page_warnings`]. Er steht getrennt,
+/// weil der Anfang aus [`SaneBox::warning`] kommt — dem Satz, den auch der
+/// Rasterizer benutzt — und weil er nur **einmal je Satz** vorkommt, nicht
+/// einmal je Seite.
+///
+/// Deshalb spricht er von „dort“ und nicht von „dieser Seite“: seit die Sätze
+/// zusammengefasst werden, kann ein Satz für eine Seite gelten oder für
+/// zwanzigtausend.
+const HEALED_PAGE_CONSEQUENCE: &str = "Was die Datei über die Größe dort sagt, \
+     gilt damit nicht. Das Deck-Rechteck wird an der Stelle gezeichnet, an der der \
+     Text stand; ob es zu sehen ist, entscheidet der Betrachter, der ebenso heilen \
+     muss. Und die Wirkungsprüfung ist dort gegen A4 gemessen, nicht gegen die \
+     Angabe der Datei. Bitte das Ergebnis dort von Hand prüfen.";
+
+/// Ein Satz je **Beanstandung**, mit der Liste der Seiten, für die er gilt.
+///
+/// ## Warum das hier steht
+///
+/// Die Heilung selbst gibt es längst und an genau einer Stelle
+/// ([`redact_pdf::document::sane_box`]); Rasterizer, Oberfläche und [`apply`]
+/// fragen dort. **Gesagt** wurde sie aber nur in der Oberfläche. Ein Lauf über
+/// eine einseitige Datei mit `/MediaBox [0 0 0 0]` endete auf der
+/// Kommandozeile mit „Entfernte Zeichen: 28“, Rückgabewert 0 und keiner
+/// einzigen Warnung — von einer gewöhnlichen Datei nicht zu unterscheiden.
+///
+/// Der erste Halbsatz ist deshalb wörtlich [`SaneBox::warning`], also derselbe
+/// Satz, den der Rasterizer schon an die gezeichnete Seite hängt; hinzu kommen
+/// die Seitenzahlen (1-basiert, wie überall in der Ausgabe) und
+/// [`HEALED_PAGE_CONSEQUENCE`].
+///
+/// ## Warum zusammengefasst wird
+///
+/// Vorher entstand **je Seite** ein vollständiger Satz von rund 410 Zeichen,
+/// von denen 350 Folgetext waren. Gemessen an einer Datei mit 20 000 entarteten
+/// Seiten (5,4 MB): 20 000 Zeilen auf stderr, und das Audit-Log wuchs von
+/// 11,1 MB (dieselbe Datei mit gesunder MediaBox) auf 19,4 MB. Kein Absturz und
+/// kein Hänger — aber die Nachbarn in [`crate::audit::Effects::warnings`] sagen
+/// dasselbe seit jeher in einem Satz mit Seitenliste, und ein Vorbehalt, der
+/// zwanzigtausend Zeilen lang ist, wird nicht gelesen.
+///
+/// Gruppiert wird nach dem Wortlaut aus [`SaneBox::warning`], nicht über alle
+/// geheilten Seiten hinweg: darin steht die **Rohangabe** der Datei („0 x 0“,
+/// „300000 x 300000“), und Seiten mit verschiedenen Angaben in einen Satz zu
+/// ziehen hieße, eine davon falsch wiederzugeben. Eine Datei, die auf jeder
+/// Seite eine *andere* unbrauchbare MediaBox nennt, bekommt deshalb weiterhin
+/// einen Satz je Seite — dort ist die Auskunft je Seite wirklich eine andere.
+///
+/// ## Warum es eine Deckungslücke ist (Rückgabewert 3)
+///
+/// Weil der zweite Teil von [`crate::coverage`]s Definition zutrifft: gelesen
+/// wurde die Seite vollständig — **nachgemessen** wurde das Ergebnis aber gegen
+/// ein Blatt, das in der Datei nicht steht. Die Wirkungsprüfung
+/// ([`crate::audit::EntryEffect::of`]) fragt „liegt das Rechteck auf dem
+/// Blatt?“ und bekommt hier eine Antwort über A4. Gemessen an
+/// `/MediaBox [0 0 300000 300000]` mit Text bei (250000, 250000): der Lauf
+/// meldet „liegen vollständig neben der Seite“ — gegen die Angabe der Datei
+/// läge dasselbe Rechteck mitten darauf. Beide Antworten sind möglich, und
+/// welche stimmt, hängt an einem Blatt, das dieses Programm sich ausgedacht
+/// hat. Dazu kommt die Ausgabedatei: sie behält die unbrauchbare MediaBox
+/// (nachgesehen in den geschriebenen Bytes), und ob das Deck-Rechteck darin zu
+/// sehen ist, entscheidet der Betrachter, der genauso heilen muss. Für diese
+/// Seite kann der Lauf nicht einstehen — das ist der Unterschied zwischen
+/// Rückgabewert 0 und 3.
+///
+/// **Was diese Begründung ausdrücklich nicht ist.** Hier stand vorher, der
+/// Beweis sei der Widerspruch zwischen „Entfernte Zeichen: 28“ und „der Text
+/// der Seite steht unverändert in der Ausgabe“. Der trägt nicht: gemessen an
+/// `/MediaBox [0 0 -595 -842]` sagt derselbe Lauf **beides** und endet mit
+/// Rückgabewert 0. Dort wird nichts geheilt — `sane_box` normalisiert die
+/// vertauschten Ecken zu einem gewöhnlichen A4-Blatt im negativen Quadranten —,
+/// und das Rechteck liegt wirklich daneben. Der Widerspruch gehört also dem
+/// Wortlaut der Off-Page-Warnung und nicht der Heilung; er kann die 3 hier
+/// nicht begründen.
+///
+/// Lärm wird daraus nicht: [`redact_pdf::document::sane_box`] greift erst
+/// außerhalb von 1 pt … 200 000 pt oder bei nicht endlichen Werten. Jedes
+/// gewöhnliche Blatt — A4, Letter, ein Scan, eine Plakatseite — liegt weit
+/// innerhalb und löst hier nichts aus.
+pub fn healed_page_warnings(boxes: &[SaneBox]) -> Vec<String> {
+    // Nach Wortlaut gruppiert, in der Reihenfolge der ersten Nennung. Die
+    // Karte hält den Platz in `gruppen`, damit das Zusammenlegen ein Durchgang
+    // bleibt und nicht Seitenzahl mal Beanstandungen kostet — bei einer Datei,
+    // die auf jeder Seite eine andere Angabe macht, wären das dieselben
+    // Aufwand-mal-Aufwand-Kosten wie in [`push_warnings`].
+    let mut gruppen: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut platz: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (page, checked) in boxes.iter().enumerate() {
+        let Some(note) = checked.warning() else {
+            continue;
+        };
+        match platz.get(&note) {
+            // Das `+ 1` ist die einzige erlaubte Umrechnung: Fließtext sagt
+            // „Seite 1“, JSON zählt ab 0 — wie bei den Nachbarn in `audit.rs`.
+            Some(&i) => gruppen[i].1.push(page + 1),
+            None => {
+                platz.insert(note.clone(), gruppen.len());
+                gruppen.push((note, vec![page + 1]));
+            }
+        }
+    }
+    let total = boxes.len();
+    gruppen
+        .into_iter()
+        .map(|(note, seiten)| {
+            let liste = seiten
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Seite {liste}: {note}. Betrifft {} von {total} Seite(n). \
+                 {HEALED_PAGE_CONSEQUENCE}",
+                seiten.len()
+            )
+        })
+        .collect()
 }
 
 /// Zeitbremse: die Konfliktauflösung wächst **überproportional** mit der
@@ -1167,9 +1489,10 @@ pub fn load_manual_regions(
     // hier durchgehen, sind JSON von Hand gepflegter Größe; die Grenze greift
     // vor `serde_json`, und darauf kommt es an.
     let data = read_aux_text(path, AUX_LIMIT_HINT)?;
-    if let Ok(regions) = serde_json::from_str::<Vec<Region>>(&data) {
-        return Ok(regions.into_iter().map(normalize_region).collect());
-    }
+    let list_error = match serde_json::from_str::<Vec<Region>>(&data) {
+        Ok(regions) => return Ok(regions.into_iter().map(normalize_region).collect()),
+        Err(e) => e,
+    };
     match ReviewFile::from_json(&data) {
         Ok(review) => {
             check_review_identity(&review, document_sha, allow_unverified)?;
@@ -1180,10 +1503,21 @@ pub fn load_manual_regions(
                 .map(|i| normalize_region(i.region))
                 .collect())
         }
-        Err(e) => Err(RedactError::Parse(format!(
-            "{}: weder eine Regionsliste noch eine Review-Datei ({e})",
-            path.display()
-        ))),
+        Err(review_error) => {
+            // Zwei Lesarten, eine Meldung: die zu der Form, die die Datei
+            // erkennbar hat. Ein JSON-Array ist eine Regionsliste — deren
+            // Fehler („"page": … ist keine Seitenzahl“) hilft; „expected
+            // struct ReviewFile“ für dieselbe Datei hülfe nicht.
+            let cause = if data.trim_start().starts_with('[') {
+                list_error.to_string()
+            } else {
+                review_error.to_string()
+            };
+            Err(RedactError::Parse(format!(
+                "{}: weder eine Regionsliste noch eine Review-Datei ({cause})",
+                path.display()
+            )))
+        }
     }
 }
 
@@ -1219,9 +1553,16 @@ pub fn review_identity(review_sha: &str, document_sha: &str) -> ReviewIdentity {
     }
 }
 
-/// Die ersten Stellen einer Prüfsumme — mehr braucht eine Meldung nicht.
+/// Die ersten zwölf **Zeichen** einer Prüfsumme — mehr braucht eine Meldung
+/// nicht.
+///
+/// Zeichen, nicht Bytes: die Prüfsumme aus der Review-Datei ist Fremdmaterial
+/// (`--apply-review`, `--manual-regions`), und `"sha256": "aaaaaaaaaaaä"`
+/// ließ den Byte-Schnitt `&sha[..12]` mitten im `ä` landen — Panik, Rückgabe
+/// 101, statt der Meldung „gehört zu einem anderen Dokument“.
 fn short_sha(sha: &str) -> &str {
-    &sha[..sha.len().min(12)]
+    let ende = sha.char_indices().nth(12).map_or(sha.len(), |(i, _)| i);
+    &sha[..ende]
 }
 
 /// Stellt sicher, dass eine Review-Datei zum Dokument gehört.
@@ -1353,13 +1694,21 @@ pub fn plan_outputs(config: &Config) -> Result<Option<PathBuf>> {
 ///
 /// Das `+ 1` ist Absicht und die einzige erlaubte Umrechnung: Fließtext sagt
 /// „Seite 1“, JSON zählt ab 0 (siehe [`audit::AuditEntry::page`]).
+///
+/// `saturating_add`, weil `BlockedRegion::page` über
+/// `blocked_by_negative_list` einer Review-Datei aus fremder Hand kommt: bei
+/// `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build über und löste
+/// eine Panic aus; im Release-Build stünde „Seite 0“ da. Die erste
+/// Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der
+/// Deserialisierung; diese hier gilt für jeden Aufrufer, der die Struktur
+/// selbst baut.
 pub fn describe_blocked(blocked: &[BlockedRegion]) -> Vec<String> {
     blocked
         .iter()
         .map(|b| {
             format!(
                 "Seite {}: „{}“ (Buchung {}) blockiert {}",
-                b.page + 1,
+                b.page.saturating_add(1),
                 b.pattern,
                 b.booking_id,
                 b.blocked_reason.as_deref().unwrap_or("einen Treffer")
@@ -1396,6 +1745,26 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )
+    }
+
+    /// Zweite Verteidigung hinter `MAX_PAGE_INDEX`, Gegenstück zu
+    /// `absurd_page_numbers_do_not_panic_in_warnings` in `audit.rs`.
+    #[test]
+    fn absurd_page_numbers_do_not_panic_in_labels() {
+        let blocked = BlockedRegion {
+            page: usize::MAX,
+            rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+            pattern: "Max".into(),
+            booking_id: "b003".into(),
+            blocked_reason: None,
+        };
+        let labels = describe_blocked(&[blocked]);
+        assert_eq!(labels.len(), 1);
+        assert!(
+            labels[0].starts_with("Seite 18446744073709551615:"),
+            "{}",
+            labels[0]
+        );
     }
 
     #[test]
@@ -1682,13 +2051,21 @@ mod tests {
             "mit ausreichendem Budget muss dieselbe Datei laden"
         );
 
-        // Enger als das harmlose Prüf-PDF: auch das fällt durch.
+        // Enger als die Bombe: dieselbe Datei fällt durch.
+        //
+        // Geprüft wird an **derselben** Datei, damit sich nur eines ändert:
+        // die Zahl in `config.limits`. Ein Budget von 1 Byte täte es nicht
+        // mehr — die Vorprüfung verbucht seit 0.7.0 auch den Rumpf der Datei
+        // und griffe schon vor der Entschlüsselung. Sie hat recht damit; nur
+        // belegt sie dann nicht mehr, was dieser Test belegen soll. 1 MB
+        // liegt über dem Rumpf dieser Datei und weit unter den 32 MB, die
+        // ihr Content-Stream entpackt ergibt.
         config.limits = Limits {
-            max_parsed_bytes: 1,
+            max_parsed_bytes: 1024 * 1024,
             ..Limits::default()
         };
-        let error = load_document(testing::ENCRYPTED_PDF, &config)
-            .expect_err("mit Budget 1 kommt nichts durch")
+        let error = load_document(testing::ENCRYPTED_BOMB_PDF, &config)
+            .expect_err("mit 1 MB Budget kommt die 32-MB-Bombe nicht durch")
             .to_string();
         assert!(error.contains("entschlüsselt gilt weiter"), "{error}");
     }

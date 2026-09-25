@@ -697,7 +697,10 @@ fn b1_arrow_keys_do_not_move_a_region_on_a_page_that_is_not_shown() {
         app.state.regions[0].region.source
     );
     // Und es steht dort, statt nur nicht zu passieren.
-    assert_eq!(app.state.status, crate::state::selection_on_other_page(0));
+    assert_eq!(
+        app.state.status,
+        crate::state::selection_on_other_page(0, crate::state::NudgeKind::Move)
+    );
     assert!(app.state.status.contains("Seite 1"), "{}", app.state.status);
     assert!(app.state.status.contains("Esc"), "{}", app.state.status);
 

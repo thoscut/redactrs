@@ -608,7 +608,11 @@ fn standard_14_fonts_render_through_the_bundled_fallback() {
 
     assert!(!page.degraded, "{:?}", page.warnings);
     assert!(page.drawn_ops >= 14, "nur {} Glyphen", page.drawn_ops);
-    assert!(renderer.font_count() > 0, "kein Font geladen");
+    // Hier stand `renderer.font_count() > 0`. Die Zeile war der einzige Nutzer
+    // einer öffentlichen Methode und hat nichts gehalten, was die beiden
+    // Nachbarn nicht schon halten: 14 gezeichnete Glyphen und ein
+    // Nicht-Weiß-Anteil über 0,1 % sind ohne geladenes Fontprogramm nicht zu
+    // haben. Nachgemessen: beides entfernt ⇒ 47 Testprogramme grün.
     assert!(
         non_white_ratio(&page) > 0.001,
         "Ersatzfont hat nichts gezeichnet: {:.5}",

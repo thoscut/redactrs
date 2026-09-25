@@ -853,6 +853,35 @@ fn images_in_form_xobjects_and_with_indirect_width_are_found_too() {
     );
 }
 
+/// Befund G1-C3, zweite Stelle: auch `page_has_images` liest die Seite über
+/// `filters::page_content`. Auf einer `ASCIIHexDecode`-kodierten Seite fand
+/// `Document::get_page_content` (kennt den Filter nicht) kein `BI`, und die
+/// Warnung „enthält Rasterbilder“ blieb aus.
+#[test]
+fn an_inline_image_on_a_hex_encoded_page_is_seen() {
+    let raw: &[u8] = b"q 10 0 0 10 50 600 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x80 EI Q\n";
+    let hex: String = raw.iter().map(|b| format!("{b:02X}")).collect::<String>() + ">";
+    for encoded in [false, true] {
+        let mut doc = build(Vec::new(), &[""]);
+        let page_id = *doc.get_pages().values().next().unwrap();
+        let content_id = doc.get_page_contents(page_id)[0];
+        let stream = if encoded {
+            Stream::new(
+                dictionary! { "Filter" => "ASCIIHexDecode" },
+                hex.clone().into_bytes(),
+            )
+            .with_compression(false)
+        } else {
+            Stream::new(dictionary! {}, raw.to_vec())
+        };
+        doc.objects.insert(content_id, Object::Stream(stream));
+        assert!(
+            redact_pdf::image::page_has_images(&doc, page_id),
+            "encoded={encoded}: das Inline-Bild wurde übersehen"
+        );
+    }
+}
+
 #[test]
 fn a_page_without_images_gets_no_image_warning() {
     let mut doc = build(Vec::new(), &["q 1 0 0 1 0 0 cm Q\n"]);

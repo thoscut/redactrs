@@ -26,7 +26,7 @@
 //! über [`ContentSink::wants_graphics`] danach fragt; für die reine
 //! Textextraktion kostet der Ausbau also nichts.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use lopdf::content::Operation;
@@ -103,13 +103,22 @@ const MAX_GLYPHS_PER_SCAN: usize = 1_000_000;
 /// trägt einige hundert Operationen) und zugleich weit unter dem, was ohne
 /// Decke möglich wäre.
 ///
-/// Gezählt werden **nicht nur** Operationen: ein [`PlacedStream`] hält auch
-/// eine Kopie des aufgelösten `/Resources` (siehe [`stream_cost`]). Ein Strom
-/// mit *null* Operationen zählte sonst *null* und wäre damit gratis. Gemessen
-/// an Formularen mit leerem Rumpf und je 800 Ressourceneinträgen: der Scan
-/// legte 12,8 kB je Strom an — über das hinaus, was das Dokument selbst
-/// belegt —, und zwar linear ohne Ende (2 000 Ströme 25,5 MB, 5 000 Ströme
-/// 62,6 MB), während der Zähler die ganze Zeit „0“ ablas.
+/// Gezählt werden **nicht nur** Operationen: auch die
+/// `/Resources`-Verzeichnisse (siehe [`stream_cost`] und
+/// [`Budget::resource_dicts`]). Ein Strom mit *null* Operationen zählte sonst
+/// *null* und wäre damit gratis. Gemessen an Formularen mit leerem Rumpf und je
+/// 800 Ressourceneinträgen: der Scan legte 12,8 kB je Strom an — über das
+/// hinaus, was das Dokument selbst belegt —, und zwar linear ohne Ende
+/// (2 000 Ströme 25,5 MB, 5 000 Ströme 62,6 MB), während der Zähler die ganze
+/// Zeit „0“ ablas.
+///
+/// **Wo genau das anfällt, entscheidet, wie es zu zählen ist.** Ein
+/// Verzeichnis mit **eigener Objekt-Id** wird geteilt: *n* Formulare, die es
+/// erben, kosten es einmal, und es wiegt hier einmal. Ein direkt im Stromdict
+/// eingebettetes gehört genau einem Strom und wiegt bei dessen Eintrag. Wer
+/// beides gleich behandelte, zählte entweder dasselbe *n*-mal (falsche Zahl)
+/// oder eine echte *n*-fache Kopie einmal (die Lücke, aus der 1 037 MB aus
+/// einer 7,6-MB-Datei wurden).
 ///
 /// Wichtig: gerade der gefährliche Fall braucht kaum Platz. Ein
 /// Zwischenspeicher zahlt sich nur aus, wenn **derselbe** Strom mehrfach
@@ -153,6 +162,132 @@ const MAX_CACHED_OPERATIONS: usize = 100_000;
 /// sondern nur nichts mehr aufgenommen; was darüber liegt, wird je Platzierung
 /// neu geladen wie vor der Änderung.
 const MAX_CACHED_FONT_ENTRIES: usize = 400_000;
+
+/// Wie viele Schrift-Tabelleneinträge ein Seiten-Scan insgesamt aufmachen
+/// darf, bevor die Datei **abgelehnt** wird.
+///
+/// [`MAX_CACHED_FONT_ENTRIES`] ist eine weiche Decke: sie sagt nur, was
+/// *gemerkt* wird. Was ein Verzeichnis geladen hat, bleibt daneben trotzdem
+/// vollständig lebendig — [`load_font_map`](Budget::load_font_map) legt jede
+/// Schrift des Verzeichnisses in dieselbe [`FontMap`], und die hält der
+/// Interpreter, solange er in diesem Strom ist. Die weiche Decke sieht das
+/// nicht.
+///
+/// Gemessen (zählender Allokator, Release, je Schrift eine `/ToUnicode` über
+/// den vollen Bereich von 65 536 Einträgen, alle in **einem** `/Resources`;
+/// gesetzt wird nur mit der ersten):
+///
+/// | Schriften | Datei    | Spitze  |
+/// |----------:|---------:|--------:|
+/// |         1 |   0,9 kB |  4,0 MB |
+/// |        10 |   4,9 kB | 39,8 MB |
+/// |        50 |  22,5 kB | 198,9 MB |
+/// |       100 |  44,8 kB | 397,7 MB |
+///
+/// Linear, rund 4 MB je Schrift, bei rund 450 Byte Dateizuwachs je Schrift —
+/// **Faktor 9 000**, und ohne jede Decke. Eine Datei von einem Megabyte käme
+/// so auf neun Gigabyte.
+///
+/// Warum **ablehnen** und nicht stillschweigend weniger laden: eine Schrift,
+/// die nicht geladen ist, hat keine `/ToUnicode`-Zuordnung, und ihr Text wird
+/// dann falsch oder gar nicht dekodiert. Für ein Werkzeug, das Geheimnisse
+/// suchen soll, ist „ich habe den Text nicht gelesen“ kein zulässiges
+/// Zwischenergebnis — das ist dieselbe Begründung wie bei
+/// [`crate::document::Limits`].
+///
+/// Warum diese Zahl: sie muss über dem liegen, was ein ehrliches Dokument
+/// braucht, und darunter, was die Maschine umwirft. Eine Million Einträge sind
+/// nach der Abschätzung in [`FontInfo::weight`] rund 60 MB und entsprechen
+/// **fünfzehn** CJK-Schriften vollen Umfangs auf einer Seite. Eine Seite mit
+/// fünf bis zehn Schriften ist normal; fünfzehn *volle* CJK-Schriften ist es
+/// nicht. Der Test `rev4_interpreter_ceilings::die_schriftendecke_haelt`
+/// (sieben mal 65 536 = 458 752) liegt ausdrücklich darunter und läuft
+/// weiterhin durch.
+///
+/// Gezählt wird je **Schriftobjekt genau einmal** (siehe
+/// [`Budget::charged_fonts`]) — dieselbe Schrift unter zweihundert Namen oder
+/// in zwanzig Verzeichnissen kostet einmal.
+const MAX_FONT_ENTRIES_PER_SCAN: usize = 1_000_000;
+
+/// Wie viele **Zuordnungen zwischen einem Textspiegel und dem, was unter ihm
+/// steht**, ein Seiten-Scan insgesamt führen darf.
+///
+/// Gezählt wird `Σ|record.forms|` bzw. `Σ|record.shows|` — an **drei**
+/// Stellen, an denen diese Zuordnungen entstehen, und zwar je Stelle einmal:
+///
+/// * beim **Aufbau** in [`scan_marked_text`]: jede Spiegel-Klammer nimmt jedes
+///   `Do` in ihrem Bereich auf. `B` verschachtelte `BDC`-Klammern über `D`
+///   Platzierungen ergeben `B × D` Paare — aus einer Datei, die dafür keinen
+///   Inhalt mitbringen muss;
+/// * ebenda für die **Textoperationen**: dieselbe Produktstruktur, nur die
+///   andere Liste (`B × S`). Sie stand bis Fix-Runde 7 unter keiner Schranke —
+///   6 000 Klammern über 6 000 `Tj` aus 263 kB ergaben 36 Mio. Zuordnungen,
+///   und der Extraktor lief darüber 31,1 s (Debug, eigener Prozess);
+/// * beim **Aufklappen** in [`ScanResult::close_forms`]: zeichnet ein Formular
+///   im Bereich seinerseits Formulare, kommt jede dieser Platzierungen dazu.
+///
+/// Drei Zähler, eine Zahl: sie messen verschiedene Arbeit (Klammern × `Do`,
+/// Klammern × `Tj`, und der Baum der Formulare darunter), und keiner soll den
+/// anderen aufbrauchen. Zusammen tragen sie höchstens 300 000 Zuordnungen,
+/// also rund 24 MB.
+///
+/// Bis Fix-Runde 6 zählte nur die zweite Stelle, und ihre Zahl war lokal in
+/// der Schließung. Der Aufbau lief ganz ohne Schranke und vor der ersten
+/// gezählten Operation.
+/// Gemessen (Debug, je eigener Prozess, `zf_q3_kombinatorik::mess_ein_fall`):
+///
+/// | Datei (Klammern × `Do`) | vorher | nachher |
+/// |---|---|---|
+/// | 92 kB (2 000 × 2 000)  | 4,71 s / 268 MB    | 0,26 s / 22 MB |
+/// | 184 kB (4 000 × 4 000) | 20,6 s / 1 036 MB  | 0,41 s / 30 MB |
+/// | 276 kB (6 000 × 6 000) | 41,7 s / 2 306 MB  | 0,56 s / 38 MB |
+///
+/// (Debug, je eigener Prozess, `VmHWM`; die dritte Zeile vorher ist die
+/// Messung des Gegenprüfers, die ersten beiden nachgestellt — 4,4 s / 268 MB
+/// und 17,5 s / 1 036 MB bei ihm.) Dieselbe Struktur **ohne** `/ActualText`
+/// braucht 0,15 s / 14 MB: der ganze Unterschied lag an dieser einen Liste.
+/// Der Fall, in dem die alte Decke zu spät griff (138 kB, 9 Mio.
+/// Grundplatzierungen unter den Spiegeln: 16,6 s, 601 MB, Rückgabewert 3),
+/// braucht jetzt 0,56 s und 33 MB.
+///
+/// **Platzierung, nicht Formular.** Dasselbe Formular zweimal unter einem
+/// Spiegel zeichnet zweimal und zählt zweimal (siehe
+/// [`ScanResult::close_forms`]).
+///
+/// 100 000 sind die Decke. Kosten der Schließung, gemessen (Debug,
+/// `ze_p2_spiegel::mess_zehntausend_platzierungen`, dieselbe Seite je einmal
+/// mit und einmal ohne den Spiegel darüber):
+///
+/// | Platzierungen | ohne Spiegel | mit Spiegel | Mehrspeicher |
+/// |--------------:|-------------:|------------:|-------------:|
+/// |        10 000 |      0,31 s  |     0,30 s  |      0,6 MB  |
+/// |        20 000 |      0,60 s  |     0,64 s  |      2,8 MB  |
+/// |110 000 (Decke)|      3,29 s  |     3,53 s  |      8,5 MB  |
+///
+/// Ein Paar kostet rund 80 Byte, an der Decke also unter 10 MB. Wird sie
+/// erreicht, **und nur dann, wenn dabei wirklich etwas weggefallen ist**,
+/// bekommt die Seite eine Warnung: die Glyphenzahl unter den letzten Spiegeln
+/// ist dann unvollständig, und das muss dastehen, statt still einen falschen
+/// Vergleich zu ergeben. Genau `MAX_MIRROR_FORM_PLACEMENTS` Zuordnungen gehen
+/// dagegen auf und bleiben still (Befund Q3-1b).
+///
+/// **Die Decke gilt je Seiten-Scan**, wie jede andere in [`Budget`]: über ein
+/// Dokument summiert sich also Seitenzahl × 300 000 Zuordnungen. Dokumentweit
+/// zu zählen hieße, dieselbe Seite je nach ihren Nachbarn zu warnen oder
+/// nicht — die Meldung wäre nicht mehr eine Aussage über diese Seite, und
+/// [`scan_page`] ist öffentlich und seitenweise.
+///
+/// Die frühere Begründung dafür — „die Kosten bleiben gedeckelt, weil jede
+/// Seite ihren eigenen Inhalt mitbringen muss“ — war **falsch**: `/Contents`
+/// darf auf denselben Strom zeigen wie die Nachbarseite (PDF 32000-1,
+/// Tabelle 30), und 1 000 Seiten an einem Strom von 9 kB zahlten jede die
+/// volle Decke. Was daraus wurde, entschied nicht der Scan, sondern der
+/// Redaktor, der die Spiegel jeder Seite bis zum Ende festhielt: gemessen
+/// 224 752 Byte Eingabe, 6 439 MB Spitze (Debug). Gedeckelt wird das jetzt
+/// dort, wo es anfällt — `crate::redact::MAX_DEFERRED_MIRRORS`; der Scan bleibt
+/// seitenweise. Beleg:
+/// `zg_r1_decke::jede_seite_zahlt_die_volle_decke_aus_einem_geteilten_strom`.
+const MAX_MIRROR_FORM_PLACEMENTS: usize = 100_000;
 
 /// Schriften eines Ressourcenverzeichnisses: Ressourcenname → Metriken.
 ///
@@ -207,6 +342,14 @@ pub struct ScanEffort {
     /// Verzeichnis teilen, ergeben eine Durchsicht, nicht *n*. Siehe
     /// [`DeclarationKey`].
     pub declared_resources: usize,
+    /// Was der Zähler des Strom-Zwischenspeichers am Ende des Scans ablas —
+    /// die Zahl, die gegen [`MAX_CACHED_OPERATIONS`] steht.
+    ///
+    /// Hier steht sie, damit ein Test sie **lesen** kann: eine Decke, deren
+    /// Zähler nicht misst, was sie begrenzen soll, sieht von außen genauso aus
+    /// wie eine, die hält. Genau das war der Fehler, den diese Zahl sichtbar
+    /// macht — 50 000 Ströme lasen 50 000 ab und belegten 1 011 MB.
+    pub retained_weight: usize,
 }
 
 /// Woher ein `/Resources`-Verzeichnis stammt — der Schlüssel des
@@ -252,7 +395,21 @@ struct PlacedStream {
     has_tokens: bool,
     /// Das **eigene** `/Resources` des Stroms, bereits aufgelöst. `None`
     /// heißt: er bringt keins mit und erbt das des Aufrufers.
-    resources: Option<Dictionary>,
+    ///
+    /// Ein [`Rc`] und keine eigene Kopie: *n* Formulare, die per Referenz
+    /// dasselbe Verzeichnis erben, hielten sonst *n* vollständige Kopien
+    /// davon — siehe [`Budget::resource_dicts`]. Am Vererbungsverhalten
+    /// ändert das nichts: entschieden wird weiterhin allein daran, **ob**
+    /// hier etwas steht, und das steht genau dann, wenn der Strom ein eigenes
+    /// `/Resources` mitbringt.
+    resources: Option<Rc<Dictionary>>,
+    /// Steht [`PlacedStream::resources`] im geteilten Zwischenspeicher?
+    ///
+    /// `true` heißt: das Verzeichnis ist dort einmal abgelegt und einmal
+    /// verbucht; dieser Strom hält nur einen Zeiger darauf und kostet nichts
+    /// extra. `false` heißt: die Kopie gehört diesem [`PlacedStream`] allein
+    /// und wiegt deshalb bei [`stream_cost`] voll mit.
+    shared_resources: bool,
     /// Unter welchem Schlüssel die Schriften zu [`PlacedStream::resources`]
     /// im Zwischenspeicher stehen — belegt genau dann, wenn jenes belegt ist.
     ///
@@ -295,16 +452,39 @@ impl PlacedStream {
 
 /// Was ein gemerkter [`PlacedStream`] gegen [`MAX_CACHED_OPERATIONS`] zählt.
 ///
-/// Nicht nur die Operationen: der Eintrag hält auch eine **Kopie** des
-/// aufgelösten `/Resources`-Verzeichnisses, und die kann um Größenordnungen
-/// schwerer sein als der Rumpf. Ein Strom mit null Operationen zählte sonst
-/// null und käme unter jeder Decke durch, gleich wie fett sein Verzeichnis ist.
+/// Die Operationen — und das `/Resources`-Verzeichnis genau dann, wenn dieser
+/// Eintrag es **allein** hält. Steht es im geteilten Zwischenspeicher
+/// ([`Budget::resource_dicts`]), ist es dort schon einmal verbucht; es hier ein
+/// zweites Mal zu zählen wäre keine Vorsicht, sondern eine falsche Zahl: der
+/// Strom hält davon nur einen Zeiger.
 fn stream_cost(placed: &PlacedStream) -> usize {
-    let resources = placed.resources.as_ref().map_or(0, dictionary_objects);
+    let resources = match (&placed.resources, placed.shared_resources) {
+        (Some(dict), false) => dictionary_objects(dict),
+        _ => 0,
+    };
     placed.operations().len().saturating_add(resources)
 }
 
-/// Wie viele Objekte in einem Dictionary stecken, Verschachtelung mitgezählt.
+/// Wie schwer ein Dictionary wiegt, Verschachtelung mitgezählt.
+///
+/// Die Einheit ist der **Eintrag**: ein Dictionary- oder Array-Platz zählt
+/// eins, wie eine Zeichenoperation. Beide sind in derselben Größenordnung
+/// (`lopdf::Object` allein ist 120 Byte), und daran ist
+/// [`MAX_CACHED_OPERATIONS`] geeicht.
+///
+/// ## Warum Zeichenketten nach ihrer Länge zählen
+///
+/// Eine PDF-Zeichenkette ist der eine Wert, dessen Platzbedarf **nicht** an der
+/// Zahl der Einträge hängt: `/Junk (AAA…)` ist *ein* Eintrag und kann ein
+/// Megabyte wiegen. Gezählt wird deshalb ihre Länge in Byte — großzügig
+/// gerechnet (ein Byte zählt wie ein ganzer Eintrag), aber in der richtigen
+/// Richtung: eine Decke, die die schwerste Sorte Wert als „eins“ liest, ist
+/// keine. Dasselbe für den Rumpf eines Streams, falls einer direkt in einem
+/// Verzeichnis steht.
+///
+/// In einem echten `/Resources` kommen Zeichenketten praktisch nicht vor — es
+/// besteht aus Namen und Referenzen. Die großzügige Rechnung kostet also nichts
+/// und greift nur da, wo jemand sie ausnutzen wollte.
 ///
 /// Iterativ und nicht rekursiv: das Verzeichnis stammt aus der Datei, und eine
 /// Schachtelungstiefe daraus darf nicht zum Stapelüberlauf werden. Gezählt wird
@@ -325,6 +505,13 @@ fn dictionary_objects(dict: &Dictionary) -> usize {
             Object::Array(items) => {
                 count = count.saturating_add(items.len());
                 todo.extend(items.iter());
+            }
+            Object::String(bytes, _) => count = count.saturating_add(bytes.len()),
+            Object::Stream(stream) => {
+                count = count
+                    .saturating_add(stream.content.len())
+                    .saturating_add(stream.dict.len());
+                todo.extend(stream.dict.iter().map(|(_, value)| value));
             }
             _ => {}
         }
@@ -398,6 +585,33 @@ struct Budget {
     /// Einmal ausgepackte und zerlegte Ströme, je Objekt-Id — samt der
     /// Auskunft, ob der Strom schon Guthaben eingebracht hat.
     streams: HashMap<ObjectId, CachedStream>,
+    /// Einmal aufgelöste `/Resources`-Verzeichnisse, je **Ressourcenobjekt**.
+    ///
+    /// Das ist die Ebene, auf der der Platz wirklich anfällt. Vorher hielt
+    /// **jeder** [`PlacedStream`] eine vollständige eigene Kopie seines
+    /// aufgelösten Verzeichnisses — auch dann, wenn tausend Formulare per
+    /// Referenz dasselbe Objekt erben. Gemessen an 50 000 Formularen, die sich
+    /// ein Verzeichnis mit einer 16-kB-Zeichenkette teilen: **1 037 MB**
+    /// Spitzenspeicher aus einer Datei von 7,6 MB, Faktor 136 — bei einem
+    /// Zähler, der dabei 50 000 von 100 000 ablas. Die Decke sah den Platz
+    /// nicht, weil er gar nicht in ihrer Einheit anfiel.
+    ///
+    /// Geteilt wird nur, was eine **eigene Objekt-Id** hat: nur dort gibt es
+    /// die Vervielfachung (ein Objekt, viele Ströme). Ein direkt im Stromdict
+    /// eingebettetes `/Resources` gehört ohnehin genau einem Strom und wiegt
+    /// deshalb weiter bei [`stream_cost`] mit.
+    ///
+    /// Auch dieser Zwischenspeicher steht unter [`MAX_CACHED_OPERATIONS`];
+    /// was nicht mehr hineinpasst, wird wie vorher je Platzierung kopiert —
+    /// und der zugehörige Strom wird dann **nicht** gemerkt, sonst bliebe die
+    /// Kopie doch liegen. Damit ist zu jedem Zeitpunkt höchstens eine solche
+    /// Kopie je Schachtelungsebene am Leben.
+    ///
+    /// An der Vererbung ändert das nichts: der Schlüssel ist die Objekt-Id des
+    /// Verzeichnisses, nicht der Fundort und nicht der Ressourcenname. Zwei
+    /// Umgebungen mit verschiedenen Verzeichnissen haben verschiedene Ids und
+    /// bekommen weiterhin verschiedene Antworten.
+    resource_dicts: HashMap<ObjectId, Rc<Dictionary>>,
     /// Einmal geladene Schriftenverzeichnisse, je Ressourcenobjekt.
     fonts: HashMap<ResourceKey, Rc<FontMap>>,
     /// Einmal geparste Schriften, je **Schriftobjekt**.
@@ -417,6 +631,14 @@ struct Budget {
     /// Wie viele Schrift-Tabelleneinträge der Zwischenspeicher festhält — die
     /// Decke ist [`MAX_CACHED_FONT_ENTRIES`].
     cached_font_entries: usize,
+    /// Wie viele Tabelleneinträge dieser Scan **insgesamt** aufgemacht hat —
+    /// die harte Decke ist [`MAX_FONT_ENTRIES_PER_SCAN`].
+    seen_font_entries: usize,
+    /// Welche Schriftobjekte darauf schon gebucht sind. Ohne diese Menge
+    /// zählte ein Verzeichnis mit derselben Schrift unter zweihundert Namen
+    /// zweihundertmal — und über der weichen Decke zählte jede erneute
+    /// Ladung noch einmal.
+    charged_fonts: HashSet<ObjectId>,
     /// Die Vorarbeit, die wirklich anfiel — siehe [`ScanEffort`].
     effort: ScanEffort,
     /// Type3-Schriften, deren Glyphprozeduren schon untersucht wurden — je
@@ -427,8 +649,84 @@ struct Budget {
     /// Vervielfachung: eine Schrift mit tausend Glyphprozeduren, tausendmal
     /// gesetzt. Was danach doch untersucht wird, zahlt regulär vom Konto.
     looked_at_type3: HashSet<(StreamKey, Vec<u8>)>,
+    /// Ströme, deren Textspiegel schon eingesammelt sind — je Strom **und
+    /// Ressourcenumgebung**, siehe [`scan_marked_text`].
+    ///
+    /// Die Klammerstruktur ist rein syntaktisch und bei jeder Platzierung
+    /// dieselbe; die Senke wirft die Wiederholung ohnehin weg
+    /// ([`ScanResult::marked`] entdoppelt über `(Strom, Operationsindex)`) —
+    /// nur bezahlt hat sie bis Fix-Runde 6 niemand, und die Decke
+    /// [`MAX_MIRROR_FORM_PLACEMENTS`] hätte sie mitgezählt: ein zwanzigmal
+    /// platziertes Formular mit fünftausend Spiegel-Paaren hätte sie erreicht,
+    /// obwohl der Datensatz am Ende fünftausend Paare führt.
+    ///
+    /// **Rein syntaktisch ist der Durchlauf aber nicht.** `/Span /MC0 BDC`
+    /// nennt die Eigenschaftsliste beim Ressourcennamen, und `/Fm0 Do`
+    /// ebenso; beide lösen sich in den Ressourcen der **Platzierung** auf. Ein
+    /// Form-XObject ohne eigenes `/Resources` erbt die des Aufrufers (PDF
+    /// 32000-1, 8.10.1) und sieht unter zwei Platzierungen zwei verschiedene
+    /// `/Properties`. Der Schlüssel trägt deshalb den Eigentümer der
+    /// wirksamen Ressourcen mit: dasselbe Formular unter zwei Umgebungen wird
+    /// zweimal abgelaufen, dasselbe Formular zwanzigmal unter derselben
+    /// Umgebung weiterhin einmal. Bis Fix-Runde 6 stand hier nur der Strom —
+    /// der zweite Spiegel blieb dann mit seinem Klartext stehen (Befund R1-2).
+    ///
+    /// Der dritte Teil des Schlüssels ist leer, außer ein Strom bringt eigene
+    /// Ressourcen mit und benennt trotzdem eine Eigenschaftsliste, die sie
+    /// nicht kennen (Register #67): dann löst sich der Name — wie in Poppler —
+    /// in den Umgebungen der **Aufrufer** auf, und dasselbe Formular unter zwei
+    /// Seiten sieht zwei Listen. Dann tragen die Eigentümer der äußeren
+    /// Umgebungen den Schlüssel mit.
+    scanned_marked: HashSet<(StreamKey, Option<ObjectId>, Vec<Option<ObjectId>>)>,
+    /// Je Strom und Eigentümer: benennt er eine Eigenschaftsliste, die seine
+    /// wirksamen Ressourcen nicht kennen? Einmal gerechnet — die Frage geht
+    /// den ganzen Strom ab, und der wird unter derselben Umgebung beliebig oft
+    /// platziert.
+    names_beyond: HashMap<(StreamKey, Option<ObjectId>), bool>,
+    /// Dasselbe für Schriften, XObjects, Grafikzustände, Muster und
+    /// Schattierungen: benennt der Strom eines davon, das seine eigenen
+    /// Ressourcen nicht kennen? Siehe [`merged_resources`] (Register #88).
+    names_beyond_resources: HashMap<(StreamKey, Option<ObjectId>), bool>,
+    /// Verbleibende Spiegel-Formular-Paare, die [`scan_marked_text`] noch
+    /// **aufnehmen** darf — die Decke ist [`MAX_MIRROR_FORM_PLACEMENTS`].
+    ///
+    /// Steht **hier** und nicht in [`scan_marked_text`] selbst, weil die
+    /// Funktion je Strom aufgerufen wird und die Decke für den ganzen
+    /// Seiten-Scan gilt: eine Seite mit hundert Strömen darf nicht hundertmal
+    /// so viel aufnehmen wie eine mit einem.
+    mirror_pairs: usize,
+    /// Dasselbe für das **Aufklappen** in [`ScanResult::close_forms`].
+    ///
+    /// Ein eigener Zähler, weil es eine eigene Arbeit ist: der Aufbau wächst
+    /// mit Klammern × `Do` des Stroms, das Aufklappen mit dem Baum der
+    /// Formulare darunter. Jede der beiden trägt für sich höchstens
+    /// [`MAX_MIRROR_FORM_PLACEMENTS`] Paare bei; zusammen also höchstens das
+    /// Doppelte, rund 16 MB.
+    mirror_expansions: usize,
+    /// Verbleibende Spiegel-Text-Zuordnungen, die [`scan_marked_text`] noch
+    /// aufnehmen darf — die Decke ist ebenfalls
+    /// [`MAX_MIRROR_FORM_PLACEMENTS`].
+    ///
+    /// Dieselbe Produktstruktur wie beim Aufbau der Formularliste, nur die
+    /// andere Liste: `B` verschachtelte Klammern über `S` Textoperationen
+    /// ergeben `B × S` Einträge in [`MarkedTextRecord::shows`]. Bis
+    /// Fix-Runde 7 stand davor keine Schranke — gemessen 6 000 × 6 000 aus
+    /// einer Datei von 263 kB: 36 Mio. Zuordnungen, `scan_page` 0,72 s /
+    /// 315 MB, der **Extraktor** 31,1 s, der Redaktor 588 MB.
+    mirror_shows: usize,
+    /// Wurde an einer der beiden Formular-Decken etwas weggelassen?
+    mirror_forms_cut: bool,
+    /// Wurde an der Text-Decke etwas weggelassen?
+    mirror_shows_cut: bool,
     /// Begründung, sobald etwas aufgebraucht ist.
     exceeded: Option<String>,
+    /// Was dieser Scan wirklich ausgegeben hat — für das Konto über das
+    /// ganze Dokument ([`DocumentWork`]).
+    spent_operations: usize,
+    spent_glyphs: usize,
+    /// Was dieser Scan gutgeschrieben hat, je Strom: (Id, Operationen,
+    /// Textbytes). `None` ist der Seitenstrom.
+    credits: Vec<(Option<ObjectId>, usize, usize)>,
 }
 
 impl Default for Budget {
@@ -437,14 +735,28 @@ impl Default for Budget {
             operations: BASE_OPERATIONS,
             glyphs: MAX_GLYPHS_PER_SCAN,
             streams: HashMap::new(),
+            resource_dicts: HashMap::new(),
             fonts: HashMap::new(),
             font_objects: HashMap::new(),
             declared_forms: HashSet::new(),
             cached_operations: 0,
             cached_font_entries: 0,
+            seen_font_entries: 0,
+            charged_fonts: HashSet::new(),
             effort: ScanEffort::default(),
             looked_at_type3: HashSet::new(),
+            scanned_marked: HashSet::new(),
+            names_beyond: HashMap::new(),
+            names_beyond_resources: HashMap::new(),
+            mirror_pairs: MAX_MIRROR_FORM_PLACEMENTS,
+            mirror_expansions: MAX_MIRROR_FORM_PLACEMENTS,
+            mirror_shows: MAX_MIRROR_FORM_PLACEMENTS,
+            mirror_forms_cut: false,
+            mirror_shows_cut: false,
             exceeded: None,
+            spent_operations: 0,
+            spent_glyphs: 0,
+            credits: Vec::new(),
         }
     }
 }
@@ -492,30 +804,31 @@ impl Budget {
         stream: &Stream,
     ) -> PlacedStream {
         self.effort.decoded_streams += 1;
-        let (content, has_tokens) = match stream
-            .decompressed_content()
-            .or_else(|_| stream.get_plain_content())
-        {
-            Ok(data) => (
+        let (content, has_tokens) = match crate::filters::decoded_content(doc, stream) {
+            Some(data) => (
                 Some(crate::ops::decode_content_checked(&data)),
                 has_tokens(&data),
             ),
-            Err(_) => (None, false),
+            None => (None, false),
         };
         // `/Resources` wird mitsamt seiner Objekt-Id aufgelöst: teilen sich
         // mehrere Ströme dasselbe Verzeichnis, teilen sie sich auch dessen
-        // Schriften.
-        let (resource_id, resources) = match stream
+        // Schriften — und seit [`Budget::resource_dicts`] auch das Verzeichnis
+        // selbst statt je Strom einer eigenen Kopie.
+        let (resource_id, resources, shared_resources) = match stream
             .dict
             .get(b"Resources")
             .ok()
             .and_then(|o| doc.dereference(o).ok())
         {
             Some((resource_id, object)) => match object.as_dict() {
-                Ok(dict) => (resource_id, Some(dict.clone())),
-                Err(_) => (None, None),
+                Ok(dict) => {
+                    let (rc, shared) = self.resource_dict(resource_id, dict);
+                    (resource_id, Some(rc), shared)
+                }
+                Err(_) => (None, None, false),
             },
-            None => (None, None),
+            None => (None, None, false),
         };
         let font_key = resources.as_ref().and(
             resource_id
@@ -526,8 +839,39 @@ impl Budget {
             content,
             has_tokens,
             resources,
+            shared_resources,
             font_key,
         }
+    }
+
+    /// Das aufgelöste `/Resources` eines Stroms — **einmal je Objekt-Id**.
+    ///
+    /// Der zweite Rückgabewert sagt, ob das Ergebnis geteilt ist. `false`
+    /// heißt: diese Kopie gehört dem Aufrufer allein und wiegt bei
+    /// [`stream_cost`] mit — entweder weil das Verzeichnis gar keine eigene
+    /// Objekt-Id hat (direkt im Stromdict eingebettet, dann gibt es nichts zu
+    /// teilen), oder weil [`MAX_CACHED_OPERATIONS`] voll ist.
+    ///
+    /// Der zweite Fall ist der wichtige: ist die Decke voll, wird der Strom
+    /// ohnehin nicht gemerkt, und die Kopie stirbt mit der Platzierung. So
+    /// bleibt auch ein Verzeichnis, das für sich allein schon über der Decke
+    /// liegt, harmlos — es wird je Platzierung neu kopiert (Laufzeit wie
+    /// vorher), aber nie *n*-mal gleichzeitig gehalten.
+    fn resource_dict(&mut self, id: Option<ObjectId>, dict: &Dictionary) -> (Rc<Dictionary>, bool) {
+        let Some(id) = id else {
+            return (Rc::new(dict.clone()), false);
+        };
+        if let Some(shared) = self.resource_dicts.get(&id) {
+            return (Rc::clone(shared), true);
+        }
+        let cost = dictionary_objects(dict);
+        if self.cached_operations.saturating_add(cost) > MAX_CACHED_OPERATIONS {
+            return (Rc::new(dict.clone()), false);
+        }
+        self.cached_operations += cost;
+        let shared = Rc::new(dict.clone());
+        self.resource_dicts.insert(id, Rc::clone(&shared));
+        (shared, true)
     }
 
     /// Die Schriften zum **eigenen** `/Resources` eines Stroms.
@@ -537,7 +881,7 @@ impl Budget {
     /// entschieden wird — und sie wird bei **jeder** Platzierung neu
     /// entschieden, nicht einmal beim Auspacken.
     fn fonts_of(&mut self, doc: &Document, placed: &PlacedStream) -> Option<Rc<FontMap>> {
-        let resources = placed.resources.as_ref()?;
+        let resources: &Dictionary = placed.resources.as_deref()?;
         Some(match placed.font_key {
             Some(key) => self.font_map(doc, key, resources),
             // Weder das Verzeichnis noch der Strom hat eine Objekt-Id: es
@@ -590,6 +934,12 @@ impl Budget {
             return (out, retained);
         };
         for (name, object) in font_dict.iter() {
+            // Über der harten Decke wird nicht weitergeladen: jede weitere
+            // Schrift bliebe bis zum Ende des Stroms lebendig, und das ist
+            // genau das, was die Decke verhindern soll.
+            if self.exceeded.is_some() {
+                break;
+            }
             let Ok((id, resolved)) = doc.dereference(object) else {
                 continue;
             };
@@ -630,6 +980,31 @@ impl Budget {
         self.effort.parsed_fonts += 1;
         let info = Rc::new(font_from_dict(doc, dict));
         let cost = info.weight();
+        // Die harte Decke: je Schriftobjekt einmal, über den ganzen Scan.
+        // Sie steht neben der weichen — was hier gebucht wird, bleibt in der
+        // [`FontMap`] des Verzeichnisses lebendig, gleich ob es der
+        // Zwischenspeicher unten annimmt oder nicht.
+        let erstmals = match id {
+            Some(id) => self.charged_fonts.insert(id),
+            // Ohne Objekt-Id gibt es nichts wiederzuerkennen; im Zweifel
+            // zählen, das ist die strengere Richtung.
+            None => true,
+        };
+        if erstmals {
+            self.seen_font_entries = self.seen_font_entries.saturating_add(cost);
+            if self.seen_font_entries > MAX_FONT_ENTRIES_PER_SCAN {
+                self.exceeded = Some(format!(
+                    "Eine Seite dieses Dokuments lädt mehr als \
+                     {MAX_FONT_ENTRIES_PER_SCAN} Schrift-Tabelleneinträge. Alle Schriften \
+                     eines Ressourcenverzeichnisses sind gleichzeitig im Speicher; \
+                     gemessen kostet eine Schrift mit voller `/ToUnicode`-Zuordnung rund \
+                     4 MB, hundert davon aus einer Datei von 45 kB also rund 400 MB. Eine \
+                     Seite trägt normalerweise eine Handvoll Schriften; diese Menge \
+                     entsteht nicht durch ein echtes Dokument. Die Datei wird abgelehnt, \
+                     statt den Text mit halb geladenen Schriften zu durchsuchen."
+                ));
+            }
+        }
         let room = self.cached_font_entries.saturating_add(cost) <= MAX_CACHED_FONT_ENTRIES;
         match id {
             Some(id) if room => {
@@ -653,7 +1028,7 @@ impl Budget {
     /// dekodiert. Ein Strom mit Id muss vorher durch [`Budget::stream`]
     /// gegangen sein; ist er das nicht, wird im Zweifel **nicht**
     /// gutgeschrieben — die strengere Richtung.
-    fn credit(&mut self, id: Option<ObjectId>, operations: usize) {
+    fn credit(&mut self, id: Option<ObjectId>, operations: &[Operation]) {
         if let Some(id) = id {
             match self.streams.get_mut(&id) {
                 Some(entry) if !entry.credited => entry.credited = true,
@@ -662,7 +1037,9 @@ impl Budget {
         }
         self.operations = self
             .operations
-            .saturating_add(operations.saturating_mul(MAX_AMPLIFICATION));
+            .saturating_add(operations.len().saturating_mul(MAX_AMPLIFICATION));
+        self.credits
+            .push((id, operations.len(), text_bytes(operations)));
     }
 
     /// `true` beim **ersten** Blick auf diese Type3-Schrift in diesem Strom.
@@ -673,6 +1050,131 @@ impl Budget {
         self.looked_at_type3.insert((stream, font.to_vec()))
     }
 
+    /// `true` beim **ersten** Spiegel-Durchlauf über diesen Strom in dieser
+    /// Ressourcenumgebung — siehe [`Budget::scanned_marked`].
+    fn first_marked_scan(
+        &mut self,
+        stream: StreamKey,
+        owner: Option<ObjectId>,
+        outer_owners: Vec<Option<ObjectId>>,
+    ) -> bool {
+        self.scanned_marked.insert((stream, owner, outer_owners))
+    }
+
+    /// Benennt dieser Strom eine Schrift, ein XObject, einen Grafikzustand,
+    /// ein Muster oder eine Schattierung, die `resources` nicht kennen? Je
+    /// (Strom, Eigentümer) einmal gerechnet.
+    fn names_beyond_own_resources(
+        &mut self,
+        doc: &Document,
+        stream: StreamKey,
+        owner: Option<ObjectId>,
+        operations: &[Operation],
+        resources: Option<&Dictionary>,
+    ) -> bool {
+        *self
+            .names_beyond_resources
+            .entry((stream, owner))
+            .or_insert_with(|| {
+                operations.iter().any(|op| {
+                    let category: &[u8] = match op.operator.as_str() {
+                        "Tf" => b"Font",
+                        "Do" => b"XObject",
+                        "gs" => b"ExtGState",
+                        "sh" => b"Shading",
+                        "sc" | "scn" | "SC" | "SCN" => b"Pattern",
+                        _ => return false,
+                    };
+                    op.operands.iter().any(|o| match o {
+                        Object::Name(name) => {
+                            category_entry(doc, resources, category, name).is_none()
+                        }
+                        _ => false,
+                    })
+                })
+            })
+    }
+
+    /// Benennt dieser Strom eine Eigenschaftsliste, die `resources` nicht
+    /// kennen? Je (Strom, Eigentümer) einmal gerechnet, siehe
+    /// [`Budget::names_beyond`].
+    fn names_beyond_own(
+        &mut self,
+        doc: &Document,
+        stream: StreamKey,
+        owner: Option<ObjectId>,
+        operations: &[Operation],
+        resources: Option<&Dictionary>,
+    ) -> bool {
+        *self.names_beyond.entry((stream, owner)).or_insert_with(|| {
+            operations.iter().any(|op| {
+                matches!(op.operator.as_str(), "BDC" | "DP")
+                    && matches!(op.operands.get(1), Some(Object::Name(name))
+                        if property_entry(doc, resources, name).is_none())
+            })
+        })
+    }
+
+    /// Bucht bis zu `want` Spiegel-Formular-Paare beim **Aufbau** der Liste
+    /// und liefert, wie viele davon bewilligt sind.
+    ///
+    /// `B` verschachtelte `BDC`-Klammern über `D` Platzierungen ergeben
+    /// `B × D` Paare, und die entstehen, bevor die Schließung überhaupt
+    /// gefragt wird. Vorher hing an dieser Stelle keine Schranke — gemessen
+    /// 2 306 MB und 41,7 s aus einer Datei von 276 kB mit neun Objekten.
+    fn mirror_pairs(&mut self, want: usize) -> usize {
+        let granted = want.min(self.mirror_pairs);
+        self.mirror_pairs -= granted;
+        if granted < want {
+            self.mirror_forms_cut = true;
+        }
+        granted
+    }
+
+    /// Bucht bis zu `want` Spiegel-Text-Zuordnungen beim Aufbau von
+    /// [`MarkedTextRecord::shows`] und liefert, wie viele bewilligt sind.
+    ///
+    /// Eigener Zähler und eigene Flagge: es ist eine eigene Liste mit eigener
+    /// Folge. Fällt hier etwas weg, fehlen einem Spiegel **Glyphen** — die
+    /// Schwärzung sieht dann nicht mehr, ob er berührt ist, und der Vergleich
+    /// in `crate::extract` vergleicht gegen zu wenig. Beides muss dastehen,
+    /// und beides steht in einer eigenen Warnung (siehe
+    /// [`ScanResult::close_forms`]).
+    fn mirror_shows(&mut self, want: usize) -> usize {
+        let granted = want.min(self.mirror_shows);
+        self.mirror_shows -= granted;
+        if granted < want {
+            self.mirror_shows_cut = true;
+        }
+        granted
+    }
+
+    /// Bucht **eine Aufklappung** in [`ScanResult::close_forms`]. `false`
+    /// heißt: die Decke ist erreicht, diese Kante entfällt — und genau dann
+    /// steht auch die Flagge.
+    fn mirror_expansion(&mut self) -> bool {
+        match self.mirror_expansions.checked_sub(1) {
+            Some(rest) => {
+                self.mirror_expansions = rest;
+                true
+            }
+            None => {
+                self.mirror_forms_cut = true;
+                false
+            }
+        }
+    }
+
+    /// Ist an einer der Formular-Decken wirklich etwas weggefallen?
+    fn mirror_forms_cut(&self) -> bool {
+        self.mirror_forms_cut
+    }
+
+    /// Ist an der Text-Decke wirklich etwas weggefallen?
+    fn mirror_shows_cut(&self) -> bool {
+        self.mirror_shows_cut
+    }
+
     /// Verbucht eine Operation. `false` heißt: sofort aussteigen.
     fn operation(&mut self) -> bool {
         if self.exceeded.is_some() {
@@ -681,6 +1183,7 @@ impl Budget {
         match self.operations.checked_sub(1) {
             Some(rest) => {
                 self.operations = rest;
+                self.spent_operations += 1;
                 true
             }
             None => {
@@ -705,6 +1208,7 @@ impl Budget {
         match self.glyphs.checked_sub(1) {
             Some(rest) => {
                 self.glyphs = rest;
+                self.spent_glyphs += 1;
                 true
             }
             None => {
@@ -717,6 +1221,14 @@ impl Budget {
                 ));
                 false
             }
+        }
+    }
+
+    /// Lehnt den Scan mit dieser Begründung ab, falls er nicht schon aus
+    /// einem anderen Grund abgelehnt ist.
+    fn refuse(&mut self, message: String) {
+        if self.exceeded.is_none() {
+            self.exceeded = Some(message);
         }
     }
 
@@ -850,17 +1362,27 @@ impl ShowRecord {
     }
 }
 
-/// Schlüssel einer Eigenschaftsliste, die den Text darunter **spiegeln**.
+/// Schlüssel einer Eigenschaftsliste, die den Text darunter **spiegeln** —
+/// drei Schlüssel, zwei Rollen.
 ///
-/// * `/ActualText` — der kanonische Ersatz für die Glyphen des Abschnitts
-///   (PDF 32000-1, 14.9.4). Word, InDesign und jeder PDF/UA-Erzeuger schreiben
-///   ihn routinemäßig, etwa für Ligaturen und Sonderzeichen.
-/// * `/Alt` — die Beschreibung für Hilfsmittel (14.9.3); bei `/Figure` steht
-///   dort regelmäßig genau der Text, den das Bild zeigt.
-/// * `/E` — die ausgeschriebene Form einer Abkürzung (14.9.5).
+/// * `/ActualText` — der **Ersatz** für die Glyphen des Abschnitts
+///   (PDF 32000-1, 14.9.4): ein Betrachter kopiert ihn *statt* der Glyphen.
+///   Er muss ihnen gleichen; Word, InDesign und jeder PDF/UA-Erzeuger
+///   schreiben ihn routinemäßig, etwa für Ligaturen und Sonderzeichen.
+/// * `/Alt` — die **Beschreibung** für Hilfsmittel (14.9.3); bei `/Figure`
+///   steht dort, was das Bild zeigt. Sie darf von den Glyphen abweichen —
+///   ein Bild hat keine.
+/// * `/E` — die **ausgeschriebene Form** einer Abkürzung (14.9.5): „z. B.“
+///   trägt `/E (zum Beispiel)`. Sie weicht von den Glyphen ab, das ist ihr
+///   Zweck.
 ///
-/// Alle drei geben wieder, was die Glyphen sagen; `pdftotext` bevorzugt in der
-/// Voreinstellung sogar den Spiegel. Verschwinden die Glyphen, muss er mit.
+/// Alle drei werden **gelesen** (als eigener Textlauf über dem Kasten der
+/// Glyphen, siehe `crate::extract`) und mit den Glyphen **geleert** (siehe
+/// `crate::redact::mirrors_to_clear`): `pdftotext` bevorzugt in der
+/// Voreinstellung sogar den Spiegel, und verschwinden die Glyphen, muss er
+/// mit. Als **Widerspruch gemeldet** wird nur der Ersatz — ein `/Alt` oder
+/// `/E`, der etwas anderes sagt als die Glyphen, ist die Normalform, kein
+/// Befund.
 pub const MIRROR_KEYS: [&[u8]; 3] = [b"ActualText", b"Alt", b"E"];
 
 /// Ein `BDC`/`DP`, dessen Eigenschaftsliste einen Textspiegel trägt.
@@ -879,12 +1401,191 @@ pub struct MarkedTextRecord {
     pub properties: Dictionary,
     /// Objekt-Id der Eigenschaftsliste, falls sie ein **eigenes** Objekt ist
     /// (`/Properties /MC0 12 0 R`). Sonst `None`: dann steht die Liste inline
-    /// im Strom oder direkt im `/Properties`-Dictionary, und der Spiegel ist
-    /// nur über die Operation selbst zu erreichen.
+    /// im Strom oder **direkt** in einem `/Properties`-Dictionary.
     pub property_id: Option<ObjectId>,
+    /// Der Ressourcenname der Eigenschaftsliste (`/Span /MC0 BDC` → `MC0`),
+    /// falls die Operation sie über `/Resources /Properties` benannt hat.
+    ///
+    /// `None` heißt: die Liste stand als Dictionary **im Strom** und existiert
+    /// nirgendwo sonst; sie wird beim Neuschreiben des Stroms ersetzt und ist
+    /// damit erledigt.
+    ///
+    /// Steht hier ein Name und `property_id` ist `None`, dann steht der
+    /// Klartext des Spiegels **im Ressourcenverzeichnis** — die Operation neu
+    /// zu schreiben genügt dann nicht, das Verzeichnis muss mit
+    /// ([`property_list_homes`]). Bis Fix-Runde 6 blieb er dort stehen;
+    /// `leaks` fand ihn, ohne Warnung, mit Rückgabewert 0 (Register #34,
+    /// Befund Q3-5).
+    pub property_name: Option<Vec<u8>>,
+    /// Das Objekt, dessen `/Resources` beim Lesen dieses Abschnitts **galten**:
+    /// die Seite, oder das Form-XObject bzw. der Musterstrom, der ein eigenes
+    /// `/Resources` mitbringt.
+    ///
+    /// Nicht dasselbe wie `stream`. Ein Form-XObject ohne eigenes
+    /// `/Resources` erbt die des Aufrufers (PDF 32000-1, 8.10.1); dann steht
+    /// hier die **platzierende Seite**, in deren `/Properties` sich
+    /// `property_name` aufgelöst hat. Wer stattdessen ab dem Formular suchte,
+    /// fand nichts und ließ den Klartext im Verzeichnis der Seite stehen —
+    /// ohne Warnung, mit Rückgabewert 0 (Befund R1-1).
+    ///
+    /// `None` nur aus [`interpret`]: dort gibt es keinen Seitenkontext, und
+    /// keine seiner Senken liest Spiegel.
+    pub property_owner: Option<ObjectId>,
     /// Indizes der Textoperationen im Geltungsbereich (siehe
     /// [`scan_marked_text`]).
     pub shows: Vec<usize>,
+    /// Die Form-XObjects im Geltungsbereich: je `Do` der **Pfad** dorthin
+    /// und die Objekt-Id des Formulars. Der Pfad ist die Folge der
+    /// `Do`-Indizes von diesem Strom bis zum Formular — `[7]` für ein `Do` an
+    /// Index 7 dieses Stroms, `[7, 2]` für das Formular, das jenes an seinem
+    /// Index 2 zeichnet. Der Spiegel gilt auch für deren Glyphen — ein
+    /// `/Span <</ActualText …>> BDC /Fm0 Do EMC` ist die Form, in der ein
+    /// Erzeuger einen Textbaustein beschriftet, und ohne diesen Eintrag
+    /// stünden „0 Glyphen“ unter einem Spiegel, der welche hat.
+    ///
+    /// Nach [`scan_page`] **transitiv geschlossen**: ein Formular, das das
+    /// Formular hier zeichnet, steht mit dem um seinen `Do`-Index verlängerten
+    /// Pfad ebenfalls darin. Der Pfad ordnet die Glyphen aller Formulare in
+    /// Stromreihenfolge (`crate::extract`); wer nur wissen will, *welche*
+    /// Formulare betroffen sind, liest die Id. Direkt aus
+    /// [`scan_marked_text`] enthält die Liste nur die eigene Ebene.
+    pub forms: Vec<(Vec<usize>, ObjectId)>,
+    /// Der Bereich der eingeschlossenen Operationen im dekodierten Strom —
+    /// `start..end`, dieselbe Spanne, aus der [`MarkedTextRecord::shows`] und
+    /// [`MarkedTextRecord::forms`] gesiebt sind.
+    ///
+    /// Bewusst die **Spanne** und nicht eine Liste der Bildplatzierungen
+    /// darin: ein Bild ist kein Text, es hat keine Glyphen, die einem Spiegel
+    /// zuzuordnen wären — gefragt wird nur, *ob* eine geschwärzte
+    /// Bildplatzierung in diesem Abschnitt liegt. Als Liste wäre das wieder
+    /// das Produkt „Klammern × Platzierungen“ mit eigener Decke
+    /// (`MAX_MIRROR_FORM_PLACEMENTS`); als Spanne kostet es zwei `usize` je
+    /// Abschnitt. Wer die Platzierungen braucht, liest [`ScanResult::images`]
+    /// und fragt hier nach.
+    pub range: std::ops::Range<usize>,
+}
+
+/// Ein platziertes Bild, so weit die Schwärzung es braucht: **wo** im Strom
+/// es steht und **welche Fläche** es einnimmt.
+///
+/// Kein Bildinhalt, keine Objekt-Id-Pflicht, kein Dekodieren — das macht
+/// [`crate::image`]. Hier zählt nur die Zuordnung „diese Platzierung liegt in
+/// jenem Marked-Content-Abschnitt und unter jener Schwärzung“.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImagePlacement {
+    /// Der Strom, in dem die Platzierung steht (Seite oder Form-XObject).
+    pub stream: StreamKey,
+    /// Index der `Do`- bzw. `BI`-Operation im dekodierten Strom.
+    pub op_index: usize,
+    /// Objekt-Id des Bild-XObjects; `None` bei einem Inline-Bild, das kein
+    /// eigenes Objekt hat.
+    pub id: Option<ObjectId>,
+    /// Die Hülle der Zielfläche im User-Space — das Einheitsquadrat des
+    /// Bildes durch die CTM (PDF 32000-1, 8.9.5.2).
+    ///
+    /// **Die Hülle ist nicht die Fläche.** Bei einer gedrehten CTM ist sie
+    /// größer als das Bild, und in ihren Ecken liegt kein Bildpunkt. Wer
+    /// fragen will, ob eine Schwärzung das Bild trifft, nimmt deshalb
+    /// [`ImagePlacement::covers`] und nicht dieses Rechteck; hier steht nur
+    /// die billige Vorauswahl.
+    pub bounds: Rect,
+    /// Die vier Ecken der Zielfläche im User-Space, im Umlauf
+    /// `(0,0) (1,0) (1,1) (0,1)` des Einheitsquadrats.
+    pub quad: [Point; 4],
+}
+
+impl ImagePlacement {
+    /// Trifft `rect` die **Fläche** dieser Platzierung?
+    ///
+    /// Nicht ihre Hülle: bei einem um 45° gedrehten Bild ist die Hülle doppelt
+    /// so groß wie das Bild, und in ihren vier Ecken steht kein Bildpunkt,
+    /// sondern gewöhnlich Text. Eine Schwärzung dort nimmt dem Bild keinen
+    /// Bildpunkt — [`crate::image`] fasst es nicht an, `redacted_images`
+    /// bleibt 0, und es gibt keine Warnung. Wer an der Hülle entschied, nahm
+    /// dem unversehrten Bild trotzdem seinen Ersatztext und dem Abschnitt
+    /// darüber seinen Spiegel: Barrierefreiheit weg, kein Bildpunkt gewonnen,
+    /// kein Wort darüber.
+    ///
+    /// Gefragt wird deshalb das **konvexe Viereck** gegen das achsenparallele
+    /// Rechteck, über die trennenden Achsen: die beiden Achsen des Rechtecks
+    /// (das ist genau die Hüllenfrage) und die vier Kantennormalen des
+    /// Vierecks.
+    ///
+    /// **Was diese Frage nicht ist: die Wahrheit über die Bildpunkte.** Die
+    /// kennt nur [`crate::image`] und gibt sie dort heraus
+    /// ([`crate::image::ImageOutcome::page_image_hits`]); über den Ersatztext
+    /// eines Bildes wird deshalb dort entschieden und nicht hier.
+    ///
+    /// Hier stand einmal die Zusicherung, wo `filled > 0` gelte, liege eine
+    /// Zellecke im Rechteck und damit auch das Viereck darin — ein Bild, das
+    /// Bildpunkte verliert, werde also nie übersehen. **Sie war falsch und ist
+    /// gestrichen.** Diese Frage vergleicht streng (Berührung zählt nicht),
+    /// [`crate::image`] füllt mit dem Rand eingeschlossen; wo eine Zellecke
+    /// genau auf dem Rand des Rechtecks liegt, fiel der Bildpunkt und diese
+    /// Frage verneinte (`zj_b_flaeche_gegen_bildpunkt`). In der anderen
+    /// Richtung blieb ebenfalls ein Rest: ein Rechteck, das die Fläche um
+    /// weniger als eine Pixelzelle überlappt, gilt hier als Treffer.
+    ///
+    /// Die Frage bleibt, weil sie billig und ohne Dekodieren zu haben ist —
+    /// als Auskunft über eine Platzierung, nicht als Ersatz für die Wahrheit.
+    ///
+    /// Ein entartetes Viereck (die CTM ist nicht umkehrbar, oder eine
+    /// Koordinate ist unbrauchbar) trifft nichts: `crate::image` kann dort
+    /// nicht einmal rückwärts rechnen und füllt keinen Bildpunkt.
+    pub fn covers(&self, rect: &Rect) -> bool {
+        // Die beiden Achsen des Rechtecks — und zugleich der billige
+        // Vorfilter, der die meisten Platzierungen hier schon verlässt.
+        if !self.bounds.intersects(rect) {
+            return false;
+        }
+        let corners = [
+            rect.ll,
+            Point::new(rect.ur.x, rect.ll.y),
+            rect.ur,
+            Point::new(rect.ll.x, rect.ur.y),
+        ];
+        for index in 0..4 {
+            let from = self.quad[index];
+            let to = self.quad[(index + 1) % 4];
+            // Normale der Kante; bei einer entarteten Kante ist sie (0,0).
+            let axis = Point::new(from.y - to.y, to.x - from.x);
+            if !axis.x.is_finite() || !axis.y.is_finite() {
+                return false;
+            }
+            if axis.x == 0.0 && axis.y == 0.0 {
+                return false;
+            }
+            let (qmin, qmax) = span(&self.quad, axis);
+            let (rmin, rmax) = span(&corners, axis);
+            // Wie [`Rect::intersects`]: Berührung zählt nicht. Ein NaN in der
+            // Projektion lässt beide Vergleiche falsch werden — deshalb steht
+            // die Entscheidung positiv formuliert.
+            if !(qmax > rmin && rmax > qmin) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Projektion von vier Punkten auf eine Achse — kleinster und größter Wert.
+///
+/// Auch [`crate::image`] fragt so: dort wird die Fläche **einer Pixelzelle**
+/// gegen ein Schwärzungsrechteck geprüft. Dieselbe Frage, dieselbe Antwort —
+/// zwei Fassungen davon wären zwei Gelegenheiten, verschieden zu antworten.
+pub(crate) fn span(points: &[Point; 4], axis: Point) -> (f64, f64) {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for point in points {
+        let value = point.x * axis.x + point.y * axis.y;
+        if value < min {
+            min = value;
+        }
+        if value > max {
+            max = value;
+        }
+    }
+    (min, max)
 }
 
 /// Ergebnis eines Seiten-Scans.
@@ -893,6 +1594,36 @@ pub struct ScanResult {
     pub shows: Vec<ShowRecord>,
     /// Marked-Content-Abschnitte mit Textspiegel.
     pub marked: Vec<MarkedTextRecord>,
+    /// **Jede** Bildplatzierung dieser Seite — je Platzierung ihr Fundort im
+    /// Strom und ihre Fläche im User-Space.
+    ///
+    /// Gebraucht werden zwei Fragen. Liegt in diesem Marked-Content-Abschnitt
+    /// ein Bild, dessen Pixel eine Schwärzung überschreibt? Dann ist der
+    /// Spiegel darüber (`/Alt` bei `/Figure`: „Kontoauszug, IBAN …“) genauso
+    /// falsch wie ein Spiegel über verschwundenen Glyphen (Register #20). Und:
+    /// welchem Bild-XObject gehört die Platzierung? Daran hängt der Ersatztext
+    /// am Bilddictionary selbst.
+    ///
+    /// **Ohne Filter, und warum der frühere falsch war.** Die Liste wurde
+    /// einmal nur „in Strömen, über denen ein Textspiegel steht“ gefüllt. Das
+    /// verfehlte beide Fragen: der Spiegel steht regelmäßig in einem anderen
+    /// Strom als das Bild (`… BDC /Fm0 Do EMC` im Seitenstrom, `/Im0 Do` in
+    /// `Fm0`), und die zweite Frage stellt sich auch in einer Datei ganz ohne
+    /// Marked Content. Gefüllt wird beim Durchlauf, also **je Platzierung**:
+    /// ein zwanzigmal gezeichnetes Formular bringt seine Bilder zwanzigmal
+    /// mit, jedes Mal mit seiner eigenen CTM. Genau so muss es sein — ein Bild
+    /// kann an einer Stelle geschwärzt werden und an einer anderen nicht.
+    ///
+    /// **Keine eigene Decke, und warum keine nötig ist.** Die Liste wächst
+    /// *linear* in den Platzierungen — eine je `Do`/`BI` —, und jede davon ist
+    /// eine Operation, die aus demselben Aufwandskonto zahlt wie jede andere
+    /// (`Budget::operation`). Das unterscheidet sie von der Zuordnung
+    /// Spiegel↔Formular, die als **Produkt** „Klammern × Platzierungen“
+    /// entstand und deshalb `MAX_MIRROR_FORM_PLACEMENTS` braucht. Gemessen an
+    /// 10 000/50 000/100 000 Bildplatzierungen unter einem Spiegel: dieselbe
+    /// Wanduhr wie ohne den Spiegel
+    /// (`zh_b_bildspiegel::mess_viele_bildplatzierungen`).
+    pub images: Vec<ImagePlacement>,
     /// Wie oft ein Form-XObject auf dieser Seite gezeichnet wurde.
     pub form_placements: BTreeMap<ObjectId, usize>,
     /// Form-XObjects, die in einem der gelesenen Ressourcenverzeichnisse
@@ -913,10 +1644,186 @@ pub struct ScanResult {
     /// Durchsuchen der Liste: eine getaggte Seite bringt leicht Tausende
     /// Abschnitte mit, und ein mehrfach platziertes Formular liefert sie
     /// mehrfach.
-    seen_marked: HashSet<(StreamKey, usize)>,
+    /// Schlüssel: Strom, Operation **und Herkunft der Eigenschaftsliste**
+    /// (Eigentümer der Ressourcen, Objekt-Id der Liste). Bis zur
+    /// Spur-A-Runde 1 fehlte die Herkunft (Register #65).
+    seen_marked: HashSet<(StreamKey, usize, Option<ObjectId>, Option<ObjectId>)>,
+    /// Dasselbe für [`ScanResult::warnings`].
+    ///
+    /// Die Entdopplung war schon immer zugesagt; sie lief nur über
+    /// `warnings.contains(…)`, also über die ganze bisherige Liste je neuer
+    /// Warnung. Gemessen an derselben Datei, beide Fassungen abwechselnd:
+    ///
+    /// | Warnungen | mit Liste | mit Menge | Anteil |
+    /// |----------:|----------:|----------:|-------:|
+    /// |     2 000 |   0,028 s |   0,025 s |   11 % |
+    /// |     8 000 |   0,157 s |   0,108 s |   31 % |
+    /// |    32 000 |   3,592 s |   0,444 s |   88 % |
+    ///
+    /// Die rechte Spalte ist linear, die linke vervierfacht sich. Am
+    /// Verhalten ändert sich nichts: dieselben Warnungen, dieselbe
+    /// Reihenfolge, jede genau einmal.
+    seen_warnings: HashSet<String>,
+    /// Formular → die Formulare, die es selbst zeichnet, je mit dem Index
+    /// des `Do` in seinem Strom, in `Do`-Reihenfolge. Gefüllt über
+    /// [`ContentSink::form_within`], verbraucht von [`ScanResult::close_forms`].
+    ///
+    /// Eine **Menge**, weil ein mehrfach platziertes Formular mehrfach
+    /// durchlaufen wird und seine Kanten dabei jedes Mal meldet: der Strom
+    /// eines Formulars zeichnet an einem Index aber genau einmal, und die
+    /// Schließung zählt Platzierungen. Stünde `(Index, Formular)` hier
+    /// zweimal, zählten die Glyphen dahinter doppelt. Nach `Index` sortiert,
+    /// also in Stromreihenfolge.
+    nested_forms: BTreeMap<ObjectId, BTreeSet<(usize, ObjectId)>>,
+}
+
+impl ScanResult {
+    /// Schließt [`MarkedTextRecord::forms`] transitiv über
+    /// [`ScanResult::nested_forms`]: zeichnet ein Formular im Geltungsbereich
+    /// eines Spiegels seinerseits Formulare, gehören deren Glyphen zu
+    /// demselben Spiegel. Jede **Platzierung** steht danach mit dem Pfad der
+    /// `Do`-Indizes darin, über den sie erreicht wurde.
+    ///
+    /// **Platzierung, nicht Formular.** Steht dasselbe Formular zweimal unter
+    /// einem Spiegel (`… BDC /Fm0 Do /Fm0 Do EMC`, oder ein Formular, das ein
+    /// inneres zweimal zeichnet), zeigt der Betrachter seine Glyphen zweimal,
+    /// und der Spiegel schreibt sie zweimal aus. Eine Menge über Objekt-Ids
+    /// warf hier bis Fix-Runde 5 die zweite Platzierung weg; die Glyphen
+    /// zählten halb, und ein deckungsgleicher Spiegel („AlphaAlpha“ über
+    /// zweimal „Alpha“) galt als Widerspruch — eine Deckungslücke und damit
+    /// Rückgabewert 3 an gewöhnlichem Material. Perfide daran war, dass die
+    /// Schließung nur läuft, wenn *irgendwo* im Dokument ein Formular ein
+    /// Formular zeichnet: dieselbe Seite warnte je nach unbeteiligtem Beiwerk
+    /// oder nicht.
+    ///
+    /// **Was die Menge stattdessen leistet.** Ein Zyklus (ein Formular, das
+    /// sich selbst zeichnet) darf nicht in eine Endlosschleife laufen. Dagegen
+    /// steht hier die **Kette der Vorfahren** dieses Pfades, nicht der ganze
+    /// Datensatz: sie beendet den Zyklus genauso, lässt aber dasselbe Formular
+    /// an zwei verschiedenen Stellen zu. Dazu kommt die Tiefe
+    /// [`MAX_FORM_DEPTH`] — tiefer hat der Interpreter selbst nicht gelesen,
+    /// und was er nicht gelesen hat, hat hier keine Glyphen beizutragen — und
+    /// die Decke [`MAX_MIRROR_FORM_PLACEMENTS`] gegen die Fächerung.
+    fn close_forms(&mut self, budget: &mut Budget) {
+        // Auch ohne ein verschachteltes Formular kann beim **Aufbau** der
+        // Listen schon etwas an der Decke weggefallen sein; die Warnung unten
+        // gilt deshalb beiden Stellen — sie zählen dieselbe Größe.
+        if !self.nested_forms.is_empty() {
+            self.expand_forms(budget);
+        }
+        if budget.mirror_forms_cut() {
+            self.warn(format!(
+                "Unter den Textspiegeln dieser Seite stehen mehr als \
+                 {MAX_MIRROR_FORM_PLACEMENTS} Zuordnungen zwischen einem Spiegel und \
+                 einer Formularplatzierung; ab dort wurden die Glyphen den Spiegeln \
+                 nicht mehr zugeordnet. Der Vergleich zwischen Spiegel und Glyphen ist \
+                 für die letzten Abschnitte deshalb unvollständig."
+            ));
+        }
+        if budget.mirror_shows_cut() {
+            self.warn(format!(
+                "Unter den Textspiegeln dieser Seite stehen mehr als \
+                 {MAX_MIRROR_FORM_PLACEMENTS} Zuordnungen zwischen einem Spiegel und \
+                 einer Textoperation; ab dort wurden die Textoperationen den Spiegeln \
+                 nicht mehr zugeordnet. Für die letzten Abschnitte ist deshalb weder \
+                 der Vergleich zwischen Spiegel und Glyphen vollständig noch die \
+                 Frage entscheidbar, ob eine Schwärzung sie berührt — ein Spiegel \
+                 darüber kann stehen bleiben."
+            ));
+        }
+    }
+
+    /// Der Tiefensuchlauf von [`ScanResult::close_forms`].
+    fn expand_forms(&mut self, budget: &mut Budget) {
+        for record in &mut self.marked {
+            let mut closed: Vec<(Vec<usize>, ObjectId)> = Vec::new();
+            for (path, id) in std::mem::take(&mut record.forms) {
+                // Tiefensuche in `Do`-Reihenfolge. Ein Eintrag im Stapel ist
+                // der ganze Weg als (Do-Index, Formular): daraus kommen der
+                // Pfad, das aktuelle Formular und die Vorfahren, die den
+                // Zyklus beenden.
+                let mut stack: Vec<Vec<(usize, ObjectId)>> = Vec::new();
+                // `scan_marked_text` liefert einen Pfad der Länge eins (das
+                // `Do` in diesem Strom); längere kämen nur aus einer schon
+                // geschlossenen Liste, und deren Vorfahren sind hier nicht
+                // mehr bekannt — dann steht `id` für die ganze Kette, was den
+                // Zyklusschutz höchstens strenger macht.
+                stack.push(path.into_iter().map(|at| (at, id)).collect());
+                while let Some(way) = stack.pop() {
+                    let Some(&(_, id)) = way.last() else {
+                        continue;
+                    };
+                    closed.push((way.iter().map(|(at, _)| *at).collect(), id));
+                    if way.len() >= MAX_FORM_DEPTH {
+                        continue;
+                    }
+                    let Some(children) = self.nested_forms.get(&id) else {
+                        continue;
+                    };
+                    for (at, child) in children.iter().rev() {
+                        if way.iter().any(|(_, up)| up == child) {
+                            continue; // Zyklus
+                        }
+                        // Gefragt wird erst hier, wo eine Kante wirklich
+                        // aufzuklappen ist. Stand die Frage davor — beim
+                        // Blatt, das gar keine Kinder hat —, meldete genau
+                        // `MAX_MIRROR_FORM_PLACEMENTS` Aufklappungen einen
+                        // Verlust, obwohl nichts verloren ging (Befund
+                        // Q3-1b; `decke_99999.pdf` 0, `decke_100000.pdf` 3).
+                        if !budget.mirror_expansion() {
+                            break;
+                        }
+                        let mut deeper = way.clone();
+                        deeper.push((*at, *child));
+                        stack.push(deeper);
+                    }
+                }
+            }
+            record.forms = closed;
+        }
+    }
 }
 
 impl ContentSink for ScanResult {
+    /// Die Bilder ja, den Grafikzustand nein — siehe
+    /// [`ContentSink::wants_images`].
+    fn wants_images(&self) -> bool {
+        true
+    }
+
+    /// Jede Bildplatzierung — auch in einem Strom ohne Textspiegel darüber.
+    ///
+    /// Der frühere Filter „nur in Strömen mit Spiegel“ sparte nichts Nennbares
+    /// und war zweimal falsch. Erstens steht der Spiegel oft in einem
+    /// **anderen** Strom als das Bild: `/Figure <</Alt …>> BDC /Fm0 Do EMC` im
+    /// Seitenstrom, `/Im0 Do` in `Fm0` — die Platzierung fiel durch den Filter,
+    /// der Spiegel blieb mit dem Klartext stehen. Zweitens braucht der
+    /// Ersatztext **am Bilddictionary** die Liste auch in einer Datei ganz ohne
+    /// Marked Content; eine Seite ohne `BDC` lieferte nichts, und das `/Alt`
+    /// eines unlesbaren Bildes blieb stehen.
+    fn image(&mut self, cx: &SinkContext, event: &ImageEvent) {
+        let id = event
+            .name
+            .and_then(|name| image_id_of(cx.doc, cx.resources, name));
+        self.images.push(ImagePlacement {
+            stream: cx.stream,
+            op_index: cx.op_index,
+            id,
+            bounds: unit_square_bounds(&event.ctm),
+            quad: unit_square_quad(&event.ctm),
+        });
+    }
+
+    fn form_within(&mut self, parent: StreamKey, at: usize, id: ObjectId) {
+        let StreamKey::Form(parent) = parent else {
+            return;
+        };
+        self.nested_forms
+            .entry(parent)
+            .or_default()
+            .insert((at, id));
+    }
+
     fn show(&mut self, record: ShowRecord) {
         self.shows.push(record);
     }
@@ -925,7 +1832,20 @@ impl ContentSink for ScanResult {
         // Ein mehrfach platziertes Form-XObject wird mehrfach durchlaufen; sein
         // Strom wird aber nur **einmal** neu geschrieben. Derselbe Spiegel darf
         // deshalb nicht mehrfach in der Liste stehen.
-        if !self.seen_marked.insert((record.stream, record.op_index)) {
+        //
+        // „Derselbe“ heißt: dieselbe Operation **und** dieselbe
+        // Eigenschaftsliste. Ein Formular ohne eigenes `/Resources` löst
+        // `/MC0` unter jeder Umgebung neu auf — zeichnet es Fm0 mit einem
+        // Spiegel und danach die Seite mit einem anderen, sind das zwei
+        // Listen an zwei Fundorten. Wer nur nach (Strom, Operation) prüfte,
+        // verwarf die zweite: ihr Klartext blieb im Verzeichnis der Seite,
+        // ohne Warnung, mit Rückgabewert 0 (Spur-A-Runde 1, Register #65).
+        if !self.seen_marked.insert((
+            record.stream,
+            record.op_index,
+            record.property_owner,
+            record.property_id,
+        )) {
             return;
         }
         self.marked.push(record);
@@ -942,7 +1862,7 @@ impl ContentSink for ScanResult {
     }
 
     fn warn(&mut self, message: String) {
-        if !self.warnings.contains(&message) {
+        if self.seen_warnings.insert(message.clone()) {
             self.warnings.push(message);
         }
     }
@@ -1015,6 +1935,24 @@ pub trait ContentSink {
     fn wants_graphics(&self) -> bool {
         false
     }
+    /// Nur wenn `true`, werden **Bildplatzierungen** gemeldet
+    /// ([`ContentSink::image`]).
+    ///
+    /// Eigene Frage, weil eine Senke die Bilder brauchen kann, ohne den
+    /// vollen Grafikzustand zu wollen: die CTM führt der Interpreter ohnehin
+    /// nach (`q`, `Q`, `cm` stehen außerhalb jeder Abfrage), Farben, Pfade und
+    /// Clips nicht. Die Schwärzung braucht genau die Fläche eines Bildes und
+    /// nichts weiter — siehe [`ScanResult::images`]. Voreinstellung ist
+    /// [`ContentSink::wants_graphics`]: wer Grafik will, bekommt die Bilder
+    /// wie bisher, und für jede andere Senke ändert sich nichts.
+    ///
+    /// Was eine Senke, die nur hier `true` sagt, **nicht** bekommt: gültige
+    /// `fill`, `fill_alpha` und `clip` im [`ImageEvent`] — der Farb- und
+    /// Clip-Zustand wird dann nicht nachgeführt. Wer sie liest, fragt nach
+    /// `wants_graphics`.
+    fn wants_images(&self) -> bool {
+        self.wants_graphics()
+    }
     /// Eine abgeschlossene Text-Ausgabe-Operation.
     fn show(&mut self, _record: ShowRecord) {}
     /// Ein Marked-Content-Abschnitt mit Textspiegel (`/ActualText`, `/Alt`,
@@ -1033,6 +1971,16 @@ pub trait ContentSink {
     }
     /// Ein Form-XObject wurde platziert.
     fn form(&mut self, _id: ObjectId) {}
+    /// Ein Form-XObject `id` wurde **aus dem Strom `parent`** heraus
+    /// platziert, durch das `Do` an Index `at` dieses Stroms — Formular im
+    /// Formular, wenn `parent` selbst eines ist.
+    ///
+    /// Nur die Verschachtelung, nicht die Platzierung: die zählt
+    /// [`ContentSink::form`]. Gebraucht wird sie, um den Geltungsbereich eines
+    /// Textspiegels ([`MarkedTextRecord::forms`]) über Formulargrenzen hinweg
+    /// zu schließen — mit `at`, damit die Glyphen des inneren Formulars an
+    /// der Stelle seines `Do` in die Glyphenfolge des äußeren fallen.
+    fn form_within(&mut self, _parent: StreamKey, _at: usize, _id: ObjectId) {}
     /// Ein Form-XObject **steht in den Ressourcen** eines gelesenen Stroms.
     ///
     /// Das ist nicht dasselbe wie [`ContentSink::form`]: dort wird gezeichnet,
@@ -1350,9 +2298,28 @@ pub(crate) fn cmyk_to_rgb(c: f64, m: f64, y: f64, k: f64) -> Rgb {
 /// Erfolg durchgehen: „0 Schwärzungen, Rückgabewert 0“ liest sich wie
 /// „nichts gefunden, also sauber“, und genau das wäre es dann nicht.
 pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
-    let content_data = doc
-        .get_page_content(page_id)
-        .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
+    scan_page_with(doc, page_id, &mut AnnotationLedger::default())
+}
+
+/// Wie [`scan_page`], mit dem Annotationsbuch des **ganzen Dokuments**.
+///
+/// Die Seitenschleifen des Extraktors und des Redaktors reichen dasselbe
+/// [`AnnotationLedger`] von Seite zu Seite: eine Annotation, die eine frühere
+/// Seite unter denselben Ressourcen schon gelesen hat, wird nicht noch einmal
+/// gelesen (Register #94).
+pub(crate) fn scan_page_with(
+    doc: &Document,
+    page_id: ObjectId,
+    ledger: &mut AnnotationLedger,
+) -> Result<ScanResult> {
+    // Ist das Konto über das Dokument schon gerissen, kostet jede weitere
+    // Seite nichts mehr (Register #106).
+    if let Some(message) = &ledger.work.refused {
+        return Err(RedactError::Pdf(message.clone()));
+    }
+    // Über [`crate::filters`], nicht `Document::get_page_content`: der eigene
+    // Dekoder kennt `ASCIIHexDecode` und `RunLengthDecode`, `lopdf` nicht.
+    let content_data = crate::filters::page_content(doc, page_id);
     // Nicht `lopdf::content::Content::decode`: dessen Parser kennt kein
     // `BI … ID … EI`. Die Binärdaten hinter dem `ID` bringen ihn aus dem Tritt,
     // der Rest des Streams geht verloren — Text hinter einem Inline-Bild wäre
@@ -1396,21 +2363,36 @@ pub fn scan_page(doc: &Document, page_id: ObjectId) -> Result<ScanResult> {
     let resources = page_resources(doc, page_id);
     let mut result = ScanResult::default();
     let mut budget = Budget::default();
-    budget.credit(None, operations.len());
+    budget.credit(None, &operations);
     scan_with_budget(
         doc,
         &operations,
         StreamKey::Page,
         resources.as_ref(),
         true,
+        Some(page_id),
+        &[],
         None,
         Matrix::IDENTITY,
         &mut budget,
         &mut result,
     );
-    scan_annotations(doc, page_id, resources.as_ref(), &mut budget, &mut result);
+    let read = scan_annotations(
+        doc,
+        page_id,
+        resources.as_ref(),
+        ledger,
+        &mut budget,
+        &mut result,
+    );
     budget.result()?;
+    ledger.work.book(&content_ids(doc, page_id), &budget)?;
+    // Erst jetzt, nach dem gelungenen Scan: eine Seite, die abgelehnt wird,
+    // hat ihre Annotationen nicht gelesen, und die nächste Seite muss es tun.
+    ledger.commit(read);
+    result.close_forms(&mut budget);
     result.effort = budget.effort;
+    result.effort.retained_weight = budget.cached_operations;
     Ok(result)
 }
 
@@ -1430,12 +2412,56 @@ fn has_tokens(data: &[u8]) -> bool {
 struct FontDecodeStats {
     /// (Ressourcenname, `/BaseFont`) → (Zeichen gesamt, davon unlesbar)
     per_font: BTreeMap<(Vec<u8>, String), (usize, usize)>,
+    /// Fonts **mit** `/ToUnicode`: was ihre Codes ergeben — siehe
+    /// [`UniformMapping`].
+    mapped: BTreeMap<(Vec<u8>, String), UniformMapping>,
 }
 
+/// Ob ein `/ToUnicode` alle benutzten Codes auf denselben Text abbildet.
+///
+/// Ein `/ToUnicode` ist eine Behauptung des Erzeugers, keine Eigenschaft der
+/// Glyphen: der Betrachter zeichnet, was im Font steht, und kopiert, was die
+/// CMap sagt. Gemessen an einer Datei, deren CMap jeden Code auf „x“ legt:
+/// der Betrachter zeigte die IBAN, die Analyse las „xxxxxxxx“, fand nichts
+/// und endete mit Rückgabewert 0. Eine CMap, die viele verschiedene Codes auf
+/// **ein** Zeichen legt, ist sichtbar unplausibel — ein Font hat für ein
+/// Zeichen ein, zwei, vielleicht drei Glyphvarianten, nicht acht.
+///
+/// Nur diese eine Form wird erkannt. Eine CMap, die die Zeichen *vertauscht*,
+/// ist von einer richtigen nicht zu unterscheiden, ohne die Glyphen selbst zu
+/// lesen.
+#[derive(Debug, Default)]
+struct UniformMapping {
+    codes: HashSet<u32>,
+    text: String,
+    uniform: bool,
+}
+
+/// Ab so vielen verschiedenen Codes auf denselben Text gilt ein `/ToUnicode`
+/// als unplausibel. Die Zahl zählt **Codes** (verschiedene Glyphen), nicht
+/// Zeichen im Strom: ein Wort mit hundert „x“ ist ein Code.
+const UNIFORM_MAPPING_MIN_CODES: usize = 8;
+
 impl FontDecodeStats {
-    fn record(&mut self, font_name: &[u8], font: &FontInfo, text: &str) {
-        // Fonts mit /ToUnicode sagen selbst, was ihre Codes bedeuten.
+    fn record(&mut self, font_name: &[u8], font: &FontInfo, code: u32, text: &str) {
+        // Fonts mit /ToUnicode sagen selbst, was ihre Codes bedeuten — ob
+        // glaubhaft, hält [`UniformMapping`] fest. Leerraum zählt nicht mit:
+        // dass mehrere Codes ein Leerzeichen ergeben, ist gewöhnlich.
         if font.charmap.has_to_unicode() {
+            if text.trim().is_empty() || text.contains(crate::encoding::REPLACEMENT) {
+                return;
+            }
+            let entry = self
+                .mapped
+                .entry((font_name.to_vec(), font.base_font.clone()))
+                .or_insert_with(|| UniformMapping {
+                    codes: HashSet::new(),
+                    text: text.to_string(),
+                    uniform: true,
+                });
+            if entry.codes.insert(code) && entry.text != text {
+                entry.uniform = false;
+            }
             return;
         }
         let entry = self
@@ -1470,6 +2496,25 @@ impl FontDecodeStats {
                  Seite wurde möglicherweise nicht vollständig geschwärzt."
             ));
         }
+        for ((resource, base_font), mapping) in &self.mapped {
+            if !mapping.uniform || mapping.codes.len() < UNIFORM_MAPPING_MIN_CODES {
+                continue;
+            }
+            let name = if base_font.is_empty() {
+                String::from_utf8_lossy(resource).into_owned()
+            } else {
+                base_font.clone()
+            };
+            out.push(format!(
+                "Font „{name}“ hat ein /ToUnicode, das {} verschiedene Zeichencodes auf \
+                 denselben Text „{}“ abbildet. Das ist nicht glaubhaft: der Betrachter \
+                 zeichnet die Glyphen des Fonts, die Analyse liest nur, was das \
+                 /ToUnicode behauptet. Muster können darin nicht erkannt werden — diese \
+                 Seite wurde möglicherweise nicht vollständig geschwärzt.",
+                mapping.codes.len(),
+                mapping.text
+            ));
+        }
         out
     }
 }
@@ -1492,13 +2537,18 @@ pub fn interpret(
     sink: &mut dyn ContentSink,
 ) -> Result<()> {
     let mut budget = Budget::default();
-    budget.credit(None, operations.len());
+    budget.credit(None, operations);
+    // Ohne Seitenkontext: `interpret` bekommt die Ressourcen fertig gemischt
+    // und kennt die Seite nicht. Keine seiner Senken liest Textspiegel, und
+    // `property_owner` bleibt entsprechend leer.
     scan_with_budget(
         doc,
         operations,
         stream,
         resources,
         true,
+        None,
+        &[],
         None,
         initial_ctm,
         &mut budget,
@@ -1528,6 +2578,8 @@ fn scan_with_budget(
     stream: StreamKey,
     resources: Option<&Dictionary>,
     own_resources: bool,
+    owner: Option<ObjectId>,
+    outer: &Outer<'_>,
     fonts: Option<&FontMap>,
     initial_ctm: Matrix,
     budget: &mut Budget,
@@ -1549,6 +2601,8 @@ fn scan_with_budget(
         stream,
         resources,
         own_resources,
+        owner,
+        outer,
         fonts,
         initial_ctm,
         0,
@@ -1657,18 +2711,320 @@ pub fn stream_shows_text(doc: &Document, id: ObjectId) -> bool {
 /// Die Datensätze tragen [`StreamKey::Form`] mit der Objekt-Id des
 /// Erscheinungsstroms; die Schwärzung kann sie damit genauso neu schreiben wie
 /// ein gewöhnliches Form-XObject.
+/// Wie weit eine Annotation über `/Popup`, `/IRT` und (vom Popup aus)
+/// `/Parent` weitere Annotationen erreichen darf, deren Erscheinungsströme
+/// dann mitgelesen werden. Gewöhnliche Dateien brauchen eine Stufe; eine
+/// Antwortkette, deren Glieder alle in `/Annots` stehen, kostet über
+/// `visited` ohnehin nichts Weiteres.
+const MAX_ANNOTATION_LINKS: usize = 16;
+
+/// Wie viele Annotationen ein Dokument **erneut** lesen lassen darf, weil
+/// eine weitere Seite sie unter anderen Ressourcen zeigt (Register #94).
+///
+/// Nach PDF 32000-1, 12.5.2 steht eine Annotation im `/Annots` genau einer
+/// Seite. Teilen sich Seiten sie trotzdem, liest [`AnnotationLedger`] sie
+/// unter derselben Ressourcenumgebung einmal; unter einer anderen muss sie
+/// neu gelesen werden, weil ein Erscheinungsstrom ohne eigene Ressourcen die
+/// der Seite benutzt und dort anders aussehen kann. Diese Wiederholungen sind
+/// die Vervielfachung Seiten × Annotationen; über der Decke wird die Datei
+/// abgelehnt. So viele Wiederholungen kosten so viel wie ebenso viele
+/// verschiedene Annotationen, die eine Datei ehrlich mitbringt.
+const MAX_REPEATED_ANNOTATIONS: usize = 100_000;
+
+/// Die Ressourcenumgebung einer Seite: jedes `/Resources` auf dem Weg von der
+/// Seite zur Wurzel des Seitenbaums, als Objekt-Id — oder, direkt
+/// eingebettet, als der Knoten, der es trägt.
+///
+/// Zwei Seiten mit derselben Umgebung sehen dieselben Ressourcen; dieselbe
+/// Annotation liefert unter beiden denselben Text an derselben Stelle. Zwei
+/// Seiten mit inhaltsgleichen, aber getrennt eingebetteten Verzeichnissen
+/// gelten als verschieden — die vorsichtige Richtung: dann wird noch einmal
+/// gelesen.
+fn resource_environment(doc: &Document, page_id: ObjectId) -> Vec<(ObjectId, bool)> {
+    let mut chain = Vec::new();
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    let mut current = Some(page_id);
+    while let Some(id) = current {
+        if seen.len() >= MAX_PAGE_TREE_DEPTH || !seen.insert(id) {
+            break;
+        }
+        let Ok(node) = doc.get_dictionary(id) else {
+            break;
+        };
+        match node.get(b"Resources") {
+            Ok(Object::Reference(resources)) => chain.push((*resources, false)),
+            Ok(_) => chain.push((id, true)),
+            Err(_) => {}
+        }
+        current = match node.get(b"Parent") {
+            Ok(Object::Reference(parent)) => Some(*parent),
+            _ => None,
+        };
+    }
+    chain
+}
+
+/// Wie viele Bytes Text die Zeichenketten dieser Operationen tragen — das,
+/// was ein Strom an Zeichen **mitbringt**. Jede gesetzte Glyphe braucht
+/// mindestens ein Byte davon; mehr Glyphen, als der Text hergibt, entstehen
+/// nur durch Wiederholung.
+fn text_bytes(operations: &[Operation]) -> usize {
+    operations
+        .iter()
+        .flat_map(|op| op.operands.iter())
+        .map(|operand| match operand {
+            Object::String(bytes, _) => bytes.len(),
+            Object::Array(items) => items
+                .iter()
+                .map(|item| match item {
+                    Object::String(bytes, _) => bytes.len(),
+                    _ => 0,
+                })
+                .sum(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Das Aufwandskonto über **das ganze Dokument** (Register #106).
+///
+/// [`Budget`] gilt je Seite und schreibt jeden Strom gut, den die Seite zum
+/// ersten Mal liest — auch dann, wenn eine frühere Seite denselben Strom
+/// schon gelesen hat. Ein Inhaltsstrom oder ein Formular, das sich P Seiten
+/// teilen, brachte sein Guthaben so P-mal ein, und die Arbeit wuchs mit
+/// Seiten × Inhalt, ohne dass ein Konto sie sah. Gemessen (Release, 200
+/// Seiten, die denselben Strom mit 1 000 Zeilen zeichnen, 32 kB): 14,4 s
+/// und 421 MB ohne ein einziges Muster, `--check-leaks` 10,5 s.
+///
+/// Hier bringt jeder Strom sein Guthaben **einmal je Dokument** ein —
+/// Operationen mal [`MAX_AMPLIFICATION`], dazu seine Textbytes mal
+/// demselben Faktor für die Glyphen. Jede Seite bucht, was sie wirklich
+/// ausgegeben hat. Wer mehr ausgibt als Grundausstattung plus Guthaben, wird
+/// abgelehnt, und jede weitere Seite ohne Scan. Eine Datei, deren Seiten
+/// verschiedenen Inhalt zeigen, bringt mit jeder Seite neues Guthaben mit
+/// und reißt diese Decke nicht; reißen kann sie nur Inhalt, der vielfach
+/// gezeigt wird.
+#[derive(Debug)]
+pub(crate) struct DocumentWork {
+    /// Ströme, die ihr Guthaben im Dokument schon eingebracht haben.
+    credited: HashSet<ObjectId>,
+    operations_spent: usize,
+    glyphs_spent: usize,
+    operations_credit: usize,
+    glyphs_credit: usize,
+    /// Grundausstattung — [`BASE_OPERATIONS`] und [`MAX_GLYPHS_PER_SCAN`];
+    /// nur die Grenzproben in diesem Modul setzen sie kleiner.
+    operations_base: usize,
+    glyphs_base: usize,
+    /// Begründung, sobald das Konto gerissen ist.
+    refused: Option<String>,
+}
+
+impl Default for DocumentWork {
+    fn default() -> Self {
+        Self {
+            credited: HashSet::new(),
+            operations_spent: 0,
+            glyphs_spent: 0,
+            operations_credit: 0,
+            glyphs_credit: 0,
+            operations_base: BASE_OPERATIONS,
+            glyphs_base: MAX_GLYPHS_PER_SCAN,
+            refused: None,
+        }
+    }
+}
+
+impl DocumentWork {
+    /// Bucht einen gelungenen Seiten-Scan. `contents` sind die Inhaltsströme
+    /// der Seite: der Seitenstrom bringt sein Guthaben nur ein, wenn einer
+    /// von ihnen neu ist.
+    fn book(&mut self, contents: &[ObjectId], budget: &Budget) -> Result<()> {
+        for (id, operations, bytes) in &budget.credits {
+            let new = match id {
+                Some(id) => self.credited.insert(*id),
+                None => {
+                    let mut new = contents.is_empty();
+                    for id in contents {
+                        new |= self.credited.insert(*id);
+                    }
+                    new
+                }
+            };
+            if new {
+                self.operations_credit = self
+                    .operations_credit
+                    .saturating_add(operations.saturating_mul(MAX_AMPLIFICATION));
+                self.glyphs_credit = self
+                    .glyphs_credit
+                    .saturating_add(bytes.saturating_mul(MAX_AMPLIFICATION));
+            }
+        }
+        self.operations_spent = self
+            .operations_spent
+            .saturating_add(budget.spent_operations);
+        self.glyphs_spent = self.glyphs_spent.saturating_add(budget.spent_glyphs);
+        let operations_limit = self.operations_base.saturating_add(self.operations_credit);
+        let glyphs_limit = self.glyphs_base.saturating_add(self.glyphs_credit);
+        if self.operations_spent > operations_limit || self.glyphs_spent > glyphs_limit {
+            let message = format!(
+                "Die Seiten dieses Dokuments zeigen denselben Inhalt vielfach: zusammen \
+                {} Zeichenoperationen und {} Zeichen, wo der Inhalt der Datei \
+                höchstens {} und {} hergibt (das {}-fache dessen, was sie mitbringt, \
+                dazu eine Grundausstattung). So etwas entsteht, wenn viele Seiten \
+                denselben Inhaltsstrom oder dasselbe Formular zeichnen — aus wenigen \
+                Kilobyte wird die Arbeit vieler Seiten. Die Datei wird abgelehnt.",
+                self.operations_spent,
+                self.glyphs_spent,
+                operations_limit,
+                glyphs_limit,
+                MAX_AMPLIFICATION,
+            );
+            self.refused = Some(message.clone());
+            return Err(RedactError::Pdf(message));
+        }
+        Ok(())
+    }
+}
+
+/// Die Inhaltsströme einer Seite als Objekt-Ids (`/Contents` als Verweis oder
+/// Array von Verweisen).
+fn content_ids(doc: &Document, page_id: ObjectId) -> Vec<ObjectId> {
+    let Ok(page) = doc.get_dictionary(page_id) else {
+        return Vec::new();
+    };
+    match page.get(b"Contents") {
+        Ok(Object::Reference(id)) => match doc.get_object(*id) {
+            Ok(Object::Array(items)) => items
+                .iter()
+                .filter_map(|item| item.as_reference().ok())
+                .chain(std::iter::once(*id))
+                .collect(),
+            _ => vec![*id],
+        },
+        Ok(Object::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_reference().ok())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Was die Seiten eines Dokuments an Annotationen schon gelesen haben — über
+/// alle Seiten hinweg (Register #94).
+///
+/// Bis zur Spur-A-Runde 2 las jede Seite ihr `/Annots` von vorn. Ein Array,
+/// das sich P Seiten teilen, kostete P × N Erscheinungsströme, ohne dass ein
+/// Konto es sah: das Aufwandskonto [`Budget`] beginnt je Seite neu. Gemessen
+/// an hundert Seiten mit tausend geteilten Annotationen (Release): Extraktor
+/// 2,6 s, Redaktor 1,5 s — aus einer Datei von 287 kB, quadratisch in der
+/// Seitenzahl.
+///
+/// Übersprungen wird nur, was unter **derselben** Ressourcenumgebung schon
+/// gelesen ist (siehe [`resource_environment`]): dieselbe Annotation, dasselbe
+/// `/Rect`, dieselben Ressourcen ergeben denselben Text. Ihr Text steht dann
+/// einmal im Ergebnis, auf der ersten Seite, die sie zeigt; geschwärzt wird
+/// ihr Erscheinungsstrom ohnehin nur einmal, und eine Annotation, die in eine
+/// Schwärzung ragt, fällt als Ganzes aus dem Array aller Seiten.
+#[derive(Debug)]
+pub(crate) struct AnnotationLedger {
+    /// Die Ressourcenumgebungen, je einmal abgelegt; die Schlüssel darunter
+    /// tragen nur ihre Nummer.
+    environments: HashMap<Vec<(ObjectId, bool)>, usize>,
+    /// Gelesene Annotationen, je Umgebung.
+    read: HashSet<(ObjectId, usize)>,
+    /// `/Annots`-Arrays als eigene Objekte, deren Einträge unter einer
+    /// Umgebung vollständig gelesen sind — eine Seite, die dasselbe Array
+    /// unter derselben Umgebung zeigt, kostet dann einen Blick.
+    arrays: HashSet<(ObjectId, usize)>,
+    /// Annotationen, die unter irgendeiner Umgebung gelesen sind.
+    seen: HashSet<ObjectId>,
+    /// Wie oft eine schon gelesene Annotation unter einer weiteren Umgebung
+    /// erneut gelesen wurde.
+    repeats: usize,
+    /// Die Decke für `repeats` — [`MAX_REPEATED_ANNOTATIONS`]; nur die
+    /// Grenzprobe in diesem Modul setzt sie kleiner.
+    limit: usize,
+    /// Wie viele Einträge die Seiten zusammen angesehen haben. Die Arbeit,
+    /// die das Buch spart, ist genau diese Zahl: ohne das Buch wüchse sie mit
+    /// Seiten × Annotationen, mit ihm mit den Annotationen.
+    visits: usize,
+    /// Das Aufwandskonto über das ganze Dokument (Register #106).
+    work: DocumentWork,
+}
+
+impl Default for AnnotationLedger {
+    fn default() -> Self {
+        Self {
+            environments: HashMap::new(),
+            read: HashSet::new(),
+            arrays: HashSet::new(),
+            seen: HashSet::new(),
+            repeats: 0,
+            limit: MAX_REPEATED_ANNOTATIONS,
+            visits: 0,
+            work: DocumentWork::default(),
+        }
+    }
+}
+
+/// Was eine Seite an Annotationen gelesen hat; ins [`AnnotationLedger`] geht
+/// es erst, wenn ihr Scan gelungen ist.
+struct ReadAnnotations {
+    environment: usize,
+    ids: Vec<ObjectId>,
+    array: Option<ObjectId>,
+}
+
+impl AnnotationLedger {
+    fn environment(&mut self, doc: &Document, page_id: ObjectId) -> usize {
+        let key = resource_environment(doc, page_id);
+        let next = self.environments.len();
+        *self.environments.entry(key).or_insert(next)
+    }
+
+    fn commit(&mut self, read: ReadAnnotations) {
+        for id in read.ids {
+            self.read.insert((id, read.environment));
+            self.seen.insert(id);
+        }
+        if let Some(array) = read.array {
+            self.arrays.insert((array, read.environment));
+        }
+    }
+}
+
 fn scan_annotations(
     doc: &Document,
     page_id: ObjectId,
     page_resources: Option<&Dictionary>,
+    ledger: &mut AnnotationLedger,
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
-) {
-    let annots = doc
+) -> ReadAnnotations {
+    let mut read = ReadAnnotations {
+        environment: ledger.environment(doc, page_id),
+        ids: Vec::new(),
+        array: None,
+    };
+    let Some(value) = doc
         .get_dictionary(page_id)
         .ok()
         .and_then(|d| d.get(b"Annots").ok())
-        .and_then(|o| doc.dereference(o).ok())
+    else {
+        return read;
+    };
+    // Dasselbe Array unter derselben Umgebung: alles darin ist gelesen, und
+    // der Blick darauf kostet nicht mehr als diese eine Frage.
+    if let Object::Reference(array) = value {
+        if ledger.arrays.contains(&(*array, read.environment)) {
+            return read;
+        }
+        read.array = Some(*array);
+    }
+    let annots = doc
+        .dereference(value)
+        .ok()
         .and_then(|(_, o)| o.as_array().ok())
         .cloned()
         .unwrap_or_default();
@@ -1676,14 +3032,66 @@ fn scan_annotations(
     // Ein Strom, der von zwei Annotationen (oder zwei Zuständen) benutzt wird,
     // wird nur einmal gelesen — sonst stünde derselbe Text doppelt im Ergebnis.
     let mut seen: HashSet<ObjectId> = HashSet::new();
-    for annot in &annots {
-        let Some(dict) = doc
-            .dereference(annot)
+    // Die Annotationen der Seite — und die, die eine von ihnen am Leben hält,
+    // ohne dass sie selbst in `/Annots` stünde: die Elternnotiz eines
+    // `/Popup` (`/Parent`), die Annotation, auf die eine Antwort zeigt
+    // (`/IRT`), das `/Popup` selbst. Ein Werkzeug, das die Notiz aus
+    // `/Annots` streicht und das Popup vergisst, hinterlässt so einen
+    // Erscheinungsstrom, den `strip_metadata` über dieselben Schlüssel
+    // erreicht (dort fällt `/Contents`), den hier aber niemand las: sein
+    // Text stand nach dem Lauf in der Datei, ohne Warnung (Register #71).
+    // Gelesen wird er mit dem `/Rect` seiner Annotation — wie jeder andere.
+    let mut queue: VecDeque<(Object, usize)> =
+        annots.iter().map(|annot| (annot.clone(), 0)).collect();
+    let mut visited: HashSet<ObjectId> = HashSet::new();
+    while let Some((annot, depth)) = queue.pop_front() {
+        let Some((id, dict)) = doc
+            .dereference(&annot)
             .ok()
-            .and_then(|(_, o)| o.as_dict().ok())
+            .and_then(|(id, o)| o.as_dict().ok().map(|d| (id, d)))
         else {
             continue;
         };
+        ledger.visits += 1;
+        if let Some(id) = id {
+            if ledger.read.contains(&(id, read.environment)) || !visited.insert(id) {
+                continue;
+            }
+            if ledger.seen.contains(&id) {
+                ledger.repeats += 1;
+                if ledger.repeats > ledger.limit {
+                    budget.refuse(format!(
+                        "Dieses Dokument zeigt dieselben Annotationen auf so vielen Seiten mit \
+                         jeweils anderen Ressourcen, dass mehr als {} Erscheinungen erneut zu \
+                         lesen wären. Eine Annotation gehört zu genau \
+                         einer Seite (PDF 32000-1, 12.5.2); hier kostet sie Seiten mal \
+                         Annotationen. Die Datei wird abgelehnt.",
+                        ledger.limit
+                    ));
+                    return read;
+                }
+            }
+            read.ids.push(id);
+        }
+        if depth < MAX_ANNOTATION_LINKS {
+            let is_popup = dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|o| doc.dereference(o).ok())
+                .is_some_and(|(_, o)| o.as_name().is_ok_and(|n| n == b"Popup"));
+            // `/Parent` nur vom Popup aus: das `/Parent` eines Widgets ist
+            // ein Formularfeld, und dessen `/Kids` stehen auf anderen Seiten.
+            let links: &[&[u8]] = if is_popup {
+                &[b"Popup", b"IRT", b"Parent"]
+            } else {
+                &[b"Popup", b"IRT"]
+            };
+            for key in links {
+                if let Ok(value) = dict.get(key) {
+                    queue.push_back((value.clone(), depth + 1));
+                }
+            }
+        }
         let rect = dict
             .get(b"Rect")
             .ok()
@@ -1719,16 +3127,41 @@ fn scan_annotations(
                 streams.extend(appearance_streams(doc, value, selected.as_deref()));
             }
         }
+        // Die Symbole eines Druckknopfs (`/MK /I`, `/RI`, `/IX`, Tabelle 189)
+        // sind Form-XObjects wie ein Erscheinungsstrom und dürfen Text
+        // zeichnen; ein Betrachter, der die Erscheinung neu aufbaut, malt sie
+        // in das `/Rect` des Widgets. Bis zur Spur-A-Runde 1 las sie niemand
+        // (Register #71).
+        if let Some(mk) = dict
+            .get(b"MK")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+        {
+            for key in [b"I".as_slice(), b"RI".as_slice(), b"IX".as_slice()] {
+                if let Ok(value) = mk.get(key) {
+                    streams.extend(appearance_streams(doc, value, None));
+                }
+            }
+        }
 
-        // Ohne Erscheinungsstrom bleibt nur der Klartext in `/Contents` — der
-        // hat keine Glyphengeometrie, kann also weder verortet noch geschwärzt
-        // werden. Verschwiegen werden darf er trotzdem nicht.
+        // Ohne Erscheinungsstrom bleibt nur der Klartext in `/Contents` (und
+        // den übrigen Textschlüsseln, siehe `crate::meta::ANNOTATION_TEXT_KEYS`)
+        // — der hat keine Glyphengeometrie, kann also nicht verortet und
+        // deshalb nicht *anteilig* geschwärzt werden. Entfernt wird er
+        // trotzdem: `crate::meta::strip_metadata` nimmt jeder Annotation genau
+        // diese Schlüssel, als Ganzes. Die Warnung sagt das — und nicht mehr
+        // „nicht durchsucht“, was `redact_pipeline::coverage` zu Recht als
+        // Deckungslücke (Rückgabewert 3) las, während `--check-leaks` an der
+        // Ausgabe nichts fand (Befund G2-7).
         if streams.is_empty() {
             if annot_has_text(doc, dict) {
                 sink.warn(
-                    "Eine Annotation trägt Text in /Contents, hat aber keinen lesbaren \
-                     Erscheinungsstrom (/AP). Dieser Text wurde nicht durchsucht und \
-                     kann deshalb nicht geschwärzt worden sein."
+                    "Eine Annotation trägt Text (/Contents oder einen der Schlüssel /RC, /T, \
+                     /Subj, /TU, /TM), hat aber keinen lesbaren Erscheinungsstrom (/AP). \
+                     Dieser Text hat keine Glyphen und wird deshalb nicht anteilig \
+                     geschwärzt; er wird mit den Metadaten als Ganzes entfernt \
+                     (strip_metadata, in der Verarbeitungskette immer)."
                         .to_string(),
                 );
             }
@@ -1738,24 +3171,25 @@ fn scan_annotations(
             if !seen.insert(id) {
                 continue;
             }
-            scan_appearance(doc, id, rect, page_resources, budget, sink);
+            scan_appearance(doc, id, page_id, rect, page_resources, budget, sink);
         }
     }
+    read
 }
 
-/// Trägt die Annotation überhaupt Text in `/Contents` (oder `/RC`)?
+/// Trägt die Annotation überhaupt Text — in einem der Schlüssel, die
+/// `strip_metadata` entfernt? Dieselbe Liste an beiden Stellen: was hier
+/// gemeldet wird, ist genau das, was dort fällt.
 fn annot_has_text(doc: &Document, dict: &Dictionary) -> bool {
-    [b"Contents".as_slice(), b"RC".as_slice()]
-        .iter()
-        .any(|key| {
-            dict.get(key)
-                .ok()
-                .and_then(|o| doc.dereference(o).ok())
-                .is_some_and(|(_, o)| match o {
-                    Object::String(bytes, _) => bytes.iter().any(|b| !b.is_ascii_whitespace()),
-                    _ => false,
-                })
-        })
+    crate::meta::ANNOTATION_TEXT_KEYS.iter().any(|key| {
+        dict.get(key)
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .is_some_and(|(_, o)| match o {
+                Object::String(bytes, _) => bytes.iter().any(|b| !b.is_ascii_whitespace()),
+                _ => false,
+            })
+    })
 }
 
 /// Objekt-Ids aller Ströme unter einem `/AP`-Eintrag.
@@ -1797,9 +3231,11 @@ fn appearance_streams(doc: &Document, value: &Object, selected: Option<&[u8]>) -
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_appearance(
     doc: &Document,
     id: ObjectId,
+    page_id: ObjectId,
     rect: Option<Rect>,
     page_resources: Option<&Dictionary>,
     budget: &mut Budget,
@@ -1855,7 +3291,7 @@ fn scan_appearance(
     if appearance.operations().is_empty() {
         return;
     }
-    budget.credit(Some(id), appearance.operations().len());
+    budget.credit(Some(id), appearance.operations());
 
     let matrix = stream
         .dict
@@ -1875,17 +3311,30 @@ fn scan_appearance(
     // seiner schon geladenen Schriften; sonst die der Seite.
     let own_fonts = budget.fonts_of(doc, &appearance);
     let (resources, own_resources, fonts) = match (&appearance.resources, &own_fonts) {
-        (Some(own), Some(own_fonts)) => (Some(own.clone()), true, Some(&**own_fonts)),
+        (Some(own), Some(own_fonts)) => (Some(Rc::clone(own)), true, Some(&**own_fonts)),
         // Die Ressourcen der Seite hat der Seitenstrom schon angeboten.
-        _ => (page_resources.cloned(), false, None),
+        _ => (page_resources.map(|d| Rc::new(d.clone())), false, None),
+    };
+    let owner = if own_resources { id } else { page_id };
+    // Mit eigenen Ressourcen liegt die Seite als äußere Umgebung darunter —
+    // so legt Poppler sie unter jede Erscheinung, und ein Name, den das
+    // eigene Verzeichnis nicht kennt, löst sich dort auf. Bis zur
+    // Spur-A-Runde 2 stand hier keine Umgebung: der Spiegel aus der Seite
+    // über einer Erscheinung blieb stehen, ohne Warnung (Register #85).
+    let outer: Vec<(Option<&Dictionary>, Option<ObjectId>)> = if own_resources {
+        vec![(page_resources, Some(page_id))]
+    } else {
+        Vec::new()
     };
 
     scan_with_budget(
         doc,
         appearance.operations(),
         StreamKey::Form(id),
-        resources.as_ref(),
+        resources.as_deref(),
         own_resources,
+        Some(owner),
+        &outer,
         fonts,
         appearance_matrix(&matrix, bbox, rect),
         budget,
@@ -1985,18 +3434,76 @@ fn merge_resources(target: &mut Dictionary, source: &Dictionary) {
 ///   (`BT … ET`), sonst der ganze Strom. Ein Punkt beschreibt die Stelle, an
 ///   der er steht; wird dort etwas entfernt, ist auch seine Beschreibung
 ///   falsch.
+/// * Ein `Do` im Bereich zieht das **Form-XObject** dahinter mit hinein
+///   ([`MarkedTextRecord::forms`]): dessen Glyphen stehen in einem anderen
+///   Strom, gehören aber zu diesem Spiegel. Aufgelöst wird nur die Objekt-Id
+///   — kein Rumpf, kein Aufwandskonto; ob das Formular lesbar ist, entscheidet
+///   [`load_xobject`] an derselben Stelle, und ein unlesbares hat keine
+///   Glyphen, die hier fehlen könnten.
+#[allow(clippy::too_many_arguments)]
 fn scan_marked_text(
     doc: &Document,
     operations: &[Operation],
     stream: StreamKey,
     resources: Option<&Dictionary>,
+    owner: Option<ObjectId>,
+    outer: &Outer<'_>,
+    budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
+    // Wo sich die Eigenschaftsliste einer Operation auflöst — und wem das
+    // Verzeichnis gehört, in dem sie steht. Zuerst in den eigenen Ressourcen;
+    // kennen die den Namen nicht, in den Umgebungen der Aufrufer, von innen
+    // nach außen. PDF 32000-1, 8.10.1 sieht das nicht vor: ein Formular mit
+    // eigenem `/Resources` bringt alles mit. Poppler
+    // (`GfxResources::lookupPropertiesNF`) sucht trotzdem die Kette hinauf
+    // und gibt den Spiegel aus; bis zur Spur-A-Runde 1 blieb er hier dann
+    // unaufgelöst in der Seite stehen, ohne Warnung (Register #67).
+    let resolve = |operands: &[Object]| -> Option<ResolvedMirror> {
+        if let Some((list, id, name)) = mirror_property_list(doc, resources, operands) {
+            return Some((list, id, name, owner));
+        }
+        let Some(Object::Name(name)) = operands.get(1) else {
+            return None;
+        };
+        if property_entry(doc, resources, name).is_some() {
+            return None;
+        }
+        let (found_in, found_owner) = outer
+            .iter()
+            .find(|(res, _)| property_entry(doc, *res, name).is_some())?;
+        let (list, id, name) = mirror_property_list(doc, *found_in, operands)?;
+        Some((list, id, name, *found_owner))
+    };
     let shows: Vec<usize> = operations
         .iter()
         .enumerate()
         .filter(|(_, op)| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
         .map(|(index, _)| index)
+        .collect();
+    // Die Ströme, deren Glyphen unter einem Spiegel dieses Stroms stehen
+    // können: Form-XObjects am `Do` — und **Kachelmuster** am `scn`. Ein
+    // Muster ist ein eigener Strom mit eigenem Text; wird es unter
+    // `/Span <</ActualText …>> BDC` als Füllung gesetzt, beschreibt der
+    // Spiegel dessen Glyphen. Bis zur Spur-A-Runde 1 stand hier nur das
+    // `Do`: die Glyphen fielen aus dem Musterstrom, der Spiegel im Seitenstrom
+    // blieb stehen — `--check-leaks` fand ihn (Register #66).
+    let dos: Vec<(usize, ObjectId)> = operations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, op)| match op.operator.as_str() {
+            "Do" => match op.operands.first() {
+                Some(Object::Name(name)) => Some((index, form_id_of(doc, resources, name)?)),
+                _ => None,
+            },
+            "sc" | "scn" | "SC" | "SCN" => op.operands.iter().find_map(|o| match o {
+                Object::Name(name) => {
+                    tiling_pattern_id_of(doc, resources, name).map(|id| (index, id))
+                }
+                _ => None,
+            }),
+            _ => None,
+        })
         .collect();
 
     // Offene Klammern bzw. das offene Textobjekt, jeweils als Operationsindex.
@@ -2006,10 +3513,22 @@ fn scan_marked_text(
     let mut ranges: BTreeMap<usize, std::ops::Range<usize>> = BTreeMap::new();
     // Gefundene Spiegel an Klammern und an Punkten; ein Punkt merkt sich
     // zusätzlich, worin er steht.
-    let mut brackets: Vec<(usize, Dictionary, Option<ObjectId>)> = Vec::new();
+    // Operationsindex, Liste, Objekt-Id der Liste, Ressourcenname der Liste,
+    // Eigentümer des Verzeichnisses, in dem sie sich aufgelöst hat.
+    type BracketMirror = (
+        usize,
+        Dictionary,
+        Option<ObjectId>,
+        Option<Vec<u8>>,
+        Option<ObjectId>,
+    );
+    let mut brackets: Vec<BracketMirror> = Vec::new();
+    // Dasselbe, plus umschließende Klammer und umschließendes Textobjekt.
     type PointMirror = (
         usize,
         Dictionary,
+        Option<ObjectId>,
+        Option<Vec<u8>>,
         Option<ObjectId>,
         Option<usize>,
         Option<usize>,
@@ -2020,8 +3539,8 @@ fn scan_marked_text(
         match op.operator.as_str() {
             "BDC" | "BMC" => {
                 open.push(index);
-                if let Some((list, id)) = mirror_property_list(doc, resources, &op.operands) {
-                    brackets.push((index, list, id));
+                if let Some((list, id, name, home)) = resolve(&op.operands) {
+                    brackets.push((index, list, id, name, home));
                 }
             }
             "EMC" => {
@@ -2036,8 +3555,16 @@ fn scan_marked_text(
                 }
             }
             "DP" => {
-                if let Some((list, id)) = mirror_property_list(doc, resources, &op.operands) {
-                    points.push((index, list, id, open.last().copied(), text_object));
+                if let Some((list, id, name, home)) = resolve(&op.operands) {
+                    points.push((
+                        index,
+                        list,
+                        id,
+                        name,
+                        home,
+                        open.last().copied(),
+                        text_object,
+                    ));
                 }
             }
             _ => {}
@@ -2048,16 +3575,45 @@ fn scan_marked_text(
         ranges.insert(start, start + 1..operations.len());
     }
 
-    let in_range = |range: &std::ops::Range<usize>| -> Vec<usize> {
-        shows
-            .iter()
-            .copied()
-            .filter(|index| range.contains(index))
-            .collect()
+    // `shows` und `dos` stehen nach Operationsindex sortiert; der Bereich einer
+    // Klammer ist darin ein zusammenhängendes Stück. Die binäre Suche findet
+    // es in O(log n) — die frühere Filterung ging für **jede** Klammer die
+    // ganze Liste ab, und das ist bei verschachtelten Klammern das Produkt aus
+    // beidem.
+    let slice_in = |list: &[usize], range: &std::ops::Range<usize>| -> (usize, usize) {
+        (
+            list.partition_point(|index| *index < range.start),
+            list.partition_point(|index| *index < range.end),
+        )
     };
+    // Dieselbe Decke, dieselbe Bauart wie unten bei `forms_in`: `B`
+    // verschachtelte Klammern über `S` Textoperationen ergeben `B × S`
+    // Einträge, und auch die entstehen alle hier — vor jeder Schleife, die das
+    // Aufwandskonto belastet. Bis Fix-Runde 7 stand davor nichts (gemessen:
+    // 6 000 × 6 000 aus 263 kB = 36 Mio. Zuordnungen, Extraktor 31,1 s).
+    let in_range = |budget: &mut Budget, range: &std::ops::Range<usize>| -> Vec<usize> {
+        let (from, to) = slice_in(&shows, range);
+        let granted = budget.mirror_shows(to - from);
+        shows[from..from + granted].to_vec()
+    };
+    let do_indices: Vec<usize> = dos.iter().map(|(index, _)| *index).collect();
+    // Die Decke zählt hier mit: `B` verschachtelte Klammern über `D`
+    // Platzierungen ergeben `B × D` Paare, und die entstehen alle an dieser
+    // Stelle — vor jeder Schleife, die das Aufwandskonto belastet, und bis
+    // Fix-Runde 6 unter keiner Schranke (gemessen: 2 306 MB und 41,7 s aus
+    // einer Datei von 276 kB).
+    let forms_in =
+        |budget: &mut Budget, range: &std::ops::Range<usize>| -> Vec<(Vec<usize>, ObjectId)> {
+            let (from, to) = slice_in(&do_indices, range);
+            let granted = budget.mirror_pairs(to - from);
+            dos[from..from + granted]
+                .iter()
+                .map(|(index, id)| (vec![*index], *id))
+                .collect()
+        };
 
     // Eine Klammer bringt ihren Bereich selbst mit.
-    for (op_index, properties, property_id) in brackets {
+    for (op_index, properties, property_id, property_name, property_owner) in brackets {
         let range = ranges
             .get(&op_index)
             .cloned()
@@ -2067,11 +3623,17 @@ fn scan_marked_text(
             op_index,
             properties,
             property_id,
-            shows: in_range(&range),
+            property_name,
+            property_owner,
+            shows: in_range(budget, &range),
+            forms: forms_in(budget, &range),
+            range,
         });
     }
     // Ein Punkt erbt den Bereich, in dem er steht.
-    for (op_index, properties, property_id, bracket, text_object) in points {
+    for (op_index, properties, property_id, property_name, property_owner, bracket, text_object) in
+        points
+    {
         let range = bracket
             .or(text_object)
             .and_then(|start| ranges.get(&start).cloned())
@@ -2081,9 +3643,97 @@ fn scan_marked_text(
             op_index,
             properties,
             property_id,
-            shows: in_range(&range),
+            property_name,
+            property_owner,
+            shows: in_range(budget, &range),
+            forms: forms_in(budget, &range),
+            range,
         });
     }
+}
+
+/// Die Objekt-Id des Form-XObjects hinter einem `Do`-Namen — nur die Id.
+///
+/// Der Rumpf bleibt unangetastet: [`load_xobject`] holt ihn ohnehin, mit
+/// Aufwandskonto und Warnung. Hier zählt nur, *welches* Objekt in den
+/// Geltungsbereich eines Spiegels fällt. `None` für Bilder, fehlende Einträge
+/// und alles, was kein eigenständiger Strom ist — ein Formular ohne eigene
+/// Objekt-Id liest auch der Interpreter nicht.
+fn form_id_of(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> Option<ObjectId> {
+    let entry = resources?.get(b"XObject").ok()?;
+    let (_, xobjects) = doc.dereference(entry).ok()?;
+    let (id, object) = doc
+        .dereference(xobjects.as_dict().ok()?.get(name).ok()?)
+        .ok()?;
+    let stream = object.as_stream().ok()?;
+    (crate::ops::xobject_subtype(doc, &stream.dict) == Some(b"Form".as_slice())).then_some(id?)
+}
+
+/// Die Objekt-Id des **Kachelmusters** hinter einem `scn`-Namen.
+///
+/// `None` für ein Schattierungsmuster (`/PatternType 2` — ein Dictionary ohne
+/// Strom, dort steht kein Text), für einen fehlenden Eintrag und für ein
+/// Muster, das kein eigenes Objekt ist (dann liest es
+/// [`scan_tiling_pattern`] auch nicht).
+fn tiling_pattern_id_of(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    name: &[u8],
+) -> Option<ObjectId> {
+    let entry = resources?.get(b"Pattern").ok()?;
+    let (_, patterns) = doc.dereference(entry).ok()?;
+    let (id, object) = doc
+        .dereference(patterns.as_dict().ok()?.get(name).ok()?)
+        .ok()?;
+    let stream = object.as_stream().ok()?;
+    if stream.dict.get(b"PatternType").ok().and_then(as_f64) == Some(2.0) {
+        return None;
+    }
+    id
+}
+
+/// Die Objekt-Id des **Bild**-XObjects hinter einem `Do`-Namen.
+///
+/// Gegenstück zu [`form_id_of`], dieselbe Auflösung, andere `/Subtype`-Probe.
+/// `None` für ein Inline-Bild (es hat kein eigenes Objekt), für einen
+/// fehlenden Eintrag und für alles, was kein Bild ist.
+fn image_id_of(doc: &Document, resources: Option<&Dictionary>, name: &[u8]) -> Option<ObjectId> {
+    let entry = resources?.get(b"XObject").ok()?;
+    let (_, xobjects) = doc.dereference(entry).ok()?;
+    let (id, object) = doc
+        .dereference(xobjects.as_dict().ok()?.get(name).ok()?)
+        .ok()?;
+    let stream = object.as_stream().ok()?;
+    (crate::ops::xobject_subtype(doc, &stream.dict) == Some(b"Image".as_slice())).then_some(id?)
+}
+
+/// Die Hülle des transformierten Einheitsquadrats.
+///
+/// Ein Bild wird immer in `(0,0)-(1,1)` gezeichnet und von der CTM auf seine
+/// Zielfläche gebracht (PDF 32000-1, 8.9.5.2). Genommen werden alle **vier**
+/// Ecken, nicht zwei: bei einer gedrehten oder gescherten CTM sind die beiden
+/// anderen die äußeren.
+fn unit_square_bounds(ctm: &Matrix) -> Rect {
+    let corners = unit_square_quad(ctm);
+    let mut bounds = Rect::from_corners(corners[0], corners[1]);
+    for corner in &corners[2..] {
+        bounds = bounds.union(&Rect::from_corners(*corner, *corner));
+    }
+    bounds
+}
+
+/// Die vier Ecken des transformierten Einheitsquadrats, **im Umlauf**.
+///
+/// Die Reihenfolge ist `(0,0) (1,0) (1,1) (0,1)` und nicht die Aufzählung des
+/// Quadrats: [`ImagePlacement::covers`] läuft die Kanten des Vierecks ab, und
+/// eine über Kreuz verbundene Ecke ergäbe kein Viereck.
+fn unit_square_quad(ctm: &Matrix) -> [Point; 4] {
+    [
+        ctm.apply(0.0, 0.0),
+        ctm.apply(1.0, 0.0),
+        ctm.apply(1.0, 1.0),
+        ctm.apply(0.0, 1.0),
+    ]
 }
 
 /// Trägt die Eigenschaftsliste eines `BDC`/`DP` einen Textspiegel?
@@ -2095,23 +3745,289 @@ fn mirror_property_list(
     doc: &Document,
     resources: Option<&Dictionary>,
     operands: &[Object],
-) -> Option<(Dictionary, Option<ObjectId>)> {
+) -> Option<(Dictionary, Option<ObjectId>, Option<Vec<u8>>)> {
     match operands.get(1)? {
         // `/Span <</ActualText (…)>> BDC`
-        Object::Dictionary(dict) => has_mirror_key(doc, dict).then(|| (dict.clone(), None)),
+        Object::Dictionary(dict) => has_mirror_key(doc, dict).then(|| (dict.clone(), None, None)),
         // `/Span /MC0 BDC` — die Liste steht in `/Resources /Properties`.
         Object::Name(name) => {
-            let entry = resources
-                .and_then(|r| r.get(b"Properties").ok())
-                .and_then(|o| doc.dereference(o).ok())
-                .and_then(|(_, o)| o.as_dict().ok())
-                .and_then(|d| d.get(name.as_slice()).ok())?;
+            let entry = property_entry(doc, resources, name)?;
             let (id, resolved) = doc.dereference(entry).ok()?;
             let dict = resolved.as_dict().ok()?;
-            has_mirror_key(doc, dict).then(|| (dict.clone(), id))
+            has_mirror_key(doc, dict).then(|| (dict.clone(), id, Some(name.clone())))
         }
         _ => None,
     }
+}
+
+/// Der Eintrag `name` in `/Resources /Properties`, falls es ihn gibt.
+///
+/// Ein Eintrag mit dem Wert `null` — direkt oder als Verweis ins Leere — ist
+/// nach PDF 32000-1, 7.3.9 wie ein fehlender. Poppler und MuPDF suchen dann
+/// in den Umgebungen der Aufrufer weiter; bis zur Spur-A-Runde 2 galt er hier
+/// als vorhanden, die Suche brach ab, und der Spiegel in der Seite blieb
+/// stehen (Register #86).
+fn property_entry<'a>(
+    doc: &'a Document,
+    resources: Option<&'a Dictionary>,
+    name: &[u8],
+) -> Option<&'a Object> {
+    let entry = resources
+        .and_then(|r| r.get(b"Properties").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(name).ok())?;
+    match doc.dereference(entry) {
+        Ok((_, Object::Null)) | Err(_) => None,
+        Ok(_) => Some(entry),
+    }
+}
+
+/// Der Eintrag `name` in `/Resources /<category>`, falls es ihn gibt — mit
+/// derselben Regel für `null` wie [`property_entry`].
+fn category_entry<'a>(
+    doc: &'a Document,
+    resources: Option<&'a Dictionary>,
+    category: &[u8],
+    name: &[u8],
+) -> Option<&'a Object> {
+    let entry = resources
+        .and_then(|r| r.get(category).ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(name).ok())?;
+    match doc.dereference(entry) {
+        Ok((_, Object::Null)) | Err(_) => None,
+        Ok(_) => Some(entry),
+    }
+}
+
+/// Die Nachschlage-Sicht eines Stroms mit eigenen Ressourcen, der Namen
+/// seiner Aufrufer benutzt (Register #88).
+///
+/// Je Art — `/Font`, `/XObject`, `/ExtGState`, `/Pattern`, `/Shading`,
+/// `/ColorSpace` — die Einträge der Aufrufer von außen nach innen, darüber die
+/// eigenen: ein Name, den der Strom selbst kennt, gewinnt, wie in Poppler.
+/// `/Properties` bleibt, wie es ist; die Eigenschaftslisten löst
+/// [`scan_marked_text`] mit ihrem Eigentümer auf, damit die Räumung sie dort
+/// findet, wo sie stehen.
+fn merged_resources(doc: &Document, own: Option<&Dictionary>, outer: &Outer<'_>) -> Dictionary {
+    let mut out = own.cloned().unwrap_or_default();
+    for category in [
+        &b"Font"[..],
+        b"XObject",
+        b"ExtGState",
+        b"Pattern",
+        b"Shading",
+        b"ColorSpace",
+    ] {
+        let mut merged = Dictionary::new();
+        for level in outer
+            .iter()
+            .rev()
+            .map(|(res, _)| *res)
+            .chain(std::iter::once(own))
+        {
+            if let Some(dict) = level
+                .and_then(|r| r.get(category).ok())
+                .and_then(|o| doc.dereference(o).ok())
+                .and_then(|(_, o)| o.as_dict().ok())
+            {
+                for (key, value) in dict.iter() {
+                    merged.set(key.clone(), value.clone());
+                }
+            }
+        }
+        if !merged.is_empty() {
+            out.set(category, Object::Dictionary(merged));
+        }
+    }
+    out
+}
+
+/// Eine aufgelöste Eigenschaftsliste mit Spiegel: Liste, Objekt-Id, Name, und
+/// der Eigentümer des Verzeichnisses, in dem sie steht.
+type ResolvedMirror = (
+    Dictionary,
+    Option<ObjectId>,
+    Option<Vec<u8>>,
+    Option<ObjectId>,
+);
+
+/// Die Ressourcenumgebungen der Aufrufer eines Stroms, von innen nach außen:
+/// je das wirksame `/Resources` und sein Eigentümer (Seite oder Strom).
+///
+/// Gebraucht nur für einen Namen, den das eigene `/Resources` eines Stroms
+/// nicht kennt — siehe [`scan_marked_text`] und Register #67.
+type Outer<'a> = [(Option<&'a Dictionary>, Option<ObjectId>)];
+
+/// Die Umgebungskette für einen Strom, den ein Aufrufer mit `resources` und
+/// `owner` platziert. Bringt der Strom eigene Ressourcen mit, kommt die des
+/// Aufrufers vorn hinzu; sonst gelten dessen Ressourcen unverändert, und die
+/// Kette bleibt, wie sie war.
+fn outer_for<'a>(
+    own: bool,
+    resources: Option<&'a Dictionary>,
+    owner: Option<ObjectId>,
+    outer: &Outer<'a>,
+) -> Vec<(Option<&'a Dictionary>, Option<ObjectId>)> {
+    if own {
+        std::iter::once((resources, owner))
+            .chain(outer.iter().copied())
+            .collect()
+    } else {
+        outer.to_vec()
+    }
+}
+
+/// Wo eine **direkt** stehende Eigenschaftsliste in der Datei zu finden ist.
+///
+/// Nicht jede Eigenschaftsliste ist ein eigenes Objekt. Steht sie direkt in
+/// einem `/Properties`-Dictionary, hat sie keine Objekt-Id, und der Spiegel
+/// darin ist trotzdem Klartext in der Datei — an genau einer Stelle, die sich
+/// benennen lässt: das Objekt, in dem sie steckt, und der Weg dorthin.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct MirrorHome {
+    /// Das Objekt, das die Liste (mittelbar) enthält.
+    pub(crate) object: ObjectId,
+    /// Der Weg von diesem Objekt zur Liste, Schlüssel für Schlüssel — etwa
+    /// `[/Resources, /Properties, /MC0]` oder nur `[/MC0]`.
+    pub(crate) path: Vec<Vec<u8>>,
+}
+
+/// Die Ressourcenverzeichnisse im Geltungsbereich von `owner`, von innen nach
+/// außen — je mit dem Objekt, in dem sie stecken, und dem Weg dorthin.
+///
+/// `owner` ist die Seite oder das Form-XObject. Für eine Seite läuft die
+/// Vererbungskette `/Parent` mit, denn `/Resources` darf am `/Pages`-Knoten
+/// stehen (PDF 32000-1, Tabelle 30) — dieselbe Kette wie in
+/// [`page_resources`], nur behält diese hier die Objekt-Ids.
+fn resource_homes(doc: &Document, owner: ObjectId) -> Vec<(ObjectId, Vec<Vec<u8>>)> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    let mut current = Some(owner);
+    while let Some(id) = current {
+        if seen.len() >= MAX_PAGE_TREE_DEPTH || !seen.insert(id) {
+            break;
+        }
+        let node = match doc.get_object(id) {
+            Ok(Object::Dictionary(dict)) => dict,
+            // Ein Form-XObject: sein `/Resources` steht im Stromdictionary.
+            Ok(Object::Stream(stream)) => &stream.dict,
+            _ => break,
+        };
+        match node.get(b"Resources") {
+            Ok(Object::Reference(target)) => out.push((*target, Vec::new())),
+            Ok(Object::Dictionary(_)) => out.push((id, vec![b"Resources".to_vec()])),
+            _ => {}
+        }
+        current = match node.get(b"Parent") {
+            Ok(Object::Reference(parent)) => Some(*parent),
+            _ => None,
+        };
+    }
+    out
+}
+
+/// Folgt einem Weg aus **direkten** Schlüsseln innerhalb eines Objekts.
+fn dict_at<'a>(doc: &'a Document, object: ObjectId, path: &[Vec<u8>]) -> Option<&'a Dictionary> {
+    let mut dict = match doc.get_object(object).ok()? {
+        Object::Dictionary(dict) => dict,
+        Object::Stream(stream) => &stream.dict,
+        _ => return None,
+    };
+    for key in path {
+        dict = dict.get(key).ok()?.as_dict().ok()?;
+    }
+    Some(dict)
+}
+
+/// **Alle** Stellen, an denen die über `/Resources /Properties /<name>`
+/// erreichbare Eigenschaftsliste von `owner` in der Datei steht — für den
+/// Fall, dass sie **kein eigenes Objekt** ist.
+///
+/// Leer heißt: es gibt nichts im Dokument zu bereinigen (die Liste ist überall
+/// ein eigenes Objekt, oder der Name löst sich gar nicht auf).
+///
+/// Gesucht wird die ganze Kette von innen nach außen, in der Reihenfolge, in
+/// der [`merge_resources`] die Verzeichnisse übereinanderlegt. Das innerste,
+/// das den Namen führt, ist das **wirksame** — aber nicht das einzige, in dem
+/// der Klartext steht. Steht `/Properties /MC0` zugleich in den
+/// Seitenressourcen und noch einmal im `/Pages`-Knoten darüber, dann trägt die
+/// überschattete äußere Kopie dieselbe Zeichenkette; sie nur deshalb stehen zu
+/// lassen, weil kein Betrachter sie benutzt, hieße das Geheimnis in der Datei
+/// zu lassen. `leaks` sucht Bytes, nicht Wirksamkeit — und fand sie bis
+/// Fix-Runde 7 ohne Warnung (Befund R1-5). Geräumt wird deshalb **jeder**
+/// Fundort der Kette.
+///
+/// **Geteilte Verzeichnisse.** Trifft der Weg ein `/Properties`- oder
+/// `/Resources`-Objekt, das mehrere Seiten oder Formulare benutzen, wirkt die
+/// Bereinigung auf alle. Das ist dieselbe Richtung, in die schon eine geteilte
+/// Liste mit eigener Objekt-Id wirkt (siehe `crate::redact::mirrors_to_clear`):
+/// ein Spiegel, der zu viel verliert, kostet die Vorlesefunktion; einer, der
+/// stehen bleibt, kostet das Geheimnis. Dieselbe Abwägung gilt für die
+/// überschattete Kopie.
+pub(crate) fn property_list_homes(doc: &Document, owner: ObjectId, name: &[u8]) -> Vec<MirrorHome> {
+    let mut out = Vec::new();
+    for (object, prefix) in resource_homes(doc, owner) {
+        let Some(resources) = dict_at(doc, object, &prefix) else {
+            continue;
+        };
+        match resources.get(b"Properties") {
+            // Eigenes `/Properties`-Objekt: die Liste steht darin.
+            Ok(Object::Reference(properties)) => {
+                // Ein Verweis auf die Liste selbst: sie ist ein eigenes Objekt
+                // und wird dort bereinigt (`property_id`). Nicht vorhanden:
+                // hier nichts zu tun.
+                if let Ok(Ok(Object::Dictionary(_))) =
+                    doc.get_dictionary(*properties).map(|d| d.get(name))
+                {
+                    out.push(MirrorHome {
+                        object: *properties,
+                        path: vec![name.to_vec()],
+                    });
+                }
+            }
+            // Direkt im Verzeichnis: dann steht die Liste im Objekt, das
+            // dieses Verzeichnis trägt.
+            Ok(Object::Dictionary(properties)) => {
+                if let Ok(Object::Dictionary(_)) = properties.get(name) {
+                    let mut path = prefix;
+                    path.push(b"Properties".to_vec());
+                    path.push(name.to_vec());
+                    out.push(MirrorHome { object, path });
+                }
+            }
+            _ => continue,
+        }
+    }
+    out
+}
+
+/// Die Eigenschaftslisten namens `name`, die entlang der Kette von `owner`
+/// als **eigenes Objekt** stehen (`/Properties << /MC0 7 0 R >>`) — das
+/// Gegenstück zu [`property_list_homes`], das nur die Listen ohne eigene
+/// Objekt-Id liefert. Beim Leser selbst kommt eine solche Liste über
+/// [`MarkedTextRecord::property_id`]; gebraucht wird die Suche für die
+/// überschattete Kopie beim **Aufrufer** eines Formulars (Register #87).
+pub(crate) fn property_list_objects(doc: &Document, owner: ObjectId, name: &[u8]) -> Vec<ObjectId> {
+    let mut out = Vec::new();
+    for (object, prefix) in resource_homes(doc, owner) {
+        let Some(resources) = dict_at(doc, object, &prefix) else {
+            continue;
+        };
+        let properties = match resources.get(b"Properties") {
+            Ok(Object::Reference(id)) => doc.get_dictionary(*id).ok(),
+            Ok(Object::Dictionary(dict)) => Some(dict),
+            _ => None,
+        };
+        if let Some(Ok(Object::Reference(list))) = properties.map(|p| p.get(name)) {
+            if doc.get_dictionary(*list).is_ok() {
+                out.push(*list);
+            }
+        }
+    }
+    out
 }
 
 /// Steht in dieser Liste überhaupt ein nicht leerer Textspiegel?
@@ -2186,6 +4102,14 @@ fn scan_operations(
     // Mal durchzugehen wäre genau die Vervielfachung, gegen die
     // [`DeclarationKey`] steht.
     own_resources: bool,
+    // Wem `resources` gehört: die Seite, oder der Strom, der sie selbst
+    // mitbringt. Läuft mit `own_resources` mit und steht am Ende in
+    // [`MarkedTextRecord::property_owner`] — dort wird aus ihm der Fundort
+    // einer Eigenschaftsliste, die kein eigenes Objekt ist.
+    owner: Option<ObjectId>,
+    // Die Umgebungen der Aufrufer, von innen nach außen — nur für einen
+    // Namen, den `resources` nicht kennen (Register #67, siehe [`Outer`]).
+    outer: &Outer<'_>,
     fonts: &FontMap,
     initial_ctm: Matrix,
     depth: usize,
@@ -2194,15 +4118,61 @@ fn scan_operations(
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
-    scan_marked_text(doc, operations, stream, resources, sink);
+    // Einmal je Strom, und **vor** der Schleife darunter gebucht. Der
+    // Durchlauf geht den ganzen Strom ab; er lief bisher bei jeder Platzierung
+    // desselben Formulars erneut, ganz außerhalb des Aufwandskontos, und ein
+    // aufgebrauchtes Konto hielt ihn nicht auf — die erste Zeile der Schleife
+    // kommt erst danach. Dass einmal genügt, liegt an ihm selbst: er ist rein
+    // syntaktisch (siehe [`scan_marked_text`]) und liefert jedes Mal dieselben
+    // Abschnitte, die die Senke dann verwirft.
+    // Bringt der Strom eigene Ressourcen mit und benennt trotzdem eine
+    // Schrift, ein XObject, einen Grafikzustand, ein Muster oder eine
+    // Schattierung, die sie nicht kennen, schlägt er — wie in Poppler und
+    // MuPDF — bei den Aufrufern nach. PDF 32000-1 sieht das nicht vor; bis zur
+    // Spur-A-Runde 2 hieß ein solcher Name hier „nichts gezeichnet“: die
+    // Glyphen eines Formulars mit der Schrift der Seite blieben stehen, ein
+    // Formular hinter dem `/XObject` des Aufrufers wurde nie gelesen, und
+    // auch die Nachprüfung sah sie nicht (Register #88). Die Nachschlage-Sicht
+    // gilt für alles, was dieser Strom nachschlägt; angeboten (`declare_forms`)
+    // werden weiter nur seine eigenen Einträge, und die Eigenschaftslisten
+    // behält [`scan_marked_text`] mit ihrem Eigentümer für sich.
+    let merged = (own_resources
+        && !outer.is_empty()
+        && budget.names_beyond_own_resources(doc, stream, owner, operations, resources))
+    .then(|| merged_resources(doc, resources, outer));
+    let merged_fonts = merged
+        .as_ref()
+        .map(|m| budget.load_font_map(doc, Some(m)).0);
+    let own_dict = resources;
+    let resources = merged.as_ref().or(resources);
+    let fonts: &FontMap = merged_fonts.as_ref().unwrap_or(fonts);
+
+    let outer_owners = if !outer.is_empty()
+        && budget.names_beyond_own(doc, stream, owner, operations, resources)
+    {
+        outer.iter().map(|(_, o)| *o).collect()
+    } else {
+        Vec::new()
+    };
+    if budget.first_marked_scan(stream, owner, outer_owners) {
+        if !budget.operation() {
+            return;
+        }
+        scan_marked_text(
+            doc, operations, stream, resources, owner, outer, budget, sink,
+        );
+    }
     // Einmal je Verzeichnis, nicht einmal je Platzierung und nicht einmal je
     // Strom: ein zwanzigmal gezeichnetes Formular bietet zwanzigmal dieselben
     // Ressourcen an, und zwanzig Formulare, die sich dasselbe Verzeichnis
     // teilen, ebenfalls.
     if own_resources {
-        declare_forms(doc, resources, stream, budget, sink);
+        declare_forms(doc, own_dict, stream, budget, sink);
     }
     let graphics = sink.wants_graphics();
+    // Bilder können auch ohne den vollen Grafikzustand gebraucht werden —
+    // siehe [`ContentSink::wants_images`].
+    let images = graphics || sink.wants_images();
     let mut state = GraphicsState::new(initial_ctm);
     let mut stack: Vec<GraphicsState> = Vec::new();
     // Textmatrix und Zeilenmatrix
@@ -2464,7 +4434,11 @@ fn scan_operations(
                 {
                     scan_tiling_pattern(
                         doc,
+                        stream,
+                        op_index,
                         resources,
+                        owner,
+                        outer,
                         fonts,
                         pattern,
                         initial_ctm,
@@ -2532,6 +4506,8 @@ fn scan_operations(
                 scan_soft_mask(
                     doc,
                     resources,
+                    owner,
+                    outer,
                     fonts,
                     &op.operands,
                     &state,
@@ -2546,7 +4522,7 @@ fn scan_operations(
             // Der Operationsstrom kommt von `ops::decode_content`, das
             // `BI … ID … EI` zu einer Operation mit Dictionary und Rohdaten
             // zusammenfasst.
-            "BI" if graphics => {
+            "BI" if images => {
                 if let (Some(Object::Dictionary(dict)), Some(Object::String(data, _))) =
                     (op.operands.first(), op.operands.get(1))
                 {
@@ -2572,7 +4548,7 @@ fn scan_operations(
                     // versteckt sich hier auch nichts.
                     XObjectEntry::Missing => {}
                     XObjectEntry::Image => {
-                        if graphics {
+                        if images {
                             sink.image(
                                 &cx,
                                 &ImageEvent {
@@ -2603,6 +4579,7 @@ fn scan_operations(
                             continue;
                         }
                         sink.form(form_id);
+                        sink.form_within(stream, op_index, form_id);
                         if !visiting.insert(form_id) {
                             continue; // Zyklus
                         }
@@ -2613,15 +4590,21 @@ fn scan_operations(
                         let own_fonts = budget.fonts_of(doc, &form);
                         let (form_resources, form_own, form_fonts) =
                             match (&form.resources, &own_fonts) {
-                                (Some(own), Some(own_fonts)) => (Some(own), true, &**own_fonts),
+                                (Some(own), Some(own_fonts)) => (Some(&**own), true, &**own_fonts),
                                 _ => (resources, false, fonts),
                             };
+                        // Ohne eigenes `/Resources` bleibt der Aufrufer der
+                        // Eigentümer — die Namen lösen sich dort auf.
+                        let form_owner = if form_own { Some(form_id) } else { owner };
+                        let form_outer = outer_for(form_own, resources, owner, outer);
                         scan_operations(
                             doc,
                             form.operations(),
                             StreamKey::Form(form_id),
                             form_resources,
                             form_own,
+                            form_owner,
+                            &form_outer,
                             form_fonts,
                             form_matrix.mul(&state.ctm),
                             depth + 1,
@@ -2685,6 +4668,8 @@ fn ext_gstate_dict(
 fn scan_soft_mask(
     doc: &Document,
     resources: Option<&Dictionary>,
+    owner: Option<ObjectId>,
+    outer: &Outer<'_>,
     fonts: &FontMap,
     operands: &[Object],
     state: &GraphicsState,
@@ -2762,7 +4747,7 @@ fn scan_soft_mask(
     if group.operations().is_empty() {
         return;
     }
-    budget.credit(Some(group_id), group.operations().len());
+    budget.credit(Some(group_id), group.operations());
     if !visiting.insert(group_id) {
         return; // Zyklus
     }
@@ -2778,9 +4763,11 @@ fn scan_soft_mask(
     // bereits geladenen Schriften.
     let own_fonts = budget.fonts_of(doc, &group);
     let (group_resources, group_own, group_fonts) = match (&group.resources, &own_fonts) {
-        (Some(own), Some(own_fonts)) => (Some(own), true, &**own_fonts),
+        (Some(own), Some(own_fonts)) => (Some(&**own), true, &**own_fonts),
         _ => (resources, false, fonts),
     };
+    let group_owner = if group_own { Some(group_id) } else { owner };
+    let group_outer = outer_for(group_own, resources, owner, outer);
     // Die Maske ist ein platzierter Strom wie ein Formular; sie muss auch so
     // gezählt werden, sonst hielte die Ressourcenprüfung sie für ungezeichnet.
     sink.form(group_id);
@@ -2790,6 +4777,8 @@ fn scan_soft_mask(
         StreamKey::Form(group_id),
         group_resources,
         group_own,
+        group_owner,
+        &group_outer,
         group_fonts,
         matrix.mul(&state.ctm),
         depth + 1,
@@ -2941,7 +4930,7 @@ fn load_xobject(
             }
             // Der Inhalt dieses Stroms bringt einmal Guthaben ein; jede
             // weitere Platzierung zehrt nur noch davon.
-            budget.credit(Some(id), form.operations().len());
+            budget.credit(Some(id), form.operations());
             if form.operations().is_empty() && form.has_tokens {
                 return XObjectEntry::Unusable(format!(
                     "Der Inhalt des Form-XObjects „{label}“ ließ sich nicht in Operationen \
@@ -2978,7 +4967,14 @@ fn load_xobject(
 #[allow(clippy::too_many_arguments)]
 fn scan_tiling_pattern(
     doc: &Document,
+    // Der Strom, in dem das `scn` steht, und dessen Index — damit ein Spiegel
+    // eines **äußeren** Stroms auch die Glyphen dieses Musters umfasst
+    // ([`ContentSink::form_within`], Register #66).
+    parent: StreamKey,
+    op_index: usize,
     resources: Option<&Dictionary>,
+    owner: Option<ObjectId>,
+    outer: &Outer<'_>,
     fonts: &FontMap,
     name: &[u8],
     base_ctm: Matrix,
@@ -3029,13 +5025,20 @@ fn scan_tiling_pattern(
             pattern.affected_bytes()
         ));
     }
-    // Ein Muster ohne Textoperator ist ein Schraffur- oder Logomuster: kein
-    // Befund, keine Meldung.
-    if !pattern
+    // Ein Muster, dessen Strom weder Text setzt noch etwas platziert (`Do`,
+    // `BI`), ist ein Schraffur- oder Logomuster aus Pfaden: kein Befund, keine
+    // Meldung. Bis zur Spur-A-Runde 1 entschied hier allein der Textoperator —
+    // ein Bild im Muster ohne Text bekam der Bildsammler so nie zu sehen, und
+    // ein Formular im Muster (mit Text darin) niemand (Register #75).
+    let setzt_text = pattern
         .operations()
         .iter()
-        .any(|op| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
-    {
+        .any(|op| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""));
+    let platziert = pattern
+        .operations()
+        .iter()
+        .any(|op| matches!(op.operator.as_str(), "Do" | "BI"));
+    if !setzt_text && !platziert {
         return;
     }
     if depth >= MAX_FORM_DEPTH {
@@ -3053,16 +5056,26 @@ fn scan_tiling_pattern(
         ));
         return;
     };
+    // Wie ein Formular im Formular: der Spiegel eines äußeren Stroms über
+    // dem `scn` gilt auch für die Glyphen des Musters. Vor der Zyklusprobe,
+    // weil die Verschachtelung auch beim zweiten Setzen desselben Musters
+    // gilt (siehe die `Do`-Stelle in [`scan_operations`]).
+    sink.form_within(parent, op_index, id);
     // Einmal je Dokumentobjekt: ein zweiter Durchlauf brächte nur denselben
     // Text ein zweites Mal (und bei Zyklen gar keinen).
     if !visiting.insert(id) {
         return;
     }
-    budget.credit(Some(id), pattern.operations().len());
+    budget.credit(Some(id), pattern.operations());
 
+    let inhalt = match (setzt_text, platziert) {
+        (true, false) => "enthält Text",
+        (false, _) => "platziert Bilder oder Formulare",
+        (true, true) => "enthält Text und platziert Bilder oder Formulare",
+    };
     sink.warn(format!(
-        "Kachelmuster „{label}“ enthält Text. Er wird an der Stelle der ersten Kachel \
-         gesucht und beim Schwärzen aus dem Muster entfernt — die übrigen Kacheln \
+        "Kachelmuster „{label}“ {inhalt}. Was darin steht, wird an der Stelle der ersten \
+         Kachel gesucht und beim Schwärzen aus dem Muster entfernt — die übrigen Kacheln \
          werden dabei nicht einzeln vermessen. Bitte das Ergebnis dort prüfen."
     ));
 
@@ -3080,15 +5093,19 @@ fn scan_tiling_pattern(
     // bereits geladenen Schriften.
     let own_fonts = budget.fonts_of(doc, &pattern);
     let (pattern_resources, pattern_own, pattern_fonts) = match (&pattern.resources, &own_fonts) {
-        (Some(own), Some(own_fonts)) => (Some(own), true, &**own_fonts),
+        (Some(own), Some(own_fonts)) => (Some(&**own), true, &**own_fonts),
         _ => (resources, false, fonts),
     };
+    let pattern_owner = if pattern_own { Some(id) } else { owner };
+    let pattern_outer = outer_for(pattern_own, resources, owner, outer);
     scan_operations(
         doc,
         pattern.operations(),
         StreamKey::Form(id),
         pattern_resources,
         pattern_own,
+        pattern_owner,
+        &pattern_outer,
         pattern_fonts,
         matrix.mul(&base_ctm),
         depth + 1,
@@ -3187,7 +5204,7 @@ fn warn_about_text_in_charprocs(
             unreadable += 1;
         }
         // Der Inhalt bringt einmal Guthaben ein — wie jeder andere Strom auch.
-        budget.credit(id, decoded.operations().len());
+        budget.credit(id, decoded.operations());
         let mut sets_text = false;
         for op in decoded.operations() {
             // Jede geprüfte Operation kostet. Ist das Konto leer, endet der
@@ -3285,7 +5302,7 @@ fn show_text(
                     if !budget.glyph() {
                         break;
                     }
-                    stats.record(&ts.font_name, font, &text);
+                    stats.record(&ts.font_name, font, code, &text);
                     let w0 = font.width(code, &text);
                     let is_space = nbytes == 1 && code == 32;
                     let displacement = (w0 * ts.font_size
@@ -3495,6 +5512,256 @@ mod tests {
 
     fn ops(src: &[u8]) -> Vec<Operation> {
         Content::decode(src).unwrap().operations
+    }
+
+    /// Drei Seiten mit je eigenem `/Resources`, die sich ein `/Annots` mit
+    /// vier Annotationen teilen: Seite 2 und 3 lesen jede Annotation erneut,
+    /// zusammen acht Wiederholungen (Register #94).
+    fn geteiltes_annots_unter_drei_umgebungen() -> (Document, Vec<ObjectId>) {
+        let (mut doc, first) = page_with_font(
+            |_| dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+            b"BT /F1 10 Tf 72 700 Td (Hallo) Tj ET".to_vec(),
+        );
+        let mut annots = Vec::new();
+        for i in 0..4 {
+            let ap = doc.add_object(Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 100.into(), 20.into()],
+                },
+                format!("BT /F1 10 Tf 2 5 Td (Notiz {i}) Tj ET").into_bytes(),
+            ));
+            annots.push(Object::Reference(doc.add_object(dictionary! {
+                "Type" => "Annot", "Subtype" => "FreeText",
+                "Rect" => vec![50.into(), (100 + 30 * i).into(), 150.into(), (120 + 30 * i).into()],
+                "AP" => dictionary! { "N" => ap },
+            })));
+        }
+        let array = doc.add_object(Object::Array(annots));
+        let template = {
+            let page = doc.get_dictionary_mut(first).unwrap();
+            page.set("Annots", array);
+            page.clone()
+        };
+        let font = template.get(b"Resources").ok().cloned().unwrap();
+        let mut pages = vec![first];
+        for k in 1..3 {
+            let mut page = template.clone();
+            // Inhaltsgleich, aber je Seite eingebettet: eine eigene Umgebung.
+            page.set(
+                "Resources",
+                dictionary! { "Font" => doc.get_object(font.as_reference().unwrap())
+                .unwrap().as_dict().unwrap().get(b"Font").unwrap().clone(), "K" => k },
+            );
+            pages.push(doc.add_object(page));
+        }
+        let parent = template.get(b"Parent").unwrap().as_reference().unwrap();
+        let tree = doc.get_dictionary_mut(parent).unwrap();
+        tree.set(
+            "Kids",
+            pages
+                .iter()
+                .map(|id| Object::Reference(*id))
+                .collect::<Vec<_>>(),
+        );
+        tree.set("Count", 3_i64);
+        (doc, pages)
+    }
+
+    /// Die Decke der Wiederholungen hält genau: acht erlaubt, acht gelesen;
+    /// sieben erlaubt, die dritte Seite abgelehnt — mit der Begründung.
+    #[test]
+    fn die_wiederholungsdecke_haelt_genau() {
+        let (doc, pages) = geteiltes_annots_unter_drei_umgebungen();
+
+        let mut ledger = AnnotationLedger {
+            limit: 8,
+            ..AnnotationLedger::default()
+        };
+        for page in &pages {
+            let scan = scan_page_with(&doc, *page, &mut ledger).expect("unter der Decke");
+            assert!(!scan.shows.is_empty());
+        }
+        assert_eq!(ledger.repeats, 8);
+
+        let mut ledger = AnnotationLedger {
+            limit: 7,
+            ..AnnotationLedger::default()
+        };
+        scan_page_with(&doc, pages[0], &mut ledger).expect("Seite 1");
+        scan_page_with(&doc, pages[1], &mut ledger).expect("Seite 2");
+        let err = scan_page_with(&doc, pages[2], &mut ledger).expect_err("über der Decke");
+        assert!(err.to_string().contains("dieselben Annotationen"), "{err}");
+    }
+
+    /// Dieselbe Umgebung, dasselbe Array: die zweite und dritte Seite kosten
+    /// je einen Blick auf das Array, nicht einen je Eintrag — angesehen werden
+    /// vier Einträge, nicht zwölf.
+    #[test]
+    fn ein_geteiltes_array_kostet_seine_eintraege_einmal() {
+        let (mut doc, pages) = geteiltes_annots_unter_drei_umgebungen();
+        let resources = doc
+            .get_dictionary(pages[0])
+            .unwrap()
+            .get(b"Resources")
+            .unwrap()
+            .clone();
+        for page in &pages[1..] {
+            doc.get_dictionary_mut(*page)
+                .unwrap()
+                .set("Resources", resources.clone());
+        }
+        let mut ledger = AnnotationLedger::default();
+        for page in &pages {
+            scan_page_with(&doc, *page, &mut ledger).expect("Scan");
+        }
+        assert_eq!(ledger.visits, 4);
+        assert_eq!(ledger.repeats, 0);
+    }
+
+    /// Unter derselben Umgebung zählt ein zweiter Blick nichts: dieselbe Seite
+    /// zweimal gescannt ist keine Wiederholung.
+    #[test]
+    fn dieselbe_umgebung_zaehlt_keine_wiederholung() {
+        let (doc, pages) = geteiltes_annots_unter_drei_umgebungen();
+        let mut ledger = AnnotationLedger {
+            limit: 0,
+            ..AnnotationLedger::default()
+        };
+        scan_page_with(&doc, pages[0], &mut ledger).expect("erster Blick");
+        scan_page_with(&doc, pages[0], &mut ledger).expect("zweiter Blick");
+        assert_eq!(ledger.repeats, 0);
+    }
+
+    /// `pages` Seiten; mit `shared` zeichnen alle **denselben** Inhaltsstrom,
+    /// sonst jede ihren eigenen — gleich lang, anderer Text.
+    fn seiten_mit_inhalt(pages: usize, shared: bool) -> (Document, Vec<ObjectId>) {
+        let mut doc = Document::with_version("1.5");
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let resources = doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
+        let inhalt = |k: usize| {
+            let mut body = Vec::new();
+            for i in 0..10 {
+                body.extend_from_slice(
+                    format!(
+                        "BT /F1 10 Tf 72 {} Td (Seite {k} Zeile {i}) Tj ET\n",
+                        700 - 12 * i
+                    )
+                    .as_bytes(),
+                );
+            }
+            Stream::new(dictionary! {}, body)
+        };
+        let tree = doc.new_object_id();
+        let gemeinsam = doc.add_object(inhalt(0));
+        let mut ids = Vec::new();
+        for k in 0..pages {
+            let contents = if shared {
+                gemeinsam
+            } else {
+                doc.add_object(inhalt(k))
+            };
+            ids.push(doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => tree,
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+                "Resources" => resources,
+                "Contents" => contents,
+            }));
+        }
+        doc.objects.insert(
+            tree,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => ids.iter().map(|id| Object::Reference(*id)).collect::<Vec<_>>(),
+                "Count" => pages as i64,
+            }),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => tree });
+        doc.trailer.set("Root", catalog);
+        (doc, ids)
+    }
+
+    fn ohne_grundausstattung() -> AnnotationLedger {
+        AnnotationLedger {
+            work: DocumentWork {
+                operations_base: 0,
+                glyphs_base: 0,
+                ..DocumentWork::default()
+            },
+            ..AnnotationLedger::default()
+        }
+    }
+
+    /// Register #106: ein Inhaltsstrom, den sich Seiten teilen, bringt sein
+    /// Guthaben **einmal** ein. Ohne Grundausstattung trägt er rund
+    /// [`MAX_AMPLIFICATION`] Seiten — je Seite bucht der Scan eine Operation
+    /// mehr, als der Strom mitbringt, deshalb eine weniger. Die nächste wird
+    /// mit der Begründung abgelehnt, und jede weitere ohne Scan.
+    #[test]
+    fn ein_geteilter_inhaltsstrom_bringt_sein_guthaben_einmal() {
+        let (doc, pages) = seiten_mit_inhalt(MAX_AMPLIFICATION + 2, true);
+        let mut ledger = ohne_grundausstattung();
+        let erste_abgelehnte = pages
+            .iter()
+            .position(|page| scan_page_with(&doc, *page, &mut ledger).is_err())
+            .expect("das Guthaben reicht nicht für alle Seiten");
+        assert!(
+            (MAX_AMPLIFICATION - 1..=MAX_AMPLIFICATION).contains(&erste_abgelehnte),
+            "abgelehnt ab Seite {}",
+            erste_abgelehnte + 1
+        );
+        let message = ledger.work.refused.clone().expect("Begründung");
+        assert!(message.contains("denselben Inhalt vielfach"), "{message}");
+        let spent = ledger.work.operations_spent;
+        let err = scan_page_with(&doc, pages[MAX_AMPLIFICATION + 1], &mut ledger)
+            .expect_err("ohne Scan abgelehnt");
+        assert_eq!(err.to_string(), RedactError::Pdf(message).to_string());
+        assert_eq!(
+            ledger.work.operations_spent, spent,
+            "die letzte Seite kostete nichts"
+        );
+    }
+
+    /// Gegenprobe: Seiten mit je eigenem Inhalt bringen je Seite neues
+    /// Guthaben mit und reißen das Konto auch ohne Grundausstattung nie.
+    #[test]
+    fn eigener_inhalt_je_seite_reisst_das_konto_nicht() {
+        let (doc, pages) = seiten_mit_inhalt(3 * MAX_AMPLIFICATION, false);
+        let mut ledger = ohne_grundausstattung();
+        for page in &pages {
+            scan_page_with(&doc, *page, &mut ledger).expect("eigener Inhalt");
+        }
+        assert!(ledger.work.refused.is_none());
+    }
+
+    /// Die Glyphen haben ihr eigenes Guthaben: die Textbytes eines Stroms mal
+    /// [`MAX_AMPLIFICATION`], einmal je Dokument. Jede gesetzte Glyphe braucht
+    /// mindestens ein Byte davon.
+    #[test]
+    fn die_glyphen_haben_ihr_eigenes_guthaben() {
+        let (doc, pages) = seiten_mit_inhalt(2, true);
+        let mut ledger = AnnotationLedger {
+            work: DocumentWork {
+                operations_base: usize::MAX / 2,
+                glyphs_base: 0,
+                ..DocumentWork::default()
+            },
+            ..AnnotationLedger::default()
+        };
+        scan_page_with(&doc, pages[0], &mut ledger).expect("Seite 1");
+        let glyphen = ledger.work.glyphs_spent;
+        assert!(glyphen > 0 && glyphen <= ledger.work.glyphs_credit);
+        assert_eq!(
+            ledger.work.glyphs_credit,
+            MAX_AMPLIFICATION
+                * text_bytes(&crate::ops::decode_content(&crate::filters::page_content(
+                    &doc, pages[0]
+                ))),
+            "gutgeschrieben werden die Textbytes des Stroms, mal dem Faktor"
+        );
     }
 
     /// Baut ein einseitiges PDF um ein beliebiges Font-Dictionary (`/F1`).
@@ -3751,7 +6018,16 @@ endcmap"
     fn mirrors(src: &[u8]) -> Vec<(usize, Vec<usize>)> {
         let doc = Document::with_version("1.5");
         let mut result = ScanResult::default();
-        scan_marked_text(&doc, &ops(src), StreamKey::Page, None, &mut result);
+        scan_marked_text(
+            &doc,
+            &ops(src),
+            StreamKey::Page,
+            None,
+            None,
+            &[],
+            &mut Budget::default(),
+            &mut result,
+        );
         result
             .marked
             .iter()

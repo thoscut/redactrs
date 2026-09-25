@@ -80,6 +80,28 @@ use crate::display::safe_path;
 /// 700-MB-Scan ist eine echte Eingabe —, für eine 700-MB-Buchungsliste keinen.
 pub const MAX_AUX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Obergrenze für die **Zahl** der Suchbegriffe einer Nachprüfung.
+///
+/// `--check-leaks` und die Nachprüfung der Oberfläche nach dem Export teilen
+/// sich diese Decke — dieselbe Zahl, dieselbe Einheit. Sie liegt hier und
+/// nicht in einem der beiden Programme aus demselben Grund wie
+/// [`crate::DEFAULT_REPLACEMENT`]: `redact-core` ist der Ort, an dem beide
+/// dieselbe Sprache sprechen.
+///
+/// Warum eine Zahl und nicht nur die Byte-Grenze [`MAX_AUX_FILE_BYTES`]:
+/// 16 MB fassen rund eine Million kurze Zeilen. Die Kosten der Nachprüfung
+/// sind Begriffe × **entpackte** Streambytes; die Bytes sind durch
+/// `--max-decompressed-mb` gedeckelt, die Begriffe hier. Gemessen an einer
+/// 898-kB-Datei mit 420 Seiten (Release): 1 Begriff 1,7 s, 100 Begriffe
+/// 2,1 s, 1 000 Begriffe 5,9 s — ein Sockel (Datei lesen, Ströme auspacken,
+/// jede Seite durch den Schriftdekoder) und darüber rund 4 ms je Begriff.
+/// Eine Million Begriffe liefen also über eine Stunde, ohne dass etwas kaputt
+/// wäre; von außen sieht das wie ein Hänger aus.
+///
+/// 1 000 ist großzügig für den Zweck: die Geheimnisse **eines** Dokuments,
+/// von Hand aufgeschrieben. Wer mehr hat, ruft zweimal auf.
+pub const MAX_CHECK_NEEDLES: usize = 1_000;
+
 /// Liest `path` vollständig — mit der Obergrenze `max_bytes` **vor** dem
 /// ersten gelesenen Byte.
 ///
@@ -265,16 +287,42 @@ mod tests {
     /// der Punkt: schon das *Öffnen* einer Pipe ohne Schreiber blockiert
     /// endlos. Wenn dieser Test zurückkehrt, ist vor dem Öffnen entschieden
     /// worden.
+    ///
+    /// `cfg(unix)` sagt, dass es benannte Pipes gibt — nicht, dass `mkfifo` im
+    /// `PATH` steht. Auf einem schlanken Unix-Bild ohne die Werkzeuge (BusyBox
+    /// ohne `mkfifo`, ein Container mit `scratch`-Basis) ließ
+    /// `expect("mkfifo startbar")` den Testlauf platzen, obwohl am Programm nichts
+    /// falsch war — derselbe Fehler, den `belege.rs` bei `python3` schon
+    /// vermeidet: fehlt das Werkzeug, ist hier nichts zu prüfen, und der Test
+    /// **sagt das** und endet grün.
+    ///
+    /// Dasselbe gilt für **jeden** Ausgang außer null — und das ist die Korrektur
+    /// der Korrektur. Der Anlassfall selbst war damit nicht gedeckt: auf einem
+    /// BusyBox-Bild steht der Name als Symlink im `PATH` und das Applet fehlt;
+    /// `status()` liefert `Ok(exit status: 127)` und nicht `Err`. Ein Ziel ohne
+    /// FIFOs (vfat, ein 9p-Bindmount), eine Verweigerung von `mknod` durch
+    /// seccomp oder ein BusyBox-Wrapper tun es ebenso. Scheitert `mkfifo`, gibt es
+    /// **keine** Pipe — es ist genauso nichts zu prüfen wie bei fehlendem
+    /// Werkzeug, und ein harter `assert` auf das Startergebnis wäre derselbe
+    /// Fehler eine Ebene höher.
     #[cfg(unix)]
     #[test]
     fn a_named_pipe_is_refused_without_opening_it() {
         let dir = tempdir("pipe");
         let path = dir.join("pipe.csv");
-        let ok = std::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .expect("mkfifo startbar");
-        assert!(ok.success(), "mkfifo ist fehlgeschlagen");
+        let fehlt = match std::process::Command::new("mkfifo").arg(&path).status() {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(format!("mkfifo endete mit {status}")),
+            Err(e) => Some(format!("kein mkfifo im Pfad: {e}")),
+        };
+        if let Some(grund) = fehlt {
+            eprintln!(
+                "keine benannte Pipe angelegt ({grund}) — dass `read_limited` eine \
+                 benannte Pipe ablehnt, bleibt hier ungeprüft"
+            );
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
 
         let error = read_limited(&path, MAX_AUX_FILE_BYTES, HINT)
             .expect_err("eine Pipe ist keine Hilfsdatei");

@@ -302,6 +302,143 @@ fn residual_data_removals_reach_the_audit_log() {
     assert_eq!(usize_at(&log, &["metadata", "names"]), 1);
 }
 
+/// Lesezeichen, Annotationstexte, Annotationsaktionen und Ebenennamen: vier
+/// Zähler, die das Log bis Fix-Runde 4 nur als Satz in `summary` trug. Jetzt
+/// stehen sie als Zahl im Log — gemessen am Binary, nicht am Bericht.
+#[test]
+fn bookmarks_and_annotation_removals_reach_the_audit_log_as_numbers() {
+    let dir = workdir("lesezeichen");
+    let input = dir.join("lesezeichen.pdf");
+    let output = dir.join("out.pdf");
+    let audit = dir.join("audit.json");
+
+    let mut doc =
+        redact_pdf::load_from_bytes(&redact_pdf::testing::demo_statement()).expect("ladbar");
+    let page_id = doc.get_pages()[&1];
+    let catalog_id = match doc.trailer.get(b"Root").unwrap() {
+        Object::Reference(id) => *id,
+        other => panic!("kein Katalog: {other:?}"),
+    };
+
+    // Zwei Lesezeichen, das zweite mit der IBAN im Titel.
+    let outlines_id = doc.new_object_id();
+    let first = doc.new_object_id();
+    let second = doc.new_object_id();
+    doc.objects.insert(
+        first,
+        Object::Dictionary(dictionary! {
+            "Title" => Object::string_literal("Kapitel 1"),
+            "Parent" => outlines_id, "Next" => second,
+            "Dest" => vec![Object::Reference(page_id), Object::Name(b"Fit".to_vec())],
+        }),
+    );
+    doc.objects.insert(
+        second,
+        Object::Dictionary(dictionary! {
+            "Title" => Object::string_literal(format!("Kontoauszug {IBAN}")),
+            "Parent" => outlines_id, "Prev" => first,
+        }),
+    );
+    doc.objects.insert(
+        outlines_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Outlines", "First" => first, "Last" => second, "Count" => 2_i64,
+        }),
+    );
+
+    // Eine Notiz mit Symbol-Erscheinungsstrom (sonst meldet die Analyse eine
+    // Deckungslücke) und zwei Klartexten, dazu ein Link mit URI-Aktion —
+    // beide fern des Textes, damit die Schwärzung sie nicht selbst löscht.
+    let icon = doc.add_object(Object::Stream(lopdf::Stream::new(
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 20.into(), 20.into()],
+        },
+        b"0 0 1 rg 0 0 20 20 re f".to_vec(),
+    )));
+    let note = doc.add_object(Object::Dictionary(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text",
+        "Rect" => vec![500.into(), 20.into(), 520.into(), 40.into()],
+        "Contents" => Object::string_literal(format!("Notiz {IBAN}")),
+        "T" => Object::string_literal("Max"),
+        "AP" => dictionary! { "N" => icon },
+    }));
+    let link = doc.add_object(Object::Dictionary(dictionary! {
+        "Type" => "Annot", "Subtype" => "Link",
+        "Rect" => vec![530.into(), 20.into(), 560.into(), 40.into()],
+        "A" => dictionary! {
+            "S" => "URI",
+            "URI" => Object::string_literal(format!("mailto:x@example.org?subject={IBAN}")),
+        },
+    }));
+
+    // Eine Ebene, die die Seite über ihre Ressourcen hält.
+    let ocg = doc.add_object(Object::Dictionary(dictionary! {
+        "Type" => "OCG",
+        "Name" => Object::string_literal(format!("Ebene {IBAN}")),
+    }));
+    let resources_id = match doc.get_dictionary(page_id).unwrap().get(b"Resources") {
+        Ok(Object::Reference(id)) => *id,
+        other => panic!("Ressourcen der Demo-Seite sind kein Verweis mehr: {other:?}"),
+    };
+    doc.get_dictionary_mut(resources_id).unwrap().set(
+        "Properties",
+        Object::Dictionary(dictionary! { "MC0" => Object::Reference(ocg) }),
+    );
+
+    doc.get_dictionary_mut(page_id).unwrap().set(
+        "Annots",
+        Object::Array(vec![Object::Reference(note), Object::Reference(link)]),
+    );
+    doc.get_dictionary_mut(catalog_id)
+        .unwrap()
+        .set("Outlines", Object::Reference(outlines_id));
+    std::fs::write(&input, redact_pdf::save_to_bytes(&doc).unwrap()).unwrap();
+    assert!(
+        !redact_pdf::leaks(&std::fs::read(&input).unwrap(), IBAN).is_empty(),
+        "Testdaten taugen nicht"
+    );
+
+    succeeds(&run(&[
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--patterns",
+        "iban_de",
+        "--audit-log",
+        audit.to_str().unwrap(),
+    ]));
+
+    let hits = leaks_in(&output, IBAN);
+    assert!(
+        hits.is_empty(),
+        "IBAN steht noch in der Ausgabe:\n{}",
+        hits.join("\n")
+    );
+
+    let log = read_log(&audit);
+    assert_eq!(log["metadata_stripped"], serde_json::json!(true));
+    assert_eq!(
+        usize_at(&log, &["metadata", "outlines_removed"]),
+        2,
+        "{log}"
+    );
+    assert_eq!(
+        usize_at(&log, &["metadata", "annotation_texts_cleared"]),
+        2,
+        "/Contents und /T"
+    );
+    assert_eq!(
+        usize_at(&log, &["metadata", "annotation_actions_removed"]),
+        1,
+        "/A am Link"
+    );
+    assert_eq!(
+        usize_at(&log, &["metadata", "optional_content_names_cleared"]),
+        1
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Stille Abbrüche des Interpreters
 // ---------------------------------------------------------------------------

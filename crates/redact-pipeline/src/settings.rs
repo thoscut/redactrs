@@ -225,6 +225,9 @@ impl Settings {
 
     /// Prüft, was `serde` nicht prüfen kann.
     fn validate(&self) -> Result<()> {
+        // `padding: .nan` ist gültiges YAML, und `serde_yaml` macht daraus
+        // klaglos ein `f64::NAN`. Siehe [`check_padding`].
+        check_padding(self.padding)?;
         if !THEMES.contains(&self.theme.as_str()) {
             return Err(RedactError::Config(format!(
                 "unbekanntes Thema „{}“ — erlaubt sind {}",
@@ -239,6 +242,79 @@ impl Settings {
         redact_core::check_output_suffix(&self.output_suffix)?;
         Ok(())
     }
+}
+
+/// Größter zulässiger Betrag für `padding`, in Punkt.
+///
+/// Es ist die größte Seitenkante, die [`redact_pdf::document::sane_box`] noch
+/// gelten lässt (200 000 pt ≈ 70 m). Die Zahl wird hier **nicht neu
+/// festgelegt**, sondern von dort geholt: die Polsterung wird auf Rechtecke
+/// addiert, die auf einer solchen Seite liegen, und ein Rand, der breiter ist
+/// als das größte Blatt, das dieses Programm annimmt, kann nichts mehr
+/// bezeichnen, was das Blatt nicht schon enthielte.
+///
+/// Nach unten gilt derselbe Betrag mit umgekehrtem Vorzeichen. Negative
+/// Polsterung ist ausdrücklich erlaubt — sie verkleinert jeden Bereich, das ist
+/// eine gültige Absicht und seit jeher geprüft
+/// (`a_degenerate_rect_wins_over_a_rect_beside_the_sheet` rechnet mit −100).
+/// Jenseits der größten Seitenkante bleibt von jedem Rechteck nichts übrig,
+/// also ist auch dort die Grenze das Blatt.
+pub const MAX_PADDING: f64 = redact_pdf::document::MAX_PAGE_EXTENT;
+
+/// Ist `padding` ein Rand, mit dem sich rechnen lässt?
+///
+/// # Der Befund
+///
+/// `--padding` und der Schlüssel `padding` waren unvalidierte `f64`. clap nimmt
+/// `nan`, `inf` und `1e400` (das zu `inf` wird), YAML kennt `.nan` und `.inf`.
+///
+/// Gemessen mit dem gebauten Binary auf einem gewöhnlichen Kontoauszug
+/// (`redact_pdf::testing::demo_statement`, 7 Treffer):
+///
+/// ```text
+/// --padding nan    → Rückgabewert 0, 7 von 7 Schwärzungen wirkungslos,
+///                    0 entfernte Zeichen, 0 Deck-Rechtecke, Ausgabe geschrieben
+/// --padding inf    → dasselbe
+/// --padding 1e400  → dasselbe
+/// ```
+///
+/// [`redact_core::Rect::expanded`] macht aus jedem Rechteck ein unbrauchbares,
+/// [`redact_core::Rect::is_empty`] wirft es weg, und heraus kommt eine
+/// **ungeschwärzte Datei mit Rückgabewert 0**. Die Warnung dazu gibt es seit
+/// der letzten Runde; sie lautet aber „leeres Rechteck nach --padding“ und
+/// endet mit „Ein negatives Padding verkleinert jeden Bereich“ — ein Satz über
+/// negative Zahlen, der zu `nan` nichts erklärt. Wer die Ausgabe nicht liest,
+/// hält eine ungeschwärzte Datei für geschwärzt.
+///
+/// # Warum an der Grenze und nicht später
+///
+/// Weil es keine Angabe gibt, die `nan` meint. Ein Rand ist eine Länge; NaN ist
+/// keine, ∞ ist keine. Ein Wert, aus dem *jede* Schwärzung wirkungslos wird,
+/// ist eine Fehlbedienung, und die gehört gemeldet, bevor eine Datei gelesen
+/// wird — nicht als Warnung neben einer Ausgabe, die schon geschrieben ist.
+///
+/// # Die Grenzen
+///
+/// Endlich, und dem Betrag nach höchstens [`MAX_PADDING`]. Das ist die größte
+/// Seitenkante dieses Programms; die Begründung steht dort. Gewöhnliche Werte
+/// (0, 1, 2,5 und negative wie −2,5 oder −100) bleiben zulässig — die Grenze
+/// wehrt ab, was gar keine Länge ist, nicht was ungewöhnlich ist.
+pub fn check_padding(padding: f64) -> Result<()> {
+    if !padding.is_finite() {
+        return Err(RedactError::Config(format!(
+            "padding {padding} ist keine Länge. Erlaubt ist eine endliche Zahl von \
+             -{MAX_PADDING} bis {MAX_PADDING} Punkt; mit „nan\" oder „inf\" bliebe von \
+             jedem Bereich ein leeres Rechteck, und die Ausgabe wäre ungeschwärzt."
+        )));
+    }
+    if padding.abs() > MAX_PADDING {
+        return Err(RedactError::Config(format!(
+            "padding {padding} liegt außerhalb von -{MAX_PADDING} bis {MAX_PADDING} Punkt. \
+             Das ist die größte Seitenkante, mit der dieses Programm rechnet (etwa 70 m); \
+             ein Rand darüber hinaus kann nichts mehr bezeichnen."
+        )));
+    }
+    Ok(())
 }
 
 /// Baut aus einem `serde_yaml`-Fehler eine Meldung **ohne** Dateiinhalt.

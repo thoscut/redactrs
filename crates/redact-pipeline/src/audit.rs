@@ -281,7 +281,34 @@ impl EntryEffect {
 /// oder verkleinert die Fläche, verschiebt sie aber nicht auf die Seite. Ein
 /// Rechteck, das erst durch eine großzügige Polsterung das Blatt berührt,
 /// träfe dort ohnehin keinen Text, den die Analyse gefunden hätte.
+///
+/// # Unbrauchbare Koordinaten sind `true`
+///
+/// `f64::max` und `f64::min` **schlucken** einen NaN-Operanden und liefern den
+/// anderen zurück. Ohne die Prüfung wird aus `rect.ll.x.max(NaN)` genau
+/// `rect.ll.x` und aus `rect.ur.x.min(NaN)` genau `rect.ur.x` — die Rechnung
+/// findet eine Überschneidung, die es nicht gibt, und ein Rechteck ohne
+/// brauchbare Koordinaten galt als „auf dem Blatt“ (gemessen: `false` für alle
+/// fünf Bauarten, siehe `ein_unbrauchbares_rechteck_liegt_neben_dem_blatt`).
+///
+/// `true` ist die richtige Antwort, und zwar aus beiden Richtungen: ein solches
+/// Rechteck bezeichnet die leere Menge ([`Rect::is_usable`]), und die
+/// überschneidet das Blatt nicht — und beim einzigen Aufrufer
+/// ([`EntryEffect::of`]) führt `false` weiter zu [`EntryEffect::Applied`] oder
+/// [`EntryEffect::Covered`], also zu „Deck-Rechteck gezeichnet“ für ein
+/// Rechteck, das nirgends liegt. `true` führt auf „wirkungslos“.
+///
+/// Erreicht wird der Fall heute nicht: [`EntryEffect::of`] fragt eine Zeile
+/// vorher [`Rect::is_empty`], und die fängt unbrauchbare Koordinaten bereits ab
+/// (Nachweis:
+/// `ein_unbrauchbares_rechteck_bleibt_entartet_und_wird_nicht_off_page`). Die
+/// Prüfung steht hier trotzdem: sie hängt an *dieser* Funktion, nicht an der
+/// Reihenfolge ihres Aufrufers, und die Reihenfolge dort ist ein Argument über
+/// Erklärungsgüte, keine Sicherheitsschranke.
 fn beside_the_sheet(rect: &Rect, sheet: &Rect) -> bool {
+    if !rect.is_usable() {
+        return true;
+    }
     let rect = rect.normalized();
     let sheet = sheet.normalized();
     let (x0, x1) = (rect.ll.x.max(sheet.ll.x), rect.ur.x.min(sheet.ur.x));
@@ -420,10 +447,19 @@ impl Effects {
         if self.missing_page > 0 {
             // Das `+ 1` ist die einzige erlaubte Umrechnung: Fließtext sagt
             // „Seite 1“, JSON zählt ab 0 (siehe [`AuditEntry::page`]).
+            //
+            // `saturating_add`, weil die Seitennummer aus fremder Hand kommt
+            // (Review-Datei, `--manual-regions`): bei `usize::MAX` liefe die
+            // 1-basierte Anzeige im Debug-Build über und löste eine Panic
+            // aus — ausgerechnet in dem Zweig, der die falsche Seite melden
+            // soll; im Release-Build stünde stattdessen „Seite 0“ da. Die
+            // erste Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an
+            // der Deserialisierung; diese hier gilt für jeden Aufrufer, der
+            // `Region` selbst baut.
             let list = self
                 .missing_pages
                 .iter()
-                .map(|p| (p + 1).to_string())
+                .map(|p| p.saturating_add(1).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             warnings.push(format!(
@@ -452,10 +488,11 @@ impl Effects {
         // Oberfläche („neben der Seite“), damit beide Wege wiedererkennbar
         // dasselbe sagen.
         if self.off_page > 0 {
+            // `saturating_add` aus demselben Grund wie bei `missing_pages`.
             let list = self
                 .off_page_pages
                 .iter()
-                .map(|p| (p + 1).to_string())
+                .map(|p| p.saturating_add(1).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             warnings.push(format!(
@@ -561,6 +598,16 @@ pub struct EffectRecord {
 }
 
 /// Was der Metadatenlauf entfernt hat — die Zahlen aus [`MetadataReport`].
+///
+/// Die vier jüngeren Zähler (`outlines_removed`, `annotation_actions_removed`,
+/// `annotation_texts_cleared`, `optional_content_names_cleared`) tragen
+/// `#[serde(default)]`: ein Log aus einer Fassung ohne sie bleibt lesbar.
+/// Geschrieben werden sie immer. Das Log hat keine eigene Schemaversion —
+/// nur `tool.version` — und braucht für ein zusätzliches Feld keine: jeder
+/// Leser, der die alten Felder kennt, liest ein neues Log weiterhin, und ein
+/// altes Log liest sich mit Nullen. Vor dieser Änderung stand jede dieser
+/// Zahlen nur als Satz in `summary` — `meta.rs` versprach, „das Audit-Log
+/// übernimmt die Zahlen unverändert“, und für vier Zähler stimmte das nicht.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataRecord {
     pub info: bool,
@@ -577,6 +624,21 @@ pub struct MetadataRecord {
     pub open_action: bool,
     pub additional_actions: usize,
     pub optional_content: bool,
+    /// Lesezeichen (`/Outlines`-Einträge), mit dem Baum entfernt.
+    #[serde(default)]
+    pub outlines_removed: usize,
+    /// `/A`, `/AA`, `/PA` und benannte `/Dest` an Annotationen und den von
+    /// ihnen erreichbaren Feldern.
+    #[serde(default)]
+    pub annotation_actions_removed: usize,
+    /// Klartexte (`/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`,
+    /// `/OverlayText`, `/NM`, `/DS`, `/MK`-Beschriftungen) an Annotationen
+    /// und erreichbaren Feldern — je Schlüssel einer.
+    #[serde(default)]
+    pub annotation_texts_cleared: usize,
+    /// Ebenennamen (`/OCG /Name`), die geleert wurden.
+    #[serde(default)]
+    pub optional_content_names_cleared: usize,
     /// Dieselbe Information in Klartext, für Menschen.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summary: Vec<String>,
@@ -599,6 +661,10 @@ impl From<&MetadataReport> for MetadataRecord {
             open_action: report.open_action_removed,
             additional_actions: report.additional_actions_removed,
             optional_content: report.optional_content_removed,
+            outlines_removed: report.outlines_removed,
+            annotation_actions_removed: report.annotation_actions_removed,
+            annotation_texts_cleared: report.annotation_texts_cleared,
+            optional_content_names_cleared: report.optional_content_names_cleared,
             summary: report.summary(),
         }
     }
@@ -1125,6 +1191,105 @@ mod tests {
         assert_eq!(effects.off_page, 0);
     }
 
+    /// **Der Befund N-2.** [`beside_the_sheet`] rechnet mit `f64::max` und
+    /// `f64::min`, und die **schlucken** einen NaN-Operanden: aus
+    /// `rect.ll.x.max(NaN)` wird `rect.ll.x`, aus `rect.ur.x.min(NaN)` wird
+    /// `rect.ur.x`. Für ein Rechteck ohne brauchbare Koordinaten kam damit
+    /// `x1 > x0 && y1 > y0` heraus — die Funktion meldete „auf dem Blatt“.
+    ///
+    /// Gemessen vor der Korrektur: `false` für jede der fünf Bauarten. Nach der
+    /// Korrektur `true`.
+    ///
+    /// # Warum `true` und nicht `false`
+    ///
+    /// Zwei Gründe, beide vom einzigen Aufrufer her:
+    ///
+    /// * **Wahr.** Ein Rechteck ohne brauchbare Koordinaten bezeichnet die
+    ///   leere Menge (siehe [`Rect::is_usable`]), und die leere Menge
+    ///   überschneidet das Blatt nicht. „Liegt vollständig neben dem Blatt“ ist
+    ///   für sie zutreffend.
+    /// * **Sicher.** Das `false` fiel in [`EntryEffect::of`] durch bis zu
+    ///   [`EntryEffect::Applied`] oder [`EntryEffect::Covered`] — beides
+    ///   bedeutet „Deck-Rechteck gezeichnet“. Für ein Rechteck, das nirgends
+    ///   liegt, wäre das eine gemeldete Schwärzung, die es nicht gibt. `true`
+    ///   führt auf [`EntryEffect::OffPage`], also auf „wirkungslos“
+    ///   ([`Effects::ineffective`]) — die Richtung, in der ein Irrtum eine
+    ///   Warnung zu viel erzeugt statt einer Entwarnung zu viel.
+    #[test]
+    fn ein_unbrauchbares_rechteck_liegt_neben_dem_blatt() {
+        let blatt = sheets(1)[0];
+        let n = f64::NAN;
+        let p = f64::INFINITY;
+        let m = f64::NEG_INFINITY;
+        for (name, kaputt) in [
+            ("alles NaN", Rect::new(n, n, n, n)),
+            ("nur ll.x NaN", Rect::new(n, 100.0, 200.0, 120.0)),
+            ("nur ur.y NaN", Rect::new(100.0, 100.0, 200.0, n)),
+            ("unendlich gross", Rect::new(m, m, p, p)),
+            ("beide Kanten +inf", Rect::new(p, p, p, p)),
+        ] {
+            assert!(
+                beside_the_sheet(&kaputt, &blatt),
+                "{name}: gilt als „auf dem Blatt“"
+            );
+        }
+    }
+
+    /// Gegenprobe zum Test darüber: gewöhnliche Rechtecke behalten ihre
+    /// Antwort. Ohne diese Zeilen wäre er auch dann grün, wenn die Funktion
+    /// pauschal `true` lieferte — und dann gälte **jede** Schwärzung als neben
+    /// dem Blatt.
+    #[test]
+    fn brauchbare_rechtecke_antworten_wie_vorher() {
+        let blatt = sheets(1)[0];
+        assert!(
+            !beside_the_sheet(&Rect::new(100.0, 100.0, 200.0, 120.0), &blatt),
+            "ein Rechteck mitten auf dem Blatt gilt als daneben"
+        );
+        assert!(
+            !beside_the_sheet(&Rect::new(594.0, 100.0, 650.0, 120.0), &blatt),
+            "ein Rechteck, das die Kante überlappt, gilt als daneben"
+        );
+        assert!(
+            beside_the_sheet(&Rect::new(595.0, 100.0, 650.0, 120.0), &blatt),
+            "ein Rechteck jenseits der Kante gilt als auf dem Blatt"
+        );
+    }
+
+    /// **Die Reihenfolge bleibt, wie sie ist.** Ein unbrauchbares Rechteck
+    /// erreicht [`beside_the_sheet`] heute gar nicht: `expanded(padding)` ist
+    /// dann ebenfalls unbrauchbar, und [`Rect::is_empty`] fängt es eine Zeile
+    /// vorher als [`EntryEffect::Degenerate`].
+    ///
+    /// Das ist der Grund, warum N-2 kein Loch war, sondern eine zweite
+    /// Verteidigungslinie. Der Test hält beides fest: dass die erste Linie hält
+    /// **und** dass die Korrektur an [`beside_the_sheet`] die Einordnung nach
+    /// außen nicht verschiebt.
+    #[test]
+    fn ein_unbrauchbares_rechteck_bleibt_entartet_und_wird_nicht_off_page() {
+        let n = f64::NAN;
+        for (name, kaputt) in [
+            ("alles NaN", Rect::new(n, n, n, n)),
+            ("nur ll.x NaN", Rect::new(n, 100.0, 200.0, 120.0)),
+            (
+                "unendlich gross",
+                Rect::new(f64::NEG_INFINITY, f64::NEG_INFINITY, 1.0, 1.0),
+            ),
+        ] {
+            let mut region = iban_redaction();
+            region.region.rect = kaputt;
+            let effects = Effects::measure(&[region], 1.0, &sheets(1), &report_with(&[0]));
+            assert_eq!(
+                effects.per_entry,
+                vec![EntryEffect::Degenerate],
+                "{name}: nicht mehr als entartet eingeordnet"
+            );
+            assert_eq!(effects.off_page, 0, "{name}");
+            assert_eq!(effects.applied, 0, "{name}");
+            assert_eq!(effects.covered, 0, "{name}");
+        }
+    }
+
     /// Und `--padding`, das ein Rechteck leert, schlägt beides: dort wird
     /// überhaupt nichts angefasst.
     #[test]
@@ -1145,6 +1310,29 @@ mod tests {
         let effects = Effects::measure(&[region], -100.0, &sheets(1), &RedactionReport::default());
         assert_eq!(effects.per_entry, vec![EntryEffect::MissingPage]);
         assert_eq!(effects.degenerate, 0);
+    }
+
+    /// Zweite Verteidigung hinter `MAX_PAGE_INDEX`: wer `Effects` mit einer
+    /// Seitennummer aus fremder Hand füttert, bekommt eine Warnung mit der
+    /// Zahl darin — keine Panic (Debug) und kein „Seite 0“ (Release).
+    #[test]
+    fn absurd_page_numbers_do_not_panic_in_warnings() {
+        let effects = Effects {
+            per_entry: vec![EntryEffect::MissingPage, EntryEffect::OffPage],
+            removed_glyphs: vec![0, 0],
+            pages: 1,
+            missing_page: 1,
+            off_page: 1,
+            missing_pages: vec![usize::MAX],
+            off_page_pages: vec![usize::MAX],
+            ..Effects::default()
+        };
+        let warnings = effects.warnings(&RedactionReport::default());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        for w in &warnings {
+            assert!(w.contains("Seite 18446744073709551615"), "{w}");
+            assert!(!w.contains("Seite 0"), "{w}");
+        }
     }
 
     #[test]
@@ -1260,6 +1448,43 @@ mod tests {
         let old: AuditLog = serde_json::from_value(value).expect("altes Log bleibt lesbar");
         assert_eq!(old.patterns, PatternRecord::default());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Jeder Zähler des Berichts kommt unverändert im Log an — auch die
+    /// vier, die vorher nur als Satz in `summary` standen.
+    #[test]
+    fn every_metadata_counter_reaches_the_record() {
+        let report = MetadataReport {
+            outlines_removed: 3,
+            annotation_actions_removed: 4,
+            annotation_texts_cleared: 5,
+            optional_content_names_cleared: 6,
+            ..MetadataReport::default()
+        };
+        let record = MetadataRecord::from(&report);
+        assert_eq!(record.outlines_removed, 3);
+        assert_eq!(record.annotation_actions_removed, 4);
+        assert_eq!(record.annotation_texts_cleared, 5);
+        assert_eq!(record.optional_content_names_cleared, 6);
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["outlines_removed"], 3);
+        assert_eq!(json["annotation_actions_removed"], 4);
+        assert_eq!(json["annotation_texts_cleared"], 5);
+        assert_eq!(json["optional_content_names_cleared"], 6);
+
+        // Ein Log aus einer Fassung ohne die vier Felder bleibt lesbar.
+        let mut old = json.clone();
+        for key in [
+            "outlines_removed",
+            "annotation_actions_removed",
+            "annotation_texts_cleared",
+            "optional_content_names_cleared",
+        ] {
+            old.as_object_mut().unwrap().remove(key);
+        }
+        let parsed: MetadataRecord = serde_json::from_value(old).expect("altes Log bleibt lesbar");
+        assert_eq!(parsed.outlines_removed, 0);
+        assert_eq!(parsed.annotation_texts_cleared, 0);
     }
 
     fn tempdir() -> std::path::PathBuf {

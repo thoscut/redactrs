@@ -30,6 +30,7 @@ pub mod content;
 pub mod document;
 pub mod encoding;
 pub mod extract;
+pub mod filters;
 pub mod font;
 pub mod glyphnames;
 pub mod image;
@@ -39,7 +40,7 @@ pub mod ops;
 pub mod redact;
 pub mod testing;
 
-pub use audit_bytes::leaks;
+pub use audit_bytes::{leaks, leaks_many, leaks_many_within, squeeze, LeakCheck};
 pub use content::{
     interpret, scan_page, ContentSink, GlyphEvent, GlyphItem, ImageEvent, MarkedTextRecord,
     PathEvent, ScanResult, ShowItem, ShowRecord, SinkContext, StreamKey, MIRROR_KEYS,

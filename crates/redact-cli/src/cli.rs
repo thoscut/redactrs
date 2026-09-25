@@ -232,7 +232,12 @@ pub struct Cli {
     /// Zusätzlicher Rand um jede Schwärzung, in Punkt.
     ///
     /// Ohne Angabe gilt der Wert aus der Einstellungsdatei, sonst 1.0.
-    #[arg(long)]
+    ///
+    /// Geprüft wird an der Grenze: `f64` allein nimmt `nan`, `inf` und `1e400`
+    /// an, und jeder dieser Werte macht **jede** Schwärzung wirkungslos. Die
+    /// Regel steht in [`redact_pipeline::check_padding`] — dieselbe, die für
+    /// den Schlüssel `padding` der Einstellungsdatei gilt.
+    #[arg(long, value_parser = parse_padding)]
     pub padding: Option<f64>,
 
     /// Bilder, die sich nicht dekodieren lassen, durchgehen lassen.
@@ -251,21 +256,38 @@ pub struct Cli {
     ///
     /// Schutz gegen Dekompressionsbomben: eine kleine Datei, die sich beim
     /// Öffnen vervielfacht.
+    ///
+    /// Bei `--check-leaks` ist dieselbe Zahl das **Budget der Nachprüfung**
+    /// (Summe der entpackten Bytes, je Sicht der Suche einmal): was die Suche
+    /// darunter nicht auspacken kann, nennt sie als
+    /// `NICHT GEPRÜFT` und endet mit Rückgabewert `3` — nie mit `0`.
     #[arg(long, value_name = "MB", default_value_t = 1024)]
     pub max_decompressed_mb: u64,
 
-    /// Davon: Obergrenze für die Streams, die geparst werden
-    /// (Seiteninhalt und Objekt-Streams).
+    /// Davon: Obergrenze für alles, woraus PDF-**Syntax** wird — die
+    /// geparsten Streams (Seiteninhalt, Objekt-Streams) **und** der Rumpf der
+    /// Datei selbst (Objektköpfe, Dictionaries, Arrays, Querverweistabelle,
+    /// Trailer). Beide Klassen zusammen gegen dieselbe Zahl; eine Datei ganz
+    /// ohne Streams kann sie allein ausschöpfen.
     ///
-    /// Aus einem Byte Seiteninhalt werden beim Parsen 60 bis 100 Byte
-    /// `lopdf::content::Operation` — deshalb ist diese Grenze deutlich enger.
+    /// Ob ein Stream hierher zählt, entscheidet sein **ausgepackter Inhalt**,
+    /// nicht sein Dictionary: sieht er wie PDF-Syntax aus statt wie Nutzlast,
+    /// gilt dieses engere Budget. Auch ein Bild kann darunterfallen, wenn
+    /// seine Bildpunkte wie druckbarer Text aussehen — ein dunkler
+    /// Graustufen-Scan tut das.
     ///
-    /// Das ist **nicht** der Spitzenbedarf: die Zahl gilt für den
-    /// Operationsvektor allein, bei Text kommen die Glyphen dazu. Gemessen an
-    /// einer Seite mit 20 000 Textzeilen: 1,448 MB Seiteninhalt, 492 MB
-    /// Spitzenspeicher — 340 Byte je Byte. Für eine Textseite zieht ohnehin
-    /// nicht diese Grenze, sondern die Deckelung auf eine Million Zeichen je
-    /// Seite. Die Messreihe steht in `SECURITY.md`.
+    /// Das ist **nicht** der Spitzenbedarf, und der Aufblähfaktor ist keine
+    /// Konstante: er hängt an der *Form* der Syntax, nicht an ihrer Länge.
+    /// Gemessen an einer Seite mit 20 000 Textzeilen: 1,31 MB Seiteninhalt,
+    /// 477 MB Spitzenspeicher — 363 Byte je Byte. Für eine Textseite zieht
+    /// ohnehin meist nicht diese Grenze, sondern die Deckelung auf eine
+    /// Million Zeichen je Seite. Die Messreihe steht in `SECURITY.md`.
+    ///
+    /// Genau weil sich aus Dateibytes kein Speicher ablesen lässt, deckelt
+    /// derselbe Schalter noch eine zweite Größe: den *gerechneten* Speicher
+    /// der Objekte, die daraus entstehen. Beide Decken hängen an dieser einen
+    /// Zahl und bewegen sich zusammen — wer eine wirklich so große Datei
+    /// durchlassen will, hebt nur sie.
     #[arg(long, value_name = "MB", default_value_t = 16)]
     pub max_parsed_mb: u64,
 
@@ -274,8 +296,12 @@ pub struct Cli {
     /// Eine Schwärzung auf einem Bild überschreibt dessen Bildpunkte, dafür
     /// muss das Bild nach RGBA8 ausgepackt werden: 4 Byte je Bildpunkt. Ein
     /// gewöhnlicher Schwarzweiß-Scan (`/BitsPerComponent 1`) wächst dabei um
-    /// den Faktor 32 — deshalb greifen `--max-decompressed-mb` und
-    /// `--max-parsed-mb` hier nicht, die zählen die Rohbytes des Streams.
+    /// den Faktor 32 — deshalb genügen `--max-decompressed-mb` und
+    /// `--max-parsed-mb` hier nicht: die zählen die **ausgepackten**
+    /// Streambytes, also die Bildpunkte in der Form, in der sie in der Datei
+    /// stehen, nicht das RGBA8 danach. (Roh gezählt wird nirgends: eine
+    /// 82 679 Byte kleine Datei mit einem FlateDecode-Bild von 19 998 784 Byte
+    /// entpackt scheitert an `--max-decompressed-mb 8`.)
     ///
     /// Reicht die Grenze nicht, bricht der Lauf mit einer Meldung ab, statt
     /// die Speicheranforderung scheitern zu lassen. Sie deckt nicht den
@@ -321,14 +347,25 @@ pub struct Cli {
     /// **Nachprüfen statt schwärzen:** steht dieser Text noch in der Datei?
     ///
     /// Mehrfach angebbar — je Angabe ein Suchbegriff. Gesucht wird mit
-    /// `redact_pdf::leaks` auf allen Ebenen, auf denen ein Geheimnis
+    /// `redact_pdf::leaks_many_within` — alle Begriffe in einem Durchgang,
+    /// mit Budget — auf allen Ebenen, auf denen ein Geheimnis
     /// überleben kann: rohe Dateibytes, jeder `stream … endstream`-Block (auch
     /// Flate-dekomprimiert, also inklusive Altrevisionen), jedes Stream-Objekt
     /// dekodiert, die Objekte in `/ObjStm`-Containern und jedes
-    /// Zeichenketten-Objekt unter jedem Schlüssel — jeweils in UTF-8,
-    /// Latin-1/PDFDoc, UTF-16BE und als Hex-String. `pdftotext … | grep …`
-    /// sieht davon einen Bruchteil und gibt an der eigenen Demo-Ausgabe
-    /// falsche Entwarnung.
+    /// Zeichenketten-Objekt unter jedem Schlüssel — jeweils in **bis zu neun
+    /// Byte-Kodierungen**: UTF-8/ASCII, Latin-1/PDFDoc, UTF-16BE und
+    /// UTF-16LE, dazu jede der drei Bytefassungen (Latin-1, UTF-16BE,
+    /// UTF-16LE) als Hex-String in Groß- und in Kleinschreibung. Neun sind es
+    /// für einen Begriff aus reinem ASCII mit Buchstaben — dort fällt Latin-1
+    /// mit UTF-8 zusammen —, zehn mit Umlaut und sieben mit einem Zeichen
+    /// jenseits von Latin-1 (dann gibt es keine Einbytefassung). Fassungen,
+    /// die auf dieselben Bytes fallen, werden nur einmal gesucht: bei einer
+    /// IBAN aus Ziffern und `DE` ist der Hex-String in Groß- und in
+    /// Kleinschreibung dieselbe Bytefolge, dort sind es sechs. Ein Begriff mit
+    /// einem Zeichen, das WinAnsi anders ablegt als Latin-1 (`€`, `–`, `„`),
+    /// wird zusätzlich in WinAnsi gesucht, roh und als Hex-String.
+    /// `pdftotext … | grep …` sieht davon einen Bruchteil und gibt an der
+    /// eigenen Demo-Ausgabe falsche Entwarnung.
     ///
     /// **`-` liest die Begriffe zeilenweise von der Standardeingabe.** Ein
     /// Suchbegriff ist ein Geheimnis; auf der Kommandozeile steht er in der
@@ -339,12 +376,34 @@ pub struct Cli {
     /// **Kein Komma-Trenner:** eine Angabe ist ein Begriff, ganz.
     /// „Mustermann, Max“ ist ein Name und nicht zwei.
     ///
-    /// Rückgabewert: `0`, wenn keiner der Begriffe gefunden wurde, `3`, wenn
-    /// mindestens einer noch dasteht. Ein Fund ist kein Verarbeitungsfehler —
-    /// der Lauf ist gelungen, das *Ergebnis* ist es nicht.
+    /// Rückgabewert: `0` **nur**, wenn keiner der Begriffe gefunden wurde
+    /// *und* jede Stelle geprüft werden konnte; `3`, wenn mindestens einer
+    /// noch dasteht **oder** eine Stelle ungeprüft blieb (`NICHT GEPRÜFT: …`)
+    /// — auch ohne einen einzigen Fund. Die drei Fälle stehen unter
+    /// „Rückgabewerte“ am Ende dieser Hilfe. Ein Fund ist kein
+    /// Verarbeitungsfehler — der Lauf ist gelungen, das *Ergebnis* ist es
+    /// nicht.
+    ///
+    /// **Die Suche hat ein Budget:** mehr als `--max-decompressed-mb` (Vorgabe
+    /// 1024 MB) wird in Summe nicht ausgepackt — je Sicht der Suche einmal.
+    /// Ein Strom, der das Restbudget sprengte, wird nicht entpackt und steht als
+    /// `NICHT GEPRÜFT: …` in der Ausgabe, und der Lauf endet auch ohne Fund
+    /// mit `3` — „nicht gefunden“ in einer Datei, deren größter Strom nie
+    /// aufgemacht wurde, wäre keine Antwort. Wer die Stelle prüfen will, hebt
+    /// den Schalter.
     ///
     /// **Nichts gefunden ist kein Freibrief:** geprüft ist damit genau diese
     /// Liste und sonst nichts.
+    ///
+    /// Höchstens 1 000 Begriffe je Aufruf; mehr endet mit Rückgabewert `2`,
+    /// bevor die Datei gelesen wird. Nicht der Zeit wegen: seit Fix-Runde 4
+    /// laufen alle Begriffe in **einem** Durchgang, 1 000 kosten kaum mehr
+    /// als einer (gemessen an 64 MiB: 5,20 s gegen 6,27 s). Die Decke gilt
+    /// dem Speicher des Automaten, der alle Begriffe in allen Kodierungen
+    /// trägt — gemessen 1,0 MB für 1 000 Begriffe, 675 MB und 25 s allein
+    /// für den Bau bei einer Million —, und der Trefferliste, die je Begriff
+    /// eine Zeile bekommt. Wer mehr hat, teilt die Liste und ruft mehrmals
+    /// auf — jeder Lauf meldet für sich.
     #[arg(
         long = "check-leaks",
         value_name = "TEXT",
@@ -474,6 +533,28 @@ impl Cli {
     }
 }
 
+/// Wertet `--padding` aus und lehnt ab, was keine Länge ist.
+///
+/// **Warum ein `value_parser` und nicht eine Prüfung in [`Cli::config`]:** clap
+/// beendet den Aufruf bei einem abgelehnten Wert selbst, mit Rückgabewert 2
+/// (Benutzungsfehler) und der Meldung unter dem beanstandeten Schalter — also
+/// bevor eine Datei gelesen wird. Eine Prüfung in [`Cli::config`] müsste
+/// dagegen deren Signatur auf `Result` umstellen, und die ruft auch die
+/// Oberfläche.
+///
+/// Die Regel selbst steht **nicht hier**, sondern in
+/// [`redact_pipeline::check_padding`]: den Wert kann auch die
+/// Einstellungsdatei liefern, und zwei Fassungen derselben Grenze wären zwei
+/// Gelegenheiten, dass sie auseinanderlaufen.
+fn parse_padding(raw: &str) -> Result<f64, String> {
+    let value: f64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("„{raw}“ ist keine Zahl"))?;
+    redact_pipeline::check_padding(value).map_err(|e| e.to_string())?;
+    Ok(value)
+}
+
 impl ActionArg {
     pub fn to_action(self, replacement: &str) -> redact_core::Action {
         match self {
@@ -488,15 +569,19 @@ impl ActionArg {
 ///
 /// Aufgabe #61: der musl-Build entsteht mit `--no-default-features`; dort darf
 /// die Oberfläche weder im Beispielteil noch bei den Schaltern auftauchen.
+///
+/// Kein `\` hinter dem öffnenden Anführungszeichen: die Fortsetzung frisst
+/// nicht nur den Zeilenumbruch, sondern auch den führenden Leerraum der
+/// nächsten Zeile — und die Kommentarzeile stand dann in der Hilfe ohne die
+/// zwei Leerzeichen, die jedes andere Beispiel hat. Der Test
+/// `every_example_comment_is_indented` hält das fest.
 #[cfg(feature = "gui")]
-const GUI_EXAMPLE: &str = "\
-  # Grafische Oberfläche
+const GUI_EXAMPLE: &str = "  # Grafische Oberfläche
   redact-rs --gui kontoauszug.pdf
 
 ";
 #[cfg(not(feature = "gui"))]
-const GUI_EXAMPLE: &str = "\
-  # (Diese Fassung wurde ohne grafische Oberfläche gebaut.)
+const GUI_EXAMPLE: &str = "  # (Diese Fassung wurde ohne grafische Oberfläche gebaut.)
 
 ";
 
@@ -526,8 +611,7 @@ Beispiele:
   redact-rs kontoauszug.pdf -o geschwaerzt.pdf --apply-review review.json \\
       --audit-log audit.json
 
-{GUI_EXAMPLE}\
-  # Beispieldatei zum Ausprobieren erzeugen
+{GUI_EXAMPLE}  # Beispieldatei zum Ausprobieren erzeugen
   redact-rs --write-demo beispiel.pdf
 
   # Nachprüfen: steht das Geheimnis noch in der fertigen Datei?
@@ -537,7 +621,8 @@ Beispiele:
   # Dasselbe, ohne die Begriffe in Prozessliste und Shell-Historie zu schreiben
   redact-rs geschwaerzt.pdf --check-leaks - < begriffe.txt
 
-Einstellungsdatei — Namenszusatz, Muster, Mindestvertrauen, Polsterung, Thema:
+Einstellungsdatei — Namenszusatz, Muster, abgeschaltete Muster, Mindestvertrauen,
+Polsterung, Thema:
   ~/.config/redact-rs/settings.yaml   bzw.   %APPDATA%\\redact-rs\\settings.yaml
   {} zeigt auf eine andere Datei.
   Rangfolge: Kommandozeile schlägt Datei schlägt Vorgabe.
@@ -551,12 +636,12 @@ Rückgabewerte:
   {EXIT_USAGE}  Bedienfehler: ein Schalter, die Einstellungsdatei oder eine mitgegebene
      Datei passt nicht (z.B. eine Review-Datei zu einem anderen Dokument).
   {EXIT_INCOMPLETE}  Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.
-     Zwei Fälle:
+     Drei Fälle:
      • Verarbeitet, aber nicht vollständig geprüft. Die Ausgabe ist
        geschrieben und was gefunden wurde, ist geschwärzt — für einen Teil des
        Dokuments konnte die Analyse aber nicht einstehen: ein Font ohne
        /ToUnicode, ein zu tief verschachteltes Form-XObject, ein Kachelmuster
-       mit Text, eine Annotation ohne Erscheinungsstrom, ein Bild, das sich
+       mit Text, ein XObject ohne bekanntes /Subtype, ein Bild, das sich
        nicht dekodieren ließ. Dort kann etwas stehen geblieben sein.
        Diese Ausgabe gehört von Hand geprüft. Die betroffenen Stellen stehen
        auf stderr und im Audit-Log; im Stapel weist die Zusammenfassung solche
@@ -565,6 +650,13 @@ Rückgabewerte:
        Ein Fund ist kein Verarbeitungsfehler (das wäre 1) und kein
        Bedienfehler (das wäre 2): die Suche lief vollständig, die Antwort
        lautet „ja, es steht noch drin“.
+     • --check-leaks konnte eine Stelle NICHT PRÜFEN — und das auch ohne
+       einen einzigen Fund. Ein Strom, der das Restbudget von
+       --max-decompressed-mb sprengte, wurde nicht entpackt; über ihn sagt
+       „nicht gefunden“ nichts. Solche Stellen stehen als
+       „NICHT GEPRÜFT: …“ in der Ausgabe. Dasselbe gilt, wo die Objektsicht
+       an ihrer Verschachtelungstiefe abbricht. Hier liegt der Unterschied
+       zu 0: die Antwort ist nicht „sauber“, sondern unvollständig.
 ",
         redact_pipeline::settings::SETTINGS_ENV,
         EXIT_OK = crate::EXIT_OK,
@@ -582,6 +674,147 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// Jede Kommentarzeile im Beispielblock steht zwei Zeichen eingerückt —
+    /// auch die beiden, die an eine `\`-Fortsetzung des Stringliterals
+    /// grenzten und deshalb bündig links standen (`# Grafische Oberfläche`,
+    /// `# Beispieldatei …`).
+    #[test]
+    fn every_example_comment_is_indented() {
+        let text = examples();
+        let buendig: Vec<&str> = text.lines().filter(|l| l.starts_with('#')).collect();
+        assert!(
+            buendig.is_empty(),
+            "Kommentarzeilen ohne Einrückung im Hilfetext: {buendig:?}"
+        );
+        assert!(
+            text.lines().any(|l| l.starts_with("  # ")),
+            "kein eingerücktes Beispiel gefunden — Prüfung greift ins Leere"
+        );
+    }
+
+    /// Der Rückgabewert 3 hat **drei** Bedeutungen — und alle drei stehen im
+    /// Hilfetext, in `README.md` und in `SECURITY.md`.
+    ///
+    /// **Und der Hilfetext widerspricht sich dabei nicht selbst.**
+    /// Gegenprüfung der Fix-Runde 6: drei Absätze über dem Block „Drei Fälle“
+    /// stand im selben `--help` weiter „Rückgabewert: `0`, wenn keiner der
+    /// Begriffe gefunden wurde, `3`, wenn mindestens einer noch dasteht“ —
+    /// also genau die zwei Fälle, die die Runde 5 abgeschafft hatte. Wer die
+    /// Hilfe von oben nach unten liest, findet zuerst die falsche Fassung.
+    /// Der Lauf `redact-rs tief33.pdf --check-leaks GEHEIM` sagt „nicht
+    /// gefunden“, schreibt eine `NICHT GEPRÜFT`-Zeile und endet mit 3
+    /// (`ze_p4_check_leaks_grenzen::tiefe_33_ist_eine_stille_entwarnung`) —
+    /// nach dem alten Satz wäre das unmöglich. Dieser Test verlangt deshalb
+    /// die neue Fassung **und** verbietet die alte wörtlich.
+    ///
+    /// Gegenprüfung E1 der Fix-Runde 5: der dritte Fall („nicht geprüft“, auch
+    /// ohne Fund) war seit der Runde 4 im Code (`main.rs`, `check::report`),
+    /// aber der Hilfetext sagte weiter „Zwei Fälle“, `SECURITY.md` „hat **zwei**
+    /// Bedeutungen“ und die README-Tabelle nannte nur den Fund. Wer danach ein
+    /// Skript baute, hielt `3` ohne Fund für unmöglich.
+    ///
+    /// Der Block, den `SECURITY.md` aus `--help` zitiert, wird **Zeile für
+    /// Zeile** gegen den echten Hilfetext gehalten — ein Zitat, das das
+    /// Programm nie ausgibt, ist schlimmer als keines. Zeilen, die im Zitat
+    /// mit „…“ abgekürzt sind, werden dabei ausgelassen.
+    ///
+    /// Mutation (nachgewiesen): „Drei Fälle:“ im Hilfetext zurück auf „Zwei
+    /// Fälle:“ — dieser Test ist rot.
+    #[test]
+    fn der_dritte_fall_des_rueckgabewerts_drei_steht_ueberall() {
+        use clap::CommandFactory;
+
+        let wurzel = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // `replace`: unter Windows checkt git Textdateien mit CRLF aus, wenn
+        // `core.autocrlf` gesetzt ist. Der Vergleich unten sucht Zeilen mit
+        // `\n` — ohne diese Zeile war der Windows-Job der CI rot, obwohl an
+        // der Doku nichts fehlte. `.gitattributes` hält LF fest; das hier ist
+        // der zweite Zaun, damit der Test nicht von einer Einstellung abhängt.
+        let lies = |name: &str| {
+            std::fs::read_to_string(wurzel.join(name))
+                .unwrap_or_else(|e| panic!("{name}: {e}"))
+                .replace("\r\n", "\n")
+        };
+        let glatt = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("     Drei Fälle:"), "--help zählt nicht drei");
+        assert!(
+            help.contains("--check-leaks konnte eine Stelle NICHT PRÜFEN"),
+            "--help nennt den dritten Fall nicht"
+        );
+
+        // Und derselbe Hilfetext sagt es **auch bei `--check-leaks`** so.
+        let glatter_hilfetext = glatt(&help);
+        assert!(
+            glatter_hilfetext.contains(
+                "Rückgabewert: `0` **nur**, wenn keiner der Begriffe gefunden wurde \
+                 *und* jede Stelle geprüft werden konnte; `3`, wenn mindestens einer \
+                 noch dasteht **oder** eine Stelle ungeprüft blieb"
+            ),
+            "der Absatz zu --check-leaks nennt die Bedingung für `0` nicht: {help}"
+        );
+        assert!(
+            !glatter_hilfetext.contains(
+                "Rückgabewert: `0`, wenn keiner der Begriffe gefunden wurde, `3`, \
+                 wenn mindestens einer noch dasteht"
+            ),
+            "derselbe --help-Text zählt oben zwei Fälle und unten drei: {help}"
+        );
+
+        let security = lies("SECURITY.md");
+        assert!(
+            security.contains("#### Rückgabewert 3 hat **drei** Bedeutungen"),
+            "SECURITY.md zählt nicht drei"
+        );
+
+        // Der zitierte Block: alles zwischen dem `sed`-Aufruf und dem Ende
+        // des Konsolenkastens.
+        let marke = "$ redact-rs --help | sed -n '/^  3  /,$p'\n";
+        let start = security
+            .find(marke)
+            .expect("SECURITY.md ohne das --help-Zitat")
+            + marke.len();
+        let zitat = &security[start..];
+        let zitat = &zitat[..zitat.find("\n```").expect("Kasten ohne Ende")];
+        let mut geprueft = 0;
+        for zeile in zitat.lines() {
+            if zeile.trim().is_empty() || zeile.trim_end().ends_with('…') {
+                continue;
+            }
+            assert!(
+                help.contains(zeile.trim_end()),
+                "SECURITY.md zitiert eine Zeile, die --help nicht ausgibt: {zeile:?}"
+            );
+            geprueft += 1;
+        }
+        assert!(
+            geprueft >= 5,
+            "das Zitat besteht fast nur aus „…“ — geprüft wurden {geprueft} Zeilen"
+        );
+
+        let readme = glatt(&lies("README.md"));
+        assert!(
+            readme.contains("endet **auch ohne Fund** mit `3`, wenn es eine Stelle nicht lesen"),
+            "README nennt den dritten Fall nicht im Fließtext"
+        );
+        assert!(
+            readme.contains(
+                "**oder** eine Stelle konnte nicht geprüft werden \
+                 (fünf Gründe, siehe [`SECURITY.md`](SECURITY.md)), \
+                 auch ohne einen einzigen Fund."
+            ),
+            "die README-Tabelle nennt den dritten Fall nicht"
+        );
+        assert!(
+            readme.contains(
+                "| `0` | Keiner der Begriffe steht noch in der Datei — \
+                 **und** jede Stelle konnte geprüft werden."
+            ),
+            "die README-Tabelle verspricht `0` ohne die Bedingung"
+        );
     }
 
     #[test]
@@ -900,5 +1133,160 @@ mod tests {
         // Aufrufbar bleibt er in beiden Fassungen — sonst käme statt der
         // erklärenden Meldung ein „unexpected argument“.
         assert!(Cli::try_parse_from(["redact-rs", "--gui"]).is_ok());
+    }
+
+    // ------------------------------------- Der Hilfetext und was wirklich zählt
+    //
+    // Beide Tests hier prüfen **eine Aussage des Hilfetextes**, und zwar an
+    // der Tat statt am Wortlaut: der Text sagt, *welche Menge* ein Budget
+    // zählt, und genau daran hing schon zweimal eine falsche Zusicherung.
+    // Geprüft wird deshalb immer dieselbe Datei mit zwei Werten desselben
+    // Schalters — zählte das Programm die andere Menge, liefe sie beide Male
+    // durch, und der Test fiele auf.
+
+    /// Ein PDF-Rumpf **ohne einen einzigen Stream**: `ballast` Dictionaries,
+    /// die niemand referenziert.
+    fn rumpf_ohne_stream(ballast: usize) -> Vec<u8> {
+        use lopdf::xref::XrefType;
+        use lopdf::{dictionary, Document, Object};
+
+        let mut doc = Document::with_version("1.4");
+        // Klassische Querverweistabelle statt Querverweis-*Stream*: `lopdf`
+        // schreibt sonst einen, und dann hätte diese Datei doch einen Stream —
+        // was den Versuch gerade um seinen Kern brächte.
+        doc.reference_table.cross_reference_type = XrefType::CrossReferenceTable;
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1_i64,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+
+        for _ in 0..ballast {
+            let mut d = lopdf::Dictionary::new();
+            for k in 0..500 {
+                d.set(format!("k{k}"), Object::Integer(0));
+            }
+            doc.add_object(Object::Dictionary(d));
+        }
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).expect("speicherbar");
+        bytes
+    }
+
+    /// Ein PDF mit einem komprimierten Bildstrom: auf der Platte klein,
+    /// ausgepackt `megabytes` MB **Nutzlast** (Bytes über 126, damit der
+    /// Inhalt nicht wie PDF-Syntax aussieht).
+    fn bild_das_sich_aufblaeht(megabytes: usize) -> Vec<u8> {
+        use lopdf::{dictionary, Document, Object, Stream};
+
+        let punkte: Vec<u8> = (0..megabytes * 1024 * 1024)
+            .map(|i| 128u8.wrapping_add((i % 128) as u8))
+            .collect();
+        let mut bild = Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 1024_i64,
+                "Height" => (megabytes * 1024) as i64,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8_i64,
+            },
+            punkte,
+        );
+        bild.compress().expect("komprimierbar");
+
+        let mut doc = Document::with_version("1.5");
+        let bild_id = doc.add_object(bild);
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => bild_id } },
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1_i64,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).expect("speicherbar");
+        bytes
+    }
+
+    /// `--max-parsed-mb` zählt **auch den Rumpf** der Datei, nicht nur die
+    /// geparsten Streams — so steht es im Hilfetext, seit dort der halbe Satz
+    /// stand. Diese Datei hat keinen einzigen Stream; zählte nur, was in
+    /// Streams steht, käme sie durch beide Werte.
+    #[test]
+    fn das_parse_budget_zaehlt_auch_den_rumpf_ohne_jeden_stream() {
+        let pdf = rumpf_ohne_stream(700);
+        assert!(
+            pdf.len() > 2 * 1024 * 1024,
+            "Rumpf zu klein für den Versuch: {} Byte",
+            pdf.len()
+        );
+        let stelle = pdf.windows(6).position(|w| w == b"stream");
+        let umfeld = stelle
+            .map(|i| String::from_utf8_lossy(&pdf[i.saturating_sub(80)..i]).into_owned())
+            .unwrap_or_default();
+        assert!(
+            stelle.is_none(),
+            "diese Datei darf keinen Stream enthalten, hat aber einen: {umfeld}"
+        );
+
+        let eng = Cli::parse_from(["redact-rs", "in.pdf", "--max-parsed-mb", "1"]).limits();
+        let weit = Cli::parse_from(["redact-rs", "in.pdf", "--max-parsed-mb", "8"]).limits();
+        assert!(
+            redact_pdf::document::prescan(&pdf, &eng).is_err(),
+            "ein Rumpf über dem Budget muss abgelehnt werden"
+        );
+        assert!(
+            redact_pdf::document::prescan(&pdf, &weit).is_ok(),
+            "derselbe Rumpf unter dem Budget muss durchlaufen"
+        );
+    }
+
+    /// `--max-decompressed-mb` zählt die **ausgepackten** Streambytes, nicht
+    /// die rohen — so steht es beim Hilfetext von `--max-image-mb`, seit dort
+    /// „Rohbytes“ stand. Die Datei hier ist auf der Platte weit unter jeder
+    /// der beiden Grenzen; nur ausgepackt reißt sie die engere.
+    #[test]
+    fn das_dekompressionsbudget_zaehlt_die_ausgepackten_streambytes() {
+        let pdf = bild_das_sich_aufblaeht(4);
+        assert!(
+            pdf.len() < 1024 * 1024,
+            "roh gezählt müsste die Datei unter 1 MB bleiben, ist aber {} Byte",
+            pdf.len()
+        );
+
+        let eng = Cli::parse_from(["redact-rs", "in.pdf", "--max-decompressed-mb", "1"]).limits();
+        let weit = Cli::parse_from(["redact-rs", "in.pdf", "--max-decompressed-mb", "8"]).limits();
+        assert!(
+            redact_pdf::document::prescan(&pdf, &eng).is_err(),
+            "4 MB ausgepackt müssen an 1 MB scheitern"
+        );
+        assert!(
+            redact_pdf::document::prescan(&pdf, &weit).is_ok(),
+            "dieselben 4 MB müssen unter 8 MB durchlaufen"
+        );
     }
 }

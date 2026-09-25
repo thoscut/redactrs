@@ -23,10 +23,11 @@
 //!   Content-Streams).
 //! * **Inline-Bilder** werden auf Seitenebene erkannt; in Form-XObjects nicht,
 //!   weil dort die Operationsindizes zur Schwärzung passen müssen.
-//! * **`LZWDecode`/`CCITTFaxDecode`/`JPXDecode`** werden nicht dekodiert,
-//!   sondern durch einen Platzhalter ersetzt (siehe [`PageOps::notes`]).
+//! * **`CCITTFaxDecode`/`JPXDecode`** werden nicht dekodiert, sondern durch
+//!   einen Platzhalter ersetzt (siehe [`PageOps::notes`]). `LZWDecode` wird
+//!   seit der Spur-A-Runde 1 entpackt wie in `filters.rs` (Register #78).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
@@ -224,6 +225,11 @@ pub struct RasterImage {
     /// `true`, wenn das Bild nicht dekodiert werden konnte und hier nur eine
     /// Ersatzfläche steht.
     pub placeholder: bool,
+    /// `true`, wenn das Bild einen Stencil-`/Mask`-Strom hat, der sich
+    /// **nicht** lesen ließ — dann trägt der Alphakanal die Maske nicht, und
+    /// `crate::image` muss den Strom unverändert mitschreiben (Register #77:
+    /// nur eine gelesene Maske lässt sich unter der Zone schwärzen).
+    pub mask_unread: bool,
 }
 
 impl RasterImage {
@@ -234,6 +240,7 @@ impl RasterImage {
             height: 1,
             rgba: color.to_vec(),
             placeholder,
+            mask_unread: false,
         }
     }
 
@@ -306,9 +313,7 @@ pub fn page_ops(doc: &Document, page_index: usize) -> Result<PageOps> {
     let media_box = crate::document::page_box(doc, page_id);
     let rotate = page_rotation(doc, page_id);
 
-    let data = doc
-        .get_page_content(page_id)
-        .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
+    let data = crate::filters::page_content(doc, page_id);
     let operations = decode_content(&data);
     let resources = crate::content::page_resources(doc, page_id);
 
@@ -316,6 +321,8 @@ pub fn page_ops(doc: &Document, page_index: usize) -> Result<PageOps> {
         out: PageOps::empty(page_index, media_box, rotate),
         fonts: HashMap::new(),
         images: HashMap::new(),
+        clips: HashMap::new(),
+        seen_notes: HashSet::new(),
     };
     interpret(
         doc,
@@ -370,15 +377,71 @@ enum FontKey {
     Local(StreamKey, Vec<u8>),
 }
 
+/// Schlüssel eines Clip-Pfads: die Bitmuster seiner Koordinaten.
+///
+/// [`PathSeg`] trägt `f64` und hat deshalb weder `Eq` noch `Hash`. Bitgleiche
+/// Pfade sind aber genau die, aus denen dieselbe Maske entsteht — als
+/// Schlüssel taugen die Rohbits also, und sie umgehen dabei die zwei
+/// Eigenheiten von `==` auf Fließkomma:
+///
+/// * `NaN == NaN` ist **falsch**. Ein Pfad mit NaN-Koordinate wäre bei der
+///   alten Suche nie wiedererkannt worden — jedes `W n` hätte einen neuen
+///   Eintrag und im Rasterizer eine neue Maske erzeugt.
+/// * `0.0 == -0.0` ist **wahr**. Solche Pfade stehen jetzt doppelt in der
+///   Liste: ein Eintrag zu viel, aber kein falsches Bild.
+type ClipKey = Vec<u64>;
+
+fn clip_key(segments: &[PathSeg]) -> ClipKey {
+    let mut key = Vec::with_capacity(segments.len() * 3);
+    let mut push = |tag: u64, points: &[Point]| {
+        key.push(tag);
+        for p in points {
+            key.push(p.x.to_bits());
+            key.push(p.y.to_bits());
+        }
+    };
+    for seg in segments {
+        match seg {
+            PathSeg::MoveTo(p) => push(0, &[*p]),
+            PathSeg::LineTo(p) => push(1, &[*p]),
+            PathSeg::CubicTo(a, b, c) => push(2, &[*a, *b, *c]),
+            PathSeg::Close => push(3, &[]),
+        }
+    }
+    key
+}
+
 struct OpsCollector {
     out: PageOps,
     fonts: HashMap<FontKey, usize>,
     images: HashMap<ObjectId, usize>,
+    /// Schon abgelegte Clip-Pfade — **als Menge**, nicht durch Durchsuchen der
+    /// Liste.
+    ///
+    /// Vorher stand hier `clips.iter().position(…)`, also eine Suche über alle
+    /// bisherigen Pfade je neuem Pfad: quadratisch. Gemessen (Debug, beide
+    /// Fassungen abwechselnd auf derselben Datei, je ein `re W n` mit eigenem
+    /// Rechteck):
+    ///
+    /// | Clips  | Datei   | mit Liste | mit Menge |
+    /// |-------:|--------:|----------:|----------:|
+    /// |  8 000 |  382 kB |    1,07 s |    0,50 s |
+    /// | 16 000 |  769 kB |    3,78 s |    1,04 s |
+    /// | 32 000 |  1,5 MB |   14,65 s |    2,16 s |
+    /// | 64 000 |  3,1 MB |   59,73 s |    4,23 s |
+    ///
+    /// Links Faktor 3,5 bis 4,1 je Verdopplung, rechts 2,0. Die Nachbarn
+    /// [`OpsCollector::fonts`] und [`OpsCollector::images`] machen es seit
+    /// jeher so.
+    clips: HashMap<ClipKey, usize>,
+    /// Schon vergebene Hinweise — als Menge, aus demselben Grund wie
+    /// [`OpsCollector::clips`].
+    seen_notes: HashSet<String>,
 }
 
 impl OpsCollector {
     fn note(&mut self, text: String) {
-        if !self.out.notes.contains(&text) {
+        if self.seen_notes.insert(text.clone()) {
             self.out.notes.push(text);
         }
     }
@@ -444,11 +507,14 @@ impl ContentSink for OpsCollector {
     }
 
     fn clip(&mut self, _cx: &SinkContext, segments: &[PathSeg], _even_odd: bool) -> Option<usize> {
-        if let Some(index) = self.out.clips.iter().position(|c| c == segments) {
-            return Some(index);
+        let key = clip_key(segments);
+        if let Some(index) = self.clips.get(&key) {
+            return Some(*index);
         }
+        let index = self.out.clips.len();
         self.out.clips.push(segments.to_vec());
-        Some(self.out.clips.len() - 1)
+        self.clips.insert(key, index);
+        Some(index)
     }
 
     fn image(&mut self, cx: &SinkContext, event: &ImageEvent) {
@@ -851,6 +917,7 @@ fn decode_image_inner(
                         height,
                         rgba,
                         placeholder: false,
+                        mask_unread: false,
                     },
                     None => {
                         return (
@@ -890,6 +957,7 @@ fn decode_image_inner(
                             height,
                             rgba,
                             placeholder: false,
+                            mask_unread: false,
                         }
                     }
                     None => {
@@ -901,14 +969,9 @@ fn decode_image_inner(
                 }
             }
         }
-        Payload::Jpeg(data) => match decode_jpeg(&data, decode.as_deref()) {
-            Some(image) => image,
-            None => {
-                return (
-                    RasterImage::solid([220, 220, 220, 255], true),
-                    Some("JPEG nicht dekodierbar".into()),
-                )
-            }
+        Payload::Jpeg(data) => match decode_jpeg(&data, decode.as_deref(), width, height) {
+            Ok(image) => image,
+            Err(reason) => return (RasterImage::solid([220, 220, 220, 255], true), Some(reason)),
         },
         Payload::Jpx => {
             return (
@@ -946,6 +1009,19 @@ fn apply_filters(doc: &Document, dict: &Dictionary, raw: &[u8]) -> Payload {
                 Some(out) => apply_predictor(doc, out, params.as_ref()),
                 None => return Payload::Unsupported("FlateDecode".into()),
             },
+            // Derselbe Dekoder wie für Content-Streams und das Orakel
+            // (`filters::lzw_within`, `weezl`). Bis zur Spur-A-Runde 1 endete
+            // ein LZW-gepacktes Bild unter der Zone hier als „nicht
+            // unterstützt“ — und ohne `--allow-undecodable-images` der ganze
+            // Lauf ohne Ausgabedatei, für eine gewöhnliche Datei (Register
+            // #78). Die Grenze folgt dem, was das Bild laut Dictionary
+            // braucht: mehr Abtastwerte liest niemand.
+            "LZWDecode" | "LZW" => {
+                match crate::filters::lzw_within(&data, params.as_ref(), lzw_limit(doc, dict)) {
+                    Ok(out) => apply_predictor(doc, out, params.as_ref()),
+                    Err(_) => return Payload::Unsupported("LZWDecode (zu groß)".into()),
+                }
+            }
             "ASCII85Decode" | "A85" => decode_ascii85(&data),
             "ASCIIHexDecode" | "AHx" => decode_ascii_hex(&data),
             "RunLengthDecode" | "RL" => decode_run_length(&data),
@@ -955,6 +1031,16 @@ fn apply_filters(doc: &Document, dict: &Dictionary, raw: &[u8]) -> Payload {
         };
     }
     Payload::Samples(data)
+}
+
+/// Wie viel ein LZW-gepacktes Bild höchstens entpacken darf: was `/Width` ×
+/// `/Height` an Abtastwerten brauchen — großzügig mit 8 Byte je Bildpunkt
+/// (16 Bit, vier Komponenten) — plus ein MiB Spielraum für Zeilenfüllung und
+/// Prädiktorbytes. Ein Strom, der mehr hergibt, malt kein Bild, er füllt
+/// Speicher.
+fn lzw_limit(doc: &Document, dict: &Dictionary) -> usize {
+    let pixels = usize::try_from(crate::image::declared_pixels(doc, dict)).unwrap_or(usize::MAX);
+    pixels.saturating_mul(8).saturating_add(1 << 20)
 }
 
 fn filter_names(doc: &Document, dict: &Dictionary) -> Vec<String> {
@@ -1217,17 +1303,40 @@ fn read_sample(row: &[u8], bit_offset: usize, bpc: usize) -> u32 {
 }
 
 /// JPEG über `zune-jpeg`. CMYK-JPEGs werden als Adobe-invertiert behandelt.
-fn decode_jpeg(data: &[u8], decode: Option<&[f64]>) -> Option<RasterImage> {
+///
+/// **Die Maße im JPEG entscheiden über den Speicher, nicht die im
+/// Dictionary.** `--max-image-mb` und [`MAX_IMAGE_PIXELS`] prüfen `/Width` ×
+/// `/Height`; der Dekoder belegt aber, was der SOF-Kopf des JPEG sagt. Bis zur
+/// Spur-A-Runde 2 las ihn niemand vorher: ein Dictionary mit 100 × 100 über
+/// einem JPEG mit 6000 × 6000 kam an jeder Decke vorbei (Register #101).
+/// Jetzt wird zuerst der Kopf gelesen, und ein JPEG mit mehr Bildpunkten, als
+/// das Dictionary angibt — für das die Decke reserviert hat —, gilt als nicht
+/// dekodierbar, mit seinem Grund.
+fn decode_jpeg(
+    data: &[u8],
+    decode: Option<&[f64]>,
+    declared_width: u32,
+    declared_height: u32,
+) -> std::result::Result<RasterImage, String> {
     use zune_jpeg::zune_core::bytestream::ZCursor;
     use zune_jpeg::JpegDecoder;
 
+    let unlesbar = || "JPEG nicht dekodierbar".to_string();
     let mut decoder = JpegDecoder::new(ZCursor::new(data));
-    let pixels = decoder.decode().ok()?;
-    let info = decoder.info()?;
+    decoder.decode_headers().map_err(|_| unlesbar())?;
+    let info = decoder.info().ok_or_else(unlesbar)?;
     let (width, height) = (info.width as u32, info.height as u32);
     if width == 0 || height == 0 {
-        return None;
+        return Err(unlesbar());
     }
+    if u64::from(width) * u64::from(height) > u64::from(declared_width) * u64::from(declared_height)
+    {
+        return Err(format!(
+            "JPEG größer als im Bild-Dictionary angegeben ({width}x{height} statt \
+             {declared_width}x{declared_height})"
+        ));
+    }
+    let pixels = decoder.decode().map_err(|_| unlesbar())?;
     let count = width as usize * height as usize;
     let comps = pixels.len() / count.max(1);
     // `/Decode [1 0 …]` dreht die Werte um.
@@ -1265,15 +1374,16 @@ fn decode_jpeg(data: &[u8], decode: Option<&[f64]>) -> Option<RasterImage> {
                 };
                 crate::content::cmyk_to_rgb(f(p[0]), f(p[1]), f(p[2]), f(p[3])).to_u8()
             }
-            _ => return None,
+            _ => return Err(unlesbar()),
         };
         rgba[i * 4..i * 4 + 3].copy_from_slice(&rgb);
     }
-    Some(RasterImage {
+    Ok(RasterImage {
         width,
         height,
         rgba,
         placeholder: false,
+        mask_unread: false,
     })
 }
 
@@ -1351,6 +1461,9 @@ fn apply_soft_mask(
     );
     if mask.placeholder || mask.width == 0 || mask.height == 0 {
         if is_stencil {
+            // Die Maske bleibt beim Neukodieren stehen; dass sie nicht im
+            // Alphakanal steckt, muss `crate::image` wissen (Register #77).
+            image.mask_unread = true;
             return None;
         }
         return Some(format!(
@@ -1439,12 +1552,16 @@ fn apply_color_key(
 pub enum MaskPlan {
     /// Kein `/Mask` (ein `/SMask` läuft über den Alphakanal).
     None,
-    /// `/Mask` verweist auf einen Stencil-Strom: **unverändert übernehmen**.
+    /// `/Mask` verweist auf einen Stencil-Strom: **unverändert übernehmen**,
+    /// solange kein Bildpunkt gefallen ist.
     ///
     /// Der Strom steht neben dem Bild und beschreibt es im Einheitsquadrat,
     /// nicht im Pixelraster — er überlebt das Neukodieren des Bildes
     /// unbeschadet und in voller Auflösung. Ihn in eine Alphaebene des Bildes
-    /// umzurechnen, hieße ihn auf dessen Auflösung herunterzubrechen.
+    /// umzurechnen, hieße ihn auf dessen Auflösung herunterzubrechen. Fällt
+    /// aber ein Bildpunkt, ist die Maske selbst Bildinhalt (ihre Bits sind
+    /// die Form, die gemalt wird), und `crate::image` schreibt statt ihrer
+    /// die unter der Zone geschwärzte Alphaebene als `/SMask` (Register #77).
     Keep(Object),
     /// Die Maske steckt bereits im Alphakanal; ein `/Mask` darf **nicht**
     /// übernommen werden.
@@ -1747,11 +1864,13 @@ fn decode_chunk(chunk: &[u8], out: &mut DecodedContent) {
         out.operations.extend(content.operations);
         return;
     }
-    // Zweiter Versuch mit sauberem Abschluss: lopdf verlangt hinter einem
-    // Kommentar ein Zeilenende und kennt weder NUL noch Seitenvorschub als
-    // Leerraum, obwohl PDF 32000-1 (Tabelle 1) beide dazuzählt. Beides ist
-    // kein Inhaltsverlust und darf keinen Fehlalarm auslösen.
-    let mut tidied: Vec<u8> = chunk.to_vec();
+    // Zweiter Versuch mit dem Leerraum der Norm und sauberem Abschluss:
+    // lopdf verlangt hinter einem Kommentar ein Zeilenende, stolpert über
+    // einen Kommentar vor einer Leerzeile und kennt weder NUL noch
+    // Seitenvorschub als Leerraum, obwohl PDF 32000-1 (Tabelle 1) beide
+    // dazuzählt. Nichts davon ist Inhaltsverlust, und nichts davon darf die
+    // Seite kosten.
+    let mut tidied = pdf_whitespace_for_lopdf(chunk);
     while tidied.last().is_some_and(|b| is_pdf_whitespace(*b)) {
         tidied.pop();
     }
@@ -1761,10 +1880,53 @@ fn decode_chunk(chunk: &[u8], out: &mut DecodedContent) {
         return;
     }
     // Jetzt ist wirklich etwas abgeschnitten. Was davor steht, wird gerettet.
-    if let Ok(content) = Content::decode(chunk) {
+    if let Ok(content) = Content::decode(&tidied) {
         out.operations.extend(content.operations);
     }
     out.truncated.push(chunk.len());
+}
+
+/// Schreibt Kommentare und den Leerraum, den lopdf nicht kennt, so um, dass
+/// lopdf sie liest wie die Norm — **außerhalb** von Zeichenketten.
+///
+/// * Ein Kommentar (`%` bis vor das Zeilenende) wird zu Leerzeichen; das
+///   Zeilenende bleibt. Bis zur Spur-A-Runde 2 brach
+///   `Content::decode_strict` an einem Kommentar mit einer Leerzeile
+///   dahinter (`… ET\n% Kopf\n\nBT …`): die Seite galt als nicht
+///   zerlegbar, und eine gewöhnliche Datei wurde mit Rückgabewert 1
+///   abgelehnt, obwohl jeder Betrachter sie liest (Register #103).
+/// * NUL und Seitenvorschub werden zu Leerzeichen (PDF 32000-1, Tabelle 1).
+///
+/// Literale Zeichenketten bleiben, wie sie sind: `(100% sicher)` ist Text,
+/// kein Kommentar. (In einer Hex-Zeichenkette ist Leerraum ohnehin bedeutungslos
+/// und `%` kein zulässiges Zeichen.)
+fn pdf_whitespace_for_lopdf(chunk: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(chunk.len());
+    let mut i = 0usize;
+    while i < chunk.len() {
+        match chunk[i] {
+            b'(' => {
+                let end = skip_literal_string(chunk, i).min(chunk.len());
+                out.extend_from_slice(&chunk[i..end]);
+                i = end;
+            }
+            b'%' => {
+                while i < chunk.len() && chunk[i] != b'\n' && chunk[i] != b'\r' {
+                    out.push(b' ');
+                    i += 1;
+                }
+            }
+            0x00 | 0x0c => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Leerraum nach PDF 32000-1, Tabelle 1 — einschließlich NUL und
@@ -2440,10 +2602,23 @@ mod tests {
         );
     }
 
+    /// Ein Clip-Pfad wird **einmal** abgelegt, auch wenn er zweimal gesetzt
+    /// wird.
+    ///
+    /// Der zweite `W n` ist der Kern des Tests. Ohne ihn sagte er nur aus, dass
+    /// aus **einem** `W n` **ein** Eintrag wird — und das gilt mit und ohne
+    /// Entdopplung. Erst der zweite, gleiche Beschnitt unterscheidet die
+    /// beiden Fassungen: ohne Entdopplung stünde derselbe Pfad zweimal in
+    /// [`PageOps::clips`], und der Rasterizer baute für ihn eine zweite Maske
+    /// in voller Bildgröße.
     #[test]
     fn clip_is_stored_once_and_referenced_by_the_following_ops() {
-        let page = ops_of("q 0 0 10 10 re W n 1 1 2 2 re f 1 1 2 2 re f Q 1 1 2 2 re f");
-        assert_eq!(page.clips.len(), 1);
+        let page = ops_of(
+            "q 0 0 10 10 re W n 1 1 2 2 re f 1 1 2 2 re f Q \
+             q 0 0 10 10 re W n 1 1 2 2 re f Q \
+             1 1 2 2 re f",
+        );
+        assert_eq!(page.clips.len(), 1, "derselbe Pfad, zweimal gesetzt");
         assert_eq!(page.clips[0].len(), 5);
         let ops = paths(&page);
         assert!(matches!(
@@ -2454,7 +2629,19 @@ mod tests {
             }
         ));
         assert!(matches!(ops[1], DrawOp::Path { clip: Some(_), .. }));
-        assert!(matches!(ops[2], DrawOp::Path { clip: None, .. }));
+        // Der zweite Block muss auf **denselben** Eintrag zeigen.
+        assert!(
+            matches!(
+                ops[2],
+                DrawOp::Path {
+                    clip: Some(ClipRef(0)),
+                    ..
+                }
+            ),
+            "der zweite, gleiche Beschnitt zeigt nicht auf denselben Eintrag: {:?}",
+            ops[2]
+        );
+        assert!(matches!(ops[3], DrawOp::Path { clip: None, .. }));
     }
 
     #[test]

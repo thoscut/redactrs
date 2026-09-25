@@ -1,11 +1,12 @@
 [package]
 name = "redact-booking"
-description = "Booking list (allow/deny list) matching for redact-rs"
+description = "Booking list matching (positive/negative lists) for redact-rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 redact-core.workspace = true

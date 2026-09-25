@@ -1,0 +1,34 @@
+# Mitschnitt fuer docs/konsole.gif - erzeugt von scripts/make-preview.sh.
+# '$ ' = getippter Befehl, '| ' = eine Zeile Ausgabe eines echten Laufs,
+# '~ N' = N Hundertstelsekunden laenger stehen lassen.
+#
+# Die Ausgabezeilen sind unveraendert; nur das Praefix '| ' kam dazu.
+# Angezeigt und ausgefuehrt wird derselbe String - nur der Pfad des
+# gebauten Binaries ist durch seinen Namen ersetzt.
+$ redact-rs kontoauszug.pdf
+| Eingabe:            kontoauszug.pdf
+| Seiten:             2
+| Textzeilen:         15
+| Treffer gesamt:     7
+| Schwärzungen:       7
+| Entfernte Zeichen:  134
+| Deck-Rechtecke:     7
+| Metadaten entfernt: /Info-Dictionary
+| Ausgabe:            kontoauszug_geschwaerzt.pdf
+~ 60
+|
+$ redact-rs kontoauszug_geschwaerzt.pdf --check-leaks "DE89 3704 0044 0532 0130 00"
+| Geprüft: kontoauszug_geschwaerzt.pdf (1332 Byte)
+|   nicht gefunden: DE89 3704 0044 0532 0130 00
+| 
+| Ergebnis: der Suchbegriff steht nicht mehr in der Datei.
+| Das heißt NICHT, dass in der Datei nichts mehr steht. Geprüft wurde genau diese
+| Liste. Was nicht darin steht — ein zweiter Name, eine weitere Kontonummer, eine
+| Schreibweise mit anderen Leerzeichen, Text in einem Rasterbild, Text in einer
+| Schrift ohne brauchbare Zeichenzuordnung —, ist damit nicht geprüft. Die Liste
+| zu schreiben bleibt Handarbeit, und die Sichtprüfung des Ergebnisses ersetzt
+| sie nicht.
+~ 40
+|
+$ echo $?
+| 0
