@@ -334,7 +334,9 @@ pub struct MetadataReport {
     /// und `/OPI`. Dazu seit der Spur-A-Runde 2 jeder Schlüssel an Katalog,
     /// Seitenbaum und Seite, der nicht auf der Erlaubnisliste steht
     /// ([`CATALOG_KEEP`], [`PAGE_KEEP`], [`PAGE_TREE_KEEP`]) — etwa
-    /// `/SpiderInfo`, `/Legal`, `/Requirements` (Register #92).
+    /// `/SpiderInfo`, `/Legal`, `/Requirements` (Register #92) — und in jedem
+    /// Ressourcenverzeichnis jeder Schlüssel, der keine Ressourcenart ist
+    /// ([`RESOURCES_KEEP`], Register #107).
     pub beiwerk_removed: usize,
 }
 
@@ -631,6 +633,9 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
         &mut file_specs,
         &mut beiwerk,
     );
+    // Und in jedem Ressourcenverzeichnis nur, was ein Inhaltsstrom
+    // nachschlagen kann (Register #107).
+    clear_foreign_resources(doc, &mut beiwerk);
 
     // --- Lesezeichen ----------------------------------------------------
     //
@@ -1880,6 +1885,74 @@ const PAGE_TREE_KEEP: [&[u8]; 9] = [
     b"Rotate",
     b"AF",
 ];
+
+/// Was ein Ressourcenverzeichnis behalten darf (ISO 32000-2, Tabelle 34):
+/// die acht Arten, unter denen ein Inhaltsstrom einen Namen nachschlägt.
+///
+/// Seit #92 behielten Katalog, Seitenbaum und Seite nur, was auf ihrer
+/// Erlaubnisliste steht — das `/Resources` darunter aber jeden Schlüssel.
+/// `/Resources << /Font … /Zusatz (Kunde …) >>` stand nach dem Lauf in der
+/// Ausgabe, mit Rückgabewert 0 und ohne Warnung (Register #107). Die
+/// Einträge **unter** den Arten bleiben unberührt: eine Eigenschaftsliste
+/// unter `/Properties` ist frei gestaltbar (14.6.2), ihre Spiegel leert die
+/// Schwärzung.
+const RESOURCES_KEEP: [&[u8]; 8] = [
+    b"ExtGState",
+    b"ColorSpace",
+    b"Pattern",
+    b"Shading",
+    b"XObject",
+    b"Font",
+    b"ProcSet",
+    b"Properties",
+];
+
+/// Nimmt jedem Ressourcenverzeichnis der Datei, was nicht auf
+/// [`RESOURCES_KEEP`] steht.
+///
+/// Über **alle** Objekte, nicht über das, was die Seiten zeichnen: ein
+/// Verzeichnis hängt an Seite, Seitenbaum, Formular, Erscheinungsbild,
+/// Kachelmuster, Type3-Schrift oder Softmaske, und auch die Kopie, die die
+/// Schwärzung einer Seite direkt einsetzt, ist eines. Ein direktes
+/// Verzeichnis wird an Ort und Stelle bereinigt, ein eigenes Objekt einmal —
+/// gleich wie viele Halter es teilen.
+fn clear_foreign_resources(doc: &mut Document, into: &mut Tally) {
+    let ids: Vec<ObjectId> = doc.objects.keys().copied().collect();
+    let mut shared: BTreeSet<ObjectId> = BTreeSet::new();
+    for id in ids {
+        let Some(object) = doc.objects.get_mut(&id) else {
+            continue;
+        };
+        // Ohne Rekursion und ohne Tiefengrenze, wie [`clear_ocg_names`].
+        let mut stack: Vec<&mut Object> = vec![object];
+        while let Some(item) = stack.pop() {
+            let dict = match item {
+                Object::Dictionary(dict) => dict,
+                Object::Stream(stream) => &mut stream.dict,
+                Object::Array(items) => {
+                    stack.extend(items.iter_mut());
+                    continue;
+                }
+                _ => continue,
+            };
+            match dict.get_mut(b"Resources") {
+                Ok(Object::Dictionary(resources)) => {
+                    take_unlisted(resources, &RESOURCES_KEEP, into);
+                }
+                Ok(Object::Reference(target)) => {
+                    shared.insert(*target);
+                }
+                _ => {}
+            }
+            stack.extend(dict.iter_mut().map(|(_, value)| value));
+        }
+    }
+    for id in shared {
+        if let Ok(resources) = doc.get_dictionary_mut(id) {
+            take_unlisted(resources, &RESOURCES_KEEP, into);
+        }
+    }
+}
 
 /// Nimmt `dict` jeden Schlüssel, der nicht in `keep` steht, und bucht ihn.
 fn take_unlisted(dict: &mut Dictionary, keep: &[&[u8]], into: &mut Tally) {

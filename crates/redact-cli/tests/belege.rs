@@ -3446,6 +3446,14 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "übergangen und `/3DU` aus der Liste genommen",
         "ein Schlüsselname, keine Messung",
     ),
+    (
+        "(Register #107, beim dritten Teil von #92 gefunden; stilles Leck, die Zeile zum Beiwerk mit Klartext trat weiter auf)",
+        "Registernummern, keine Messung",
+    ),
+    (
+        "Seit #92 behielten Katalog, Seitenbaum und Seite nur",
+        "eine Registernummer, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

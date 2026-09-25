@@ -376,6 +376,23 @@ sind, jeder in seinem eigenen Commit.
   wirkungslos, die Seiten-`/OutputIntents` übergangen und `/3DU` aus der
   Liste genommen → je ihr Fall rot.
 
+* **⚠ Sicherheit: ein Ressourcenverzeichnis behält nur noch
+  Ressourcenarten** (Register #107, beim dritten Teil von #92 gefunden;
+  stilles Leck, die Zeile zum Beiwerk mit Klartext trat weiter auf). Seit
+  #92 behielten Katalog, Seitenbaum und Seite nur, was auf ihrer
+  Erlaubnisliste steht — das `/Resources` darunter aber jeden Schlüssel.
+  `/Resources << /Font … /Zusatz (Kunde …) >>` stand nach dem Lauf in der
+  Ausgabe, an der Seite, geerbt am Seitenbaum, am Formular und am
+  Erscheinungsbild einer Annotation; der Lauf meldete nichts, erst
+  `--check-leaks` an der Ausgabe fand den Text. Jetzt behält jedes
+  Ressourcenverzeichnis der Datei nur die Arten, unter denen ein
+  Inhaltsstrom nachschlägt (`/ExtGState`, `/ColorSpace`, `/Pattern`,
+  `/Shading`, `/XObject`, `/Font`, `/ProcSet`, `/Properties`); die Einträge
+  darunter bleiben unberührt. Belege: `zp_b_fremde_ressourcen`, darunter
+  die Gegenprobe, dass jede dieser Arten bleibt. Mutationsnachweis: der
+  Durchgang wirkungslos → jeder Fall rot; Verzeichnisse als eigenes Objekt
+  übergangen oder direkte übergangen → je ihre Fälle rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile
