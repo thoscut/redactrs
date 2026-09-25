@@ -741,15 +741,32 @@ jobs:
           # Verhaltensaenderungen wieder nur in `git log` stehen zu lassen.
           # Bis v0.3.0 enthielten diese Notizen Artefakttabelle, Pruefsummen
           # und Herkunftshinweis - und keine einzige Verhaltensaenderung.
-          CHANGES=""
-          if [ -f CHANGELOG.md ]; then
-            CHANGES="$(awk -v v="$VERSION" '
+          #
+          # Ist der Abschnitt laenger als NOTES_MAX Zeichen, wird nur sein
+          # VORSPANN genommen - bis zur ersten `### `-Zeile. Der Abschnitt
+          # von 0.7.0 traegt darunter den Verlauf aller Pruefrunden, zusammen
+          # rund 150 000 Zeichen; GitHub nimmt als Release-Text hoechstens
+          # 125 000 und lehnte die Veroeffentlichung sonst ab. Der Vorspann
+          # fasst den Abschnitt zusammen, der Link darunter fuehrt zum
+          # vollstaendigen Verlauf.
+          NOTES_MAX=100000
+          abschnitt() {
+            awk -v v="$VERSION" -v nur_vorspann="$1" '
               BEGIN { esc = v; gsub(/\./, "\\.", esc); pat = "^## " esc "([^0-9.]|$)" }
               $0 ~ pat { inside = 1; next }
               inside && /^## / { exit }
+              inside && nur_vorspann && /^### / { exit }
               inside && /^---[[:space:]]*$/ { next }
               inside { print }
-            ' CHANGELOG.md)"
+            ' CHANGELOG.md
+          }
+          CHANGES=""
+          if [ -f CHANGELOG.md ]; then
+            CHANGES="$(abschnitt 0)"
+            if [ "$(printf '%s' "$CHANGES" | wc -m)" -gt "$NOTES_MAX" ]; then
+              echo "::notice::Der Abschnitt ${VERSION} ist laenger als ${NOTES_MAX} Zeichen - die Release-Notizen nehmen nur seinen Vorspann."
+              CHANGES="$(abschnitt 1)"
+            fi
             # Fuehrende und abschliessende Leerzeilen weg.
             CHANGES="$(printf '%s\n' "$CHANGES" | sed -e '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba')"
           fi
@@ -856,6 +873,13 @@ jobs:
             fi
           } > release-notes.md
           cat release-notes.md
+          # Lieber hier mit Begruendung abbrechen als beim Hochladen mit einer
+          # Fehlermeldung von GitHub, nachdem alle Archive gebaut sind.
+          ZEICHEN="$(wc -m < release-notes.md)"
+          if [ "$ZEICHEN" -gt 120000 ]; then
+            echo "::error::Die Release-Notizen haben ${ZEICHEN} Zeichen; GitHub nimmt hoechstens 125000. Den Vorspann des Abschnitts in CHANGELOG.md kuerzen."
+            exit 1
+          fi
 
       - name: Release veroeffentlichen
         uses: softprops/action-gh-release@62c96d0c4e8a889135c1f3a25910db8dbe0e85f7 # v2.3.4
