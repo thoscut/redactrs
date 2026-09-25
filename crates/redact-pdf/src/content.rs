@@ -3835,6 +3835,32 @@ pub(crate) fn property_list_homes(doc: &Document, owner: ObjectId, name: &[u8]) 
     out
 }
 
+/// Die Eigenschaftslisten namens `name`, die entlang der Kette von `owner`
+/// als **eigenes Objekt** stehen (`/Properties << /MC0 7 0 R >>`) — das
+/// Gegenstück zu [`property_list_homes`], das nur die Listen ohne eigene
+/// Objekt-Id liefert. Beim Leser selbst kommt eine solche Liste über
+/// [`MarkedTextRecord::property_id`]; gebraucht wird die Suche für die
+/// überschattete Kopie beim **Aufrufer** eines Formulars (Register #87).
+pub(crate) fn property_list_objects(doc: &Document, owner: ObjectId, name: &[u8]) -> Vec<ObjectId> {
+    let mut out = Vec::new();
+    for (object, prefix) in resource_homes(doc, owner) {
+        let Some(resources) = dict_at(doc, object, &prefix) else {
+            continue;
+        };
+        let properties = match resources.get(b"Properties") {
+            Ok(Object::Reference(id)) => doc.get_dictionary(*id).ok(),
+            Ok(Object::Dictionary(dict)) => Some(dict),
+            _ => None,
+        };
+        if let Some(Ok(Object::Reference(list))) = properties.map(|p| p.get(name)) {
+            if doc.get_dictionary(*list).is_ok() {
+                out.push(*list);
+            }
+        }
+    }
+    out
+}
+
 /// Steht in dieser Liste überhaupt ein nicht leerer Textspiegel?
 ///
 /// Aufgelöst wird auch ein indirekter Verweis: eine Eigenschaftsliste, die als

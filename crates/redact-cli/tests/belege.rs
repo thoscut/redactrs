@@ -3458,6 +3458,14 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "(Register #93, Prüfer B; stilles Leck, die Zeile der Metadaten-Träger trat weiter auf)",
         "eine Registernummer, keine Messung",
     ),
+    (
+        "(Register #87, Prüfer C; Leck, von `--check-leaks` gefunden, die Zeile #67 der Probenliste trat weiter auf)",
+        "Registernummern, keine Messung",
+    ),
+    (
+        "Trägt ein Formular `/Properties /MC0` selbst",
+        "der Name einer Eigenschaftsliste (Ressourcenname), keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

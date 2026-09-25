@@ -408,6 +408,23 @@ sind, jeder in seinem eigenen Commit.
   alte Abgleich am Etikett → jeder Fall rot; der Ausschluss der Seite
   entfernt → die Gegenprobe mit der späteren Seite rot.
 
+* **⚠ Sicherheit: die überschattete Spiegelliste beim Aufrufer eines
+  Formulars bleibt nicht mehr stehen** (Register #87, Prüfer C; Leck, von
+  `--check-leaks` gefunden, die Zeile #67 der Probenliste trat weiter
+  auf). Trägt ein Formular `/Properties /MC0` selbst und die Seite, die es
+  platziert, eine gleichnamige Liste, ist die der Seite überschattet —
+  aber sie steht mit demselben Spiegeltext in der Datei. Die Schwärzung
+  leerte nur die wirksame Liste im Formular; die Kopie der Seite fand
+  erst `--check-leaks` an der Ausgabe. Jetzt fällt beim Leeren eines
+  Spiegels im Formular auch jede gleichnamige Liste in den Ressourcen der
+  Seiten, die es platzieren — direkt im Verzeichnis wie als eigenes
+  Objekt. Dieselbe Abwägung wie bei der überschatteten Kopie entlang einer
+  Kette: ein Spiegel, der zu viel verliert, kostet die Vorlesefunktion;
+  einer, der stehen bleibt, das Geheimnis. Belege:
+  `zo_c_spiegel_umgebungen`, je Bauart der Listen. Mutationsnachweis: die
+  Aufrufer übergangen → jede Bauart rot; Listen als eigenes Objekt beim
+  Aufrufer übergangen → diese Bauart rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

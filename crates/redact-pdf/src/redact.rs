@@ -37,7 +37,8 @@ use redact_core::conflict::RectGrid;
 use redact_core::{Rect, RedactError, Redaction, Result};
 
 use crate::content::{
-    property_list_homes, MarkedTextRecord, MirrorHome, ShowItem, ShowRecord, StreamKey, MIRROR_KEYS,
+    property_list_homes, property_list_objects, MarkedTextRecord, MirrorHome, ShowItem, ShowRecord,
+    StreamKey, MIRROR_KEYS,
 };
 use crate::image::InlineTarget;
 use crate::matrix::Matrix;
@@ -650,6 +651,7 @@ impl PdfRedactor {
             let mut mirrors = mirrors_to_clear(
                 doc,
                 *page_id,
+                &[],
                 &scan.marked,
                 StreamKey::Page,
                 &page_plans,
@@ -758,9 +760,16 @@ impl PdfRedactor {
             report.removed_glyphs += removed_here;
             add_per_redaction(&mut report, plans.values());
             let marked = form_marked.get(&form_id).unwrap_or(&no_marked);
+            let callers: Vec<ObjectId> = form_pages
+                .get(&form_id)
+                .unwrap_or(&no_form_pages)
+                .iter()
+                .filter_map(|index| pages.get(*index).copied())
+                .collect();
             let mut mirrors = mirrors_to_clear(
                 doc,
                 form_id,
+                &callers,
                 marked,
                 StreamKey::Form(form_id),
                 plans,
@@ -1593,10 +1602,18 @@ fn touches_form_image(
 /// stehen, weil sich das Bild nicht dekodieren ließ, fällt der Spiegel
 /// trotzdem. Dort weiß niemand, was fiel; dort steht über das Bild selbst eine
 /// Warnung, und ohne `--allow-undecodable-images` bricht der Lauf sogar ab.
+///
+/// **Die Aufrufer.** `callers` sind die Seiten, die den Strom platzieren —
+/// leer für einen Seitenstrom. Trägt ein Formular `/Properties /MC0` selbst
+/// und die platzierende Seite eine gleichnamige Liste, ist die der Seite
+/// überschattet; sie steht trotzdem mit demselben Text in der Datei. Sie
+/// fällt mit (Register #87) — dieselbe Abwägung wie bei der überschatteten
+/// Kopie entlang **einer** Kette in [`property_list_homes`].
 #[allow(clippy::too_many_arguments)]
 fn mirrors_to_clear(
     doc: &Document,
     owner: ObjectId,
+    callers: &[ObjectId],
     marked: &[MarkedTextRecord],
     stream: StreamKey,
     plans: &BTreeMap<usize, Plan>,
@@ -1629,6 +1646,14 @@ fn mirrors_to_clear(
             fixes.image_alt_texts += mirror_keys_in(&record.properties);
         }
         mirror_fix(doc, owner, record).apply(&mut fixes);
+        if let Some(name) = &record.property_name {
+            for caller in callers {
+                fixes.homes.extend(property_list_homes(doc, *caller, name));
+                fixes
+                    .objects
+                    .extend(property_list_objects(doc, *caller, name));
+            }
+        }
     }
     fixes
 }

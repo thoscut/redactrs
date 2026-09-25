@@ -1595,3 +1595,43 @@ fn c4_decke_der_gehaltenen_formularspiegel_wird_gesagt() {
         "über der Decke muss der Bericht es sagen: {ueber:?}"
     );
 }
+
+/// **Befund C-3 der Spur-A-Runde 2 — Register #87.** Das Formular trägt
+/// `/Properties /MC0` selbst, und die Seite, die es platziert, trägt eine
+/// gleichnamige Liste mit demselben Spiegel. Wirksam ist die des Formulars;
+/// die der Seite ist überschattet — aber sie steht mit dem Geheimnis in der
+/// Datei. `leaks` sucht Bytes, nicht Wirksamkeit: geräumt werden muss auch
+/// die überschattete Kopie beim Aufrufer, so wie
+/// [`property_list_homes`](redact_pdf) es entlang **einer** Kette schon tut.
+#[test]
+fn ueberschattete_gleichnamige_liste_beim_aufrufer_faellt_mit() {
+    let mut offen = Vec::new();
+    for (seite, formular) in [
+        (Liste::Direkt, Liste::Direkt),
+        (Liste::AlsObjekt, Liste::Direkt),
+        (Liste::Direkt, Liste::AlsObjekt),
+    ] {
+        let mut d = page(&[]);
+        let res = d.resources_id;
+        let props = properties_mit(&mut d, seite, mirror_list(&lie()));
+        set_properties(&mut d, res, props);
+        let (_, form_res) = add_form(
+            &mut d,
+            res,
+            "Fm0",
+            &format!("/Span /MC0 BDC\n{}EMC\n", text_at(600, SECRET)),
+        );
+        let props = properties_mit(&mut d, formular, mirror_list(&lie()));
+        set_properties(&mut d, form_res, props);
+        let mut raw = text_ops(&["Kontoinhaber Max Mustermann"]);
+        raw.extend_from_slice(b"q /Fm0 Do Q\n");
+        d.set_content(&raw);
+        let (found, warnings) = nach_der_pipeline(&d.finish());
+        if !found.is_empty() {
+            offen.push(format!(
+                "Seite {seite:?} / Formular {formular:?}: {found:?} (Warnungen {warnings:?})"
+            ));
+        }
+    }
+    assert!(offen.is_empty(), "{}", offen.join("\n"));
+}
