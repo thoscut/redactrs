@@ -425,6 +425,31 @@ sind, jeder in seinem eigenen Commit.
   Aufrufer übergangen → jede Bauart rot; Listen als eigenes Objekt beim
   Aufrufer übergangen → diese Bauart rot.
 
+* **Dienstverweigerung: ein Inhaltsstrom oder Formular, das sich viele
+  Seiten teilen, kostet nicht mehr Seiten × Inhalt** (Register #106, bei
+  #94 gefunden; Dienstverweigerung, die Klasse aus #94 an Inhaltsströmen und
+  Formularen). Das Aufwandskonto galt je Seite und schrieb jeden Strom gut,
+  den die Seite zum ersten Mal las — auch wenn eine frühere Seite ihn schon
+  gelesen hatte. Ein Strom, den viele Seiten zeigen, brachte sein Guthaben
+  so je Seite ein, und eine kleine Datei kaufte sich die Arbeit sehr vieler
+  Seiten; Analyse und Nachprüfung liefen entsprechend lange, ohne dass eine
+  Decke griff. Jetzt führt das Buch aus #94 auch das Konto über das ganze
+  Dokument: jeder Strom bringt sein Guthaben einmal ein, die Zeichen ihr
+  eigenes aus den Textbytes des Stroms; jede Seite bucht, was sie wirklich
+  ausgegeben hat. Wer mehr ausgibt, als das Dokument mitbringt, wird mit
+  Begründung abgelehnt, jede weitere Seite ohne Scan; die Nachprüfung nennt
+  die übrigen Seiten `NICHT GEPRÜFT`. Eine Datei, deren Seiten eigenen
+  Inhalt zeigen, bringt mit jeder Seite neues Guthaben mit — auch mit einem
+  geteilten Briefkopf. Benannte Grenze: eine echte Datei, die sehr viele
+  Seiten mit demselben Inhalt füllt, wird abgelehnt; einen Schalter dafür
+  gibt es nicht, wie bei der Decke aus #94. Belege: `zp_b_geteilter_inhalt`,
+  `content::tests::ein_geteilter_inhaltsstrom_bringt_sein_guthaben_einmal`,
+  `content::tests::eigener_inhalt_je_seite_reisst_das_konto_nicht`,
+  `content::tests::die_glyphen_haben_ihr_eigenes_guthaben`.
+  Mutationsnachweis: das Konto bucht nichts, ein geteilter Strom bringt je
+  Seite Guthaben (alter Stand), keine Ablehnung ohne Scan → je ihre Fälle
+  rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

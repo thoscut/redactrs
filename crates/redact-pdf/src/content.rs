@@ -720,6 +720,13 @@ struct Budget {
     mirror_shows_cut: bool,
     /// Begründung, sobald etwas aufgebraucht ist.
     exceeded: Option<String>,
+    /// Was dieser Scan wirklich ausgegeben hat — für das Konto über das
+    /// ganze Dokument ([`DocumentWork`]).
+    spent_operations: usize,
+    spent_glyphs: usize,
+    /// Was dieser Scan gutgeschrieben hat, je Strom: (Id, Operationen,
+    /// Textbytes). `None` ist der Seitenstrom.
+    credits: Vec<(Option<ObjectId>, usize, usize)>,
 }
 
 impl Default for Budget {
@@ -747,6 +754,9 @@ impl Default for Budget {
             mirror_forms_cut: false,
             mirror_shows_cut: false,
             exceeded: None,
+            spent_operations: 0,
+            spent_glyphs: 0,
+            credits: Vec::new(),
         }
     }
 }
@@ -1018,7 +1028,7 @@ impl Budget {
     /// dekodiert. Ein Strom mit Id muss vorher durch [`Budget::stream`]
     /// gegangen sein; ist er das nicht, wird im Zweifel **nicht**
     /// gutgeschrieben — die strengere Richtung.
-    fn credit(&mut self, id: Option<ObjectId>, operations: usize) {
+    fn credit(&mut self, id: Option<ObjectId>, operations: &[Operation]) {
         if let Some(id) = id {
             match self.streams.get_mut(&id) {
                 Some(entry) if !entry.credited => entry.credited = true,
@@ -1027,7 +1037,9 @@ impl Budget {
         }
         self.operations = self
             .operations
-            .saturating_add(operations.saturating_mul(MAX_AMPLIFICATION));
+            .saturating_add(operations.len().saturating_mul(MAX_AMPLIFICATION));
+        self.credits
+            .push((id, operations.len(), text_bytes(operations)));
     }
 
     /// `true` beim **ersten** Blick auf diese Type3-Schrift in diesem Strom.
@@ -1171,6 +1183,7 @@ impl Budget {
         match self.operations.checked_sub(1) {
             Some(rest) => {
                 self.operations = rest;
+                self.spent_operations += 1;
                 true
             }
             None => {
@@ -1195,6 +1208,7 @@ impl Budget {
         match self.glyphs.checked_sub(1) {
             Some(rest) => {
                 self.glyphs = rest;
+                self.spent_glyphs += 1;
                 true
             }
             None => {
@@ -2298,6 +2312,11 @@ pub(crate) fn scan_page_with(
     page_id: ObjectId,
     ledger: &mut AnnotationLedger,
 ) -> Result<ScanResult> {
+    // Ist das Konto über das Dokument schon gerissen, kostet jede weitere
+    // Seite nichts mehr (Register #106).
+    if let Some(message) = &ledger.work.refused {
+        return Err(RedactError::Pdf(message.clone()));
+    }
     // Über [`crate::filters`], nicht `Document::get_page_content`: der eigene
     // Dekoder kennt `ASCIIHexDecode` und `RunLengthDecode`, `lopdf` nicht.
     let content_data = crate::filters::page_content(doc, page_id);
@@ -2344,7 +2363,7 @@ pub(crate) fn scan_page_with(
     let resources = page_resources(doc, page_id);
     let mut result = ScanResult::default();
     let mut budget = Budget::default();
-    budget.credit(None, operations.len());
+    budget.credit(None, &operations);
     scan_with_budget(
         doc,
         &operations,
@@ -2367,6 +2386,7 @@ pub(crate) fn scan_page_with(
         &mut result,
     );
     budget.result()?;
+    ledger.work.book(&content_ids(doc, page_id), &budget)?;
     // Erst jetzt, nach dem gelungenen Scan: eine Seite, die abgelehnt wird,
     // hat ihre Annotationen nicht gelesen, und die nächste Seite muss es tun.
     ledger.commit(read);
@@ -2517,7 +2537,7 @@ pub fn interpret(
     sink: &mut dyn ContentSink,
 ) -> Result<()> {
     let mut budget = Budget::default();
-    budget.credit(None, operations.len());
+    budget.credit(None, operations);
     // Ohne Seitenkontext: `interpret` bekommt die Ressourcen fertig gemischt
     // und kennt die Seite nicht. Keine seiner Senken liest Textspiegel, und
     // `property_owner` bleibt entsprechend leer.
@@ -2744,6 +2764,152 @@ fn resource_environment(doc: &Document, page_id: ObjectId) -> Vec<(ObjectId, boo
     chain
 }
 
+/// Wie viele Bytes Text die Zeichenketten dieser Operationen tragen — das,
+/// was ein Strom an Zeichen **mitbringt**. Jede gesetzte Glyphe braucht
+/// mindestens ein Byte davon; mehr Glyphen, als der Text hergibt, entstehen
+/// nur durch Wiederholung.
+fn text_bytes(operations: &[Operation]) -> usize {
+    operations
+        .iter()
+        .flat_map(|op| op.operands.iter())
+        .map(|operand| match operand {
+            Object::String(bytes, _) => bytes.len(),
+            Object::Array(items) => items
+                .iter()
+                .map(|item| match item {
+                    Object::String(bytes, _) => bytes.len(),
+                    _ => 0,
+                })
+                .sum(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Das Aufwandskonto über **das ganze Dokument** (Register #106).
+///
+/// [`Budget`] gilt je Seite und schreibt jeden Strom gut, den die Seite zum
+/// ersten Mal liest — auch dann, wenn eine frühere Seite denselben Strom
+/// schon gelesen hat. Ein Inhaltsstrom oder ein Formular, das sich P Seiten
+/// teilen, brachte sein Guthaben so P-mal ein, und die Arbeit wuchs mit
+/// Seiten × Inhalt, ohne dass ein Konto sie sah. Gemessen (Release, 200
+/// Seiten, die denselben Strom mit 1 000 Zeilen zeichnen, 32 kB): 14,4 s
+/// und 421 MB ohne ein einziges Muster, `--check-leaks` 10,5 s.
+///
+/// Hier bringt jeder Strom sein Guthaben **einmal je Dokument** ein —
+/// Operationen mal [`MAX_AMPLIFICATION`], dazu seine Textbytes mal
+/// demselben Faktor für die Glyphen. Jede Seite bucht, was sie wirklich
+/// ausgegeben hat. Wer mehr ausgibt als Grundausstattung plus Guthaben, wird
+/// abgelehnt, und jede weitere Seite ohne Scan. Eine Datei, deren Seiten
+/// verschiedenen Inhalt zeigen, bringt mit jeder Seite neues Guthaben mit
+/// und reißt diese Decke nicht; reißen kann sie nur Inhalt, der vielfach
+/// gezeigt wird.
+#[derive(Debug)]
+pub(crate) struct DocumentWork {
+    /// Ströme, die ihr Guthaben im Dokument schon eingebracht haben.
+    credited: HashSet<ObjectId>,
+    operations_spent: usize,
+    glyphs_spent: usize,
+    operations_credit: usize,
+    glyphs_credit: usize,
+    /// Grundausstattung — [`BASE_OPERATIONS`] und [`MAX_GLYPHS_PER_SCAN`];
+    /// nur die Grenzproben in diesem Modul setzen sie kleiner.
+    operations_base: usize,
+    glyphs_base: usize,
+    /// Begründung, sobald das Konto gerissen ist.
+    refused: Option<String>,
+}
+
+impl Default for DocumentWork {
+    fn default() -> Self {
+        Self {
+            credited: HashSet::new(),
+            operations_spent: 0,
+            glyphs_spent: 0,
+            operations_credit: 0,
+            glyphs_credit: 0,
+            operations_base: BASE_OPERATIONS,
+            glyphs_base: MAX_GLYPHS_PER_SCAN,
+            refused: None,
+        }
+    }
+}
+
+impl DocumentWork {
+    /// Bucht einen gelungenen Seiten-Scan. `contents` sind die Inhaltsströme
+    /// der Seite: der Seitenstrom bringt sein Guthaben nur ein, wenn einer
+    /// von ihnen neu ist.
+    fn book(&mut self, contents: &[ObjectId], budget: &Budget) -> Result<()> {
+        for (id, operations, bytes) in &budget.credits {
+            let new = match id {
+                Some(id) => self.credited.insert(*id),
+                None => {
+                    let mut new = contents.is_empty();
+                    for id in contents {
+                        new |= self.credited.insert(*id);
+                    }
+                    new
+                }
+            };
+            if new {
+                self.operations_credit = self
+                    .operations_credit
+                    .saturating_add(operations.saturating_mul(MAX_AMPLIFICATION));
+                self.glyphs_credit = self
+                    .glyphs_credit
+                    .saturating_add(bytes.saturating_mul(MAX_AMPLIFICATION));
+            }
+        }
+        self.operations_spent = self
+            .operations_spent
+            .saturating_add(budget.spent_operations);
+        self.glyphs_spent = self.glyphs_spent.saturating_add(budget.spent_glyphs);
+        let operations_limit = self.operations_base.saturating_add(self.operations_credit);
+        let glyphs_limit = self.glyphs_base.saturating_add(self.glyphs_credit);
+        if self.operations_spent > operations_limit || self.glyphs_spent > glyphs_limit {
+            let message = format!(
+                "Die Seiten dieses Dokuments zeigen denselben Inhalt vielfach: zusammen \
+                {} Zeichenoperationen und {} Zeichen, wo der Inhalt der Datei \
+                höchstens {} und {} hergibt (das {}-fache dessen, was sie mitbringt, \
+                dazu eine Grundausstattung). So etwas entsteht, wenn viele Seiten \
+                denselben Inhaltsstrom oder dasselbe Formular zeichnen — aus wenigen \
+                Kilobyte wird die Arbeit vieler Seiten. Die Datei wird abgelehnt.",
+                self.operations_spent,
+                self.glyphs_spent,
+                operations_limit,
+                glyphs_limit,
+                MAX_AMPLIFICATION,
+            );
+            self.refused = Some(message.clone());
+            return Err(RedactError::Pdf(message));
+        }
+        Ok(())
+    }
+}
+
+/// Die Inhaltsströme einer Seite als Objekt-Ids (`/Contents` als Verweis oder
+/// Array von Verweisen).
+fn content_ids(doc: &Document, page_id: ObjectId) -> Vec<ObjectId> {
+    let Ok(page) = doc.get_dictionary(page_id) else {
+        return Vec::new();
+    };
+    match page.get(b"Contents") {
+        Ok(Object::Reference(id)) => match doc.get_object(*id) {
+            Ok(Object::Array(items)) => items
+                .iter()
+                .filter_map(|item| item.as_reference().ok())
+                .chain(std::iter::once(*id))
+                .collect(),
+            _ => vec![*id],
+        },
+        Ok(Object::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_reference().ok())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Was die Seiten eines Dokuments an Annotationen schon gelesen haben — über
 /// alle Seiten hinweg (Register #94).
 ///
@@ -2783,6 +2949,8 @@ pub(crate) struct AnnotationLedger {
     /// die das Buch spart, ist genau diese Zahl: ohne das Buch wüchse sie mit
     /// Seiten × Annotationen, mit ihm mit den Annotationen.
     visits: usize,
+    /// Das Aufwandskonto über das ganze Dokument (Register #106).
+    work: DocumentWork,
 }
 
 impl Default for AnnotationLedger {
@@ -2795,6 +2963,7 @@ impl Default for AnnotationLedger {
             repeats: 0,
             limit: MAX_REPEATED_ANNOTATIONS,
             visits: 0,
+            work: DocumentWork::default(),
         }
     }
 }
@@ -3122,7 +3291,7 @@ fn scan_appearance(
     if appearance.operations().is_empty() {
         return;
     }
-    budget.credit(Some(id), appearance.operations().len());
+    budget.credit(Some(id), appearance.operations());
 
     let matrix = stream
         .dict
@@ -4578,7 +4747,7 @@ fn scan_soft_mask(
     if group.operations().is_empty() {
         return;
     }
-    budget.credit(Some(group_id), group.operations().len());
+    budget.credit(Some(group_id), group.operations());
     if !visiting.insert(group_id) {
         return; // Zyklus
     }
@@ -4761,7 +4930,7 @@ fn load_xobject(
             }
             // Der Inhalt dieses Stroms bringt einmal Guthaben ein; jede
             // weitere Platzierung zehrt nur noch davon.
-            budget.credit(Some(id), form.operations().len());
+            budget.credit(Some(id), form.operations());
             if form.operations().is_empty() && form.has_tokens {
                 return XObjectEntry::Unusable(format!(
                     "Der Inhalt des Form-XObjects „{label}“ ließ sich nicht in Operationen \
@@ -4897,7 +5066,7 @@ fn scan_tiling_pattern(
     if !visiting.insert(id) {
         return;
     }
-    budget.credit(Some(id), pattern.operations().len());
+    budget.credit(Some(id), pattern.operations());
 
     let inhalt = match (setzt_text, platziert) {
         (true, false) => "enthält Text",
@@ -5035,7 +5204,7 @@ fn warn_about_text_in_charprocs(
             unreadable += 1;
         }
         // Der Inhalt bringt einmal Guthaben ein — wie jeder andere Strom auch.
-        budget.credit(id, decoded.operations().len());
+        budget.credit(id, decoded.operations());
         let mut sets_text = false;
         for op in decoded.operations() {
             // Jede geprüfte Operation kostet. Ist das Konto leer, endet der
@@ -5462,6 +5631,137 @@ mod tests {
         scan_page_with(&doc, pages[0], &mut ledger).expect("erster Blick");
         scan_page_with(&doc, pages[0], &mut ledger).expect("zweiter Blick");
         assert_eq!(ledger.repeats, 0);
+    }
+
+    /// `pages` Seiten; mit `shared` zeichnen alle **denselben** Inhaltsstrom,
+    /// sonst jede ihren eigenen — gleich lang, anderer Text.
+    fn seiten_mit_inhalt(pages: usize, shared: bool) -> (Document, Vec<ObjectId>) {
+        let mut doc = Document::with_version("1.5");
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let resources = doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
+        let inhalt = |k: usize| {
+            let mut body = Vec::new();
+            for i in 0..10 {
+                body.extend_from_slice(
+                    format!(
+                        "BT /F1 10 Tf 72 {} Td (Seite {k} Zeile {i}) Tj ET\n",
+                        700 - 12 * i
+                    )
+                    .as_bytes(),
+                );
+            }
+            Stream::new(dictionary! {}, body)
+        };
+        let tree = doc.new_object_id();
+        let gemeinsam = doc.add_object(inhalt(0));
+        let mut ids = Vec::new();
+        for k in 0..pages {
+            let contents = if shared {
+                gemeinsam
+            } else {
+                doc.add_object(inhalt(k))
+            };
+            ids.push(doc.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => tree,
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+                "Resources" => resources,
+                "Contents" => contents,
+            }));
+        }
+        doc.objects.insert(
+            tree,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => ids.iter().map(|id| Object::Reference(*id)).collect::<Vec<_>>(),
+                "Count" => pages as i64,
+            }),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => tree });
+        doc.trailer.set("Root", catalog);
+        (doc, ids)
+    }
+
+    fn ohne_grundausstattung() -> AnnotationLedger {
+        AnnotationLedger {
+            work: DocumentWork {
+                operations_base: 0,
+                glyphs_base: 0,
+                ..DocumentWork::default()
+            },
+            ..AnnotationLedger::default()
+        }
+    }
+
+    /// Register #106: ein Inhaltsstrom, den sich Seiten teilen, bringt sein
+    /// Guthaben **einmal** ein. Ohne Grundausstattung trägt er rund
+    /// [`MAX_AMPLIFICATION`] Seiten — je Seite bucht der Scan eine Operation
+    /// mehr, als der Strom mitbringt, deshalb eine weniger. Die nächste wird
+    /// mit der Begründung abgelehnt, und jede weitere ohne Scan.
+    #[test]
+    fn ein_geteilter_inhaltsstrom_bringt_sein_guthaben_einmal() {
+        let (doc, pages) = seiten_mit_inhalt(MAX_AMPLIFICATION + 2, true);
+        let mut ledger = ohne_grundausstattung();
+        let erste_abgelehnte = pages
+            .iter()
+            .position(|page| scan_page_with(&doc, *page, &mut ledger).is_err())
+            .expect("das Guthaben reicht nicht für alle Seiten");
+        assert!(
+            (MAX_AMPLIFICATION - 1..=MAX_AMPLIFICATION).contains(&erste_abgelehnte),
+            "abgelehnt ab Seite {}",
+            erste_abgelehnte + 1
+        );
+        let message = ledger.work.refused.clone().expect("Begründung");
+        assert!(message.contains("denselben Inhalt vielfach"), "{message}");
+        let spent = ledger.work.operations_spent;
+        let err = scan_page_with(&doc, pages[MAX_AMPLIFICATION + 1], &mut ledger)
+            .expect_err("ohne Scan abgelehnt");
+        assert_eq!(err.to_string(), RedactError::Pdf(message).to_string());
+        assert_eq!(
+            ledger.work.operations_spent, spent,
+            "die letzte Seite kostete nichts"
+        );
+    }
+
+    /// Gegenprobe: Seiten mit je eigenem Inhalt bringen je Seite neues
+    /// Guthaben mit und reißen das Konto auch ohne Grundausstattung nie.
+    #[test]
+    fn eigener_inhalt_je_seite_reisst_das_konto_nicht() {
+        let (doc, pages) = seiten_mit_inhalt(3 * MAX_AMPLIFICATION, false);
+        let mut ledger = ohne_grundausstattung();
+        for page in &pages {
+            scan_page_with(&doc, *page, &mut ledger).expect("eigener Inhalt");
+        }
+        assert!(ledger.work.refused.is_none());
+    }
+
+    /// Die Glyphen haben ihr eigenes Guthaben: die Textbytes eines Stroms mal
+    /// [`MAX_AMPLIFICATION`], einmal je Dokument. Jede gesetzte Glyphe braucht
+    /// mindestens ein Byte davon.
+    #[test]
+    fn die_glyphen_haben_ihr_eigenes_guthaben() {
+        let (doc, pages) = seiten_mit_inhalt(2, true);
+        let mut ledger = AnnotationLedger {
+            work: DocumentWork {
+                operations_base: usize::MAX / 2,
+                glyphs_base: 0,
+                ..DocumentWork::default()
+            },
+            ..AnnotationLedger::default()
+        };
+        scan_page_with(&doc, pages[0], &mut ledger).expect("Seite 1");
+        let glyphen = ledger.work.glyphs_spent;
+        assert!(glyphen > 0 && glyphen <= ledger.work.glyphs_credit);
+        assert_eq!(
+            ledger.work.glyphs_credit,
+            MAX_AMPLIFICATION
+                * text_bytes(&crate::ops::decode_content(&crate::filters::page_content(
+                    &doc, pages[0]
+                ))),
+            "gutgeschrieben werden die Textbytes des Stroms, mal dem Faktor"
+        );
     }
 
     /// Baut ein einseitiges PDF um ein beliebiges Font-Dictionary (`/F1`).

@@ -3466,6 +3466,18 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Trägt ein Formular `/Properties /MC0` selbst",
         "der Name einer Eigenschaftsliste (Ressourcenname), keine Messung",
     ),
+    (
+        "(Register #106, bei #94 gefunden; Dienstverweigerung, die Klasse aus #94 an Inhaltsströmen und Formularen)",
+        "Registernummern, keine Messung",
+    ),
+    (
+        "Jetzt führt das Buch aus #94 auch das Konto",
+        "eine Registernummer, keine Messung",
+    ),
+    (
+        "einen Schalter dafür gibt es nicht, wie bei der Decke aus #94",
+        "eine Registernummer, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.

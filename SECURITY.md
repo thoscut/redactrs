@@ -729,6 +729,14 @@ Das **Aufwandskonto** (`Budget` in `crates/redact-pdf/src/content.rs`) tut das:
   Das Konto wächst also mit dem Inhalt, den die Datei **mitbringt**, nicht mit
   dem, was sie daraus macht. Ein zweiter Durchlauf durch denselben Strom bringt
   nichts ein — sonst finanzierte die Fächerung sich selbst.
+* Dasselbe gilt **über das ganze Dokument**: ein Strom bringt sein Guthaben
+  einmal je Dokument ein, nicht einmal je Seite, die ihn zeigt. Bis zur
+  Spur-A-Runde 2 schrieb jede Seite einen geteilten Inhaltsstrom oder ein
+  geteiltes Formular erneut gut, und die Arbeit wuchs mit Seiten × Inhalt
+  (Register #106). Die Zeichen haben dabei ihr eigenes Guthaben: die
+  Textbytes jedes Stroms, mit demselben Faktor. Wer mehr ausgibt, als das
+  Dokument mitbringt, wird abgelehnt, und jede weitere Seite ohne Scan; die
+  Nachprüfung liest die übrigen Seiten nicht und nennt sie `NICHT GEPRÜFT`.
 
 Damit steht diese Grenze nicht quer zu `--max-parsed-mb`: wer das Parse-Budget
 anhebt, hebt das Aufwandskonto automatisch mit an, weil mehr Inhalt mehr

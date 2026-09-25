@@ -1749,6 +1749,8 @@ cargo test -p redact-pdf --test marked_content
   entstehen. Dagegen hilft keine Größengrenze. Das Konto zählt deshalb, was
   wirklich anfällt, und wächst mit dem Inhalt, den die Datei *mitbringt* —
   nicht mit dem, was sie daraus macht. Ist es leer, wird die Datei abgelehnt.
+  Das gilt auch über das ganze Dokument: ein Inhaltsstrom oder ein Formular,
+  das viele Seiten zeigen, bringt sein Guthaben einmal ein, nicht je Seite.
 
   Zwei weitere Decken haben **keinen** Schalter, weil es an ihnen nichts
   einzustellen gibt — sie begrenzen, was eine Datei über den Umweg ihrer
