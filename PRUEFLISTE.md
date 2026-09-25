@@ -22,6 +22,7 @@ Prosa.
 | Spiegel über Formular: verschachtelt, mehrfach platziert, ohne eigenes `/Resources`, in `/Properties` | A | R3, R6, R7 | `crates/redact-pdf/tests/zg_r1_spiegel.rs`, `crates/redact-pdf/tests/zg_r1_decke.rs` |
 | Bild unter zwei Namen; Kopie, Teilung, Waise | A | R8, R9 | `crates/redact-pdf/tests/zm_a_zwei_namen_ein_bild.rs`, `crates/redact-pdf/tests/zm_a_kopie_teilung_und_waise.rs` |
 | Metadaten-Träger, die den Lauf überstehen (`/Popup`, `/AF`, `/PieceInfo`, `/Movie`, `/RichMediaContent`, `/RichMediaSettings`, …) | A | R5, R7, Spur-A-Runde 2 (#92) | `crates/redact-pdf/tests/zg_r3_beiwerk.rs`, `crates/redact-pdf/tests/zg_r3_barrierefrei.rs`, `crates/redact-pdf/tests/zp_b_richmedia_einstellungen.rs` |
+| Träger mit normwidrigem `/Type` (`/Annotation`, `/Widget`, `/Field`): Form statt Etikett | A | Spur-A-Runde 2 (#93) | `crates/redact-pdf/tests/zp_b_normwidriger_typ.rs` |
 | Filterkette: unbekannter Filter an erster Stelle, `/Filter`-Wert kein Name, Kette weggeworfen | A | R4, R5, R7 | `crates/redact-pdf/tests/ze_p1_budget_und_filter.rs`, `crates/redact-cli/tests/zf_q5_unbekannter_filter.rs`, `crates/redact-pdf/tests/zg_r2_unbrauchbarer_filterwert.rs` |
 | Verschachtelungstiefe: stille Entwarnung jenseits der Decke | A | R5 | `crates/redact-cli/tests/ze_p4_check_leaks_grenzen.rs` |
 | Flächenfrage am Rand: berührt ist nicht geschnitten; entartete Matrix | A | R9 | `crates/redact-pdf/tests/zm_d_bildwahrheit_gegengelesen.rs`, `crates/redact-pdf/tests/zm_a_entartete_ctm.rs` |

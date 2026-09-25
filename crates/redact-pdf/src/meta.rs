@@ -1219,13 +1219,28 @@ const FILE_SPEC_KEYS: [&[u8]; 2] = [b"AF", b"FS"];
 /// Ist dieses Dictionary eine Annotation oder ein Formularfeld?
 ///
 /// Beide tragen entweder kein `/Type` (Felder, und Annotationen dürfen es
-/// weglassen) oder `/Type /Annot`. Alles andere — eine Seite, der
-/// Seitenbaum, ein Katalog — ist kein Träger: eine kaputte `/Parent`-Kette,
-/// die auf die Seite führt, darf ihr weder `/Contents` noch `/Kids` nehmen.
+/// weglassen) oder `/Type /Annot`. Erzeuger schreiben aber auch `/Type
+/// /Annotation` oder `/Type /Widget` — normwidrig, und jeder Betrachter zeigt
+/// die Annotation trotzdem samt `/Contents`. Bis Register #93 galt ein
+/// solches Dictionary nicht als Träger, und seine Klartexte blieben. Deshalb
+/// entscheidet bei fremdem `/Type` die **Form**: `/Subtype` mit `/Rect` (eine
+/// Annotation, Tabelle 166) oder `/FT` (ein Feld, Tabelle 226).
+///
+/// Nie ein Träger sind Seite, Seitenbaum und Katalog: eine kaputte
+/// `/Parent`-Kette, die auf die Seite führt, darf ihr weder `/Contents` noch
+/// `/Kids` nehmen — auch dann nicht, wenn die Seite ein `/Rect` trägt.
 fn is_carrier(dict: &Dictionary) -> bool {
     match value_of(dict, b"Type") {
-        Some(Object::Name(name)) => name == b"Annot",
-        Some(_) => false,
+        Some(Object::Name(name)) if name == b"Annot" => true,
+        Some(Object::Name(name))
+            if [&b"Page"[..], b"Pages", b"Catalog"].contains(&name.as_slice()) =>
+        {
+            false
+        }
+        Some(_) => {
+            (value_of(dict, b"Subtype").is_some() && value_of(dict, b"Rect").is_some())
+                || value_of(dict, b"FT").is_some()
+        }
         // Kein `/Type` — und ein `/Type null` ist keines (7.3.9).
         None => true,
     }

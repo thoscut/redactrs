@@ -393,6 +393,21 @@ sind, jeder in seinem eigenen Commit.
   Durchgang wirkungslos → jeder Fall rot; Verzeichnisse als eigenes Objekt
   übergangen oder direkte übergangen → je ihre Fälle rot.
 
+* **⚠ Sicherheit: eine Annotation mit normwidrigem `/Type` behielt ihre
+  Klartexte** (Register #93, Prüfer B; stilles Leck, die Zeile der
+  Metadaten-Träger trat weiter auf). Der Metadatenlauf erkannte einen
+  Träger am `/Type`: `/Annot` oder keines. Erzeuger schreiben aber auch
+  `/Type /Annotation` oder `/Type /Widget`; jeder Betrachter zeigt die
+  Annotation trotzdem, und ihr `/Contents`, ein Feldname `/T` und ein
+  Feldwert `/V` standen nach dem Lauf in der Ausgabe, während der Bericht
+  nichts nannte. Jetzt entscheidet bei fremdem `/Type` die Form:
+  `/Subtype` mit `/Rect` (eine Annotation) oder `/FT` (ein Feld). Seite,
+  Seitenbaum und Katalog bleiben ausgenommen — eine `/Parent`-Kette, die
+  auf eine Seite führt, nimmt ihr nichts, auch wenn die Seite erst später
+  bereinigt wird. Belege: `zp_b_normwidriger_typ`. Mutationsnachweis: der
+  alte Abgleich am Etikett → jeder Fall rot; der Ausschluss der Seite
+  entfernt → die Gegenprobe mit der späteren Seite rot.
+
 ### Spur-A-Runde 1: die Probenliste hält, und sie war nicht vollständig
 
 Die erste Runde unter dem Mandat aus `CONTRIBUTING.md` („prüfe, ob eine Zeile

@@ -3454,6 +3454,10 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "Seit #92 behielten Katalog, Seitenbaum und Seite nur",
         "eine Registernummer, keine Messung",
     ),
+    (
+        "(Register #93, Prüfer B; stilles Leck, die Zeile der Metadaten-Träger trat weiter auf)",
+        "eine Registernummer, keine Messung",
+    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
