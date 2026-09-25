@@ -170,9 +170,9 @@ Dazu liegt in **jedem** der drei Archive (nachgesehen in
 * dieser `README.md` und [`SECURITY.md`](SECURITY.md) — sonst liefen die
   Verweise in beiden Richtungen ins Leere,
 * [`CHANGELOG.md`](CHANGELOG.md) — wer eine ältere Fassung ersetzt, muss ohne
-  Netzzugang sehen können, welche Lecks dazwischen geschlossen wurden. **Ab der
-  nächsten Fassung**; die v0.3.0-Archive enthalten ihn noch nicht (nachgesehen
-  in den ausgelieferten Archiven).
+  Netzzugang sehen können, welche Lecks dazwischen geschlossen wurden. Seit
+  v0.4.0 packt der Release-Job ihn mit; die v0.3.0-Archive enthalten ihn noch
+  nicht (nachgesehen in den ausgelieferten Archiven).
 * die drei Lizenztexte `LICENSE-MIT`, `LICENSE-APACHE` und `LICENSE-OFL.txt`
   (die eingebetteten Schriften stehen unter der SIL Open Font License),
 * das Verzeichnis `examples/`.

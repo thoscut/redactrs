@@ -29,9 +29,9 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 ---
 
-## Unveröffentlicht
+## 0.7.0 — 2026-09-25
 
-Bereich: `git log v0.6.0..HEAD`.
+Bereich: `git log v0.6.0..v0.7.0`.
 
 Neun Fix-Runden seit 0.6.0, jede eine Gegenprüfung der vorigen — an Code
 und Doku mit demselben Maßstab. Zuletzt (Runde 9) fällt ein stilles Leck im
@@ -40,6 +40,15 @@ beim falschen der beiden Fäden stand — denn **jede** Zahl der beiden jüngste
 Abschnitte dieser Datei ist an einen Lauf, eine Konstante oder eine
 aufgezeichnete Messung gebunden, nicht nur die, an die jemand dachte, und seit
 dieser Runde auch jede Zusage, die in Fettschrift steht.
+
+Danach folgten die Spur-A-Runden (siehe `CONTRIBUTING.md`): Prüfer mit
+gewechseltem Mandat sehen nach, ob eine Zeile der Probenliste
+(`PRUEFLISTE.md`) noch auftritt, und suchen nach Klassen, die nicht auf ihr
+stehen. Was sie fanden — stille Lecks an Trägern, die der Metadatenlauf nicht
+kannte, Lücken des Orakels in Altgenerationen, Dienstverweigerungen durch
+Vervielfachung über Seiten —, steht in den Abschnitten „Spur-A-Runde“
+darunter, jeder Befund mit Beleg und Mutationsnachweis. Wer mit diesem
+Werkzeug Bankunterlagen schwärzt, liest sie zuerst.
 
 Der Maßstab für eine Messzahl, ausgeschrieben — die pauschale Zusage, die hier
 stand („jede Angabe hier stammt aus einem Lauf des gebauten Binaries“), war

@@ -1,4 +1,4 @@
-Erzeugt von scripts/make-preview.sh mit redact-rs 0.6.0.
+Erzeugt von scripts/make-preview.sh mit redact-rs 0.7.0.
 Ungekuerzte Ausgabe echter Laeufe - hier ist keine Zeile von Hand
 geschrieben, geloescht oder umgestellt.
 

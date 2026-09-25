@@ -2684,8 +2684,12 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
     // Er liegt seit zi_e_lage_der_messzahlen IM geprueften Block. Was dort an
     // Zahlen steht, zaehlt oder benennt - gemessen wird nichts davon.
     (
-        "Bereich: `git log v0.6.0..HEAD`.",
+        "Bereich: `git log v0.6.0..v0.7.0`.",
         "die Spanne der Release-Notizen; ein Git-Bereich, keine gemessene Groesse",
+    ),
+    (
+        "## 0.7.0 — 2026-09-25",
+        "Fassung und Datum des Release-Schnitts, keine Messung",
     ),
     (
         "Neun Fix-Runden seit 0.6.0",

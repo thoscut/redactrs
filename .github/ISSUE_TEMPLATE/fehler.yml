@@ -38,7 +38,7 @@ body:
     attributes:
       label: Version
       description: "Ausgabe von `redact-rs --version`"
-      placeholder: "redact-rs 0.6.0"
+      placeholder: "redact-rs 0.7.0"
     validations:
       required: true
 
