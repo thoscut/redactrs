@@ -11,7 +11,7 @@
 //! Geometrie (MediaBox plus `/Rotate`), kein Fenster, keine Grafik. Sie liegt
 //! im Sichtmodul, weil sie dort gebraucht und geprüft wird.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -47,18 +47,71 @@ pub const PROTECTION_OVERRIDDEN: &str =
     "Achtung: Dieser Treffer war durch Ihre Schutzliste gedeckt. Von Hand angepasst \
      überstimmt er sie und wird jetzt geschwärzt — Strg+Z nimmt es zurück.";
 
+/// Was der abgelehnte Anschlag hätte tun sollen.
+///
+/// Die Absage nannte früher fest „Nicht verschoben“ — auch dann, wenn
+/// Strg+Umschalt+Pfeil die **Größe** ändern sollte. Wer sie so liest, sucht den
+/// Fehler beim Verschieben und nicht bei der Auswahl.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NudgeKind {
+    /// Pfeiltasten mit Auswahl: das Rechteck schieben.
+    Move,
+    /// Strg+Pfeil: die obere rechte Ecke ziehen.
+    Resize,
+}
+
+impl NudgeKind {
+    /// Der Satzanfang der Absage — das Verb, um das es wirklich ging.
+    pub fn refusal(self) -> &'static str {
+        match self {
+            NudgeKind::Move => "Nicht verschoben",
+            NudgeKind::Resize => "Größe nicht geändert",
+        }
+    }
+}
+
 /// Statuszeile, wenn ein Pfeiltastendruck eine Region auf einer Seite träfe,
 /// die gerade niemand sieht.
 ///
 /// Siehe [`AppState::move_selected`] und [`AppState::resize_selected`]. Der
 /// Satz nennt beide Auswege — zu der Seite blättern oder die Auswahl aufheben
 /// —, weil sonst nur „es passiert nichts“ übrig bliebe. `page` ist 0-basiert.
-pub fn selection_on_other_page(page: usize) -> String {
+pub fn selection_on_other_page(page: usize, kind: NudgeKind) -> String {
     format!(
-        "Nicht verschoben — die ausgewählte Region liegt auf Seite {}, gezeigt wird \
+        "{} — die ausgewählte Region liegt auf Seite {}, gezeigt wird \
          eine andere. Zu ihr blättern, oder mit Esc die Auswahl aufheben (dann \
          blättern die Pfeiltasten wieder).",
-        page + 1
+        kind.refusal(),
+        // `saturating_add`, weil die Seitennummer aus fremder Hand kommt (Review-Datei,
+        // `--manual-regions`): bei `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build
+        // über und löste eine Panic aus; im Release-Build stünde „Seite 0" da. Die erste
+        // Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der Deserialisierung;
+        // diese hier gilt für jeden Aufrufer, der `Region` selbst baut.
+        page.saturating_add(1)
+    )
+}
+
+/// Dieselbe Absage für eine Seite, die es **gar nicht gibt**.
+///
+/// [`selection_on_other_page`] riet „zu ihr blättern“ — und schickte damit zu
+/// Seite 8 eines zweiseitigen Dokuments. Solche Zeilen bringt nur eine
+/// Review- oder Regionsdatei mit ([`HitOutcome::MissingPage`]); der Ausweg ist
+/// deshalb ein anderer, und er wird hier benannt statt verschwiegen.
+/// `page` ist 0-basiert, `pages` die Seitenzahl des Dokuments.
+pub fn selection_on_missing_page(page: usize, pages: usize, kind: NudgeKind) -> String {
+    format!(
+        "{} — die ausgewählte Region nennt Seite {}, die es in diesem Dokument \
+         nicht gibt (es hat {} Seite(n)). Dorthin lässt sich nicht blättern: die \
+         Zeile mit Entf löschen oder die Seitenzahl in der Review-Datei berichtigen \
+         — dort ist die erste Seite die 0.",
+        kind.refusal(),
+        // `saturating_add`, weil die Seitennummer aus fremder Hand kommt (Review-Datei,
+        // `--manual-regions`): bei `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build
+        // über und löste eine Panic aus; im Release-Build stünde „Seite 0" da. Die erste
+        // Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der Deserialisierung;
+        // diese hier gilt für jeden Aufrufer, der `Region` selbst baut.
+        page.saturating_add(1),
+        pages
     )
 }
 
@@ -319,6 +372,730 @@ impl HitOutcome {
     }
 }
 
+/// So viele ungeprüfte Stellen nennt der Satz beim Namen; der Rest wird
+/// gezählt.
+///
+/// [`redact_pdf::LeakCheck::unchecked`] darf **255** Zeilen tragen, nicht 51.
+/// Die Decke von 50 einzeln genannten Stellen plus Summenzeile (`redact-pdf`,
+/// `MAX_UNCHECKED`) gilt je **Zähler**, und davon gibt es fünf: nicht
+/// entpackte Ströme der Rohsicht, dieselben der Objektsicht (jede Sicht hat
+/// ihr eigenes Budget), Stellen aus anderem Grund — etwa die
+/// Verschachtelungstiefe —, verlesene oder in der Rohsicht nicht dekodierte
+/// Ströme und abgelehnte Seiten (seit der
+/// Spur-A-Runde 2; bis dahin drei Zähler und die Zeile über Sicht 7, zusammen
+/// 154). Gemessen
+/// (`zf_q4_tests::zf_q4_3_die_zahl_der_ungepruefeten_stellen_sprengt_die_zusage`):
+/// 60 zu große Ströme ergeben **52** Zeilen; die 255 sind die aus dem Code
+/// abgeleitete Obergrenze, keine gemessene Zahl.
+///
+/// Alle in die Statuszeile zu schreiben hieße, sie unlesbar zu machen; gar
+/// keine zu nennen hieße, die Ursache raten zu lassen. Drei zeigen, **worum**
+/// es geht — die Zahl davor sagt, wie viele es sind. Und jede von ihnen wird
+/// gekürzt ([`short_place`]): der Grund gehört in den Satz, die
+/// Buchhaltung des Budgets nicht.
+const MAX_NAMED_PLACES: usize = 3;
+
+/// So viele Zeichen trägt die Statuszeile höchstens
+/// ([`ExportCheck::status_line`]).
+///
+/// Die Teilsätze von [`ExportCheck::sentence`] treten **zusammen** auf: Fund,
+/// ungeprüfte Stellen, Texte jenseits der Decke, wörtlich gedeckte Texte, das
+/// Urteil am Fund, der Vorbehalt, die Handregionen. Gemessen mit den echten
+/// Stellen eines Laufs: **981 Zeichen** — eine Zeile, die niemand liest, sagt
+/// so wenig wie gar keine. 400 Zeichen sind rund vier Zeilen im Fenster; was
+/// darüber liegt, steht ganz in den Warnungen ([`ExportCheck::warning`]).
+pub const MAX_STATUS_CHARS: usize = 400;
+
+/// Eine ungeprüfte Stelle, gekürzt auf Ort und Grund.
+///
+/// [`redact_pdf::LeakCheck::unchecked`] schreibt je Stelle einen ganzen Satz:
+/// „Rohdaten-Stream @0x298 (Objekt 4 0): nicht entpackt — 67 Byte gepackt,
+/// entpackt mehr als die verbleibenden 64 von 64 Byte des Budgets
+/// (--max-decompressed-mb); die gepackten Bytes wurden roh durchsucht.“ Drei
+/// davon machten die Statuszeile **804 Zeichen** lang (gemessen in
+/// `zf_q4_3_die_zahl_der_ungepruefeten_stellen_sprengt_die_zusage`) — eine
+/// Zeile, die niemand liest, sagt so wenig wie gar keine.
+///
+/// Gekürzt wird am ersten Komma, Semikolon oder Punkt **hinter** dem
+/// Gedankenstrich, also genau hinter dem Grund: „… (Objekt 4 0): nicht
+/// entpackt — 67 Byte gepackt“, „Objekt 5 0 /Kids[0]: nicht durchsucht —
+/// Verschachtelungstiefe 32 erreicht“, „Objektgraph (Sichten 3–7) nicht
+/// durchsucht — die Vorprüfung des Laders lehnt die Datei ab: PDF-Fehler:
+/// entpackte Streams überschreiten das Budget von 0 MB“. Der Grund bleibt damit stehen — er ist der Teil, der zur
+/// richtigen Stelle führt (Fix-Runde 5, „die Antwort behauptet keine Ursache
+/// mehr“); die volle Zeile steht weiter in [`ExportCheck::unchecked`], für
+/// den, der sie braucht.
+fn short_place(place: &str) -> &str {
+    const DASH: &str = " — ";
+    let after_reason = place.find(DASH).map_or(0, |dash| dash + DASH.len());
+    match place[after_reason..].find([',', ';', '.']) {
+        Some(cut) => place[..after_reason + cut].trim_end(),
+        None => place,
+    }
+}
+
+/// Derselbe Satzteil mit großem Anfangsbuchstaben — für Teile, die nicht
+/// mehr an erster Stelle stehen.
+///
+/// Die Teilsätze von [`ExportCheck::sentence`] wechseln ihren Platz (der
+/// Vorbehalt steht vor der Entwarnung, der Fund vor allem). Was hinter einem
+/// Punkt landet, fängt groß an; was direkt hinter „Nachprüfung: “ steht,
+/// klein.
+fn capitalized(part: &str) -> String {
+    let mut chars = part.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Ergebnis der Nachprüfung über die geschriebene Datei.
+///
+/// Siehe [`AppState::check_export`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExportCheck {
+    /// Die Ausgabe ließ sich nicht zurücklesen — dann gibt es keine Aussage.
+    pub unreadable: Option<String>,
+    /// Zahl der wirklich gesuchten (verschiedenen) Schreibweisen.
+    pub checked: usize,
+    /// Texte, die **noch** in der Ausgabe stehen.
+    pub leaking: Vec<String>,
+    /// Geschwärzte Zeilen ohne bekannten Text — von Hand gezogene Rechtecke.
+    pub without_text: usize,
+    /// Texte jenseits der Decke ([`redact_core::MAX_CHECK_NEEDLES`]) — sie
+    /// wurden nicht gesucht, und der Satz sagt das.
+    pub skipped: usize,
+    /// Schreibweisen, die sich mit einer bewusst stehen gelassenen Zeile
+    /// decken — abgewählt, durch die Negativliste geschützt oder selbst ein
+    /// Schutzeintrag. Dass sie in der Ausgabe stehen, ist eine Entscheidung
+    /// und kein Leck.
+    ///
+    /// Gezählt wird nur, was **gefunden** wurde: ein Text, der nirgends mehr
+    /// steht, ist verschwunden und zählt zur Entwarnung — gleich, was daneben
+    /// abgewählt ist (Befund R4-1). Zwei Wege führen hierher, und sie sind
+    /// **nicht** dasselbe Urteil:
+    ///
+    /// 1. eine stehen gelassene Zeile trägt **wörtlich denselben Text**
+    ///    ([`ExportCheckPlan::kept_literal`]) — dann ist der Fund nicht
+    ///    zuzuordnen. Diese Texte zählt [`ExportCheck::unsearched`] noch
+    ///    einmal für sich: über sie sagt die Prüfung **nichts**;
+    /// 2. getroffen hat **nur die Fassung ohne Leerraum**
+    ///    ([`redact_pdf::LeakCheck::literal`]) einer stehen gelassenen Zeile
+    ///    derselben Normalform ([`ExportCheckPlan::kept_forms`]). Nur das ist
+    ///    ein Urteil: die Schreibweise steht **nicht** mehr wörtlich in der
+    ///    Ausgabe, also ist der Rest die stehen gelassene Zeile.
+    pub kept: usize,
+    /// Davon die Texte aus Weg 1: gefunden, aber eine bewusst stehen gelassene
+    /// Zeile trägt **wörtlich** denselben Text.
+    ///
+    /// Immer `<= kept`. Sie sind der Teil von `kept`, der **kein** Urteil ist:
+    /// Ging die Schwärzung daneben, stünde derselbe Text auch dort noch — und
+    /// weil beide Vorkommen Zeichen für Zeichen gleich sind, kann die Prüfung
+    /// den einen Fund nicht dem einen oder anderen Ort zuordnen (Befund Q4-1,
+    /// Begründung bei [`AppState::plan_export_check`]). Deshalb sagt der Satz
+    /// über sie „über sie sagt diese Prüfung nichts“ statt „zählt nicht als
+    /// Leck“, und [`ExportCheck::warning`] nimmt sie auf: die Statuszeile ist
+    /// flüchtig, die Warnung bleibt.
+    ///
+    /// **Der Name meint den Fund, nicht die Suche**: gesucht wird auch dieser
+    /// Text (bis Fix-Runde 6 nicht — deshalb der Name). Blieb er aus, steht er
+    /// hier nicht, und die Prüfung gibt ihre Entwarnung.
+    pub unsearched: usize,
+    /// Die Decke, die für diesen Lauf galt — im Regelfall
+    /// [`redact_core::MAX_CHECK_NEEDLES`]; ein Test darf sie tiefer legen
+    /// ([`ExportCheckPlan::run_within`]). Der Satz nennt sie, damit der
+    /// Nutzer weiß, wo die Grenze liegt, und nicht nur, dass es eine gibt.
+    pub limit: usize,
+    /// Stellen der Datei, die die Suche **nicht** durchsucht hat
+    /// ([`redact_pdf::LeakCheck::unchecked`]) — je Stelle ein Satz, und
+    /// jeder nennt **seinen eigenen** Grund: das Entpackbudget reichte
+    /// nicht, der Lader lehnte die Vorprüfung ab, oder der Objektgraph war
+    /// tiefer, als die Suche geht. Nicht leer heißt: „nicht gefunden“ ist
+    /// keine Aussage, und der Satz sagt das — mit den Stellen, nicht mit
+    /// einer angenommenen Ursache ([`ExportCheck::sentence`]). Zählt für die
+    /// Warnungen wie ein Fund, nicht als „steht NOCH“ — gesehen wurde ja
+    /// nichts.
+    pub unchecked: Vec<String>,
+}
+
+impl ExportCheck {
+    /// Hat die Prüfung etwas gefunden?
+    pub fn found_leak(&self) -> bool {
+        !self.leaking.is_empty()
+    }
+
+    /// Ist die Antwort unvollständig, weil Stellen der Datei ungeprüft
+    /// blieben? Warum, sagt jede Stelle selbst ([`ExportCheck::unchecked`]).
+    pub fn incomplete(&self) -> bool {
+        !self.unchecked.is_empty()
+    }
+
+    /// Wie viele der gesuchten Schreibweisen wirklich **verschwunden** sind.
+    ///
+    /// [`ExportCheck::checked`] zählt, was in die Suche ging; davon abzuziehen
+    /// ist, was das Orakel gefunden hat — die Lecks
+    /// ([`ExportCheck::leaking`]) und die gedeckten Funde
+    /// ([`ExportCheck::kept`], darin [`ExportCheck::unsearched`]). Der Rest
+    /// steht nicht mehr in der Ausgabe, und nur über ihn gibt der Satz eine
+    /// Entwarnung (Befund R4-7).
+    pub fn vanished(&self) -> usize {
+        self.checked.saturating_sub(self.kept + self.leaking.len())
+    }
+
+    /// Der Satz für die Warnungen — `None`, wenn es nichts zu warnen gibt.
+    ///
+    /// Ein Fund und eine unvollständige Antwort tragen den ganzen Satz der
+    /// Statuszeile; nicht gesuchte Texte (`skipped` jenseits der Decke,
+    /// `unsearched` wegen wörtlicher Deckung) bekommen einen eigenen: der
+    /// Satz der Statuszeile trägt dort auch eine Entwarnung, und die läse
+    /// sich als Warnung wie ein Freibrief. Die Statuszeile überschreibt die
+    /// nächste Aktion; die Warnungen bleiben — deshalb steht es dort noch
+    /// einmal.
+    ///
+    /// **Die Reihenfolge ist die der Ursachen, nicht die der Symptome.** Eine
+    /// unlesbare Ausgabe trägt jeden Begriff als `skipped` ein
+    /// ([`ExportCheckPlan::run_within`]) — wer `skipped` zuerst prüft, meldet
+    /// die Decke („höchstens 1 000 Begriffe“) an einer Datei, die es gar
+    /// nicht zurückzulesen gab, und schickt damit an die falsche Stelle
+    /// (Befund Q4-2). Deshalb steht `unreadable` hier oben.
+    pub fn warning(&self) -> Option<String> {
+        let sentence = self.sentence();
+        // Was die Statuszeile nicht trägt, muss ganz in den Warnungen stehen —
+        // sonst wäre der gekürzte Satz die einzige Fassung (Befund R4-6).
+        if self.unreadable.is_some()
+            || self.found_leak()
+            || self.incomplete()
+            || sentence.chars().count() > MAX_STATUS_CHARS
+        {
+            return Some(sentence);
+        }
+        // Hier bleibt der Fall **ein** Grund. Stehen beide zusammen, ist der
+        // Satz länger als die Statuszeile trägt (die beiden Teilsätze wiegen
+        // zusammen über 330 Zeichen) — dann steht er oben schon **ganz** in
+        // der Warnung, und die nennt damit beide. Bis Fix-Runde 6 kehrte
+        // diese Funktion in dieser Lage mit dem ersten Grund zurück: die Zahl
+        // jenseits der Decke und die Decke selbst standen allein in der
+        // Statuszeile, die die nächste Aktion überschreibt (Befund R4-3).
+        if self.unsearched > 0 {
+            return Some(format!(
+                "Nachprüfung unvollständig — über {} Text(e) sagt sie nichts: sie stehen in der \
+                 Ausgabe und wörtlich auch in einer abgewählten, gelöschten oder geschützten \
+                 Zeile.",
+                self.unsearched
+            ));
+        }
+        if self.skipped > 0 {
+            return Some(format!(
+                "Nachprüfung unvollständig — {} Text(e) wurden nicht gesucht (höchstens {} \
+                 Begriffe je Nachprüfung; sie stehen in der Trefferliste weiter hinten).",
+                self.skipped, self.limit
+            ));
+        }
+        None
+    }
+
+    /// Der Satz für die **Statuszeile** — höchstens [`MAX_STATUS_CHARS`]
+    /// Zeichen.
+    ///
+    /// [`ExportCheck::sentence`] ist die ganze Wahrheit und kann lang werden:
+    /// gemessen **981 Zeichen** mit den echten ungeprüften Stellen eines Laufs
+    /// (`zg_r4_tests::zg_r4_3_die_laengste_statuszeile_ist_wieder_ueber_804_zeichen`).
+    /// Fix-Runde 6 hat dagegen einen **Bestandteil** gekürzt ([`short_place`],
+    /// 804 → 411 Zeichen für die Stellen allein) — die Zeile als Ganzes blieb
+    /// ungedeckelt, denn die Teilsätze treten zusammen auf (Befund R4-6).
+    ///
+    /// Gekürzt wird **hinten**, und das ist die sichere Richtung: ein Fund
+    /// führt den Satz an ([`ExportCheck::sentence`]) und steht damit immer da,
+    /// und ohne Fund stehen die Vorbehalte vorn — abgeschnitten wird zuerst
+    /// die Entwarnung, nie eine Warnung. Der ganze Satz steht in den
+    /// Warnungen: [`ExportCheck::warning`] gibt ihn, sobald er hier nicht mehr
+    /// hineinpasst.
+    pub fn status_line(&self) -> String {
+        const TAIL: &str = " … (ganzer Satz in den Warnungen)";
+        let sentence = self.sentence();
+        if sentence.chars().count() <= MAX_STATUS_CHARS {
+            return sentence;
+        }
+        let room = MAX_STATUS_CHARS - TAIL.chars().count();
+        let end = sentence
+            .char_indices()
+            .nth(room)
+            .map_or(sentence.len(), |(at, _)| at);
+        let head = sentence[..end].trim_end();
+        // Am letzten Wort trennen, aber nicht den halben Satz opfern.
+        let head = match head.rfind(' ') {
+            Some(space) if space * 2 > head.len() => head[..space].trim_end(),
+            _ => head,
+        };
+        format!("{head}{TAIL}")
+    }
+
+    /// Der Satz für die Statuszeile.
+    ///
+    /// Drei Dinge stehen darin, und zwar immer:
+    ///
+    /// 1. **das Ergebnis**;
+    /// 2. **der Vorbehalt** — derselbe wie in `redact-cli`s `NO_CLEAN_BILL`:
+    ///    geprüft ist *diese Liste*, nicht die Datei. Ohne ihn ersetzte die
+    ///    Anzeige bloß eine falsche Entwarnung durch eine genauer aussehende;
+    /// 3. **die Handregionen**. Ein selbst gezogenes Rechteck hat keinen
+    ///    bekannten Text; über es sagt die Prüfung nichts. Verschwiegen wäre
+    ///    das die gefährlichste Zeile der Oberfläche — „nichts gefunden“ an
+    ///    einem Dokument, dessen Schwärzungen sämtlich von Hand gezogen sind.
+    ///
+    /// ## Die Reihenfolge: erst der Vorbehalt, dann die Entwarnung
+    ///
+    /// Steht ein **Fund** da, führt er — stärker als er sagt keine Zeile
+    /// etwas, und eine Entwarnung ist er nicht. Sonst kommen die Vorbehalte
+    /// (ungeprüfte Stellen, nicht gesuchte Texte) **vor** das Ergebnis. Die
+    /// umgekehrte Reihenfolge nennt der Doc-Kommentar von
+    /// [`ExportCheck::warning`] selbst als untauglich („das läse sich als
+    /// Warnung wie eine Entwarnung“) — bis Fix-Runde 5 abgestellt war sie
+    /// nur dort, während die Statuszeile, die der Nutzer zuerst liest, mit
+    /// „… stehen nicht mehr in der Ausgabe“ begann und den Vorbehalt
+    /// hinterherschickte (Befund Q4-3).
+    pub fn sentence(&self) -> String {
+        if let Some(error) = &self.unreadable {
+            return format!(
+                "Nachprüfung: die geschriebene Datei ließ sich nicht zurücklesen ({error}) \
+                 — es wurde nichts nachgeprüft.{}",
+                self.hand_made()
+            );
+        }
+        let head = if self.found_leak() {
+            format!(
+                "{} von {} gesuchten Text(en) steht NOCH in der Ausgabe \
+                 — diese Datei ist nicht geschwärzt und darf so nicht weitergegeben werden.",
+                self.leaking.len(),
+                self.checked
+            )
+        } else if self.checked == 0 && (self.kept > 0 || self.skipped > 0) {
+            // Es gab Texte — sie lagen nur alle jenseits der Decke (oder sind
+            // gedeckt). „Keine Zeile mit bekanntem Text“ wäre falsch: bei
+            // einer Decke von 0 sagte der Satz beides zugleich (Befund R4-8).
+            "es wurde nichts gesucht.".to_string()
+        } else if self.checked == 0 {
+            "keine geschwärzte Zeile mit bekanntem Text — es wurde nichts nachgeprüft.".to_string()
+        } else {
+            // **Verschwunden**, nicht gesucht: `checked` zählt die Begriffe,
+            // die in die Suche gingen. Ein Begriff, den das Orakel gefunden
+            // hat und den eine stehen gelassene Zeile deckt, steht sehr wohl
+            // noch in der Ausgabe — ihn mitzuzählen hieße, im selben Satz
+            // „steht nicht mehr“ und „deckt sich mit einer abgewählten Zeile“
+            // über **denselben** Text zu sagen (Befund R4-7).
+            format!(
+                "{} gesuchte Text(e) stehen nicht mehr in der Ausgabe.",
+                self.vanished()
+            )
+        };
+        let mut caveats: Vec<String> = Vec::new();
+        if self.incomplete() {
+            let places = self.unchecked_places();
+            // Die Stellen kommen aus `redact-pdf` und bringen ihre eigene
+            // Zeichensetzung mit; ein zweiter Punkt dahinter sähe aus wie ein
+            // Tippfehler.
+            let dot = if places.ends_with(['.', '!', '?']) {
+                ""
+            } else {
+                "."
+            };
+            caveats.push(format!(
+                "{} Stelle(n) wurden nicht geprüft — die Antwort ist unvollständig: {places}{dot}",
+                self.unchecked.len()
+            ));
+        }
+        if self.skipped > 0 {
+            // „weitere“ nur, wenn es erste gab: bei einer Decke von 0 ist
+            // keiner gesucht worden (Befund R4-8).
+            caveats.push(format!(
+                "{} {}Text(e) wurden nicht gesucht — höchstens {} Begriffe je \
+                 Nachprüfung (dieselbe Decke wie --check-leaks); sie stehen in der \
+                 Trefferliste weiter hinten.",
+                self.skipped,
+                if self.checked > 0 { "weitere " } else { "" },
+                self.limit
+            ));
+        }
+        if self.unsearched > 0 {
+            caveats.push(format!(
+                "{} Text(e) stehen wörtlich auch in einer abgewählten, gelöschten oder geschützten Zeile: \
+                 über sie sagt diese Prüfung nichts — ob dort eine Schwärzung danebenging, \
+                 bleibt offen.",
+                self.unsearched
+            ));
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if self.found_leak() {
+            parts.push(head);
+            parts.append(&mut caveats);
+        } else {
+            parts.append(&mut caveats);
+            parts.push(head);
+        }
+        // Der Rest von `kept`: gesucht **wurde**, getroffen hat nur die
+        // Fassung ohne Leerraum einer stehen gelassenen Zeile. Das ist ein
+        // Urteil und kein Vorbehalt — es gehört hinter das Ergebnis.
+        let judged = self.kept.saturating_sub(self.unsearched);
+        if judged > 0 {
+            parts.push(format!(
+                "{judged} Text(e) decken sich mit einer abgewählten, gelöschten oder geschützten Zeile und \
+                 zählen deshalb nicht als Leck."
+            ));
+        }
+        parts.push("Geprüft ist genau diese Liste, nicht die Datei.".to_string());
+        let mut sentence = String::from("Nachprüfung: ");
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 {
+                sentence.push(' ');
+                sentence.push_str(&capitalized(part));
+            } else {
+                sentence.push_str(part);
+            }
+        }
+        sentence.push_str(&self.hand_made());
+        sentence
+    }
+
+    /// Die ungeprüften Stellen, wie [`redact_pdf::LeakCheck::unchecked`] sie
+    /// liefert — jede mit **ihrem** Grund, höchstens
+    /// [`MAX_NAMED_PLACES`] genannt.
+    ///
+    /// Der Satz sagte bis Fix-Runde 5 „nicht geprüft (Entpackgrenze)“ und
+    /// behauptete damit eine Ursache, die längst nicht die einzige ist: die
+    /// Objektsicht meldet auch „Verschachtelungstiefe 32 erreicht“, und die
+    /// Vorprüfung des Laders meldet ihre eigene Ablehnung. Eine Ursache zu
+    /// nennen, die nicht feststeht, führt an der falschen Stelle nachsehen
+    /// — die Stellen selbst wissen es besser.
+    fn unchecked_places(&self) -> String {
+        let named = self.unchecked.len().min(MAX_NAMED_PLACES);
+        let mut text = self.unchecked[..named]
+            .iter()
+            .map(|place| short_place(place))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if let Some(rest) = self.unchecked.len().checked_sub(named).filter(|r| *r > 0) {
+            text.push_str(&format!("; … und {rest} weitere"));
+        }
+        text
+    }
+
+    /// Der Satz über die Rechtecke, zu denen es nichts zu suchen gibt.
+    fn hand_made(&self) -> String {
+        if self.without_text == 0 {
+            return String::new();
+        }
+        format!(
+            " {} Rechteck(e) ohne bekannten Text — dafür bleibt die Sichtprüfung.",
+            self.without_text
+        )
+    }
+}
+
+/// Was die Nachprüfung suchen soll — der Teil, der den [`AppState`] braucht.
+///
+/// Getrennt vom Lauf ([`ExportCheckPlan::run`]), weil der Lauf die Datei
+/// liest und durchsucht und dafür **nicht** auf dem Oberflächen-Thread laufen
+/// darf: 305 Seiten mit 200 Begriffen hielten das Fenster sekundenlang an.
+/// Der Plan ist reine Daten und wandert auf den Thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportCheckPlan {
+    /// Die zu suchenden Texte, jede **Schreibweise** einmal, in der
+    /// Reihenfolge der Liste — siehe [`AppState::plan_export_check`].
+    pub needles: Vec<String>,
+    /// Je Begriff: trägt eine bewusst stehen gelassene Zeile **dieselbe
+    /// Normalform** ([`redact_pdf::squeeze`])?
+    ///
+    /// Gleiche Länge und Reihenfolge wie [`ExportCheckPlan::needles`]. `true`
+    /// heißt: ein Fund, den **nur** die Fassung ohne Leerraum gebracht hat
+    /// ([`redact_pdf::LeakCheck::literal`] ist dort `false`), kann diese
+    /// Zeile sein und zählt nicht als Leck — ein **wörtlicher** Fund zählt
+    /// sehr wohl. Fehlt der Eintrag (ein Plan, den ein Test von Hand baut),
+    /// gilt `false`: dann ist jeder Fund ein Leck, und das ist die sichere
+    /// Seite.
+    pub kept_forms: Vec<bool>,
+    /// Je Begriff: trägt eine bewusst stehen gelassene Zeile ihn
+    /// **wörtlich**, Zeichen für Zeichen?
+    ///
+    /// Gleiche Länge und Reihenfolge wie [`ExportCheckPlan::needles`].
+    /// `true` heißt nicht „nicht suchen“, sondern „ein **Fund** ist nicht
+    /// zuzuordnen“: er kann die stehen gelassene Zeile sein oder eine
+    /// danebengegangene Schwärzung, und beide sähen gleich aus. Gesucht wird
+    /// trotzdem — **nicht gefunden** ist eine Aussage, und zwar eine sichere
+    /// ([`ExportCheckPlan::run_within`], Befund R4-1). Fehlt der Eintrag,
+    /// gilt `false`: dann ist jeder Fund ein Leck, und das ist die sichere
+    /// Seite.
+    pub kept_literal: Vec<bool>,
+    /// Siehe [`ExportCheck::without_text`].
+    pub without_text: usize,
+    /// Das Entpackbudget der Suche in Byte — **dieselbe** Zahl, mit der die
+    /// Oberfläche das Dokument geladen hat (`Config::limits`, also
+    /// `--max-decompressed-mb`). Was darüber liegt, wird nicht durchsucht
+    /// und steht in [`ExportCheck::unchecked`].
+    pub max_decompressed_bytes: u64,
+}
+
+/// Ein Export, der noch nicht geschrieben ist — alles, was
+/// [`redact_pipeline::apply`] dafür braucht, als reine Daten.
+///
+/// Der Grund ist derselbe wie bei [`ExportCheckPlan`]: so kommt die Arbeit auf
+/// einen eigenen Thread, ohne dass ein [`AppState`] (mit seinen Nicht-`Send`-
+/// Teilen und seiner fortlaufenden Bearbeitung) mitgehen müsste. Gemessen war
+/// der Export im Zeichentakt 6,3 s bei 305 Seiten — solange stand das Fenster
+/// und niemand wusste, ob es noch lebt (Befund R4-19).
+///
+/// Der Plan ist ein **Abzug**: was nach dem Klick an den Regionen geändert
+/// wird, steht nicht in der Ausgabe. Das ist die richtige Richtung — die Datei
+/// gehört zu dem Stand, den die Nutzerin exportiert hat, und die Nachprüfung
+/// bewertet denselben Stand ([`AppState::plan_export_check`]).
+#[derive(Clone)]
+pub struct ExportPlan {
+    /// Das geladene Dokument, ungeschwärzt — `run` schwärzt eine Kopie.
+    document: Arc<lopdf::Document>,
+    /// Die auszuführenden Schwärzungen ([`AppState::enabled_redactions`]).
+    redactions: Vec<Redaction>,
+    /// Die von der Negativliste gedeckten Flächen ([`AppState::blocked_regions`]).
+    blocked: Vec<BlockedRegion>,
+    /// Die Einstellungen dieses Exports ([`AppState::export_config`]).
+    config: Config,
+    /// Das halb gefüllte Log — die Zahlen des Eingangs stehen schon drin.
+    outcome: Outcome,
+}
+
+impl ExportPlan {
+    /// Schwärzt und schreibt — **die** Arbeit, und dieselbe wie auf der
+    /// Kommandozeile.
+    ///
+    /// Es ist derselbe Aufruf von [`redact_pipeline::apply`], der vorher in
+    /// [`AppState::export`] stand; verschoben ist nur, *wo* er läuft. Damit
+    /// bleibt die Ausgabe Byte für Byte dieselbe wie die der Kommandozeile
+    /// (`cli_and_gui_agree`).
+    pub fn run(self) -> Result<Outcome> {
+        self.run_reporting().1
+    }
+
+    /// Wie [`ExportPlan::run`], sagt aber zusätzlich, **ob die Ausgabedatei
+    /// entstanden ist**.
+    ///
+    /// Die Oberfläche braucht genau diese Auskunft und keine andere: das
+    /// Urteil einer laufenden Nachprüfung gehört zu den Bytes, die zum
+    /// Prüfzeitpunkt auf der Platte lagen, und es wird in dem Moment
+    /// gegenstandslos, in dem **neue** Bytes dieser Datei entstehen — nicht
+    /// schon, wenn jemand welche schreiben will. Siehe
+    /// [`crate::app::RedactApp::poll_exports`].
+    ///
+    /// **Die Fahne ist nicht `result.is_ok()`**, und das ist der Punkt:
+    /// [`redact_pipeline::apply`] schreibt die PDF-Datei (Schritt 11) **vor**
+    /// dem Audit-Log (Schritt 12). Scheitert das Log, kommt ein `Err` hinter
+    /// fertigen Bytes. Gelesen wird deshalb [`Outcome::output`] — das setzt
+    /// `apply` genau dann, wenn die Datei steht, und weil das Log über `&mut`
+    /// läuft, bleibt der Eintrag auch im Fehlerfall stehen.
+    ///
+    /// Umgekehrt heißt `false` wirklich „kein Byte“: ein Symlink als Ziel, ein
+    /// nicht beschreibbares Verzeichnis, eine volle Platte — alles das endet
+    /// vor Schritt 11, und dann ist ein älteres Urteil über diese Datei
+    /// weiterhin eines über die Bytes, die dort liegen.
+    pub fn run_reporting(mut self) -> (bool, Result<Outcome>) {
+        let mut copy = (*self.document).clone();
+        let applied = redact_pipeline::apply(
+            &mut copy,
+            &self.redactions,
+            &self.blocked,
+            &self.config,
+            &mut self.outcome,
+        );
+        // **Vor** dem `?`: die Frage ist, ob die Datei steht, nicht, ob der
+        // ganze Lauf geglückt ist.
+        let wrote = self.outcome.output.is_some();
+        match applied {
+            Ok(()) => {
+                self.outcome.blocked_details = redact_pipeline::describe_blocked(&self.blocked);
+                (wrote, Ok(self.outcome))
+            }
+            Err(e) => (wrote, Err(e)),
+        }
+    }
+}
+
+impl Default for ExportCheckPlan {
+    /// Das Budget der Vorgabe — dieselbe Zahl wie `Config::default().limits`.
+    /// Ein Plan aus [`AppState::plan_export_check`] trägt die Zahl der
+    /// geladenen `Config`; die Vorgabe hier ist für Pläne, die ein Test von
+    /// Hand baut. Ein abgeleitetes `Default` gäbe 0 — und damit nichts.
+    fn default() -> Self {
+        Self {
+            needles: Vec::new(),
+            kept_forms: Vec::new(),
+            kept_literal: Vec::new(),
+            without_text: 0,
+            max_decompressed_bytes: redact_pdf::document::Limits::default().max_decompressed_bytes,
+        }
+    }
+}
+
+impl ExportCheckPlan {
+    /// Liest die geschriebene Datei zurück und sucht die Texte darin —
+    /// mit [`redact_pdf::leaks_many`] über die **geschriebenen Bytes**, in
+    /// einem Durchgang. Nicht mit dem eigenen Extraktor: wovor der blind ist,
+    /// das wird nicht geschwärzt und wäre für eine Nachprüfung mit ihm auch
+    /// unsichtbar.
+    ///
+    /// ## Die Decke: Begriffe, dieselbe Zahl wie `--check-leaks`
+    ///
+    /// Gesucht werden höchstens [`redact_core::MAX_CHECK_NEEDLES`] Begriffe
+    /// — gezählt werden **Schreibweisen**, denn jede ist ein eigenes Muster
+    /// im Automaten und kostet eigene Arbeit;
+    /// was darüber liegt, zählt [`ExportCheck::skipped`] und steht im Satz.
+    /// Die Kosten der Suche sind Begriffe × **entpackte** Streambytes — und
+    /// beide Faktoren sind gedeckelt: die Begriffe hier, die Bytes durch
+    /// `--max-decompressed-mb` (das gilt für den Export wie für die Suche).
+    ///
+    /// Die Decke davor rechnete **Begriffe × Dateibytes auf der Platte**
+    /// gegen ein Budget von 2 GiB und versprach dafür „≈ 2 s bei jeder
+    /// Dateigröße“. Das war die falsche Einheit: gesucht wird in den
+    /// entpackten Strömen, und wie viel eine Datei davon trägt, sagt ihre
+    /// Größe auf der Platte nicht. Gemessen (Release,
+    /// `zb_mess_nachpruefung_je_begriff_gegen_einen_durchgang`, 305 Seiten):
+    /// dieselbe Datei wiegt ungepackt 1 094 kB und gepackt 179 kB, und 1 000
+    /// Begriffe kosten an beiden gleich viel (1,55 s gegen 1,58 s) — die alte
+    /// Decke ließ an der gepackten aber 11 683 statt 1 916 Begriffe zu, also
+    /// rund 11 s statt der versprochenen 2 s; bei stärker gepackten Dateien
+    /// entsprechend mehr. Die richtige Einheit ist vor dem Lauf nicht bekannt
+    /// (die Ströme werden erst beim Suchen ausgepackt), und eine Decke, die
+    /// man erst nach dem Lauf anwenden kann, ist keine.
+    ///
+    /// Die Kosten in Begriffen, an derselben Datei (1 079 kB nach dem
+    /// Export): 1 Begriff 0,70 s, 200 Begriffe 0,89 s, 1 000 Begriffe 1,62 s
+    /// — ein Sockel je Datei (lesen, Ströme auspacken, jede Seite durch den
+    /// Schriftdekoder) und darüber rund 0,9 ms je Begriff. Am oberen Rand der
+    /// Decke sind das rund 2 s, die „Nachprüfung läuft …“ im Hintergrund
+    /// steht; die Oberfläche hängt daran nicht (die Prüfung läuft auf einem
+    /// eigenen Thread, siehe [`crate::app::RedactApp`]). Was die Decke
+    /// überschreitet, wird **gesagt** und nicht verschwiegen — siehe
+    /// [`ExportCheck::sentence`].
+    ///
+    /// Kein Freibrief (siehe [`ExportCheck::sentence`]) und keine Aussage über
+    /// selbst gezogene Rechtecke: die haben keinen bekannten Text, und dafür
+    /// kann diese Prüfung nichts sagen. Beides steht im Satz, den der Nutzer
+    /// liest — verschwiegen wäre die Anzeige selbst eine falsche Entwarnung.
+    pub fn run(self, out: &Path) -> ExportCheck {
+        self.run_within(out, redact_core::MAX_CHECK_NEEDLES)
+    }
+
+    /// [`ExportCheckPlan::run`] mit beliebiger Decke in Begriffen — damit ein
+    /// Test sie mit einer Handvoll Begriffe erreicht, statt mit tausend.
+    pub fn run_within(self, out: &Path, limit: usize) -> ExportCheck {
+        let bytes = match std::fs::read(out) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return ExportCheck {
+                    unreadable: Some(error.to_string()),
+                    checked: 0,
+                    leaking: Vec::new(),
+                    without_text: self.without_text,
+                    skipped: self.needles.len(),
+                    // Gesucht wurde nichts, also ist auch nichts gedeckt und
+                    // nichts offen: der Satz sagt, dass es keine Aussage gibt,
+                    // und eine Zahl daneben behauptete eine.
+                    kept: 0,
+                    unsearched: 0,
+                    limit,
+                    unchecked: Vec::new(),
+                };
+            }
+        };
+        let checked = self.needles.len().min(limit);
+        let skipped = self.needles.len() - checked;
+        let needles: Vec<&str> = self.needles[..checked].iter().map(String::as_str).collect();
+
+        // Mit dem Entpackbudget des Ladens: was die Suche deshalb nicht
+        // durchsucht, kommt als `unchecked` zurück und steht im Satz.
+        let found = redact_pdf::leaks_many_within(&bytes, &needles, self.max_decompressed_bytes);
+
+        // Die zweite Hälfte der Entscheidung „Leck oder bewusst stehen
+        // gelassen“ — die erste fiel im Plan, wörtlich.
+        //
+        // Ein **wörtlicher** Fund ist immer ein Leck: die Schreibweise steht
+        // Zeichen für Zeichen in der Ausgabe, gleich was daneben abgewählt
+        // ist. Hat dagegen nur die Fassung **ohne Leerraum** getroffen und
+        // trägt eine stehen gelassene Zeile dieselbe Normalform, kann der
+        // Fund genau diese Zeile sein — dann ist er keine Aussage über ein
+        // Leck (Befund G5-B1).
+        //
+        // Bis Fix-Runde 5 fiel diese Entscheidung im Plan, also **vor** der
+        // Suche und ohne zu wissen, was getroffen hat: eine geschwärzte
+        // Zeile, deren Rechteck danebenging, galt als stehen gelassen und
+        // wurde nie gesucht — ein echtes Leck ohne ein Wort (Befund P5-2).
+        // Getrennt werden kann beides erst am Fund selbst
+        // ([`redact_pdf::LeakCheck::literal`]).
+        let mut kept = 0usize;
+        let mut unsearched = 0usize;
+        let mut leaking = Vec::new();
+        for (index, (hits, needle)) in found.findings.iter().zip(needles.iter()).enumerate() {
+            if hits.is_empty() {
+                // Nicht gefunden — und das ist eine Aussage, auch über einen
+                // Text, den eine stehen gelassene Zeile wörtlich trägt: steht
+                // er nirgends mehr, kann er auch dort nicht danebengegangen
+                // sein (Befund R4-1).
+                continue;
+            }
+            if self.kept_literal.get(index).copied().unwrap_or(false) {
+                // Gefunden — aber eine stehen gelassene Zeile trägt denselben
+                // Text Zeichen für Zeichen: dieser Fund kann sie sein oder
+                // eine danebengegangene Schwärzung. Kein Leck und keine
+                // Entwarnung, sondern **keine Aussage**.
+                kept += 1;
+                unsearched += 1;
+            } else if is_leak(
+                found.literal.get(index).copied(),
+                self.kept_forms.get(index).copied(),
+            ) {
+                leaking.push((*needle).to_string());
+            } else {
+                kept += 1;
+            }
+        }
+
+        ExportCheck {
+            unreadable: None,
+            checked,
+            leaking,
+            without_text: self.without_text,
+            skipped,
+            kept,
+            // Der Teil von `kept`, der **kein Urteil** ist: gefunden, aber von
+            // einer wörtlich gleichen stehen gelassenen Zeile nicht zu
+            // trennen. Beides in einer Zahl hieße, ein Urteil und ein
+            // Nichturteil zu verrechnen.
+            unsearched,
+            limit,
+            unchecked: found.unchecked,
+        }
+    }
+}
+
+/// Ist dieser Fund ein Leck?
+///
+/// * `literal`: hat der Begriff **wörtlich** getroffen
+///   ([`redact_pdf::LeakCheck::literal`] an seiner Stelle)?
+/// * `kept_form`: trägt eine bewusst stehen gelassene Zeile dieselbe
+///   Normalform ([`ExportCheckPlan::kept_forms`] an seiner Stelle)?
+///
+/// Ein **wörtlicher** Fund ist immer ein Leck. Nur ein Fund, den allein die
+/// Fassung ohne Leerraum gebracht hat, kann die stehen gelassene Zeile sein —
+/// und auch das nur, wenn es eine mit derselben Normalform gibt.
+///
+/// **Beide Vorgaben stehen auf der sicheren Seite**, und beide sind hier
+/// prüfbar: fehlt die Marke, gilt der Fund als wörtlich; fehlt der Eintrag im
+/// Plan, gilt keine Zeile als deckend. Ein Leck zu verschweigen ist der
+/// teurere Irrtum. Dass eine Vorgabe von außen nicht erreichbar ist
+/// ([`redact_pdf::leaks_many_within`] füllt `literal` immer in der Länge von
+/// `findings`), heißt nicht, dass sie ungeprüft bleiben muss — deshalb steht
+/// die Entscheidung in einer eigenen Funktion und nicht mitten im Lauf. Siehe
+/// `zf_q4_tests::zf_q4_1_die_beiden_vorgaben_stehen_auf_der_sicheren_seite`.
+pub(crate) fn is_leak(literal: Option<bool>, kept_form: Option<bool>) -> bool {
+    literal.unwrap_or(true) || !kept_form.unwrap_or(false)
+}
+
 /// Ergebnis einer Konfliktauflösung, aufbereitet für die Anzeige.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HitSummary {
@@ -522,6 +1299,17 @@ impl AnnotatedRegion {
         self.region.is_blocking()
     }
 
+    /// Kann die Negativliste diesen Eintrag überhaupt verhindern?
+    ///
+    /// **Nein bei [`Source::Manual`]** — wer ein Rechteck selbst zieht,
+    /// überstimmt die Liste; so entscheidet es [`resolve_conflicts`], und so
+    /// muss es die Anzeige lesen. Siehe [`AppState::hit_summary`], wo sonst
+    /// eine deckungsgleiche Handregion den Platz des wirklich blockierten
+    /// Mustertreffers verbraucht.
+    pub fn is_blockable(&self) -> bool {
+        !matches!(self.region.source, Source::Manual { .. })
+    }
+
     /// Hat die Nutzerin an diesem Eintrag etwas geändert?
     ///
     /// Grundlage für die Rückfrage, bevor Regionen weggeworfen werden.
@@ -548,7 +1336,16 @@ impl AnnotatedRegion {
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .unwrap_or("(ohne Text)");
-        format!("S.{} {}", self.region.page + 1, shorten(text, 34))
+        // `saturating_add`, weil die Seitennummer aus fremder Hand kommt (Review-Datei,
+        // `--manual-regions`): bei `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build
+        // über und löste eine Panic aus; im Release-Build stünde „Seite 0" da. Die erste
+        // Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der Deserialisierung;
+        // diese hier gilt für jeden Aufrufer, der `Region` selbst baut.
+        format!(
+            "S.{} {}",
+            self.region.page.saturating_add(1),
+            shorten(text, 34)
+        )
     }
 
     /// Beschreibung in Klartext — siehe [`plain_description`].
@@ -649,6 +1446,21 @@ pub struct AppState {
     pub rotations: Vec<i64>,
     pub runs: Vec<TextRun>,
     pub current_page: usize,
+    /// Zoomfaktor der Anzeige.
+    ///
+    /// **Ein öffentliches Feld, und darauf lässt sich nichts stützen.**
+    /// [`AppState::set_zoom`] klemmt auf [`MIN_ZOOM`] … [`MAX_ZOOM`] und lehnt
+    /// nicht endliche Werte ab — es ist damit eine Bitte und kein Wächter:
+    /// `state.zoom = f32::NAN` geht daran vorbei, und danach sind
+    /// [`AppState::can_zoom_in`] und [`AppState::can_zoom_out`] **beide**
+    /// `false` (gemessen), weil jeder Vergleich mit NaN falsch ist;
+    /// `zoom_in`/`zoom_out` holen es nicht zurück, nur `zoom_reset`.
+    ///
+    /// Heute schreibt im ganzen Programm nur `set_zoom` hierher, es ist also
+    /// kein Fehler. Aber wer den Bereich *braucht*, prüft ihn selbst:
+    /// [`crate::viewer::usable_zoom`] tut das an der einen Stelle, an der aus
+    /// dem Zoom Regionskoordinaten werden. Dort steht auch, was ohne diese
+    /// Prüfung gemessen herauskam.
     pub zoom: f32,
     pub regions: Vec<AnnotatedRegion>,
     pub selected_region: Option<usize>,
@@ -700,6 +1512,33 @@ pub struct AppState {
     /// eine Schiebe-Sitzung ist **ein** Schritt im Verlauf, nicht einer je
     /// Anschlag. Siehe [`AppState::move_selected`].
     nudging: Option<RegionId>,
+    /// Gelöschte Trefferzeilen mit bekanntem Text — Kennung und Text.
+    ///
+    /// Eine Zeile zu **löschen** (Entf) ist derselbe Wunsch wie sie
+    /// **abzuwählen**: „die bleibt stehen“. Ohne diese Erinnerung sähe die
+    /// Nachprüfung den Unterschied: die abgewählte Zeile steht in
+    /// [`AppState::regions`] und deckt ihren Text, die gelöschte steht
+    /// nirgends — und ihr Text wurde zum Leck gemeldet (Befund R4-2).
+    ///
+    /// Geschlüsselt auf die [`RegionId`], nicht auf den Text: kommt die Zeile
+    /// durch **Rückgängig** zurück, steht ihre Kennung wieder in `regions`,
+    /// und [`AppState::kept_by_deletion`] übergeht sie — ohne dass hier etwas
+    /// aufgeräumt werden müsste. Dieselbe Zeile zweimal zu löschen legt
+    /// deshalb auch nur einen Eintrag an.
+    ///
+    /// Geleert wird, wo die **ganze** Trefferliste ausgetauscht wird: beim
+    /// Dokumentwechsel ([`AppState::load_bytes`]), bei einer neuen Analyse
+    /// ([`AppState::analyze`]) und beim Laden einer Review-Datei
+    /// ([`AppState::apply_review_file`]). Eine Löschung ist eine Aussage über
+    /// **diese** Liste; nach einer neuen Analyse steht der Treffer wieder da
+    /// (mit neuer Kennung), und ihn weiter als stehen gelassen zu führen wäre
+    /// die Fehlerklasse „eine Zusicherung wird an die nächste Stelle
+    /// mitgenommen, wo sie nicht gilt“ — und zwar in der gefährlichen
+    /// Richtung: aus einem Leck würde „keine Aussage“. Der Preis ist der
+    /// Sonderfall „analysieren, dann rückgängig“: dort ist die Löschung
+    /// vergessen, und die stehen gelassene Zeile gilt wieder als Fund — ein
+    /// Fehlalarm, den ein erneutes Löschen (oder Abwählen) aufhebt.
+    deleted_hits: BTreeMap<RegionId, String>,
 }
 
 impl Default for AppState {
@@ -727,6 +1566,7 @@ impl Default for AppState {
             pending: None,
             replacing: None,
             nudging: None,
+            deleted_hits: BTreeMap::new(),
         }
     }
 }
@@ -935,6 +1775,9 @@ impl AppState {
         self.current_page = 0;
         self.selected_region = None;
         self.regions.clear();
+        // Die gelöschten Zeilen gehörten zum vorigen Dokument — wie der
+        // Verlauf.
+        self.deleted_hits.clear();
         self.end_edit_sessions();
         self.extract_warnings = warnings.clone();
         self.warnings = warnings;
@@ -1058,7 +1901,35 @@ impl AppState {
         self.current_page + 1 >= self.page_count()
     }
 
+    /// Setzt den Zoomfaktor, geklemmt auf [`MIN_ZOOM`] … [`MAX_ZOOM`].
+    ///
+    /// **`f32::clamp` klemmt NaN nicht weg, es reicht ihn durch** — anders als
+    /// `min`/`max`, die ihn schlucken. Ein einziges `set_zoom(NaN)` machte den
+    /// Zoom deshalb dauerhaft unbrauchbar: gemessen blieb `zoom = NaN` stehen,
+    /// `can_zoom_in()` und `can_zoom_out()` waren **beide** `false` (jeder
+    /// Vergleich mit NaN ist falsch), also waren Vergrößern *und* Verkleinern
+    /// abgeschaltet, und `zoom_in`/`zoom_out` hätten daran auch nichts mehr
+    /// geändert — `NaN * ZOOM_STEP` ist wieder NaN. Zurück führte nur
+    /// „Originalgröße“.
+    ///
+    /// Über die heutige Oberfläche ist das nicht auszulösen (der Regler liefert
+    /// Werte aus seinem Bereich, [`crate::viewer::fit_zoom`] prüft die
+    /// Seitenmaße vorher); die Methode ist aber öffentlich, und der Preis der
+    /// Prüfung ist ein Vergleich je Zoomschritt.
+    ///
+    /// **Diese Prüfung ist kein Tor.** [`AppState::zoom`] ist ein öffentliches
+    /// Feld; wer es unmittelbar beschreibt, kommt hier gar nicht vorbei. Wo der
+    /// Bereich gebraucht wird, wird er deshalb noch einmal geprüft — siehe
+    /// [`crate::viewer::usable_zoom`].
+    ///
+    /// Ein Wert ohne endliche Größe **ändert nichts**. Das ist die einzige
+    /// Antwort, die keinen Zustand hinterlässt, aus dem man nicht mehr
+    /// herauskommt; auf einen Ersatzwert zu klemmen hieße, einen Zoom zu
+    /// zeigen, den niemand eingestellt hat.
     pub fn set_zoom(&mut self, zoom: f32) {
+        if !zoom.is_finite() {
+            return;
+        }
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
@@ -1169,6 +2040,9 @@ impl AppState {
         self.regions = annotated;
         self.regions.extend(manual);
         self.selected_region = None;
+        // Die Trefferliste ist eine neue; was aus der alten gelöscht wurde,
+        // sagt über sie nichts ([`AppState::deleted_hits`]).
+        self.deleted_hits.clear();
 
         let summary = self.hit_summary();
         let found = summary.found;
@@ -1199,7 +2073,46 @@ impl AppState {
     /// geschwärzt“ mitgezählt — gemessen: Rechteck bei x 700…760 auf einer
     /// 595 pt breiten Seite, Kopfzeile „1 werden geschwärzt“, nach dem Export
     /// `removed_glyphs = 0`. Die Wahrheit kam erst hinterher als Warnung.
+    ///
+    /// # Unbrauchbare Koordinaten sind `None` — und das ist die gefährliche
+    /// Richtung
+    ///
+    /// `f64::max` und `f64::min` **schlucken** einen NaN-Operanden und geben
+    /// den anderen zurück. Aus `NaN.max(sheet.ll.x)` wurde damit die linke
+    /// Blattkante, aus `NaN.min(sheet.ur.x)` die rechte — der Schnitt eines
+    /// NaN-Rechtecks mit dem Blatt war **das ganze Blatt**. Gemessen mit
+    /// `Rect::new(NaN, NaN, 100, 100)` auf der 595 x 842 pt großen Demo-Seite:
+    /// `clamp_to_page` lieferte `Some(Rect(0, 0, 595, 842))`,
+    /// [`AppState::add_manual_region`] legte daraufhin eine manuelle Region
+    /// über das ganze Blatt an, meldete „Manuelle Region auf Seite 1 angelegt“
+    /// und die Bilanz zählte sie als `Redacted`. Der Nutzer sähe ein Rechteck
+    /// über der ganzen Seite, das er nie gezogen hat, und exportierte ein
+    /// vollständig geschwärztes Dokument.
+    ///
+    /// Die Regel dafür steht schon in [`Rect::is_usable`] und wird hier nicht
+    /// ein zweites Mal ausgeschrieben: ein Rechteck ohne endliche Koordinaten
+    /// bezeichnet **keinen Bereich der Ebene**, also auch keinen Bereich
+    /// *dieser Seite*. `None` ist damit dieselbe Antwort wie für ein Rechteck
+    /// neben dem Blatt, und alle vier Aufrufer verhalten sich dann richtig:
+    /// [`AppState::add_manual_region`] legt nichts an und sagt es,
+    /// [`AppState::set_region_rect`] lehnt ab, [`AppState::move_selected`] und
+    /// [`AppState::resize_selected`] lassen das Rechteck stehen, ohne einen
+    /// Schritt „Rückgängig“ zu kosten, und [`AppState::is_off_page`] hält den
+    /// Eintrag aus der Konfliktauflösung heraus, statt „wird geschwärzt“ zu
+    /// versprechen.
+    ///
+    /// Die Prüfung gilt **vor** der Frage nach dem Blatt: ohne geladenes
+    /// Dokument wird zwar nichts beschnitten, ein unbrauchbares Rechteck bleibt
+    /// aber auch dort unbrauchbar.
+    ///
+    /// Das **Blatt** braucht keine solche Prüfung: `self.page_boxes` kommt aus
+    /// [`redact_pdf::document::sane_page_boxes`], das jede nicht endliche oder
+    /// absurd bemessene MediaBox durch A4 ersetzt. Festgehalten ist das in
+    /// [`crate::state::z9_tests::jedes_geladene_blatt_ist_brauchbar`].
     pub fn clamp_to_page(&self, page: usize, rect: Rect) -> Option<Rect> {
+        if !rect.is_usable() {
+            return None;
+        }
         let Some(sheet) = self.page_box(page) else {
             return Some(rect);
         };
@@ -1309,6 +2222,22 @@ impl AppState {
         Some(index)
     }
 
+    /// Die Absage, wenn die Auswahl nicht auf der gezeigten Seite liegt.
+    ///
+    /// Zwei Lagen, zwei Auswege — und derselbe Unterschied, den
+    /// [`AppState::hit_summary`] zwischen [`HitOutcome::OffPage`] und
+    /// [`HitOutcome::MissingPage`] macht: gibt es die Seite, hilft Blättern;
+    /// gibt es sie nicht, hilft nur die Zeile selbst. Geprüft wird deshalb mit
+    /// [`AppState::page_box`] und nicht mit einem Vergleich gegen
+    /// [`AppState::page_count`] — ohne geladenes Dokument gibt es *keine*
+    /// Seite, zu der man blättern könnte.
+    fn nudge_refused(&self, page: usize, kind: NudgeKind) -> String {
+        match self.page_box(page) {
+            Some(_) => selection_on_other_page(page, kind),
+            None => selection_on_missing_page(page, self.page_count(), kind),
+        }
+    }
+
     /// Ändert die Größe der ausgewählten Region: die **linke untere** Ecke
     /// bleibt stehen, die rechte obere wandert um `dx`/`dy`.
     ///
@@ -1327,10 +2256,27 @@ impl AppState {
     /// Kleiner als [`MIN_REGION_EXTENT`] wird es nicht — ein Rechteck von null
     /// Fläche wäre eine Zeile in der Liste, die nichts überdeckt.
     ///
+    /// **Genau diese Untergrenze war der Einstieg für NaN.** Sie steht als
+    /// `(rect.ur.x + dx).max(rect.ll.x + MIN_REGION_EXTENT)`, und `f64::max`
+    /// schluckt einen NaN-Operanden: mit `dx = NaN` wurde aus der linken Seite
+    /// NaN, `max` gab die rechte zurück, und ein 100 pt breiter Balken war
+    /// danach 2 pt breit — gemessen an `Rect(100, 100, 200, 140)`, heraus kam
+    /// `Rect(100, 100, 102, 140)`. Kein Fehler, keine Meldung, und unter dem
+    /// geschrumpften Balken stünde die IBAN wieder lesbar da. Das ist derselbe
+    /// Schaden, den [`AppState::slide_onto_page`] für das Schieben abwendet.
+    ///
+    /// Ein Schritt ohne endliche Weite ist deshalb **kein** Schritt: er ändert
+    /// nichts. Über die Tastatur kommt er nicht (`crate::app::key_commands`
+    /// setzt `NUDGE`/`NUDGE_FAST`), aber diese Methode ist öffentlich, und die
+    /// Untergrenze soll nicht davon abhängen, wer sie ruft.
+    ///
     /// Verlauf und Seitenprüfung wie bei [`AppState::move_selected`]; beide
     /// teilen sich die Sitzung, weil beides dieselbe Handbewegung an derselben
     /// Region ist.
     pub fn resize_selected(&mut self, dx: f64, dy: f64) -> bool {
+        if !dx.is_finite() || !dy.is_finite() {
+            return false;
+        }
         let Some(index) = self.selected_region else {
             return false;
         };
@@ -1338,7 +2284,7 @@ impl AppState {
             return false;
         };
         if entry.region.page != self.current_page {
-            self.status = selection_on_other_page(entry.region.page);
+            self.status = self.nudge_refused(entry.region.page, NudgeKind::Resize);
             return false;
         }
         let (id, page, rect) = (entry.id, entry.region.page, entry.region.rect.normalized());
@@ -1362,6 +2308,10 @@ impl AppState {
     }
 
     /// Löscht die ausgewählte Region. `false`, wenn nichts ausgewählt war.
+    ///
+    /// Trug sie einen bekannten Text, merkt sich die Nachprüfung ihn
+    /// ([`AppState::deleted_hits`]): wer eine Zeile löscht, will sie behalten
+    /// — genau wie beim Abwählen.
     pub fn delete_selected(&mut self) -> bool {
         let Some(index) = self.selected_region else {
             return false;
@@ -1372,10 +2322,40 @@ impl AppState {
         }
         self.end_edit_sessions();
         self.history.record(&self.regions);
-        self.regions.remove(index);
+        let removed = self.regions.remove(index);
+        // Ein gelöschter **Schutzeintrag** der Negativliste ist das
+        // Gegenteil: er hielt eine Schwärzung ab, und ohne ihn wird die Zeile
+        // geschwärzt. Ihren Text als „stehen gelassen“ zu merken, nähme der
+        // Nachprüfung genau die Zeile, die jetzt geschwärzt gehört.
+        if !removed.is_blocking() {
+            if let Some(text) = removed
+                .region
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                self.deleted_hits.insert(removed.id, text.to_string());
+            }
+        }
         self.selected_region = None;
         self.status = "Region gelöscht".to_string();
         true
+    }
+
+    /// Die Texte gelöschter Trefferzeilen, die **nicht** zurückgekommen sind.
+    ///
+    /// Ein Rückgängig stellt die Zeile samt ihrer [`RegionId`] wieder her;
+    /// steht die Kennung wieder in [`AppState::regions`], ist die Zeile nicht
+    /// mehr gelöscht und deckt nichts. Ohne diesen Abgleich bliebe der Text
+    /// gedeckt, und ein echtes Leck an einer wieder eingeschalteten Zeile
+    /// wäre nur noch „keine Aussage“.
+    fn kept_by_deletion(&self) -> Vec<String> {
+        self.deleted_hits
+            .iter()
+            .filter(|(id, _)| !self.regions.iter().any(|entry| entry.id == **id))
+            .map(|(_, text)| text.clone())
+            .collect()
     }
 
     /// Schiebt ein Rechteck so weit zurück, dass es wieder ganz auf dem Blatt
@@ -1472,7 +2452,7 @@ impl AppState {
             return false;
         };
         if entry.region.page != self.current_page {
-            self.status = selection_on_other_page(entry.region.page);
+            self.status = self.nudge_refused(entry.region.page, NudgeKind::Move);
             return false;
         }
         let (id, page, rect) = (entry.id, entry.region.page, entry.region.rect);
@@ -1868,56 +2848,74 @@ impl AppState {
         let mut next_redact = 0usize;
         let mut next_blocked = 0usize;
 
-        let outcomes: Vec<HitOutcome> = self
-            .regions
-            .iter()
-            .map(|entry| {
-                if entry.is_blocking() {
-                    return HitOutcome::Protecting;
-                }
-                if !entry.enabled {
-                    return HitOutcome::Disabled;
-                }
-                // Vor der Suche im Ergebnis: neben dem Blatt liegende
-                // Rechtecke sind gar nicht erst hineingegangen und fielen
-                // sonst als „doppelt“ heraus — ein falscher Grund für das
-                // richtige Ergebnis.
-                //
-                // **Hinter** den beiden Prüfungen davor: ein Schutzeintrag
-                // bleibt ein Schutzeintrag (sonst zählte ihn `found` plötzlich
-                // als Fund), und ein abgewählter bleibt abgewählt — das ist
-                // die Entscheidung der Nutzerin und der nähere Grund.
-                if self.is_off_page(&entry.region) {
-                    // Zwei Gründe, dasselbe Ergebnis — aber verschiedene
-                    // Abhilfen: fehlt die Seite, ist die Seitenzahl falsch;
-                    // sonst die Koordinaten.
-                    return match self.page_box(entry.region.page) {
-                        Some(_) => HitOutcome::OffPage,
-                        None => HitOutcome::MissingPage,
-                    };
-                }
-                // Genau **ein** Vergleich, mit demselben Gleichheitsbegriff
-                // wie zuvor: der Platz, der dieser Zeile zusteht, ist der
-                // vorderste noch freie.
-                if resolution
-                    .redact
-                    .get(next_redact)
-                    .is_some_and(|r| *r == entry.region)
-                {
-                    next_redact += 1;
-                    return HitOutcome::Redacted;
-                }
-                if resolution
-                    .blocked
-                    .get(next_blocked)
-                    .is_some_and(|b| b.page == entry.region.page && b.rect == entry.region.rect)
-                {
-                    next_blocked += 1;
-                    return HitOutcome::Blocked;
-                }
-                HitOutcome::Duplicate
-            })
-            .collect();
+        let outcomes: Vec<HitOutcome> =
+            self.regions
+                .iter()
+                .map(|entry| {
+                    if entry.is_blocking() {
+                        return HitOutcome::Protecting;
+                    }
+                    if !entry.enabled {
+                        return HitOutcome::Disabled;
+                    }
+                    // Vor der Suche im Ergebnis: neben dem Blatt liegende
+                    // Rechtecke sind gar nicht erst hineingegangen und fielen
+                    // sonst als „doppelt“ heraus — ein falscher Grund für das
+                    // richtige Ergebnis.
+                    //
+                    // **Hinter** den beiden Prüfungen davor: ein Schutzeintrag
+                    // bleibt ein Schutzeintrag (sonst zählte ihn `found` plötzlich
+                    // als Fund), und ein abgewählter bleibt abgewählt — das ist
+                    // die Entscheidung der Nutzerin und der nähere Grund.
+                    if self.is_off_page(&entry.region) {
+                        // Zwei Gründe, dasselbe Ergebnis — aber verschiedene
+                        // Abhilfen: fehlt die Seite, ist die Seitenzahl falsch;
+                        // sonst die Koordinaten.
+                        return match self.page_box(entry.region.page) {
+                            Some(_) => HitOutcome::OffPage,
+                            None => HitOutcome::MissingPage,
+                        };
+                    }
+                    // Genau **ein** Vergleich, mit demselben Gleichheitsbegriff
+                    // wie zuvor: der Platz, der dieser Zeile zusteht, ist der
+                    // vorderste noch freie.
+                    if resolution
+                        .redact
+                        .get(next_redact)
+                        .is_some_and(|r| *r == entry.region)
+                    {
+                        next_redact += 1;
+                        return HitOutcome::Redacted;
+                    }
+                    // Dasselbe für die Blockade — mit **einer** zusätzlichen
+                    // Frage: kann diese Zeile überhaupt blockiert werden?
+                    //
+                    // [`BlockedRegion`] trägt nur Seite und Rechteck, nicht die
+                    // Herkunft. Zwei deckungsgleiche Zeilen verschiedener Herkunft
+                    // sind daran nicht zu unterscheiden — und genau das kam vor:
+                    // zweimal Strg+R legt zwei buchstäblich gleiche Handregionen
+                    // an; liegt dort ein von der Negativliste gedeckter
+                    // Mustertreffer derselben Fläche, dann verbrauchte die
+                    // Duplikatzeile dessen Platz. An einem selbst gezogenen
+                    // Rechteck stand „geschützt durch Ihre Liste“ — falsch, denn
+                    // manuelle Regionen überstimmen die Liste ([`resolve_conflicts`])
+                    // —, und der wirklich blockierte Mustertreffer hieß „doppelt“.
+                    //
+                    // `is_blockable` stellt dieselbe Frage wie `resolve_conflicts`
+                    // vor seiner Gittersuche. Sie ist nicht teurer als ein
+                    // Mustervergleich und schließt genau die Zeilen aus, die im
+                    // Ergebnis gar nicht unter `blocked` stehen können.
+                    if entry.is_blockable()
+                        && resolution.blocked.get(next_blocked).is_some_and(|b| {
+                            b.page == entry.region.page && b.rect == entry.region.rect
+                        })
+                    {
+                        next_blocked += 1;
+                        return HitOutcome::Blocked;
+                    }
+                    HitOutcome::Duplicate
+                })
+                .collect();
 
         let count = |wanted: HitOutcome| outcomes.iter().filter(|o| **o == wanted).count();
         let protecting = count(HitOutcome::Protecting);
@@ -2185,6 +3183,21 @@ impl AppState {
     ///   namens `…_geschwaerzt.pdf` samt Erfolgsmeldung — eine Datei, die
     ///   aussieht wie ein Ergebnis und keines ist.
     pub fn export(&self, out: &Path, audit: Option<&Path>) -> Result<Outcome> {
+        self.plan_export(out, audit)?.run()
+    }
+
+    /// Sammelt, was ein Export braucht — **ohne** zu schreiben.
+    ///
+    /// Derselbe Schnitt wie bei der Nachprüfung
+    /// ([`AppState::plan_export_check`], dann [`ExportCheckPlan::run`]): der
+    /// Plan ist ein Abzug des Zustands (reine Daten, `Send`), das Schreiben
+    /// macht [`ExportPlan::run`] — in der Oberfläche auf einem eigenen Thread.
+    ///
+    /// **Die beiden Ablehnungen fallen hier**, vor dem Thread und vor jedem
+    /// geschriebenen Byte: die Originaldatei als Ziel und „nichts ausgewählt“.
+    /// Sie sind die Antwort auf den Klick und müssen sofort in der
+    /// Statuszeile stehen, nicht erst, wenn ein Thread sich gemeldet hat.
+    pub fn plan_export(&self, out: &Path, audit: Option<&Path>) -> Result<ExportPlan> {
         let doc = self
             .document
             .as_ref()
@@ -2204,7 +3217,7 @@ impl AppState {
         }
 
         let config = self.export_config(out, audit);
-        let mut outcome = Outcome {
+        let outcome = Outcome {
             input: config.input.display().to_string(),
             input_sha256: self.input_sha256.clone(),
             pages: self.page_count(),
@@ -2217,11 +3230,236 @@ impl AppState {
             ..Default::default()
         };
 
-        let mut copy = (**doc).clone();
-        let blocked = self.blocked_regions();
-        redact_pipeline::apply(&mut copy, &redactions, &blocked, &config, &mut outcome)?;
-        outcome.blocked_details = redact_pipeline::describe_blocked(&blocked);
-        Ok(outcome)
+        Ok(ExportPlan {
+            // Der geladene Stand als **Abzug**: der `Arc` kostet nichts, und
+            // das Dokument bleibt für den Thread gültig, auch wenn inzwischen
+            // ein anderes geladen wird. Die teure Kopie macht `run`.
+            document: Arc::clone(doc),
+            redactions,
+            blocked: self.blocked_regions(),
+            config,
+            outcome,
+        })
+    }
+
+    // ---------------------------------------------------------- Nachprüfung
+
+    /// Sammelt, was die Nachprüfung nach dem Export suchen soll.
+    ///
+    /// ## Warum die Oberfläche das kann und die Kommandozeile nicht
+    ///
+    /// `redact-rs … --check-leaks "DE89 …"` verlangt vom Bedienenden, die
+    /// Suchbegriffe **einzutippen** — in der Prozessliste und der
+    /// Shell-Historie sichtbar, wenn er nicht `--check-leaks -` benutzt. Die
+    /// Oberfläche kennt sie schon: in jeder geschwärzten Zeile steht der
+    /// gefundene Text. Sie ist damit die stärkere Fassung desselben Wegs, und
+    /// zwar für die Zielgruppe, die per Doppelklick arbeitet und gar keine
+    /// Konsole öffnet.
+    ///
+    /// ## Gesucht wird jeder Text — entschieden wird am Fund
+    ///
+    /// Ein Text, der auch in einer **bewusst stehen gelassenen** Zeile steht
+    /// — abgewählt, durch die Negativliste geschützt, Schutzeintrag oder mit
+    /// der Entf-Taste aus der Trefferliste geworfen —, wird **gesucht wie
+    /// jeder andere**. Gemerkt wird nur, dass ein Fund nicht zuzuordnen wäre
+    /// ([`ExportCheckPlan::kept_literal`]).
+    ///
+    /// Bis Fix-Runde 6 fiel diese Entscheidung **vor** der Suche: der Text kam
+    /// gar nicht erst in `needles`. Damit waren zwei Aussagen weggeworfen, und
+    /// nur eine davon ist zweideutig. „Gefunden“ ist es — der Fund kann die
+    /// stehen gelassene Zeile sein. „**Nicht** gefunden“ ist es nicht: steht
+    /// der Text nirgends mehr in der Ausgabe, steht er auch in keiner
+    /// danebengegangenen Schwärzung. Gemessen (`zg_r4_tests::
+    /// zg_r4_1_ein_text_der_nachweislich_weg_ist_bleibt_trotzdem_ungeprueft`):
+    /// ein großes Rechteck räumte die abgewählte Zeile mit ab, „Betrag“ stand
+    /// nachweislich nirgends mehr in der Ausgabe — und die Oberfläche sagte
+    /// „über sie sagt diese Prüfung nichts“ und trug eine Warnung ein, die nur
+    /// durch Wiedereinschalten der Schwärzung verschwand (Befund R4-1).
+    ///
+    /// Der Fehlalarm, den Befund 5 aus Fix-Runde 4 abgestellt hat, kommt
+    /// dadurch **nicht** zurück: er hing am **Fund**, und ein Fund unter
+    /// `kept_literal` ist weiter kein Leck, sondern keine Aussage
+    /// (`zf_q4_tests::zf_q4_1_woertlich_gedeckt_und_getroffen_ist_kein_alarm`).
+    ///
+    /// Je Text fällt **eine** Entscheidung, gleich wie viele Zeilen ihn
+    /// tragen. Vorher wurde ein stehen gelassener Text nach der ersten
+    /// geschwärzten Zeile aus der Liste gestrichen — bei zwei geschwärzten
+    /// Zeilen und einer abgewählten stand derselbe Text dann in `needles`
+    /// **und** `kept`, und die Nachprüfung schlug Alarm über eine Datei, die
+    /// genau so gewollt war.
+    ///
+    /// ## Eine gelöschte Zeile ist eine stehen gelassene
+    ///
+    /// Es gibt zwei Wege, eine Trefferzeile zu behalten: sie **abwählen** oder
+    /// sie **löschen** (Entf, [`AppState::delete_selected`]). Die gelöschte
+    /// steht danach in keiner Liste mehr — und die Nachprüfung meldete ihren
+    /// Text als Leck: „1 von 1 gesuchten Text(en) steht NOCH in der Ausgabe —
+    /// diese Datei ist nicht geschwärzt“ über eine Datei, die genau so gewollt
+    /// war (Befund R4-2). Wer eine Zeile behalten wollte, bekam also entweder
+    /// eine Warnung, die nie verschwindet, oder einen falschen Alarm.
+    /// [`AppState::kept_by_deletion`] merkt die gelöschten Treffer, solange
+    /// das Dokument offen ist; ein Rückgängig bringt die Zeile samt ihrer
+    /// [`RegionId`] zurück und nimmt sie damit von selbst wieder heraus.
+    ///
+    /// Die Decke ([`redact_core::MAX_CHECK_NEEDLES`]) wird hier **nicht**
+    /// angewendet, sondern im Lauf ([`ExportCheckPlan::run`]) — der Plan
+    /// trägt alle Texte, damit der Lauf sagen kann, wie viele er nicht
+    /// gesucht hat.
+    ///
+    /// ## Gesucht wird jede Schreibweise, entschieden wird je Schreibweise
+    ///
+    /// Gesucht wird **jede** Schreibweise, die in einer geschwärzten Zeile
+    /// steht — nicht eine je Normalform. Fix-Runde 4 fasste Schreibweisen
+    /// derselben Normalform ([`redact_pdf::squeeze`]) zu **einem** Begriff
+    /// zusammen und suchte den Originaltext der **ersten** Zeile. Trug der
+    /// keinen Leerraum, war [`redact_pdf::leaks_many`]s gequetschte Fassung
+    /// `None` (ein Begriff ohne Leerraum wird nur wörtlich gesucht) — und
+    /// die zweite Schreibweise stand ungesucht in der Ausgabe: gemessen
+    /// siebenmal, gemeldet wurde „1 gesuchte(r) Text steht nicht mehr in
+    /// der Ausgabe“ (Befund P5-1). Ob es auffiel, hing an der Reihenfolge
+    /// der Trefferliste.
+    ///
+    /// Die Decke ([`redact_core::MAX_CHECK_NEEDLES`]) zählt damit
+    /// **Schreibweisen**, nicht Normalformen — sie deckelt, was die Suche
+    /// kostet, und das sind die Muster, die der Automat trägt (Begriffe ×
+    /// entpackte Bytes, siehe [`ExportCheckPlan::run`]). Eine Decke auf
+    /// Normalformen zählte die falsche Einheit: hundert Schreibweisen einer
+    /// Normalform wären ein Begriff und kosteten doch hundert.
+    ///
+    /// ## Wann eine stehen gelassene Zeile eine Schreibweise deckt
+    ///
+    /// **Wörtlich** — dann ist ein **Fund** nicht zuzuordnen
+    /// ([`ExportCheckPlan::kept_literal`], Befund 5 aus Fix-Runde 4):
+    /// derselbe Text in zwei Zeilen, eine geschwärzt, eine stehen gelassen.
+    /// Gesucht wird er trotzdem. Bleibt er aus, ist das eine Entwarnung wie
+    /// jede andere; wird er gefunden, sagt der Satz, dass er über ihn
+    /// **nichts** sagt ([`ExportCheck::unsearched`]).
+    ///
+    /// Denn ein Fund ist hier die halbe Wahrheit. Ging die Schwärzung daneben,
+    /// steht der Text auch dort noch — und weil beide Vorkommen Zeichen für
+    /// Zeichen dasselbe sind, ist der Fund von der stehen gelassenen Zeile
+    /// nicht zu unterscheiden. Bis Fix-Runde 5 hieß der Satz „decken sich …
+    /// und zählen deshalb nicht als Leck“ und [`ExportCheck::warning`] gab
+    /// `None` — eine Entwarnung über ein Leck, das die Prüfung nie gesucht
+    /// hat (Befund Q4-1). Jetzt sagt der Satz, dass über diese Texte nichts
+    /// gesagt wird, und die Warnung bleibt stehen.
+    ///
+    /// **Warum der Fund kein Alarm wird:** dann käme der Fehlalarm zurück,
+    /// den Befund 5 abgestellt hat — trifft das Rechteck, ist der einzige
+    /// Rest die bewusst stehen gelassene Zeile, und ein Alarm darüber wäre
+    /// falsch (`zf_q4_tests::
+    /// zf_q4_1_woertlich_gedeckt_und_getroffen_ist_kein_alarm`). Trennen
+    /// ließen sich beide Lagen nur, wenn der Fund einer **Stelle** zuzuordnen
+    /// wäre: die Oberfläche kennt Seite und Rechteck jeder Zeile,
+    /// [`redact_pdf::LeakCheck`] nennt die Seite aber nur im **Text** der
+    /// Fundmeldung („Seite 1 …“). Darauf stützt sich diese Entscheidung
+    /// nicht — dieselbe Überlegung wie bei „wörtlich oder nur ohne
+    /// Leerraum“, wo Fix-Runde 5 statt einer Textsuche das maschinenlesbare
+    /// [`redact_pdf::LeakCheck::literal`] bekam. Solange es das für den Ort
+    /// nicht gibt, ist der ehrliche Satz die richtige Antwort — aber eben nur
+    /// über den **Fund**, nicht über die Suche (Befund R4-1).
+    ///
+    /// **Auf der Normalform** fällt die Entscheidung **nicht** hier, sondern
+    /// am Fund ([`ExportCheckPlan::run_within`]): der Plan merkt sich nur, ob
+    /// eine stehen gelassene Zeile dieselbe Normalform trägt
+    /// ([`ExportCheckPlan::kept_forms`]), gesucht wird die Schreibweise so
+    /// oder so. Denn ob ein Rest die stehen gelassene Zeile ist, weiß man
+    /// erst, wenn man weiß, **was** getroffen hat: nur die Fassung ohne
+    /// Leerraum (dann kann es diese Zeile sein) oder der Text Zeichen für
+    /// Zeichen (dann ist es ein Leck).
+    ///
+    /// Die beiden Irrtümer davor, beide an derselben IBAN:
+    ///
+    /// * Vor Fix-Runde 4 verglich die Entscheidung nur wörtlich. „DE89 3704
+    ///   …“ geschwärzt, „DE893704…“ abgewählt: gesucht wurde die Schreibweise
+    ///   mit Leerraum, [`redact_pdf::leaks_many`] sucht sie **auch**
+    ///   gequetscht, traf die abgewählte Zeile — und die Nachprüfung meldete
+    ///   „steht NOCH in der Ausgabe“ über eine Datei, die genau so gewollt
+    ///   war (Befund G5-B1).
+    /// * Fix-Runde 4 deckte daraufhin die ganze Normalform, und zwar in
+    ///   **beiden** Richtungen und **vor** der Suche. Eine geschwärzte Zeile,
+    ///   deren Rechteck danebenging, galt damit als bewusst stehen gelassen
+    ///   und wurde nie gesucht — ein echtes Leck ohne ein Wort (Befund P5-2).
+    ///
+    /// Ein Teilstring bleibt ein eigener Text: „DE89“ geschwärzt und die
+    /// ganze IBAN abgewählt ist weiter ein Fund — wörtlich richtig.
+    pub fn plan_export_check(&self, summary: &HitSummary) -> ExportCheckPlan {
+        let text_of = |entry: &AnnotatedRegion| {
+            entry
+                .region
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+        };
+
+        // Erst die stehen gelassenen Texte, dann die zu suchenden — die Frage
+        // „steht er auch in einer stehen gelassenen Zeile?“ braucht die ganze
+        // Liste, nicht nur die Zeilen davor. Beides wird gebraucht: die
+        // Schreibweise wörtlich und ihre Normalform.
+        let mut kept_texts: BTreeSet<String> = BTreeSet::new();
+        let mut kept_squeezed: BTreeSet<String> = BTreeSet::new();
+        for (index, entry) in self.regions.iter().enumerate() {
+            let kept = matches!(
+                summary.outcome(index),
+                HitOutcome::Disabled | HitOutcome::Blocked | HitOutcome::Protecting
+            );
+            if let Some(text) = text_of(entry).filter(|_| kept) {
+                kept_squeezed.insert(redact_pdf::squeeze(&text));
+                kept_texts.insert(text);
+            }
+        }
+        // Gelöscht ist auch stehen gelassen — sonst ist der eine Weg ein
+        // falscher Alarm und der andere eine bleibende Warnung.
+        for text in self.kept_by_deletion() {
+            kept_squeezed.insert(redact_pdf::squeeze(&text));
+            kept_texts.insert(text);
+        }
+
+        let mut needles: Vec<String> = Vec::new();
+        let mut kept_forms: Vec<bool> = Vec::new();
+        let mut kept_literal: Vec<bool> = Vec::new();
+        let mut without_text = 0usize;
+        // Je **Schreibweise** ein Begriff — `seen` merkt sich, welche schon
+        // in der Liste steht.
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for (index, entry) in self.regions.iter().enumerate() {
+            if !summary.outcome(index).is_redacted() {
+                continue;
+            }
+            match text_of(entry) {
+                Some(text) => {
+                    if !seen.insert(text.clone()) {
+                        continue;
+                    }
+                    // Beide Marken sagen nur, was ein **Fund** bedeuten kann
+                    // — gesucht wird so oder so.
+                    kept_literal.push(kept_texts.contains(&text));
+                    kept_forms.push(kept_squeezed.contains(&redact_pdf::squeeze(&text)));
+                    needles.push(text);
+                }
+                None => without_text += 1,
+            }
+        }
+
+        ExportCheckPlan {
+            needles,
+            kept_forms,
+            kept_literal,
+            without_text,
+            max_decompressed_bytes: self.config.limits.max_decompressed_bytes,
+        }
+    }
+
+    /// Nachprüfung in einem Zug: planen und laufen lassen.
+    ///
+    /// Blockiert, solange die Datei durchsucht wird — für Tests und für den
+    /// Notfall ohne Thread. Die Oberfläche geht den zweiteiligen Weg
+    /// ([`AppState::plan_export_check`], dann [`ExportCheckPlan::run`] auf
+    /// einem eigenen Thread), damit sie nicht steht.
+    pub fn check_export(&self, out: &Path, summary: &HitSummary) -> ExportCheck {
+        self.plan_export_check(summary).run(out)
     }
 
     // ---------------------------------------------------------------- Review
@@ -2298,6 +3536,9 @@ impl AppState {
             })
             .collect();
         self.selected_region = None;
+        // Wie bei der Analyse: eine neue Trefferliste, und die gelöschten
+        // Zeilen der alten gehören nicht dazu.
+        self.deleted_hits.clear();
         self.status = match identity {
             ReviewIdentity::Matches => format!(
                 "Review übernommen: {} Einträge (Prüfsumme stimmt)",
@@ -2367,6 +3608,10 @@ fn page_rotation(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
 #[cfg(test)]
 #[path = "rev7_tests.rs"]
 pub mod rev7_tests;
+
+#[cfg(test)]
+#[path = "z9_tests.rs"]
+pub mod z9_tests;
 
 #[cfg(test)]
 mod tests {

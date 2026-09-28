@@ -87,11 +87,7 @@ pub fn show(
             ui.add_space(BAR_PADDING);
         });
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            hits(ui, state, summary);
-        });
+    hits(ui, state, summary);
 
     // Sobald das Ersatzfeld den Fokus nicht (mehr) hat — oder gar nicht
     // gezeichnet wurde —, ist die Tippsitzung vorbei: der nächste Anschlag
@@ -286,6 +282,24 @@ fn legend(ui: &mut egui::Ui) {
     });
 }
 
+/// Höhe einer Trefferzeile ohne Zwischenraum.
+///
+/// Jede Zeile ist so hoch wie das Kästchen: `interact_size.y`, das größte
+/// Element darin. Sie muss **fest** sein, weil die Liste nur die sichtbaren
+/// Zeilen aufbaut ([`egui::ScrollArea::show_rows`]) und die Höhe der übrigen
+/// aus dieser Zahl rechnet. Dass sie stimmt, prüft ein Test gegen die
+/// gezeichnete Zeile — mit und ohne Zusatz, mit echtem und trägem Kästchen.
+pub fn hit_row_height(ui: &egui::Ui) -> f32 {
+    ui.spacing().interact_size.y
+}
+
+/// Die Trefferliste — nur die **sichtbaren** Zeilen werden aufgebaut.
+///
+/// Vorher lief `for index in 0..regions.len()` durch die ganze Liste, in
+/// jedem Bild: 10 000 Zeilen kosteten 87 ms je Bild, 50 000 Zeilen 527 ms —
+/// und `--max-candidates` erlaubt 100 000. Egui zeichnet unsichtbare Widgets
+/// zwar nicht, baut aber jeden Text auf. [`egui::ScrollArea::show_rows`]
+/// überspringt, was außerhalb des Fensters liegt.
 fn hits(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     if state.regions.is_empty() {
         ui.label(RichText::new("Noch keine Treffer — „Analysieren“ oder Rechteck ziehen.").weak());
@@ -295,63 +309,14 @@ fn hits(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     let mut toggle: Option<usize> = None;
     let mut select: Option<usize> = None;
 
-    for index in 0..state.regions.len() {
-        let entry = &state.regions[index];
-        let blocking = entry.is_blocking();
-        let selected = state.selected_region == Some(index);
-        let mut enabled = entry.enabled;
-        let color = entry.color;
-        let label = entry.label();
-        let outcome = summary.outcome(index);
-        let tooltip = format!("{}\n{}", entry.description(), outcome_tooltip(outcome));
-
-        ui.horizontal(|ui| {
-            // Negativlisten-Treffer sind nicht schaltbar. Für sie steht hier
-            // ein Platzhalter statt eines abgeschalteten Kästchens: ein
-            // abgeschaltetes Widget verschluckt in egui 0.29 den Tabulator
-            // (siehe [`crate::app::greyable_button`]), und dieses Kästchen ist
-            // das **erste** Bedienelement jeder Trefferzeile. Eine
-            // Buchungsliste mit einem Schutzeintrag an erster Stelle machte
-            // damit keine einzige Trefferzeile vorwärts ertabbar.
-            if blocking {
-                ui.add_enabled(false, inert_checkbox(enabled, ""));
-            } else {
-                let checkbox = ui.add(egui::Checkbox::new(&mut enabled, ""));
-                if checkbox.changed() {
-                    toggle = Some(index);
-                }
-            }
-            ui.label(RichText::new(color.marker()).color(dot_color(color)));
-
-            let mut text = RichText::new(label);
-            match outcome {
-                // Wird geschwärzt: normal und in seiner Farbe.
-                HitOutcome::Redacted => {}
-                // Schützt Text — kein Durchstreichen, das hieße „gestrichen“.
-                HitOutcome::Protecting => text = text.color(dot_color(color)),
-                // Verworfen bzw. abgewählt: ausgegraut und durchgestrichen.
-                HitOutcome::Disabled
-                | HitOutcome::Blocked
-                | HitOutcome::Duplicate
-                | HitOutcome::OffPage
-                | HitOutcome::MissingPage => {
-                    text = text.weak().strikethrough();
-                }
-            }
-            if ui
-                .selectable_label(selected, text)
-                .on_hover_text(&tooltip)
-                .clicked()
-            {
-                select = Some(index);
-            }
-
-            let note = outcome.note();
-            if !note.is_empty() {
-                ui.label(RichText::new(note).small().weak());
+    let row_height = hit_row_height(ui);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show_rows(ui, row_height, state.regions.len(), |ui, rows| {
+            for index in rows {
+                hit_row(ui, state, summary, index, &mut toggle, &mut select);
             }
         });
-    }
 
     if let Some(index) = toggle {
         state.toggle_enabled(index);
@@ -361,6 +326,74 @@ fn hits(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
         state.selected_region = Some(index);
         state.set_page(page);
     }
+}
+
+/// Eine Zeile der Trefferliste; gibt die Antwort der ganzen Zeile zurück,
+/// damit ein Test ihre Höhe gegen [`hit_row_height`] halten kann.
+pub(crate) fn hit_row(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    summary: &HitSummary,
+    index: usize,
+    toggle: &mut Option<usize>,
+    select: &mut Option<usize>,
+) -> egui::Response {
+    let entry = &state.regions[index];
+    let blocking = entry.is_blocking();
+    let selected = state.selected_region == Some(index);
+    let mut enabled = entry.enabled;
+    let color = entry.color;
+    let label = entry.label();
+    let outcome = summary.outcome(index);
+    let tooltip = format!("{}\n{}", entry.description(), outcome_tooltip(outcome));
+
+    ui.horizontal(|ui| {
+        // Negativlisten-Treffer sind nicht schaltbar. Für sie steht hier
+        // ein Platzhalter statt eines abgeschalteten Kästchens: ein
+        // abgeschaltetes Widget verschluckt in egui 0.29 den Tabulator
+        // (siehe [`crate::app::greyable_button`]), und dieses Kästchen ist
+        // das **erste** Bedienelement jeder Trefferzeile. Eine
+        // Buchungsliste mit einem Schutzeintrag an erster Stelle machte
+        // damit keine einzige Trefferzeile vorwärts ertabbar.
+        if blocking {
+            ui.add_enabled(false, inert_checkbox(enabled, ""));
+        } else {
+            let checkbox = ui.add(egui::Checkbox::new(&mut enabled, ""));
+            if checkbox.changed() {
+                *toggle = Some(index);
+            }
+        }
+        ui.label(RichText::new(color.marker()).color(dot_color(color)));
+
+        let mut text = RichText::new(label);
+        match outcome {
+            // Wird geschwärzt: normal und in seiner Farbe.
+            HitOutcome::Redacted => {}
+            // Schützt Text — kein Durchstreichen, das hieße „gestrichen“.
+            HitOutcome::Protecting => text = text.color(dot_color(color)),
+            // Verworfen bzw. abgewählt: ausgegraut und durchgestrichen.
+            HitOutcome::Disabled
+            | HitOutcome::Blocked
+            | HitOutcome::Duplicate
+            | HitOutcome::OffPage
+            | HitOutcome::MissingPage => {
+                text = text.weak().strikethrough();
+            }
+        }
+        if ui
+            .selectable_label(selected, text)
+            .on_hover_text(&tooltip)
+            .clicked()
+        {
+            *select = Some(index);
+        }
+
+        let note = outcome.note();
+        if !note.is_empty() {
+            ui.label(RichText::new(note).small().weak());
+        }
+    })
+    .response
 }
 
 /// Ein Kästchen, das nur aussieht wie eins — nicht anklickbar, nicht
@@ -486,7 +519,12 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     let mut action = entry.action.clone();
 
     ui.label(RichText::new("Auswahl").strong());
-    ui.label(format!("Seite {}", page + 1));
+    // `saturating_add`, weil die Seitennummer aus fremder Hand kommt (Review-Datei,
+    // `--manual-regions`): bei `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build
+    // über und löste eine Panic aus; im Release-Build stünde „Seite 0" da. Die erste
+    // Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der Deserialisierung;
+    // diese hier gilt für jeden Aufrufer, der `Region` selbst baut.
+    ui.label(format!("Seite {}", page.saturating_add(1)));
     ui.label(description);
     ui.label(
         RichText::new(format!(

@@ -271,8 +271,10 @@ fn a_form_without_subtype_is_reported_not_swallowed() {
 fn form_with_unsupported_filter(secret: &str) -> Vec<u8> {
     let mut d = common::page(&["Kontoinhaber: Max Mustermann"]);
     let font_id = d.font_id;
-    // `ASCIIHexDecode` kann `lopdf` beim Auspacken nicht — ein Filter, an dem
-    // der Interpreter tatsächlich hängen bleibt.
+    // `ASCIIHexDecode` kann `lopdf` beim Auspacken nicht (object.rs kennt nur
+    // Flate, LZW und ASCII85). Seit `filters.rs` dekodiert dieses Crate den
+    // Filter selbst, bevor lopdf gefragt wird — deshalb ist das hier **kein**
+    // blinder Fleck mehr, sondern die Gegenprobe dazu.
     let encoded = common::ascii_hex_encode(&text_at(72.0, 640.0, &format!("IBAN: {secret}")));
     let form_id = d.add(Object::Stream(
         Stream::new(
@@ -300,14 +302,41 @@ fn form_with_unsupported_filter(secret: &str) -> Vec<u8> {
     d.finish()
 }
 
+/// **Umgedreht, nicht gelöscht.**
+///
+/// Dieser Test hieß `an_undecodable_form_filter_is_reported_not_swallowed` und
+/// hielt einen blinden Fleck fest: ein Form-XObject mit `/ASCIIHexDecode` ließ
+/// sich nicht auspacken, und der Interpreter *warnte* darüber — mehr konnte er
+/// nicht tun. Er ist fehlgeschlagen, sobald `filters.rs` den Filter selbst
+/// dekodierte, und genau dafür war er da.
+///
+/// Was er jetzt hält, ist die Zusage, die an die Stelle des blinden Flecks
+/// getreten ist: der Text **in** dem Formular wird gelesen, also auch
+/// gefunden — und es gibt nichts mehr zu warnen.
 #[test]
-fn an_undecodable_form_filter_is_reported_not_swallowed() {
+fn a_form_with_ascii_hex_filter_is_read_not_merely_reported() {
     let pdf = form_with_unsupported_filter(SECRET);
     assert_precondition_leaks(&pdf, "Form mit ASCIIHexDecode");
 
+    // Der Text aus dem Formular steht jetzt in der Extraktion — vorher stand
+    // dort nur die Seite selbst.
+    let text = extract(&pdf)
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        text.contains(SECRET),
+        "der Text des Formulars wird nicht gelesen: {text:?}"
+    );
+
+    // Und niemand warnt mehr über einen Filter, den dieses Crate kann.
     let scan = scan(&pdf);
-    assert_warns(&scan.warnings, "dekodieren");
-    assert_warns(&scan.warnings, "Fm0");
+    assert!(
+        !scan.warnings.iter().any(|w| w.contains("dekodieren")),
+        "es wird weiterhin über das Dekodieren geklagt: {:?}",
+        scan.warnings
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -487,6 +487,36 @@ fn load_type0(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
     load_descriptor(doc, cid_font.get(b"FontDescriptor").ok(), info);
 }
 
+/// Der größte CID, den ein PDF überhaupt benennen kann.
+///
+/// PDF 32000-1, 9.7.4.2: „CIDs shall be in the range 0 to 65 535.“ Eine Breite
+/// für einen CID darüber ist deshalb kein Wert, den je ein Zeichen abrufen
+/// könnte — sie ist tote Angabe.
+///
+/// Das ist hier keine Feinheit der Norm, sondern die Grenze zwischen einer
+/// Schrift und einer Bombe. `/W` deckelte bisher den **einzelnen** Bereich auf
+/// 65 535 Codes, aber nicht die **Summe** über viele Bereiche, und ein Bereich
+/// ist ein Zahlentripel von rund siebzehn Byte. Gemessen (Release, `VmHWM`,
+/// eine Schrift, ein Aufruf):
+///
+/// | `/W`-Bereiche | Datei | Spitzenspeicher |
+/// |---:|---:|---:|
+/// | 10 | 1,4 kB | 22 MB |
+/// | 50 | 2,1 kB | 94 MB |
+/// | 100 | 3,3 kB | 185 MB |
+///
+/// Linear, rund 1,85 MB je Bereich: 20 kB `/W` ergäben 1,9 GB, 150 kB rund
+/// 15 GB — aus einer Datei, die jede dokumentierte Grenze um Größenordnungen
+/// einhält. [`crate::content::MAX_CACHED_FONT_ENTRIES`] sah davon nichts: die
+/// Decke wird erst gefragt, wenn die Tabelle schon **gebaut** ist.
+///
+/// Mit der Norm als Grenze ist die Tabelle einer CID-Schrift auf 65 536
+/// Einträge beschränkt — dieselbe Größenordnung wie
+/// [`crate::encoding::MAX_TO_UNICODE_BYTES`] sie für die Zuordnung erlaubt, und
+/// genau der Umfang einer vollständigen CJK-Schrift. Eine echte Datei verliert
+/// dadurch nichts.
+const MAX_CID: u32 = 65_535;
+
 /// `/W` hat die Form `[ c [w1 w2 …]  cFirst cLast w  … ]`.
 fn parse_cid_widths(doc: &Document, w: &[Object], out: &mut BTreeMap<u32, f64>) {
     let mut i = 0;
@@ -495,22 +525,31 @@ fn parse_cid_widths(doc: &Document, w: &[Object], out: &mut BTreeMap<u32, f64>) 
             i += 1;
             continue;
         };
+        // `f64` → `u32` sättigt in Rust; ein negatives oder absurdes `first`
+        // wird so zu 0 bzw. `u32::MAX` und fällt unten durch die CID-Grenze.
+        let first = first as u32;
         match deref(doc, w.get(i + 1)) {
             Some(Object::Array(list)) => {
                 for (k, item) in list.iter().enumerate() {
+                    let Some(code) = first.checked_add(k as u32).filter(|c| *c <= MAX_CID) else {
+                        break;
+                    };
                     if let Some(width) = deref(doc, Some(item)).and_then(as_f64) {
-                        out.insert(first as u32 + k as u32, width / 1000.0);
+                        out.insert(code, width / 1000.0);
                     }
                 }
                 i += 2;
             }
             Some(_) => {
-                let last = deref(doc, w.get(i + 1)).and_then(as_f64).unwrap_or(first);
+                let last = deref(doc, w.get(i + 1))
+                    .and_then(as_f64)
+                    .map_or(first, |l| l as u32);
                 let width = deref(doc, w.get(i + 2)).and_then(as_f64).unwrap_or(0.0);
-                // Gegen absurde Bereiche aus kaputten Dateien absichern.
-                let last = last.min(first + 65535.0);
-                if last >= first {
-                    for code in (first as u32)..=(last as u32) {
+                // Kein CID über 65 535: das begrenzt jeden einzelnen Bereich
+                // **und** ihre Summe, denn mehr Codes gibt es nicht.
+                let last = last.min(MAX_CID);
+                if first <= MAX_CID && last >= first {
+                    for code in first..=last {
                         out.insert(code, width / 1000.0);
                     }
                 }

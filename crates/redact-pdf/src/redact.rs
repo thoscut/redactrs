@@ -14,7 +14,9 @@
 //! 5. Überlappende Annotationen werden gelöscht (auch dort steht Text).
 //! 6. Der **Textspiegel** eines Marked-Content-Abschnitts (`/ActualText`,
 //!    `/Alt`, `/E`) wird geleert, sobald von den Glyphen darunter etwas
-//!    entfernt wurde ([`mirrors_to_clear`]).
+//!    entfernt wurde ([`mirrors_to_clear`]) — oder unter ihm Bildpunkte
+//!    gefallen sind. Ob sie fielen, sagt [`crate::image`]; hier wird es nicht
+//!    geschätzt (siehe [`crate::image::ImageOutcome::page_image_hits`]).
 //!
 //! Zeichen in Form-XObjects werden ebenfalls entfernt. Wird dasselbe XObject
 //! mehrfach platziert, wirkt die Entfernung notwendigerweise auf alle
@@ -22,16 +24,22 @@
 //! die sichere Richtung, und sie wird **gesagt**: liegt das Formular auf
 //! mehreren Seiten, meldet [`warn_about_shared_form`] die betroffenen. Sonst
 //! ändert sich eine Seite, die niemand ausgewählt hat, stillschweigend — in
-//! einer Datei, die danach weitergegeben wird.
+//! einer Datei, die danach weitergegeben wird. Und die Spiegel über dem
+//! Formular gehen auf **allen** diesen Seiten mit: die Seiten werden erst
+//! neu geschrieben, wenn alle Formularpläne feststehen (siehe
+//! [`PendingPage`]).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 use redact_core::conflict::RectGrid;
 use redact_core::{Rect, RedactError, Redaction, Result};
 
-use crate::content::{MarkedTextRecord, ShowItem, ShowRecord, StreamKey, MIRROR_KEYS};
+use crate::content::{
+    property_list_homes, property_list_objects, MarkedTextRecord, MirrorHome, ShowItem, ShowRecord,
+    StreamKey, MIRROR_KEYS,
+};
 use crate::image::InlineTarget;
 use crate::matrix::Matrix;
 
@@ -90,6 +98,11 @@ pub struct RedactionReport {
     pub redacted_images: usize,
     /// Davon: Kopien, die angelegt wurden, weil das Bild mehrfach benutzt wird.
     pub copied_images: usize,
+    /// Originale, die nach dem Kopieren niemand mehr zeichnet und die durch ein
+    /// leeres Bild ersetzt wurden — sonst blieben ihre unversehrten Bildpunkte
+    /// hinter einem geerbten oder überzähligen Namen in der Datei
+    /// ([`crate::image::ImageOutcome::retired_originals`]).
+    pub retired_originals: usize,
     /// Höchstzahl der **gleichzeitig** dekodiert gehaltenen Bilder.
     ///
     /// Siehe [`crate::image::ImageOutcome::peak_decoded_images`]: der
@@ -97,6 +110,52 @@ pub struct RedactionReport {
     pub peak_decoded_images: usize,
     /// Dasselbe in Bytes (RGBA8, 4 Byte je Bildpunkt).
     pub peak_decoded_image_bytes: u64,
+    /// Ersatztexte, die **mit den Pixeln eines Bildes** gefallen sind.
+    ///
+    /// Gezählt werden **entfernte Schlüssel, nicht Absichten**: je
+    /// Marked-Content-Abschnitt, unter dem Bildpunkte gefallen sind — auch in
+    /// einem Formular darunter —, jeder Spiegelschlüssel seiner
+    /// Eigenschaftsliste ([`crate::content::MIRROR_KEYS`]), und je
+    /// geschwärztem Bild-XObject jedes `/Alt` und `/ActualText`, das an seinem
+    /// Dictionary **noch stand**.
+    ///
+    /// Das „noch stand“ ist der Grund, warum ein Bild hier gewöhnlich mit
+    /// **1** zählt und nicht mit 2: ein Bild, dessen Pixel überschrieben
+    /// wurden, ist neu kodiert, und [`crate::image`] baut sein Dictionary dabei
+    /// aus den Bildeigenschaften neu auf — der Ersatztext daran ist mit den
+    /// Pixeln gefallen, bevor diese Stelle ihn sehen konnte. Zwei werden es
+    /// genau dann, wenn das Dictionary stehen bleibt: bei einem Bild, das sich
+    /// nicht dekodieren lässt und dessen Pixel deshalb bleiben. Das ist
+    /// zugleich der **einzige** Fall, in dem das `/Alt` am Bilddictionary von
+    /// dieser Seite aus fällt (siehe [`clear_image_alternates`]), und über ihn
+    /// steht eine eigene Warnung.
+    ///
+    /// **Woran diese Zahl hängt: an gefallenen Bildpunkten.** Gezählt werden
+    /// die Abschnitte, unter denen [`crate::image`] wirklich Bildpunkte
+    /// überschrieben hat — die Antwort kommt aus dem Bildlauf selbst
+    /// ([`crate::image::ImageOutcome::page_image_hits`]) und nicht aus einer
+    /// Schätzung an der Platzierung. Weder die Hülle noch die Fläche der
+    /// Platzierung entscheidet hier noch: die Hülle nahm einem unversehrten
+    /// gedrehten Bild seinen Ersatztext, die Fläche ließ an ihrer Kante einen
+    /// Spiegel über gefallenen Bildpunkten stehen.
+    ///
+    /// **Die eine Ausnahme, und sie steht daneben.** Bei einem Bild, dessen
+    /// Pixel sich nicht anfassen ließen, weiß niemand, was fiel; dort wird grob
+    /// entschieden (der Ersatztext fällt), und dort steht eine eigene Warnung.
+    /// Grob entscheiden ist erlaubt, wenn es gesagt wird.
+    ///
+    /// **Warum das gezählt gehört.** Ein `/Figure <</Alt (…)>> BDC /Im0 Do
+    /// EMC` ist die Standardform der Barrierefreiheit; steht dort, was auf dem
+    /// Bild zu lesen war („Kontoauszug, IBAN DE89 …“), überlebte die
+    /// Beschreibung bis zu dieser Fassung die Schwärzung des Bildes
+    /// (Register #20). Sie fällt jetzt — **auch dann**, wenn sie nichts
+    /// Schützenswertes sagt („Firmenlogo“). Das ist die sichere Richtung, aber
+    /// es ist ein Verlust an Barrierefreiheit, und ein Verlust, den niemand
+    /// bemerkt, ist der falsche. Diese Zahl benennt ihn.
+    ///
+    /// Ein Bild, das **keine** Schwärzung trifft, behält seinen Ersatztext;
+    /// diese Zahl bleibt dann 0.
+    pub image_alt_texts_cleared: usize,
     /// Warnungen — z.B. Seiten, deren Bildinhalt mangels OCR nicht durchsucht
     /// werden konnte.
     pub warnings: Vec<String>,
@@ -365,18 +424,62 @@ impl PdfRedactor {
         )?;
         report.redacted_images = images.redacted_images;
         report.copied_images = images.copied_images;
+        report.retired_originals = images.retired_originals;
         report.peak_decoded_images = images.peak_decoded_images;
         report.peak_decoded_image_bytes = images.peak_decoded_bytes;
         for warning in images.warnings {
             push_warning(&mut report, warning);
         }
         let inline_images = images.inline_replacements;
+        // Geschwärzte Bildflächen — die **Wahrheit** darüber, wo Bildpunkte
+        // gefallen sind, wie [`crate::image`] sie herausgibt. Sie ist
+        // vollständig, bevor die erste Seite gelesen wird: der Bildlauf steht
+        // über der Seitenschleife. Nur deshalb darf weiter unten ein Ersatztext
+        // fallen — er fällt nie vor dem Beweis, dass die Pixel fielen.
+        //
+        // Geschätzt wurde diese Frage zweimal, und beide Schätzungen waren
+        // falsch: die **Hülle** der Platzierung nahm einem unversehrten
+        // gedrehten Bild seinen Ersatztext (in den Hüllenecken liegt kein
+        // Bildpunkt), das **Viereck** der Platzierung
+        // ([`crate::content::ImagePlacement::covers`]) ließ an seiner Kante
+        // einen Spiegel über gefallenen Bildpunkten stehen (es entscheidet mit
+        // strengen Vergleichen, [`crate::image`] füllt mit dem Rand
+        // eingeschlossen) und nahm umgekehrt einem Bild den Ersatztext, dessen
+        // Bildpunkte sämtlich stehenblieben (ein Rechteck zwischen den
+        // Gitterlinien eines groben Bildes). Beides ist fort, weil die Frage
+        // nicht mehr gestellt, sondern beantwortet wird.
+        let form_image_hits = images.form_image_hits;
+        let page_image_hits_by_page = images.page_image_hits;
+        // Bild-XObjects, deren Dictionary den Lauf überlebt, obwohl eine
+        // Schwärzung auf ihrer Fläche lag: ihre Pixel ließen sich nicht
+        // anfassen, also blieb das Dictionary samt `/Alt` stehen. Ihr
+        // Ersatztext wird zuletzt geräumt (siehe [`clear_image_alternates`]).
+        //
+        // Bei jedem anderen getroffenen Bild ist er schon gefallen —
+        // [`crate::image`] baut das Dictionary jedes neu kodierten Bildes aus
+        // den Bildeigenschaften neu auf. Diese Liste kommt deshalb aus dem
+        // Bildlauf selbst und nicht aus dem Seiten-Scan: sie hängt weder an der
+        // Betriebsart noch daran, dass die Datei getaggt ist. Vorher brauchte
+        // sie ein `BDC` im Strom, weil `ScanResult::images` ihr Futter war — in
+        // einem gewöhnlichen, nicht getaggten PDF blieb der Ersatztext eines
+        // stehengebliebenen Bildes damit stehen.
+        let blacked_images = images.undecodable_images;
 
         let pages: Vec<ObjectId> = doc.get_pages().values().copied().collect();
         let mut form_plans: BTreeMap<ObjectId, BTreeMap<usize, Plan>> = BTreeMap::new();
         // Textspiegel in Form-XObjects: gefunden beim Scan der Seite, geleert
-        // erst beim einmaligen Neuschreiben des Formulars.
+        // erst beim einmaligen Neuschreiben des Formulars. Gesammelt von
+        // **jeder** Seite, auch der ohne Schwärzung — das Formular darunter
+        // kann von einer anderen Seite aus geschwärzt werden.
         let mut form_marked: BTreeMap<ObjectId, Vec<MarkedTextRecord>> = BTreeMap::new();
+        // Schlüssel wie `Collector::seen_marked`: Operation **und** Herkunft
+        // der Liste — über Seiten hinweg kommt dasselbe Formular unter jeder
+        // Seite mit deren `/Properties` (Register #65).
+        let mut form_marked_seen: BTreeSet<(ObjectId, usize, Option<ObjectId>, Option<ObjectId>)> =
+            BTreeSet::new();
+        // Seiten, die neu zu schreiben sind — erst nach der Formularschleife,
+        // siehe [`PendingPage`].
+        let mut pending_pages: Vec<PendingPage> = Vec::new();
         // Welche Seiten benutzen welches Form-XObject. Ein Formular wird nur
         // **einmal** neu geschrieben; steht es auf mehreren Seiten, wirkt die
         // Schwärzung dort mit. Das muss gesagt werden — siehe
@@ -385,6 +488,16 @@ impl PdfRedactor {
         // Eigenschaftslisten, die als eigenes Objekt in der Datei stehen und
         // deshalb nicht im Strom, sondern im Objekt bereinigt werden.
         let mut property_objects: BTreeSet<ObjectId> = BTreeSet::new();
+        let mut property_homes: BTreeSet<MirrorHome> = BTreeSet::new();
+        let no_image_hits: BTreeSet<usize> = BTreeSet::new();
+        // Dokumentweites Konto für [`PendingPage::deferred`] — siehe
+        // [`MAX_DEFERRED_MIRRORS`].
+        let mut deferred_left = MAX_DEFERRED_MIRRORS;
+        let mut deferred_dropped = 0usize;
+        // Dasselbe Konto für die Spiegel **in** Formularen, die bis zur
+        // Formularschleife gehalten werden — siehe [`MAX_HELD_FORM_MIRRORS`].
+        let mut held_left = MAX_HELD_FORM_MIRRORS;
+        let mut held_dropped = 0usize;
         let no_inline: BTreeMap<usize, Operation> = BTreeMap::new();
         let no_plans: BTreeMap<usize, Plan> = BTreeMap::new();
         let no_marked: Vec<MarkedTextRecord> = Vec::new();
@@ -398,6 +511,13 @@ impl PdfRedactor {
         // vollständigen Liste zu filtern kostet Seiten × Schwärzungen.
         let by_page = redactions_by_page(redactions);
         let no_redactions: Vec<(usize, &Redaction)> = Vec::new();
+        // Dasselbe Buch wie im Extraktor, in derselben Seitenfolge: eine
+        // geteilte Annotation wird auf derselben Seite gelesen, auf der die
+        // Analyse ihren Text fand (Register #94).
+        let mut ledger = crate::content::AnnotationLedger::default();
+        // Die Rechtecke eines geteilten `/Annots`-Arrays, einmal gelesen —
+        // siehe [`remove_annotations`].
+        let mut annot_rects = AnnotRects::default();
 
         for (page_index, page_id) in pages.iter().enumerate() {
             // Der Index in der **übergebenen** Liste wird mitgeführt: nur so
@@ -420,7 +540,7 @@ impl PdfRedactor {
             // eine Seite, deren Text nie jemand gesehen hat. Ausgerechnet die
             // Seiten ohne Treffer sind die, bei denen das Fehlen von Treffern
             // etwas bedeuten soll.
-            let scan = crate::content::scan_page(doc, *page_id).map_err(|e| {
+            let scan = crate::content::scan_page_with(doc, *page_id, &mut ledger).map_err(|e| {
                 RedactError::Pdf(format!(
                     "Seite {} ließ sich nicht lesen: {e} Ihr Inhalt wurde nicht \
                      durchsucht; die Datei wird nicht als geschwärzt ausgegeben.",
@@ -432,11 +552,60 @@ impl PdfRedactor {
             }
             // Vor dem `continue`: gerade die Seiten **ohne** Schwärzung sind
             // die, die von einem geteilten Formular unversehens getroffen
-            // werden.
+            // werden — samt den Spiegeln darüber, im Seitenstrom wie in den
+            // Formularen selbst.
             for form_id in scan.form_placements.keys() {
                 form_pages.entry(*form_id).or_default().insert(page_index);
             }
+            for record in &scan.marked {
+                if let StreamKey::Form(id) = record.stream {
+                    if form_marked_seen.insert((
+                        id,
+                        record.op_index,
+                        record.property_owner,
+                        record.property_id,
+                    )) {
+                        // Gehalten wird, was [`mirrors_to_clear`] später
+                        // braucht — nicht der Datensatz, wie der Scan ihn
+                        // liefert (Register #68, siehe [`held_form_record`]).
+                        let held = held_form_record(record);
+                        let weight = 1 + held.forms.len() + held.shows.len();
+                        if held_left < weight {
+                            held_dropped += 1;
+                            continue;
+                        }
+                        held_left -= weight;
+                        form_marked.entry(id).or_default().push(held);
+                    }
+                }
+            }
+            // Spiegel im Seitenstrom über einem Formular: ob sie zu leeren
+            // sind, entscheidet sich erst, wenn alle Seiten gelesen sind.
+            // Gehalten wird dabei nur, was die späte Frage braucht — siehe
+            // [`DeferredMirror`].
+            let open: Vec<&MarkedTextRecord> = scan
+                .marked
+                .iter()
+                .filter(|record| record.stream == StreamKey::Page && !record.forms.is_empty())
+                .collect();
             if page_redactions.is_empty() {
+                if !open.is_empty() {
+                    let deferred = open
+                        .into_iter()
+                        .map(|record| DeferredMirror::new(doc, *page_id, record))
+                        .collect();
+                    let (deferred, dropped) = take_deferred(&mut deferred_left, deferred);
+                    deferred_dropped += dropped;
+                    if !deferred.is_empty() {
+                        pending_pages.push(PendingPage {
+                            index: page_index,
+                            id: *page_id,
+                            plans: BTreeMap::new(),
+                            mirrors: MirrorFixes::default(),
+                            deferred,
+                        });
+                    }
+                }
                 continue;
             }
             // Entartete Bereiche fliegen raus, ihr Index bleibt aber erhalten:
@@ -450,6 +619,15 @@ impl PdfRedactor {
             let rects: Vec<Rect> = indexed_rects.iter().map(|(_, r)| *r).collect();
             // Einmal je Seite statt je Textoperation — siehe [`RectIndex`].
             let rect_index = RectIndex::new(&indexed_rects);
+
+            // Welche Bildplatzierungen im Strom **dieser** Seite haben wirklich
+            // Bildpunkte verloren? Nicht geschätzt, sondern abgelesen: die
+            // Antwort kommt aus [`crate::image`], das die Pixel selbst
+            // überschrieben hat. Gebraucht wird sie für die Spiegel darüber
+            // (siehe [`mirrors_to_clear`]).
+            let page_image_hits = page_image_hits_by_page
+                .get(page_id)
+                .unwrap_or(&no_image_hits);
 
             let mut page_plans: BTreeMap<usize, Plan> = BTreeMap::new();
 
@@ -468,43 +646,83 @@ impl PdfRedactor {
             report.removed_glyphs += page_plans.values().map(Plan::hidden_count).sum::<usize>();
             add_per_redaction(&mut report, page_plans.values());
 
-            // Textspiegel in Formularen werden erst später fällig — dort sind
-            // die Pläne erst nach der letzten Seite vollständig.
-            for record in &scan.marked {
-                if let StreamKey::Form(id) = record.stream {
-                    let known = form_marked.entry(id).or_default();
-                    if !known.iter().any(|k| k.op_index == record.op_index) {
-                        known.push(record.clone());
-                    }
-                }
-            }
-            let mut mirrors = mirrors_to_clear(&scan.marked, StreamKey::Page, &page_plans);
-            property_objects.append(&mut mirrors.objects);
+            // Die Spiegel über den eigenen Glyphen dieser Seite (und über den
+            // bis hierher bekannten Formularplänen) sind jetzt entscheidbar.
+            let mut mirrors = mirrors_to_clear(
+                doc,
+                *page_id,
+                &[],
+                &scan.marked,
+                StreamKey::Page,
+                &page_plans,
+                &form_plans,
+                &form_image_hits,
+                page_image_hits,
+            );
+            report.image_alt_texts_cleared += mirrors.image_alt_texts;
             for warning in std::mem::take(&mut mirrors.warnings) {
                 push_warning(&mut report, warning);
             }
+            let deferred = open
+                .into_iter()
+                .filter(|record| !mirrors.covers(record))
+                .map(|record| DeferredMirror::new(doc, *page_id, record))
+                .collect();
+            let (deferred, dropped) = take_deferred(&mut deferred_left, deferred);
+            deferred_dropped += dropped;
 
-            let inline = inline_images
-                .get(&InlineTarget::Page(*page_id))
-                .unwrap_or(&no_inline);
-            self.rewrite_page(
-                doc,
-                *page_id,
-                &page_plans,
-                inline,
-                &mirrors.inline,
-                &page_redactions,
-                &mut report,
-                &mut content_users,
-            )?;
             let mut lost = Vec::new();
-            report.removed_annotations +=
-                remove_annotations(doc, page_index, *page_id, &rects, &mut lost)?;
+            report.removed_annotations += remove_annotations(
+                doc,
+                page_index,
+                *page_id,
+                &rects,
+                &mut lost,
+                &mut annot_rects,
+            )?;
             report.removed_annotation_details.append(&mut lost);
+            pending_pages.push(PendingPage {
+                index: page_index,
+                id: *page_id,
+                plans: page_plans,
+                mirrors,
+                deferred,
+            });
+        }
+
+        if deferred_dropped > 0 {
+            push_warning(
+                &mut report,
+                format!(
+                    "Dieses Dokument stellt mehr als {MAX_DEFERRED_MIRRORS} Textspiegel \
+                     über Form-XObjects zurück; {deferred_dropped} davon wurden nicht mehr \
+                     mitgeführt. Ob eine Schwärzung sie berührt, entscheidet sich erst \
+                     nach dem Neuschreiben der Formulare — für diese Abschnitte wurde die \
+                     Frage nicht mehr gestellt. Verliert eines der Formulare darunter \
+                     Zeichen, bleibt der Textspiegel darüber stehen."
+                ),
+            );
+        }
+        if held_dropped > 0 {
+            push_warning(
+                &mut report,
+                format!(
+                    "Dieses Dokument trägt in seinen Form-XObjects mehr Textspiegel, als \
+                     bis zum Neuschreiben der Formulare gehalten werden \
+                     ({MAX_HELD_FORM_MIRRORS} Einträge); {held_dropped} Abschnitte wurden \
+                     nicht mehr mitgeführt. Ob eine Schwärzung sie berührt, wurde für \
+                     diese Abschnitte nicht mehr gefragt. Verliert das Formular darunter \
+                     Zeichen, bleibt der Textspiegel darin stehen."
+                ),
+            );
         }
 
         // Form-XObjects werden einmalig neu geschrieben — auch die, in denen
-        // nur ein Inline-Bild zu ersetzen ist und kein Zeichen entfällt.
+        // nur ein Inline-Bild zu ersetzen ist und kein Zeichen entfällt, und
+        // die, deren einziger Anteil ein Spiegel über einem **inneren**
+        // Formular ist, das Zeichen verliert (`/Span <</ActualText …>> BDC
+        // /Fm1 Do EMC` in `Fm0`, die Glyphen in `Fm1`; Befund G1-A1).
+        // `forms` ist transitiv geschlossen, ein Durchgang genügt.
         let form_ids: BTreeSet<ObjectId> = form_plans
             .keys()
             .copied()
@@ -512,6 +730,19 @@ impl PdfRedactor {
                 InlineTarget::Form(id) => Some(*id),
                 InlineTarget::Page(_) => None,
             }))
+            .chain(
+                form_marked
+                    .iter()
+                    .filter(|(id, records)| {
+                        let hits = form_image_hits.get(*id).unwrap_or(&no_image_hits);
+                        records.iter().any(|record| {
+                            touches_form_plan(record, &form_plans)
+                                || touches_form_image(record, &form_image_hits)
+                                || hits.range(record.range.clone()).next().is_some()
+                        })
+                    })
+                    .map(|(id, _)| *id),
+            )
             .collect();
         for form_id in form_ids {
             let plans = form_plans.get(&form_id).unwrap_or(&no_plans);
@@ -529,18 +760,102 @@ impl PdfRedactor {
             report.removed_glyphs += removed_here;
             add_per_redaction(&mut report, plans.values());
             let marked = form_marked.get(&form_id).unwrap_or(&no_marked);
-            let mut mirrors = mirrors_to_clear(marked, StreamKey::Form(form_id), plans);
+            let callers: Vec<ObjectId> = form_pages
+                .get(&form_id)
+                .unwrap_or(&no_form_pages)
+                .iter()
+                .filter_map(|index| pages.get(*index).copied())
+                .collect();
+            let mut mirrors = mirrors_to_clear(
+                doc,
+                form_id,
+                &callers,
+                marked,
+                StreamKey::Form(form_id),
+                plans,
+                &form_plans,
+                &form_image_hits,
+                form_image_hits.get(&form_id).unwrap_or(&no_image_hits),
+            );
+            report.image_alt_texts_cleared += mirrors.image_alt_texts;
             property_objects.append(&mut mirrors.objects);
+            property_homes.append(&mut mirrors.homes);
             for warning in std::mem::take(&mut mirrors.warnings) {
                 push_warning(&mut report, warning);
             }
             rewrite_form(doc, form_id, plans, inline, &mirrors.inline)?;
         }
 
+        // Jetzt erst die Seiten: die Formularpläne sind vollständig, also
+        // steht für jeden Spiegel über einem Formular fest, ob er weg muss —
+        // auch auf einer Seite, für die niemand eine Schwärzung angefordert
+        // hat (Befund G1-A2).
+        for pending in pending_pages {
+            let PendingPage {
+                index,
+                id: page_id,
+                plans,
+                mut mirrors,
+                deferred,
+            } = pending;
+            // Die Formularpläne sind jetzt vollständig; die Abschnitte tragen
+            // ihre Antwort fertig bei sich (siehe [`DeferredMirror`]). Die
+            // eigenen Textoperationen der Seite werden **nicht** noch einmal
+            // befragt: über sie ist oben entschieden worden, und `plans` ist
+            // seither unverändert.
+            let mut late = MirrorFixes::default();
+            for open in deferred {
+                let by_image = open.touched_by_image(&form_image_hits);
+                if !by_image && !open.touched(&form_plans) {
+                    continue;
+                }
+                if by_image {
+                    late.image_alt_texts += open.mirror_keys;
+                }
+                open.fix.apply(&mut late);
+            }
+            report.image_alt_texts_cleared += std::mem::take(&mut late.image_alt_texts);
+            mirrors.append(&mut late);
+            for warning in late.warnings {
+                push_warning(&mut report, warning);
+            }
+            property_objects.append(&mut mirrors.objects);
+            property_homes.append(&mut mirrors.homes);
+            let page_redactions: Vec<&Redaction> = by_page
+                .get(&index)
+                .map(|list| list.iter().map(|(_, r)| *r).collect())
+                .unwrap_or_default();
+            if page_redactions.is_empty() && mirrors.inline.is_empty() {
+                continue;
+            }
+            let inline = inline_images
+                .get(&InlineTarget::Page(page_id))
+                .unwrap_or(&no_inline);
+            self.rewrite_page(
+                doc,
+                page_id,
+                &plans,
+                inline,
+                &mirrors.inline,
+                &page_redactions,
+                &mut report,
+                &mut content_users,
+            )?;
+        }
+
         // Zum Schluss die Eigenschaftslisten, die als eigene Objekte in der
         // Datei stehen — sie gehören keinem Strom, sondern dem Dokument.
         for id in property_objects {
             clear_mirror_object(doc, id);
+        }
+        // … und die, die keine eigene Objekt-Id haben, sondern direkt in einem
+        // `/Properties` stehen.
+        for home in property_homes {
+            clear_mirror_at(doc, &home);
+        }
+        // Zuletzt der Ersatztext an den geschwärzten Bildern selbst.
+        for id in blacked_images {
+            report.image_alt_texts_cleared += clear_image_alternates(doc, id);
         }
 
         Ok(report)
@@ -558,9 +873,9 @@ impl PdfRedactor {
         report: &mut RedactionReport,
         content_users: &mut ContentUsers,
     ) -> Result<()> {
-        let data = doc
-            .get_page_content(page_id)
-            .map_err(|e| RedactError::Pdf(format!("Content-Stream nicht lesbar: {e}")))?;
+        // Derselbe Leser wie in der Analyse ([`crate::filters`]): was dort
+        // dekodiert wurde, wird hier dekodiert neu geschrieben.
+        let data = crate::filters::page_content(doc, page_id);
         let decoded = decode_or_fail(&data, "Der Content-Stream dieser Seite")?;
 
         let mut operations = rewrite_operations(&decoded, plans, inline_images, mirrors);
@@ -792,12 +1107,21 @@ impl RectIndex {
 /// die Kante ausschlösse, könnte ein solches Zeichen übergehen — ein stiller
 /// Fehler genau in der Richtung, die wehtut.
 ///
-/// Umgekehrt ist das hier auch der **Torwächter gegen NaN**: `f64::min` und
-/// `f64::max` liefern bei einem NaN-Operanden den anderen zurück, weshalb
-/// `Rect::intersection_area` gegen ein NaN-Rechteck die volle Fläche des
-/// Zeichens ausweist — ein Bereich mit unbrauchbaren Koordinaten träfe damit
-/// **alles**. Jeder Vergleich mit NaN ist dagegen falsch, dieser Test also
-/// auch: ein solcher Bereich kommt gar nicht erst zur genauen Prüfung.
+/// # Kein Ersatz für [`Rect::is_usable`]
+///
+/// Über NaN entscheidet diese Zeile nebenbei richtig — jeder Vergleich mit NaN
+/// ist falsch, ein NaN-Rechteck berührt hier also nichts. Über ±∞ **nicht**:
+/// `Rect { ll: (-∞, -∞), ur: (+∞, +∞) }` besteht alle vier Vergleiche und ist
+/// trotzdem unbrauchbar (gemessen mit allen fünf Bauarten aus
+/// `redact-pdf/tests/unbrauchbares_deckrechteck.rs`; nur diese eine kommt
+/// durch).
+///
+/// Das ist kein Loch, sondern die Arbeitsteilung: hier steht eine **billige
+/// Vorauswahl**, die Regel steht in [`Rect::is_usable`] und wird von der
+/// genauen Prüfung zwei Zeilen weiter angewandt — [`Rect::covered_fraction`]
+/// und [`Rect::contains`] fragen beide danach und lehnen auch die ∞-Form ab.
+/// Wer diese Zeile für den Torwächter hält, verlässt sich auf eine Prüfung, die
+/// eine der fünf Bauarten durchlässt.
 fn touches(a: &Rect, b: &Rect) -> bool {
     a.ll.x <= b.ur.x && b.ll.x <= a.ur.x && a.ll.y <= b.ur.y && b.ll.y <= a.ur.y
 }
@@ -981,7 +1305,233 @@ struct MirrorFixes {
     /// Eigenschaftslisten, die als eigenes Objekt in der Datei stehen; sie
     /// werden im Dokument bereinigt, nicht im Strom.
     objects: BTreeSet<ObjectId>,
+    /// Eigenschaftslisten, die **direkt** in einem `/Properties`-Dictionary
+    /// stehen — auch sie gehören dem Dokument und nicht dem Strom, nur haben
+    /// sie keine eigene Objekt-Id (siehe [`MirrorHome`]).
+    homes: BTreeSet<MirrorHome>,
+    /// Spiegelschlüssel, die über einer geschwärzten Bildfläche standen —
+    /// siehe [`RedactionReport::image_alt_texts_cleared`].
+    image_alt_texts: usize,
     warnings: Vec<String>,
+}
+
+impl MirrorFixes {
+    /// Ist der Spiegel dieses Abschnitts hiermit schon erledigt?
+    fn covers(&self, record: &MarkedTextRecord) -> bool {
+        self.inline.contains_key(&record.op_index)
+            || record
+                .property_id
+                .is_some_and(|id| self.objects.contains(&id))
+    }
+
+    /// Nimmt die Fundorte von `other` auf.
+    fn append(&mut self, other: &mut Self) {
+        self.inline.append(&mut other.inline);
+        self.objects.append(&mut other.objects);
+        self.homes.append(&mut other.homes);
+        self.image_alt_texts += other.image_alt_texts;
+    }
+}
+
+/// Wie viele zurückgestellte Textspiegel ein **Dokument** insgesamt mitführen
+/// darf ([`PendingPage::deferred`]).
+///
+/// Die Decken des Seiten-Scans gelten je Seite, und das ist dort richtig: eine
+/// Warnung über eine Seite soll nicht davon abhängen, was auf ihren Nachbarn
+/// steht. Was der Redaktor **zwischen** Seiten- und Formularschleife festhält,
+/// ist aber dokumentweit, und die alte Begründung („die Kosten bleiben
+/// gedeckelt, weil jede Seite ihren eigenen Inhalt mitbringen muss“) stimmte
+/// nicht: `/Contents` darf auf denselben Strom zeigen wie die Nachbarseite.
+/// Gemessen (Debug, eigener Prozess, `zg_r1_decke::mess_seiten_mal_paare`):
+/// 224 752 Byte, 1 000 Seiten, **ein** Strom, je 99 900 Spiegel-Paare —
+/// Redaktor 105 s und **6 439 MB**, ohne Schwärzung, ohne Warnung.
+///
+/// Zwei Dinge stehen dagegen. Erstens hält [`to_deferred`] nur noch das, was
+/// die späte Frage wirklich braucht: die **Objekt-Ids** der Formulare, einmal
+/// je Formular statt einmal je Platzierung, und ohne deren Pfade — das allein
+/// nimmt dem Fall oben den Faktor. Zweitens diese Decke: sie zählt die
+/// zurückgestellten Abschnitte des ganzen Dokuments. 100 000 davon wiegen nach
+/// derselben Messung rund 25 MB. Wird sie erreicht, wird nicht mehr
+/// zurückgestellt — und **gesagt**, dass für diese Abschnitte die Frage
+/// „berührt eine Schwärzung das Formular darunter?“ nicht mehr gestellt wurde.
+const MAX_DEFERRED_MIRRORS: usize = 100_000;
+
+/// Wie viele Einträge die Spiegel **in** Form-XObjects über den ganzen Lauf
+/// halten dürfen, bis die Formulare neu geschrieben werden — je Abschnitt
+/// einer, plus einer je Formular und je Textoperation in seinem
+/// Geltungsbereich (siehe [`held_form_record`]).
+///
+/// Bis zur Spur-A-Runde 1 hielt `form_marked` die Datensätze, wie der Scan sie
+/// liefert: je Platzierung im Geltungsbereich einen Pfad auf dem Haufen, und
+/// das für jede Seite bis zum Ende — [`MAX_MIRROR_FORM_PLACEMENTS`] gilt nur
+/// je Seite, [`MAX_DEFERRED_MIRRORS`] nur für den **Seitenstrom**. Gemessen
+/// (Debug, eigener Prozess, `zo_c_spiegel_umgebungen`): je Seite ein eigenes
+/// Formular mit 100 × 999 Paaren, 10 Seiten 78 MB, 100 Seiten 637 MB und
+/// 9,8 s — aus rund 10 kB Datei je Seite, ohne Schwärzung, ohne Warnung
+/// (Register #68). Erst die schlanke Fassung, dann diese Decke; wird sie
+/// erreicht, wird nicht mehr gehalten — und **gesagt**.
+const MAX_HELD_FORM_MIRRORS: usize = 100_000;
+
+/// Der Datensatz eines Spiegels **in** einem Formular, wie er bis zur
+/// Formularschleife gehalten wird: die Formulare im Geltungsbereich **je
+/// Formular einmal** und ohne ihre Pfade. [`mirrors_to_clear`] fragt nur nach
+/// der Objekt-Id ([`touches_form_plan`], [`touches_form_image`]); der Pfad
+/// ordnet Glyphen in Stromreihenfolge und wird hier nie gelesen — dieselbe Id
+/// stand unter einem Spiegel tausendfach, mit je einem eigenen `Vec` auf dem
+/// Haufen. Alles andere (Liste, Spanne, Textoperationen, Herkunft) braucht
+/// die späte Entscheidung so, wie es ist.
+fn held_form_record(record: &MarkedTextRecord) -> MarkedTextRecord {
+    let ids: BTreeSet<ObjectId> = record.forms.iter().map(|(_, id)| *id).collect();
+    MarkedTextRecord {
+        forms: ids.into_iter().map(|id| (Vec::new(), id)).collect(),
+        ..record.clone()
+    }
+}
+
+/// Ein Abschnitt, dessen Spiegel erst nach der Formularschleife entschieden
+/// wird — mit genau dem, was diese Entscheidung noch braucht.
+///
+/// Gebraucht wird zweierlei: **welche Formulare** im Geltungsbereich stehen,
+/// und was zu tun ist, falls eines davon Zeichen verliert. Das Zweite steht
+/// hier **fertig entschieden** ([`MirrorFix`]) und nicht mehr als
+/// Eigenschaftsliste. Nicht mitgeführt werden deshalb
+///
+/// * die **Eigenschaftsliste** selbst: sie trägt den Spiegeltext, und der ist
+///   so lang, wie die Datei ihn macht. Je Seite eine Kopie davon war der
+///   Speicher aus Befund R1-4 (gemessen: 1 000 Seiten an **einem** Strom,
+///   3 320 MB allein für die Listen);
+/// * die **Pfade** der Platzierungen: gefragt wird nur nach der Objekt-Id,
+///   und dieselbe Id steht unter einem Spiegel oft tausendfach. Je Pfad hing
+///   daran ein eigener `Vec` auf dem Haufen;
+/// * die eigenen **Textoperationen** (`shows`): über sie ist beim Lesen der
+///   Seite bereits entschieden worden. Verliert eine von ihnen Zeichen, hat
+///   [`mirrors_to_clear`] den Abschnitt schon erledigt, und
+///   [`MirrorFixes::covers`] nimmt ihn aus der Liste; eine Seite ohne
+///   Schwärzung hat gar keine Pläne, gegen die zu prüfen wäre.
+#[derive(Debug)]
+struct DeferredMirror {
+    /// Die Formulare im Geltungsbereich, **je Formular einmal**.
+    forms: Vec<ObjectId>,
+    /// Wie viele Spiegelschlüssel in der Eigenschaftsliste standen — jetzt
+    /// gezählt, weil die Liste selbst nicht mitgeführt wird (siehe oben) und
+    /// der Bericht die Zahl braucht, falls dieser Abschnitt über einem
+    /// geschwärzten Bild hing. Ein `usize` je Abschnitt; die Decke
+    /// [`MAX_DEFERRED_MIRRORS`] rechnet damit.
+    mirror_keys: usize,
+    fix: MirrorFix,
+}
+
+impl DeferredMirror {
+    fn new(doc: &Document, owner: ObjectId, record: &MarkedTextRecord) -> Self {
+        // Über eine Menge und nicht über `Vec::dedup`: das kürzt zwar die
+        // Länge, behält aber die **Kapazität** der langen Liste.
+        let ids: BTreeSet<ObjectId> = record.forms.iter().map(|(_, id)| *id).collect();
+        Self {
+            forms: ids.into_iter().collect(),
+            mirror_keys: mirror_keys_in(&record.properties),
+            fix: mirror_fix(doc, owner, record),
+        }
+    }
+
+    /// Verliert eines der Formulare im Geltungsbereich Zeichen?
+    fn touched(&self, form_plans: &BTreeMap<ObjectId, BTreeMap<usize, Plan>>) -> bool {
+        self.forms.iter().any(|form| {
+            form_plans
+                .get(form)
+                .is_some_and(|plans| plans.values().any(|plan| plan.hidden_count() > 0))
+        })
+    }
+
+    /// Verliert eines der Formulare im Geltungsbereich **Bildpunkte**?
+    ///
+    /// Die Bildfrage geht hier denselben Weg wie die Glyphenfrage in
+    /// [`DeferredMirror::touched`] — und sie muss es. Ein Formular auf Seite 1
+    /// und 2 unter einem Spiegel auf Seite 1, geschwärzt wird auf Seite 2: für
+    /// Glyphen ist das Befund G1-A2 und gedeckt, für das Bild darin blieb der
+    /// Spiegel auf Seite 1 stehen.
+    fn touched_by_image(&self, form_image_hits: &BTreeMap<ObjectId, BTreeSet<usize>>) -> bool {
+        self.forms.iter().any(|form| {
+            form_image_hits
+                .get(form)
+                .is_some_and(|hits| !hits.is_empty())
+        })
+    }
+}
+
+/// Bucht die zurückgestellten Abschnitte einer Seite auf das dokumentweite
+/// Konto und liefert, was mitgeführt wird und was dabei wegfiel.
+fn take_deferred(
+    left: &mut usize,
+    mut deferred: Vec<DeferredMirror>,
+) -> (Vec<DeferredMirror>, usize) {
+    let dropped = deferred.len().saturating_sub(*left);
+    deferred.truncate(*left);
+    *left -= deferred.len();
+    (deferred, dropped)
+}
+
+/// Eine Seite, die neu zu schreiben ist — **nach** der Formularschleife.
+///
+/// Ein Spiegel im Seitenstrom über einem Formular ist erst entscheidbar, wenn
+/// alle Seiten gelesen sind: das Formular kann von einer späteren Seite aus
+/// Zeichen verlieren (Befund G1-A2: ein Formular auf Seite 1 und 2, unter
+/// einem Spiegel auf Seite 1, geschwärzt nur auf Seite 2 — die Glyphen
+/// verschwanden auf beiden Seiten, der Spiegel auf Seite 1 blieb mit dem
+/// Geheimnis stehen). Eine Seite zweimal neu zu schreiben ginge nicht: die
+/// Operationsindizes der Spiegel gelten nur für den unveränderten Strom.
+/// Deshalb wird beim Lesen nur gesammelt, was die Seite schon weiß, und
+/// geschrieben wird, wenn die Formularpläne vollständig sind.
+///
+/// Gespeichert wird nur, was je Seite klein ist: die Pläne der getroffenen
+/// Textoperationen, die schon entschiedenen Spiegel und die noch offenen
+/// Abschnitte über Formularen. Eine Seite ohne Schwärzung und ohne solchen
+/// Abschnitt steht gar nicht hier.
+struct PendingPage {
+    index: usize,
+    id: ObjectId,
+    plans: BTreeMap<usize, Plan>,
+    /// Beim Lesen der Seite schon entschieden.
+    mirrors: MirrorFixes,
+    /// Abschnitte über Formularen, die beim Lesen der Seite noch nicht berührt
+    /// waren — nach der Formularschleife neu befragt.
+    deferred: Vec<DeferredMirror>,
+}
+
+/// Verliert eines der Formulare im Geltungsbereich dieses Abschnitts Zeichen?
+fn touches_form_plan(
+    record: &MarkedTextRecord,
+    form_plans: &BTreeMap<ObjectId, BTreeMap<usize, Plan>>,
+) -> bool {
+    record.forms.iter().any(|(_, form)| {
+        form_plans
+            .get(form)
+            .is_some_and(|plans| plans.values().any(|plan| plan.hidden_count() > 0))
+    })
+}
+
+/// Verliert eines der Formulare im Geltungsbereich dieses Abschnitts
+/// **Bildpunkte**?
+///
+/// Dieselbe Frage wie [`touches_form_plan`], nur für Bilder statt Glyphen — und
+/// denselben Weg: über [`MarkedTextRecord::forms`], das transitiv geschlossen
+/// ist, also auch das Formular im Formular erfasst.
+///
+/// Ohne sie blieb genau der häufigste Fall offen. `/Figure <</Alt (Kontoauszug,
+/// IBAN …)>> BDC /Fm0 Do EMC` im Seitenstrom, `/Im0 Do` in `Fm0`: die Pixel
+/// fielen, der Spiegel im Seitenstrom blieb stehen. Gefragt wurde dort nur die
+/// eigene Spanne des Stroms (`image_hits`) — und die kennt nur Platzierungen
+/// desselben Stroms — und danach `form_plans`, also die **Glyphen**pläne. `Fm0`
+/// verliert kein Zeichen, hat also keinen Plan, und der Abschnitt galt als
+/// unberührt: rc 0, keine Warnung, Klartext in der Datei.
+fn touches_form_image(
+    record: &MarkedTextRecord,
+    form_image_hits: &BTreeMap<ObjectId, BTreeSet<usize>>,
+) -> bool {
+    record.forms.iter().any(|(_, form)| {
+        form_image_hits
+            .get(form)
+            .is_some_and(|hits| !hits.is_empty())
+    })
 }
 
 /// Entscheidet je Marked-Content-Abschnitt, ob sein Textspiegel weg muss.
@@ -1004,48 +1554,206 @@ struct MirrorFixes {
 /// **Und wenn die Schwärzung den Abschnitt nicht berührt**, bleibt der Spiegel
 /// unangetastet. Alle `/ActualText` vorsorglich zu löschen würde getaggte PDFs
 /// für Screenreader unbrauchbar machen, ohne irgendetwas zu schützen.
+///
+/// **Berührt** ist ein Abschnitt, wenn eine seiner eigenen Textoperationen
+/// Glyphen verliert **oder** eines der Form-XObjects in seinem Geltungsbereich
+/// ([`MarkedTextRecord::forms`], `form_plans`). Ein
+/// `/Span <</ActualText (IBAN …)>> BDC /Fm0 Do EMC` setzt seine Glyphen im
+/// Formular; wer nur `shows` fragte, ließe den Spiegel im Seitenstrom stehen,
+/// während die Glyphen im Formular verschwinden — gelesen, aber nicht
+/// geleert, und das wäre ein neues Leck. Damit das auch für ein Formular
+/// gilt, das erst eine **spätere** Seite trifft, werden die Seiten erst nach
+/// der Formularschleife geschrieben ([`PendingPage`]); und ein Formular,
+/// dessen Spiegel über einem inneren Formular steht, wird dafür selbst neu
+/// geschrieben, auch wenn es keinen eigenen Plan hat (Befund G1-A1).
+///
+/// **Und wenn ein Bild darunter liegt.** Ein
+/// `/Figure <</Alt (Kontoauszug, IBAN …)>> BDC /Im0 Do EMC` hat **keine**
+/// Glyphen: `shows` ist leer, `forms` ist leer, und einmal war der Abschnitt
+/// damit „unberührt“ — die Pixel des Bildes wurden überschrieben, der Klartext
+/// daneben blieb stehen (Register #20, `leaks` fand ihn im Seitenstrom).
+///
+/// Die Bildfrage geht deshalb **denselben Weg wie die Glyphenfrage**, und zwar
+/// beide Wege:
+///
+/// * `image_hits` — die Operationsindizes der geschwärzten Bildplatzierungen
+///   *dieses* Stroms, gefragt gegen die Spanne des Abschnitts
+///   ([`MarkedTextRecord::range`]) und nicht als Liste: ein Bild bringt keine
+///   Glyphen mit, die einem Spiegel zuzuordnen wären;
+/// * `form_image_hits` über [`touches_form_image`] — die Formulare im
+///   Geltungsbereich, genau wie [`touches_form_plan`] es für die Glyphen tut.
+///   Ohne das blieb der häufigste Fall offen: `… BDC /Fm0 Do EMC` im
+///   Seitenstrom und `/Im0 Do` in `Fm0`. Für ein Formular, das erst eine
+///   **spätere** Seite trifft, gilt dasselbe über
+///   [`DeferredMirror::touched_by_image`].
+///
+/// **Was „geschwärzt“ hier heißt.** Dass Bildpunkte gefallen sind — nicht,
+/// dass eine Fläche getroffen war. `image_hits` und `form_image_hits` kommen
+/// aus [`crate::image`], das die Pixel selbst überschrieben hat
+/// ([`crate::image::ImageOutcome::page_image_hits`]). Geschätzt wurde die Frage
+/// zweimal und war zweimal falsch: an der **Hülle** der Platzierung (in den
+/// Ecken eines gedrehten Bildes liegt kein Bildpunkt — ein unversehrtes Bild
+/// verlor seinen Spiegel) und an ihrer **Fläche** (an deren Kante fiel ein
+/// Bildpunkt und der Spiegel blieb stehen; und ein Rechteck zwischen den
+/// Gitterlinien eines groben Bildes nahm den Spiegel, ohne dass ein Bildpunkt
+/// fiel).
+///
+/// Die eine grobe Stelle bleibt und **steht daneben**: bleiben die Pixel
+/// stehen, weil sich das Bild nicht dekodieren ließ, fällt der Spiegel
+/// trotzdem. Dort weiß niemand, was fiel; dort steht über das Bild selbst eine
+/// Warnung, und ohne `--allow-undecodable-images` bricht der Lauf sogar ab.
+///
+/// **Die Aufrufer.** `callers` sind die Seiten, die den Strom platzieren —
+/// leer für einen Seitenstrom. Trägt ein Formular `/Properties /MC0` selbst
+/// und die platzierende Seite eine gleichnamige Liste, ist die der Seite
+/// überschattet; sie steht trotzdem mit demselben Text in der Datei. Sie
+/// fällt mit (Register #87) — dieselbe Abwägung wie bei der überschatteten
+/// Kopie entlang **einer** Kette in [`property_list_homes`].
+#[allow(clippy::too_many_arguments)]
 fn mirrors_to_clear(
+    doc: &Document,
+    owner: ObjectId,
+    callers: &[ObjectId],
     marked: &[MarkedTextRecord],
     stream: StreamKey,
     plans: &BTreeMap<usize, Plan>,
+    form_plans: &BTreeMap<ObjectId, BTreeMap<usize, Plan>>,
+    form_image_hits: &BTreeMap<ObjectId, BTreeSet<usize>>,
+    image_hits: &BTreeSet<usize>,
 ) -> MirrorFixes {
     let mut fixes = MirrorFixes::default();
     for record in marked {
         if record.stream != stream {
             continue;
         }
-        let touched = record
-            .shows
-            .iter()
-            .any(|index| plans.get(index).is_some_and(|plan| plan.hidden_count() > 0));
+        // Die Bildfrage zuerst, weil sie gezählt wird: was über einem
+        // geschwärzten Bild stand, ist ein Verlust an Barrierefreiheit und
+        // gehört in den Bericht — auch dann, wenn der Abschnitt schon wegen
+        // seiner Glyphen gefallen wäre. Gefragt werden **beide** Wege: die
+        // eigene Spanne dieses Stroms und die Formulare im Geltungsbereich.
+        let over_blacked_image = image_hits.range(record.range.clone()).next().is_some()
+            || touches_form_image(record, form_image_hits);
+        let touched = over_blacked_image
+            || record
+                .shows
+                .iter()
+                .any(|index| plans.get(index).is_some_and(|plan| plan.hidden_count() > 0))
+            || touches_form_plan(record, form_plans);
         if !touched {
             continue;
         }
-        match record.property_id {
-            // Eigenes Objekt: dort bereinigen. Wird dieselbe Liste von einem
-            // zweiten, unberührten Abschnitt benutzt, verliert auch der seinen
-            // Spiegel — eine geteilte Liste ist ein geteilter Spiegel, und zu
-            // viel entfernt ist hier die sichere Richtung.
-            Some(id) => {
-                fixes.objects.insert(id);
-            }
-            None => {
-                let (cleaned, dropped) = clean_property_list(&record.properties);
-                if !dropped.is_empty() {
-                    fixes.warnings.push(format!(
-                        "Die Eigenschaftsliste einer Marked-Content-Auszeichnung enthielt \
-                         neben dem Textspiegel indirekte Verweise ({}). Eine Liste, die \
-                         inline im Strom steht, darf keine enthalten (PDF 32000-1, 14.6.2); \
-                         sie sind deshalb mit entfallen. Bitte prüfen, ob die Datei dadurch \
-                         anders aussieht.",
-                        dropped.join(", ")
-                    ));
-                }
-                fixes.inline.insert(record.op_index, cleaned);
+        if over_blacked_image {
+            fixes.image_alt_texts += mirror_keys_in(&record.properties);
+        }
+        mirror_fix(doc, owner, record).apply(&mut fixes);
+        if let Some(name) = &record.property_name {
+            for caller in callers {
+                fixes.homes.extend(property_list_homes(doc, *caller, name));
+                fixes
+                    .objects
+                    .extend(property_list_objects(doc, *caller, name));
             }
         }
     }
     fixes
+}
+
+/// Wie viele Spiegelschlüssel stehen in dieser Eigenschaftsliste?
+///
+/// Gezählt wird, was [`clean_property_list`] entfernt — dieselbe Liste an
+/// beiden Stellen, damit die Zahl im Bericht und der Eingriff in der Datei
+/// nicht auseinanderlaufen können.
+fn mirror_keys_in(properties: &Dictionary) -> usize {
+    properties
+        .iter()
+        .filter(|(key, _)| MIRROR_KEYS.contains(&key.as_slice()))
+        .count()
+}
+
+/// Was an **einem** berührten Abschnitt zu tun ist — fertig entschieden, ohne
+/// die Eigenschaftsliste selbst festzuhalten.
+///
+/// Getrennt von [`mirrors_to_clear`], weil dieselbe Entscheidung an zwei
+/// Zeitpunkten fällt: beim Lesen der Seite, und für die zurückgestellten
+/// Abschnitte nach der Formularschleife ([`DeferredMirror`]). Der zweite
+/// Zeitpunkt darf die Liste nicht mehr vorliegen haben — sie trägt den
+/// Spiegeltext, und den je Seite mitzuschleppen war der Speicher aus Befund
+/// R1-4.
+#[derive(Debug)]
+enum MirrorFix {
+    /// Eigenes Objekt: dort bereinigen. Wird dieselbe Liste von einem
+    /// zweiten, unberührten Abschnitt benutzt, verliert auch der seinen
+    /// Spiegel — eine geteilte Liste ist ein geteilter Spiegel, und zu viel
+    /// entfernt ist hier die sichere Richtung.
+    Object(ObjectId),
+    /// Inline in den Strom zurückschreiben — dazu die Fundorte im
+    /// Ressourcenverzeichnis, an denen dieselbe Liste sonst stehen bliebe.
+    Inline {
+        op_index: usize,
+        cleaned: Dictionary,
+        homes: Vec<MirrorHome>,
+        warning: Option<String>,
+    },
+}
+
+impl MirrorFix {
+    fn apply(self, fixes: &mut MirrorFixes) {
+        match self {
+            MirrorFix::Object(id) => {
+                fixes.objects.insert(id);
+            }
+            MirrorFix::Inline {
+                op_index,
+                cleaned,
+                homes,
+                warning,
+            } => {
+                fixes.homes.extend(homes);
+                if let Some(warning) = warning {
+                    fixes.warnings.push(warning);
+                }
+                fixes.inline.insert(op_index, cleaned);
+            }
+        }
+    }
+}
+
+/// Entscheidet den Fundort eines berührten Abschnitts.
+fn mirror_fix(doc: &Document, owner: ObjectId, record: &MarkedTextRecord) -> MirrorFix {
+    if let Some(id) = record.property_id {
+        return MirrorFix::Object(id);
+    }
+    // Eine Liste, die über `/Resources /Properties` benannt war, steht
+    // **auch** im Verzeichnis. Die Operation neu zu schreiben nimmt sie dort
+    // nicht mit: bis Fix-Runde 6 fand `leaks` den Klartext danach unverändert
+    // im Ressourcenobjekt, ohne Warnung und mit Rückgabewert 0 (Register #34,
+    // Befund Q3-5). Gesucht wird der Fundort in allen vier Wegen gleich —
+    // Seite, Formular, geerbt vom Seitenbaum, geteiltes `/Properties`-Objekt.
+    let homes = match &record.property_name {
+        // Gesucht wird ab dem Eigentümer der Ressourcen, die beim Lesen
+        // **galten** — bei einem Form-XObject ohne eigenes `/Resources` ist
+        // das die platzierende Seite, nicht das Formular (PDF 32000-1,
+        // 8.10.1; Befund R1-1). `owner` bleibt nur der Rückfall für
+        // Datensätze ohne Seitenkontext (`crate::content::interpret`).
+        Some(name) => property_list_homes(doc, record.property_owner.unwrap_or(owner), name),
+        None => Vec::new(),
+    };
+    let (cleaned, dropped) = clean_property_list(&record.properties);
+    let warning = (!dropped.is_empty()).then(|| {
+        format!(
+            "Die Eigenschaftsliste einer Marked-Content-Auszeichnung enthielt neben dem \
+             Textspiegel indirekte Verweise ({}). Eine Liste, die inline im Strom steht, \
+             darf keine enthalten (PDF 32000-1, 14.6.2); sie sind deshalb mit entfallen. \
+             Bitte prüfen, ob die Datei dadurch anders aussieht.",
+            dropped.join(", ")
+        )
+    });
+    MirrorFix::Inline {
+        op_index: record.op_index,
+        cleaned,
+        homes,
+        warning,
+    }
 }
 
 /// Entfernt die Textschlüssel aus einer Eigenschaftsliste.
@@ -1090,6 +1798,39 @@ fn rebuild_marked(op: &Operation, cleaned: &Dictionary) -> Operation {
     )
 }
 
+/// Leert den Textspiegel einer Eigenschaftsliste, die **direkt** in einem
+/// `/Properties`-Dictionary steht.
+///
+/// Der Weg besteht aus direkten Schlüsseln (siehe [`MirrorHome`]); bricht er
+/// ab, ist nichts zu tun — dann sieht die Datei anders aus als beim Lesen, und
+/// blind irgendwo zu löschen wäre schlimmer als nichts zu tun.
+///
+/// Teilen sich zwei Seiten das Verzeichnis, wirkt das auf beide. Das ist
+/// dieselbe Richtung wie bei einer geteilten Liste mit eigener Objekt-Id
+/// ([`clear_mirror_object`]): lieber ein Spiegel zu viel entfernt als einer,
+/// der weiter das Geheimnis nennt.
+fn clear_mirror_at(doc: &mut Document, home: &MirrorHome) {
+    let Some((last, prefix)) = home.path.split_last() else {
+        return;
+    };
+    let mut dict = match doc.objects.get_mut(&home.object) {
+        Some(Object::Dictionary(dict)) => dict,
+        Some(Object::Stream(stream)) => &mut stream.dict,
+        _ => return,
+    };
+    for key in prefix {
+        dict = match dict.get_mut(key) {
+            Ok(Object::Dictionary(inner)) => inner,
+            _ => return,
+        };
+    }
+    if let Ok(Object::Dictionary(list)) = dict.get_mut(last) {
+        for key in MIRROR_KEYS {
+            list.remove(key);
+        }
+    }
+}
+
 /// Leert den Textspiegel einer Eigenschaftsliste, die als eigenes Objekt in der
 /// Datei steht.
 fn clear_mirror_object(doc: &mut Document, id: ObjectId) {
@@ -1101,6 +1842,65 @@ fn clear_mirror_object(doc: &mut Document, id: ObjectId) {
     for key in MIRROR_KEYS {
         dict.remove(key);
     }
+}
+
+/// Nimmt einem geschwärzten Bild-XObject seinen **eigenen** Ersatztext:
+/// `/Alt` (die Beschreibung) und `/ActualText` (der Ersatz beim Kopieren) am
+/// Bilddictionary. Rückgabe: wie viele Schlüssel dort standen.
+///
+/// **Warum hier und nicht in [`crate::meta`].** `strip_metadata` weiß nichts
+/// von Schwärzungsrechtecken; es kennt keinen Unterschied zwischen dem Bild,
+/// über dem eine Schwärzung liegt, und dem Firmenlogo daneben. Wer die Pixel
+/// überschreibt, weiß es — und nur er darf entscheiden, denn ein Dokument ohne
+/// Ersatztexte ist für blinde Leser unbrauchbar. Genau deshalb steht der
+/// Schlüssel `/Alt` auch nicht in `crate::meta::ANNOTATION_TEXT_KEYS`: dort
+/// wäre er „Text an einer Annotation ohne Erscheinungsstrom“ und erzeugte am
+/// Bild einen strukturellen Fehlalarm (Befund #14).
+///
+/// **Wann das überhaupt etwas zu tun findet.** Ein Bild, dessen Pixel gefallen
+/// sind, hat seinen Ersatztext schon verloren: [`crate::image`] baut das
+/// Dictionary eines neu kodierten Bildes aus den Bildeigenschaften neu auf.
+/// Diese Stelle greift also dort, wo das Dictionary **stehen bleibt** — bei
+/// einem Bild, dessen Pixel nicht überschrieben wurden, weil es sich nicht
+/// dekodieren ließ oder seine Maske das Neukodieren nicht überstanden hätte.
+/// Genau diese Bilder benennt [`crate::image`] selbst
+/// ([`crate::image::ImageOutcome::undecodable_images`]), und nur sie kommen
+/// hierher.
+///
+/// **Dass die Liste von dort kommt, ist der Punkt.** Ihr Futter war einmal
+/// `ScanResult::images`, gefiltert mit `--allow-undecodable-images`. Das hing an
+/// zwei Dingen, die nichts mit der Sache zu tun haben: an der Betriebsart und
+/// daran, dass die Datei **getaggt** ist — ohne ein `BDC` im Strom verwarf der
+/// Scan die Platzierung, und in einem gewöhnlichen, nicht getaggten PDF blieb
+/// der Ersatztext eines stehengebliebenen Bildes stehen
+/// (`zi_b_spiegel_ueber_formular::unlesbares_bild_ohne_marked_content_\
+/// behaelt_seinen_ersatztext`). Jetzt hängt sie am Bildlauf, der die Pixel
+/// selbst angefasst hat.
+///
+/// **Hier wird grob entschieden — und was das genau heißt.** Was von einem
+/// unlesbaren Bild wirklich unter der Schwärzung lag, weiß niemand: es ließ sich
+/// nicht auspacken. Der Ersatztext fällt deshalb schon, wenn die **Hülle** der
+/// Platzierung getroffen war; über das Bild selbst steht dann eine Warnung, die
+/// es benennt. Das ist der Unterschied, auf den es ankommt: grob entscheiden
+/// ist erlaubt, wenn es gesagt wird.
+///
+/// Ein unlesbares Bild, das **mehrere Seiten** benutzen, verliert seine
+/// Beschreibung für alle: `crate::image` legt für ein Bild, das es nicht anfasst,
+/// keine Kopie an (`zh2_b_bildfrage::geteiltes_unlesbares_bild_verliert_\
+/// seinen_ersatztext_fuer_beide_seiten`). Auch das ist der Preis von
+/// `--allow-undecodable-images`; **ohne** dieses Zugeständnis bricht ein solcher
+/// Lauf ohnehin ab, diese Liste bleibt leer, und jedes Bild, dessen Bildpunkte
+/// nicht gefallen sind, behält seine Beschreibung.
+fn clear_image_alternates(doc: &mut Document, id: ObjectId) -> usize {
+    let dict = match doc.objects.get_mut(&id) {
+        Some(Object::Stream(stream)) => &mut stream.dict,
+        Some(Object::Dictionary(dict)) => dict,
+        _ => return 0,
+    };
+    [b"Alt".as_slice(), b"ActualText".as_slice()]
+        .iter()
+        .filter(|key| dict.remove(key).is_some())
+        .count()
 }
 
 /// Baut eine Text-Operation ohne die verdeckten Zeichen neu auf.
@@ -1375,10 +2175,12 @@ fn rewrite_form(
             .get_object(form_id)
             .and_then(|o| o.as_stream())
             .map_err(|e| RedactError::Pdf(e.to_string()))?;
-        stream
-            .decompressed_content()
-            .or_else(|_| stream.get_plain_content())
-            .map_err(|e| RedactError::Pdf(e.to_string()))?
+        crate::filters::decoded_content(doc, stream).ok_or_else(|| {
+            RedactError::Pdf(format!(
+                "Form-XObject {} {} ließ sich nicht dekodieren",
+                form_id.0, form_id.1
+            ))
+        })?
     };
     let decoded = decode_or_fail(&data, "Der Inhalt eines Form-XObjects")?;
     let operations = rewrite_operations(&decoded, plans, inline_images, mirrors);
@@ -1391,67 +2193,154 @@ fn rewrite_form(
     Ok(())
 }
 
+/// Die Rechtecke der Einträge eines `/Annots`-Arrays, das als eigenes Objekt
+/// dasteht — je Array einmal gelesen (Register #94).
+///
+/// Teilen sich Seiten ein solches Array, fragte [`remove_annotations`] früher
+/// je Seite jede Annotation neu nach ihrem `/Rect` und klonte dafür ihr
+/// Dictionary: Seiten × Annotationen Nachschlagen. Jetzt steht die Liste
+/// einmal da; je Seite bleibt der Vergleich mit ihren Schwärzungsbereichen.
+#[derive(Default)]
+struct AnnotRects {
+    arrays: HashMap<ObjectId, Vec<Option<Rect>>>,
+}
+
+/// Das `/Rect` eines Eintrags in `/Annots`, ohne das Dictionary zu kopieren.
+fn annotation_rect(doc: &Document, annot: &Object) -> Option<Rect> {
+    doc.dereference(annot)
+        .ok()
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(b"Rect").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| rect_from_object(o))
+}
+
 /// Entfernt Annotationen, die in einen Schwärzungsbereich ragen.
 ///
 /// `lost` bekommt je entfernter Annotation einen Kurzbeschreiber angehängt —
 /// siehe [`annotation_label`] und
 /// [`RedactionReport::removed_annotation_details`].
+///
+/// Ein `/Annots`, das als eigenes Objekt dasteht, wird an diesem Objekt
+/// bereinigt, nicht an einer Kopie für die Seite. Teilen es sich mehrere
+/// Seiten, fällt die Annotation damit aus allen — wie vorher auch, denn ihr
+/// Objekt wird gelöscht; nur steht kein toter Verweis mehr zurück und keine
+/// Kopie des Arrays je Seite in der Ausgabe (Register #94).
 fn remove_annotations(
     doc: &mut Document,
     page_index: usize,
     page_id: ObjectId,
     rects: &[Rect],
     lost: &mut Vec<String>,
+    annot_rects: &mut AnnotRects,
 ) -> Result<usize> {
     if rects.is_empty() {
         return Ok(0);
     }
-    let annots = match doc.get_dictionary(page_id).and_then(|d| d.get(b"Annots")) {
-        Ok(obj) => match doc.dereference(obj) {
-            Ok((_, Object::Array(items))) => items.clone(),
-            _ => return Ok(0),
-        },
-        Err(_) => return Ok(0),
+    let Ok(value) = doc.get_dictionary(page_id).and_then(|d| d.get(b"Annots")) else {
+        return Ok(0);
+    };
+    // Nur ein Verweis direkt auf ein Array wird an seinem Objekt bereinigt;
+    // eine Verweiskette bekommt wie vorher die Seite.
+    let shared = match value {
+        Object::Reference(id) if matches!(doc.get_object(*id), Ok(Object::Array(_))) => Some(*id),
+        _ => None,
+    };
+    let Ok((_, Object::Array(items))) = doc.dereference(value) else {
+        return Ok(0);
     };
 
-    let mut kept = Vec::new();
-    let mut removed = 0usize;
-    for annot in annots {
-        let dict = doc
-            .dereference(&annot)
-            .ok()
-            .and_then(|(_, o)| o.as_dict().ok())
-            .cloned();
-        let rect = dict
-            .as_ref()
-            .and_then(|d| d.get(b"Rect").ok())
-            .and_then(|o| doc.dereference(o).ok())
-            .and_then(|(_, o)| rect_from_object(o));
-        match rect {
-            Some(r) if rects.iter().any(|target| r.intersects(target)) => {
-                lost.push(format!(
-                    "Seite {} {}",
-                    page_index + 1,
-                    dict.as_ref()
-                        .map(|d| annotation_label(doc, d))
-                        .unwrap_or_else(|| "Annotation ohne Dictionary".into())
-                ));
-                if let Object::Reference(id) = annot {
-                    doc.objects.remove(&id);
-                }
-                removed += 1;
+    // Welche Einträge ragen in einen Bereich? Die Rechtecke eines Arrays mit
+    // eigener Id stehen einmal da; geprüft wird je Seite, kopiert wird nichts.
+    let fresh: Vec<Option<Rect>>;
+    let list: &[Option<Rect>] = match shared {
+        Some(id) => {
+            let cached = annot_rects
+                .arrays
+                .entry(id)
+                .or_insert_with(|| items.iter().map(|a| annotation_rect(doc, a)).collect());
+            if cached.len() != items.len() {
+                *cached = items.iter().map(|a| annotation_rect(doc, a)).collect();
             }
-            _ => kept.push(annot),
+            cached
         }
+        None => {
+            fresh = items.iter().map(|a| annotation_rect(doc, a)).collect();
+            &fresh
+        }
+    };
+    let mut hits: BTreeSet<usize> = BTreeSet::new();
+    let mut ids: Vec<ObjectId> = Vec::new();
+    for (index, rect) in list.iter().enumerate() {
+        let Some(rect) = rect else {
+            continue;
+        };
+        if !rects.iter().any(|target| rect.intersects(target)) {
+            continue;
+        }
+        let Some(annot) = items.get(index) else {
+            continue;
+        };
+        // Über ein anderes Array schon gelöscht: zählt nicht noch einmal.
+        let Ok((_, Object::Dictionary(dict))) = doc.dereference(annot) else {
+            continue;
+        };
+        lost.push(format!(
+            "Seite {} {}",
+            page_index + 1,
+            annotation_label(doc, dict)
+        ));
+        if let Object::Reference(id) = annot {
+            ids.push(*id);
+        }
+        hits.insert(index);
+    }
+    if hits.is_empty() {
+        return Ok(0);
     }
 
-    if removed > 0 {
-        let page = doc
-            .get_dictionary_mut(page_id)
-            .map_err(|e| RedactError::Pdf(e.to_string()))?;
-        page.set("Annots", Object::Array(kept));
+    for id in &ids {
+        doc.objects.remove(id);
     }
-    Ok(removed)
+    let keep = |index: usize| !hits.contains(&index);
+    match shared {
+        Some(array_id) => {
+            if let Ok(Object::Array(entries)) = doc.get_object_mut(array_id) {
+                let mut index = 0;
+                entries.retain(|_| {
+                    index += 1;
+                    keep(index - 1)
+                });
+            }
+            if let Some(list) = annot_rects.arrays.get_mut(&array_id) {
+                let mut index = 0;
+                list.retain(|_| {
+                    index += 1;
+                    keep(index - 1)
+                });
+            }
+        }
+        None => {
+            let kept: Vec<Object> = match doc
+                .get_dictionary(page_id)
+                .and_then(|d| d.get(b"Annots"))
+                .and_then(|o| doc.dereference(o))
+            {
+                Ok((_, Object::Array(entries))) => entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| keep(*index))
+                    .map(|(_, annot)| annot.clone())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let page = doc
+                .get_dictionary_mut(page_id)
+                .map_err(|e| RedactError::Pdf(e.to_string()))?;
+            page.set("Annots", Object::Array(kept));
+        }
+    }
+    Ok(hits.len())
 }
 
 /// Wie eine entfernte Annotation zu benennen ist: `/Subtype` und, falls
@@ -2289,6 +3178,102 @@ mod tests {
                 assert_eq!(vereinigt, runs_of(a | b, width), "Form von {a:b} | {b:b}");
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Befund G2-7: eine Annotation ohne Erscheinungsstrom
+    // -----------------------------------------------------------------------
+
+    /// Eine Annotation mit Text unter `key`, ohne `/AP`, an der Seite.
+    fn fixture_with_bare_annotation(key: &str) -> Fixture {
+        let mut f = fixture();
+        f.set_content(&text_ops(&["Kontoinhaber Max Mustermann"]));
+        let mut annot = dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Text",
+            "Rect" => vec![72.into(), 600.into(), 300.into(), 620.into()],
+        };
+        annot.set(key, Object::string_literal(format!("Notiz: {SECRET}")));
+        let annot = f.doc.add_object(annot);
+        f.doc
+            .get_dictionary_mut(f.page_id)
+            .unwrap()
+            .set("Annots", vec![Object::Reference(annot)]);
+        f
+    }
+
+    /// Die Warnung sagt, was geschieht: nicht anteilig geschwärzt, sondern
+    /// mit den Metadaten als Ganzes entfernt — und genau das ist an der
+    /// Ausgabe messbar. Sie sagt nicht mehr „nicht durchsucht“, denn das las
+    /// `redact_pipeline::coverage` als Deckungslücke (Rückgabewert 3) für
+    /// eine Datei, in der nach `strip_metadata` nichts mehr steht.
+    #[test]
+    fn annotation_ohne_ap_wird_als_ganzes_entfernt_und_so_gemeldet() {
+        for key in ["Contents", "RC", "T", "Subj", "TU", "TM"] {
+            let mut f = fixture_with_bare_annotation(key);
+            let (report, bytes) = f.redact(&[]);
+            let about_annotation: Vec<&String> = report
+                .warnings
+                .iter()
+                .filter(|w| w.contains("Erscheinungsstrom (/AP)"))
+                .collect();
+            assert_eq!(about_annotation.len(), 1, "/{key}: {:?}", report.warnings);
+            assert!(
+                about_annotation[0].contains("wird mit den Metadaten als Ganzes entfernt"),
+                "/{key}: {}",
+                about_annotation[0]
+            );
+            assert!(
+                !report
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("nicht durchsucht")),
+                "/{key}: {:?}",
+                report.warnings
+            );
+            let found = crate::leaks(&bytes, SECRET);
+            assert!(found.is_empty(), "/{key}: {found:?}");
+        }
+    }
+
+    /// Gegenrichtung: dieselbe Annotation **mit** Erscheinungsstrom gibt
+    /// diese Warnung nicht — ihr Text wird gelesen wie Seitentext.
+    #[test]
+    fn annotation_mit_ap_bekommt_die_warnung_nicht() {
+        let mut f = fixture_with_bare_annotation("Contents");
+        let font_id = f.font_id;
+        let ap = f.doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 228.into(), 20.into()],
+                "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+            },
+            b"BT /F1 10 Tf 2 5 Td (Notiz) Tj ET".to_vec(),
+        ));
+        let annot_id = match f
+            .doc
+            .get_dictionary(f.page_id)
+            .unwrap()
+            .get(b"Annots")
+            .unwrap()
+        {
+            Object::Array(items) => items[0].as_reference().unwrap(),
+            other => panic!("{other:?}"),
+        };
+        f.doc
+            .get_dictionary_mut(annot_id)
+            .unwrap()
+            .set("AP", dictionary! { "N" => ap });
+        let (report, _) = f.redact(&[]);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.contains("Erscheinungsstrom (/AP)")),
+            "{:?}",
+            report.warnings
+        );
     }
 
     /// Die Läufe wachsen mit dem, was **getroffen** ist — nicht mit der Länge

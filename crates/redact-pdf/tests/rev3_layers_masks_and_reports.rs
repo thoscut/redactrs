@@ -497,9 +497,11 @@ fn an_smask_beside_a_mask_keeps_hiding_what_it_hid() {
 #[test]
 fn a_stencil_mask_on_its_own_is_still_carried_unchanged() {
     // Die Gegenprobe: ohne `/SMask` daneben ist der `/Mask`-Strom die befolgte
-    // Maske. Er steht neben dem Bild, beschreibt es im Einheitsquadrat und muss
-    // unverändert mitgeschrieben werden — ihn in eine Alphaebene zu rechnen
-    // bräche ihn auf die Auflösung des Bildes herunter.
+    // Maske. Bis zur Spur-A-Runde 1 (Register #77) wurde er unverändert
+    // mitgeschrieben, damit er seine eigene Auflösung behält — und trug damit
+    // seine Bits (die Form) unter der Zone weiter. Seitdem geht er bei einem
+    // Bild, das wirklich geschwärzt wurde, als Alphaebene (`/SMask`) hinaus;
+    // was er verbarg, bleibt verborgen.
     let stencil = image_stream(
         8,
         8,
@@ -553,8 +555,13 @@ fn a_stencil_mask_on_its_own_is_still_carried_unchanged() {
     let (_, after) = roundtrip(&mut doc, touches_the_image());
     let dict = image_dict_of(&after);
     assert!(
-        dict.get(b"Mask").is_ok(),
-        "der Stencil-Strom ist verlorengegangen: {dict:?}"
+        dict.get(b"SMask").is_ok(),
+        "die Maske ist als Alphaebene verlorengegangen: {dict:?}"
+    );
+    assert!(
+        dict.get(b"Mask").is_err(),
+        "der Stencil-Strom steht noch unverändert in der Ausgabe — mit seinen Bits \
+         unter der Zone: {dict:?}"
     );
     let out = first_image(&after);
     for x in 0..8 {

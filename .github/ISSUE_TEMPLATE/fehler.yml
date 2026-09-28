@@ -1,0 +1,98 @@
+name: Fehlerbericht
+description: Etwas verhält sich anders als beschrieben.
+labels: ["fehler"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Vorweg zwei Dinge
+
+        **Keine echten Daten.** Kein echter Kontoauszug, keine echte IBAN, kein
+        echter Name, keine echte Adresse — auch nicht im Anhang, auch nicht
+        „nur zum Nachstellen“. Ein öffentliches Issue bleibt öffentlich: in
+        Klonen, in Archiven, in Suchmaschinen. Bau die kleinste künstliche
+        Datei nach, die den Fehler auslöst.
+
+        **Ist es eine Sicherheitslücke?** Dann bitte hier abbrechen und eine
+        [private Advisory](https://github.com/thoscut/redactrs/security/advisories/new)
+        anlegen. Das gilt für zwei Sorten Fund: *geschwärzter Text steht noch
+        in der Ausgabe*, und *eine Datei bringt das Programm zum Absturz oder
+        belegt den Rechner*.
+
+  - type: checkboxes
+    id: keine-luecke
+    attributes:
+      label: Bestätigung
+      options:
+        - label: >-
+            Der geschwärzte Text steht **nicht** noch in der Ausgabe, und die
+            Datei bringt das Programm **nicht** zum Absturz. (Trifft eines
+            davon zu: bitte als private Advisory melden, nicht hier.)
+          required: true
+        - label: >-
+            In diesem Bericht stehen **keine** echten personenbezogenen Daten.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "Ausgabe von `redact-rs --version`"
+      placeholder: "redact-rs 0.7.0"
+    validations:
+      required: true
+
+  - type: input
+    id: umgebung
+    attributes:
+      label: Betriebssystem und Bauart
+      description: >-
+        Betriebssystem, und welches Binary — `redact-rs` (Konsole),
+        `redact-rs-gui` (Fenster) oder selbst gebaut (mit/ohne Oberfläche).
+      placeholder: "Windows 11, redact-rs-gui.exe aus dem Release-ZIP"
+    validations:
+      required: true
+
+  - type: textarea
+    id: befehl
+    attributes:
+      label: Der Aufruf
+      description: >-
+        Die vollständige Kommandozeile bzw. die Klickfolge in der Oberfläche.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: erwartet-tatsaechlich
+    attributes:
+      label: Was passiert — und was passieren sollte
+      description: >-
+        Ausgabe des Programms wörtlich, nicht sinngemäß, inklusive
+        Rückgabewert (`echo $?`), falls er eine Rolle spielt.
+    validations:
+      required: true
+
+  - type: textarea
+    id: nachstellen
+    attributes:
+      label: Wie man es nachstellt
+      description: >-
+        Am hilfreichsten ist die kleinste Datei, an der es auftritt. Zum
+        Bauen einer Testdatei ohne echte Daten reicht meist
+        `cargo run --release -p redact-pdf --example gen10 -- gross.pdf 10`
+        oder ein von Hand geschriebenes PDF.
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        **Zur Nachprüfung selbst.** Ob eine Zeichenkette wirklich aus einer
+        Datei verschwunden ist, beantwortet in diesem Projekt genau ein
+        Maßstab: `redact-rs <datei> --check-leaks "<text>"` (dahinter steckt
+        `redact_pdf::leaks`). `pdftotext | grep` und `strings` geben
+        nachweislich falsche Entwarnung — die Messung dazu steht im README
+        unter „Prüfen, ob die Schwärzung gewirkt hat“. Ein Bericht, der sich
+        auf `pdftotext` stützt, wird zuerst darauf hin nachgemessen.

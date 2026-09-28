@@ -1,10 +1,15 @@
 //! redact-rs — lokales Schwärzen sensibler Daten in PDF-Dokumenten.
 
-#![forbid(unsafe_code)]
+// `deny` statt `forbid`: genau eine Funktion braucht `unsafe`, und sie trägt
+// die Ausnahme selbst — `dumpable::deny_core_dumps`, der `prctl`-Aufruf, der
+// den Kernabzug abschaltet. Jede andere Stelle im Crate bleibt verboten, und
+// die übrigen sieben Crates stehen unverändert unter `forbid`.
+#![deny(unsafe_code)]
 
 mod batch;
 mod check;
 mod cli;
+mod dumpable;
 
 use std::process::ExitCode;
 
@@ -29,7 +34,7 @@ pub const EXIT_USAGE: u8 = 2;
 /// Die Ausgabe ist geschrieben, und was gefunden wurde, ist geschwärzt. Für
 /// einen Teil des Dokuments konnte die Analyse aber nicht einstehen: ein Font
 /// ohne `/ToUnicode`, ein Form-XObject unterhalb der Verschachtelungsgrenze,
-/// ein Kachelmuster mit Text, eine Annotation ohne Erscheinungsstrom. Dort kann
+/// ein Kachelmuster mit Text, ein XObject ohne bekanntes `/Subtype`. Dort kann
 /// etwas stehen geblieben sein, ohne dass es jemand gemerkt hätte.
 ///
 /// ## Warum ein eigener Wert und nicht die 2
@@ -63,9 +68,37 @@ pub const EXIT_USAGE: u8 = 2;
 ///
 /// Ein Skript unterscheidet damit drei Fälle, ohne die Ausgabe zu lesen:
 /// `0` sauber (im Rahmen der geprüften Liste), `3` Fund, alles andere Fehler.
+///
+/// ## Der dritte Fall: `--check-leaks` konnte eine Stelle nicht prüfen
+///
+/// Zwei Grenzen können die Suche an einer Stelle aussteigen lassen. Die
+/// **Entpackgrenze**: die Suche entpackt in Summe höchstens
+/// `--max-decompressed-mb`; ein Strom, der das Restbudget sprengte, wurde
+/// nicht entpackt, und „nicht gefunden“ sagt über ihn nichts. Und die
+/// **Verschachtelungstiefe** der Objektsicht: unterhalb davon liest sie nicht
+/// weiter.
+/// Beides ist dieselbe Nachricht wie eine Deckungslücke beim Schwärzen —
+/// „verarbeitet, aber nicht vollständig geprüft“ — und bekommt dieselbe Zahl,
+/// auch ohne Fund. Die Stellen stehen als `NICHT GEPRÜFT: …` in der Ausgabe;
+/// siehe `check::report`.
 pub const EXIT_INCOMPLETE: u8 = 3;
 
 fn main() -> ExitCode {
+    // Als Allererstes, noch vor dem Lesen der Kommandozeile: alles danach
+    // hielte den Klartext des Dokuments — und ein Absturz dort schriebe ihn
+    // in einen Kernabzug. Siehe `dumpable`.
+    if dumpable::deny_core_dumps() == dumpable::CoreDumps::Failed {
+        // Nur bei `Failed`. `Unavailable` (Windows) wäre eine Warnung, die
+        // bei jedem Lauf erschiene und die niemand befolgen kann — sie
+        // trainierte bloss an, Warnungen zu überlesen. Dieses Restrisiko
+        // steht in SECURITY.md, nicht in der Konsole.
+        eprintln!(
+            "Warnung: Kernabzüge liessen sich nicht abschalten. Stürzt dieser Lauf ab, \
+             kann der Abzug den Inhalt des Dokuments und ein eingegebenes Passwort \
+             enthalten."
+        );
+    }
+
     let cli = Cli::parse();
     match dispatch(&cli) {
         Ok(code) => code,
@@ -140,7 +173,11 @@ fn dispatch(cli: &Cli) -> Result<ExitCode> {
         let outcome = redact_pipeline::run(&cli.config_for(&settings, input))?;
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&outcome)?);
-        } else if !cli.quiet {
+        } else if cli.quiet {
+            // `--quiet` nimmt die Zusammenfassung weg, nicht den Vorbehalt.
+            // Siehe [`report_warnings`].
+            report_warnings(&outcome, true);
+        } else {
             report(&outcome);
         }
         // Eine Datei, die nur teilweise durchsucht werden konnte, ist kein
@@ -304,15 +341,55 @@ fn report(outcome: &Outcome) {
             }
         }
     }
-    // Warnungen bleiben Warnungen — aber die, für die der Rückgabewert
-    // anspringt, werden auch als solche ausgewiesen. Sonst stünde die
-    // wichtigste Zeile des Laufs zwischen Mitteilungen über Bildkodierung.
+    report_warnings(outcome, false);
+}
+
+/// Die Warnungen eines Laufs nach stderr.
+///
+/// Warnungen bleiben Warnungen — aber die, für die der Rückgabewert anspringt,
+/// werden auch als solche ausgewiesen. Sonst stünde die wichtigste Zeile des
+/// Laufs zwischen Mitteilungen über Bildkodierung.
+///
+/// # Warum `--quiet` die Deckungslücken trotzdem druckt
+///
+/// `nur_lücken` ist die Fassung für `--quiet`, und sie ist keine neue
+/// Entscheidung, sondern das Nachziehen einer bereits getroffenen. Gemessen an
+/// **derselben** Datei mit `/MediaBox [0 0 0 0]`:
+///
+/// ```text
+/// $ redact-rs e1.pdf -o o1.pdf -f --quiet          # eine Datei
+/// $ echo $?
+/// 3                                                 # sonst nichts
+/// $ redact-rs e1.pdf e2.pdf -f --quiet             # zwei Dateien
+/// NICHT VOLLSTÄNDIG GEPRÜFT e1.pdf: Seite 1: Unbrauchbare MediaBox (0 x 0) …
+/// NICHT VOLLSTÄNDIG GEPRÜFT e2.pdf: Seite 1: Unbrauchbare MediaBox (0 x 0) …
+/// ```
+///
+/// Derselbe Befund, derselbe Schalter, und ob er zu lesen ist, hing daran, wie
+/// viele Dateien auf der Kommandozeile standen: `batch::run` druckt ihn seit
+/// jeher „auch mit `--quiet` und auch mit `--json`“, die Einzeldatei schwieg.
+///
+/// Und die Entscheidung ist auch für sich richtig. Wer `--quiet` setzt, will
+/// die Zusammenfassung nicht — Seitenzahl, Trefferzahl, Metadaten, „Ausgabe:
+/// …“. Für die Stapelnutzerin ist der Rückgabewert 3 dagegen der Grund, weshalb
+/// sie die Datei anfassen muss, und **welche Stelle** gemeint ist, steht
+/// nirgends sonst: eine Schleife `for f in *.pdf; do redact-rs "$f" … --quiet;
+/// done` verwirft die Rückgabewerte der einzelnen Läufe ohnehin. Dasselbe
+/// Argument trägt schon `--check-leaks`, wo ein Fund auch bei `--quiet`
+/// gedruckt wird — er ist die Nachricht, wegen der es den Schalter gibt.
+///
+/// Gewöhnliche Warnungen (neu kodiertes Bild, `--no-patterns`, Koordinaten
+/// neben dem Blatt) bleiben unter `--quiet` still. Sonst wäre `--quiet`
+/// wirkungslos, und ein Vorbehalt, der bei jeder Datei anspringt, wird
+/// weggedrückt — genau die Erwägung, die [`redact_pipeline::coverage`] für den
+/// Rückgabewert anstellt.
+fn report_warnings(outcome: &Outcome, nur_lücken: bool) {
     for warning in &outcome.warnings {
-        let marke = if redact_pipeline::is_coverage_gap(warning) {
-            "NICHT GEPRÜFT"
-        } else {
-            "Warnung"
-        };
+        let lücke = redact_pipeline::is_coverage_gap(warning);
+        if nur_lücken && !lücke {
+            continue;
+        }
+        let marke = if lücke { "NICHT GEPRÜFT" } else { "Warnung" };
         eprintln!("{marke}: {}", safe_text(warning));
     }
     let gaps = outcome.coverage_gaps().len();

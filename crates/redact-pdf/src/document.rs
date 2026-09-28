@@ -13,7 +13,7 @@
 //! geht durch den einen Schreibpfad [`write_file`].
 
 use std::collections::BTreeSet;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use lopdf::{Document, Object, ObjectId};
@@ -51,15 +51,165 @@ pub struct Limits {
     pub max_nesting_depth: usize,
     /// Summe der **entpackten** Bytes über alle Streams der Datei.
     pub max_decompressed_bytes: u64,
-    /// Davon: die Streams, die anschließend als PDF-Syntax geparst werden
-    /// (Objekt-Streams und Content-Streams).
+    /// Alles, woraus PDF-**Syntax** wird — zwei Klassen:
     ///
-    /// Diese Streams sind der teure Teil: aus einem Byte Content-Stream werden
-    /// im Speicher rund 60 Byte `lopdf::content::Operation`. Deshalb hat diese
-    /// Klasse ein eigenes, sehr viel engeres Budget als der Rest (Bilder,
-    /// Schriften, eingebettete Dateien), der nur gespeichert wird.
+    /// 1. die Streams, die geparst werden (Objekt- und Content-Streams);
+    /// 2. der **Rumpf der Datei selbst**: Objektköpfe, Dictionaries, Arrays,
+    ///    Querverweistabelle, Trailer — alles, was nicht Stream-Nutzlast ist.
+    ///
+    /// Beides ist der teure Teil. Aus einem Byte Content-Stream werden im
+    /// Speicher rund 60 bis 100 Byte `lopdf::content::Operation`; aus einem
+    /// Dictionary-Eintrag von 5 Byte werden **197 Byte** `lopdf::Object` samt
+    /// Schlüssel und Tabellenreserve. Deshalb hat diese Klasse ein eigenes,
+    /// sehr viel engeres Budget als der Rest (Bilder, Schriften, eingebettete
+    /// Dateien), der nur gespeichert wird.
+    ///
+    /// **Klasse 2 fehlte früher.** Gezählt wurden nur Streams — eine
+    /// unkomprimierte Datei aus lauter Dictionaries sah das Budget also gar
+    /// nicht. Gemessen: 44,3 MB Quelle ergaben ein `Document` von 1 804 MB
+    /// (Faktor 40,7) und einen Lauf mit 3 756 MB Spitzenspeicher und
+    /// Rückgabewert 0. Dieselbe Bombe in einem Objekt-Stream wurde seit jeher
+    /// abgelehnt; der Unterschied war allein, ob sie komprimiert war. Die
+    /// Begründung im Langen steht in
+    /// `redact-pdf/tests/rumpf_im_parse_budget.rs`.
+    ///
+    /// **Was dieses Budget allein nicht kann.** Es zählt *Dateibytes* und muss
+    /// dafür einen Aufblähfaktor unterstellen. Der ist keine Konstante — er
+    /// hängt an der **Form** der Syntax, nicht an ihrer Länge, und schwankt
+    /// gemessen um den Faktor 274. Deshalb steht neben dieser Buchhaltung eine
+    /// zweite, die den Faktor rechnet, statt ihn zu unterstellen; sie hängt am
+    /// selben Schalter. Siehe [`OBJEKTSPEICHER_JE_BUDGETBYTE`].
     pub max_parsed_bytes: u64,
 }
+
+/// Wie viel **Objektspeicher** je Byte Parse-Budget zugestanden wird.
+///
+/// ## Das ist die Zahl, die vorher stillschweigend unterstellt wurde
+///
+/// [`Limits::max_parsed_bytes`] zählt Dateibytes und unterstellt damit einen
+/// begrenzten Aufblähfaktor — geprüft hat ihn niemand. Genau das war die
+/// Lücke: eine Datei aus reinem Rumpf, 16 761 999 Byte und damit **innerhalb**
+/// des 16-MiB-Budgets, gefüllt mit leeren Arrays `[[][][]…]`, lief mit
+/// Rückgabewert 0 durch und belegte dabei **5 739 MB** — über mehrere Läufe
+/// 11 bis 26 s, die Wanduhr schwankt mit der Fremdlast, der Speicher nicht.
+/// Dieselbe Bauart mit 21,4 MB wurde abgelehnt: die Decke griff, sie hing nur
+/// an der falschen Größe. Jetzt wird dieselbe Datei bei 22 MB abgelehnt, in
+/// unter 0,2 s.
+///
+/// Hier steht der Faktor jetzt ausdrücklich da und wird geprüft. Gemessen mit
+/// zählendem Allokator an 4-MB-Dateien gleicher Größe (`Document` nach
+/// `load_mem`, geteilt durch die Dateigröße):
+///
+/// | Form | `Document` | Byte je Dateibyte |
+/// |---|---:|---:|
+/// | `[[][][]…]` — leere Arrays | 1 204,7 MB | **301,6** |
+/// | `[/a/a/a…]` — Namen | 300,2 MB | 75,2 |
+/// | `[0 0 0…]` — Zahlen | 292,6 MB | 73,3 |
+/// | `<</ab 0 …>>` — Dictionary-Einträge | 176,1 MB | 44,1 |
+/// | `[<<>><<>>…]` — leere Dictionaries | 146,7 MB | 36,7 |
+/// | `[1 0 R …]` — Verweise | 146,0 MB | 36,5 |
+/// | eine 800-Byte-Zeichenkette | 4,6 MB | 1,1 |
+///
+/// 274-facher Unterschied bei identischer Dateigröße. Ein Faktor ist also
+/// nichts, was sich aus der Dateigröße ablesen ließe — er hängt an der
+/// **Form**. Deshalb wird er nicht geschätzt, sondern beim Lauf über die
+/// Rohbytes **gerechnet**: [`OBJEKT_BYTES`] je Objekt, [`ARRAY_BYTES`] je
+/// Array (siehe [`wortanfang`]). Dass diese Rechnung nie unter dem wirklich
+/// belegten Speicher liegt — im engsten Fall 2 % darüber —, hält
+/// `redact-pdf/tests/za_objektspeicher_gerechnet.rs` fest.
+///
+/// ## Warum 60
+///
+/// Die Decke ist `max_parsed_bytes × 60`, bei der Vorgabe also **960 MB**
+/// gerechneter Objektspeicher. Sie liegt zwischen dem Teuersten, was dieser
+/// Baum ausdrücklich durchlassen *will*, und dem Billigsten, was er ablehnen
+/// *muss*. Alles gemessen; die Spitzenwerte sind `ru_maxrss` eines
+/// Release-Laufs `redact-rs DATEI -o … -f -q`, MB heißt hier wie überall
+/// 1024², und „gerechnet“ ist der Wert dieser Buchhaltung:
+///
+/// | Datei (Byte) | gerechnet | Spitze vorher | vorher | nachher |
+/// |---|---:|---:|---|---|
+/// | 13 500 654, ein Seiteninhalt mit 1,5 Mio. Operationen | 915 MB | 2 178 MB | rc 0 | **rc 0** |
+/// | 16 660 959, `[<<>><<>>…]` | Byte-Budget bindet | 1 013 MB | rc 0 | **rc 0** |
+/// | 16 660 891, `<</ab 0 …>>` | 988 MB | 1 383 MB | rc 0 | rc 1 |
+/// | 16 661 481, `[1 0 R …]` | 1 241 MB | 711 MB | rc 0 | rc 1 |
+/// | 16 660 959, `[0 0 0 …]` | 1 241 MB | 1 920 MB | rc 0 | rc 1 |
+/// | 16 660 959, `[/a/a …]` | 1 241 MB | 2 404 MB | rc 0 | rc 1 |
+/// | 16 761 999, `[[][][]…]` | 4 896 MB | **5 739 MB** | rc 0 | rc 1, 22 MB |
+///
+/// **Nach unten** hält der lange, ehrliche Seiteninhalt die Decke fest: der
+/// Test `resource_bombs::a_long_honest_content_stream_is_not_mistaken_for_a_fanout`
+/// verlangt ausdrücklich, dass ein einzelner Strom mit sehr vielen Operationen
+/// durchläuft. Er kostet gerechnet 915 MB — jede kleinere Decke bräche ihn.
+/// **Nach oben** hält ihn die Dictionary-Bombe fest, die mit 988 MB knapp
+/// darüber liegt.
+///
+/// Die Zeile mit 711 MB zeigt den Preis der Vorsicht: `1 0 R` ist ein Objekt
+/// und zählt drei Wörter, deshalb wird diese Datei abgelehnt, obwohl sie
+/// gemessen unter der Decke bliebe. Ein Abzug für das `R` ließe sich mit
+/// `R R R R …` dazu missbrauchen, echte Objekte wegzurechnen; Wörter dürfen
+/// nur addiert werden, und eine Datei aus 2,7 Millionen Verweisen ist kein
+/// Dokument.
+///
+/// Der Faktor gilt gegen das **Budget**, nicht gegen die Dateigröße: eine
+/// Datei unter dem Budget darf einen höheren Eigenfaktor haben — der ehrliche
+/// Seiteninhalt oben hat 68 — und kommt trotzdem durch.
+///
+/// Für gewöhnliche Dokumente ändert sich damit nichts: bei allen sechs
+/// Gegenproben (`--write-demo`, 500 und 2 000 Textseiten, 200 Scanseiten mit
+/// Bildern, Querverweis-Strom, 2 937 Textseiten) bindet weiterhin das
+/// **Byte-Budget** und nicht diese Decke — nachgemessen in
+/// `za_objektdecke::bei_gewoehnlichen_dokumenten_bindet_weiter_das_byte_budget`.
+///
+/// ## Wo es doch enger wird, und was das kostet
+///
+/// Ein **sehr dichter Seiteninhalt** stößt jetzt vor dem Byte-Budget an. Bei
+/// der Dichte von `0 0 0 rg\n` (vier Wörter je neun Byte) liegt die Grenze
+/// rechnerisch bei 14 155 776 Byte Strom; gemessen läuft eine Datei mit
+/// 13,5 MB Strom durch und eine mit 14,0 MB nicht mehr — vorher lief die mit
+/// 14,6 MB bei Rückgabewert 0 auf 2 469 MB. Das ist der Preis dafür, dass die
+/// 16-MB-Datei aus leeren Arrays nicht mehr 5 739 MB belegt: beide sind
+/// Syntax, und eine Decke, die nur die eine Form kennt, wäre wieder eine über
+/// der falschen Menge. Wer solche Dateien wirklich verarbeiten muss, hebt
+/// `--max-parsed-mb` an — mit 24 läuft die 14,6-MB-Datei wieder durch.
+///
+/// ## Woran die Decke damit hängt
+///
+/// An `--max-parsed-mb`, und zwar in beiden Einheiten. Das ist Absicht: der
+/// Schalter ist die eine Stelle, an der jemand sagt „so viel Syntax lasse ich
+/// zu“, und er soll nicht in der einen Einheit wirken und in der anderen nicht.
+/// Eine zweite Schraube wäre eine zweite Stelle, an der die Zahlen
+/// auseinanderlaufen — und für ein wirklich so gebautes Dokument gäbe es sonst
+/// gar keinen Weg mehr.
+///
+/// ## Was die Zahl **nicht** ist
+///
+/// Kein Spitzenbedarf eines Laufs. Gerechnet wird, was aus der Syntax an
+/// `Object`-Werten entsteht, und sonst nichts — die Tabelle oben zeigt den
+/// Abstand: beim Seiteninhalt liegt der gemessene Spitzenwert beim 2,4-fachen
+/// des gerechneten, beim Rumpf beim 1,2- bis 1,6-fachen. Es ist auch keine
+/// Messung: die Summe hängt an der Datei, nicht an Allokator oder Zielsystem.
+///
+/// Die Messreihe steht in `redact-pdf/tests/za_objektdecke.rs`.
+const OBJEKTSPEICHER_JE_BUDGETBYTE: u64 = 60;
+
+/// Was ein `lopdf::Object` im geladenen Dokument kostet — der Betrag, mit dem
+/// [`Prescan::walk`] jedes Wort der Syntax verbucht.
+///
+/// Gemessen mit zählendem Allokator: **153,6** Byte je Zahl, Name, Verweis
+/// oder leerem Dictionary in einem Array; ein Dictionary-Eintrag kostet 231
+/// Byte und besteht aus zwei Wörtern (Schlüssel und Wert), bekommt also
+/// 2 × 160 verbucht. 160 liegt über beidem.
+pub const OBJEKT_BYTES: u64 = 160;
+
+/// Was ein **Array** zusätzlich kostet.
+///
+/// Ein leeres Array `[]` ist zwei Byte in der Datei und kostet gemessen
+/// **632,4** Byte: sein eigener `Object`-Platz plus die Anforderung des `Vec`,
+/// den `lopdf` dafür anlegt. Deshalb zählt eine öffnende `[` wie vier Objekte.
+/// Genau diese Form war die Bombe, die durch das Byte-Budget lief. Beide
+/// Beträge sind in `za_objektspeicher_gerechnet.rs` an die Messung gebunden.
+pub const ARRAY_BYTES: u64 = 640;
 
 impl Default for Limits {
     fn default() -> Self {
@@ -110,10 +260,13 @@ pub fn load_from_bytes_with_limits(bytes: &[u8], limits: &Limits) -> Result<Docu
 
     // Vorprüfung der Rohbytes — muss *vor* `load_mem` laufen: was dort
     // durchfällt, soll den Parser gar nicht erst erreichen.
-    prescan(bytes, limits)?;
+    let pending = prescan_pending(bytes, limits)?;
 
     let mut doc = Document::load_mem(bytes)
         .map_err(|e| RedactError::Pdf(format!("Datei nicht lesbar: {e}")))?;
+    // Die zweite Hälfte: was nur das geladene Dokument kennt (eine
+    // Filterkette mit Verweis), gegen dasselbe Budget.
+    pending.finish(&doc)?;
     restore_revision_markers(bytes, &mut doc);
 
     validate(&doc)?;
@@ -124,13 +277,23 @@ pub fn load_from_bytes_with_limits(bytes: &[u8], limits: &Limits) -> Result<Docu
 // Vorprüfung der Rohbytes
 // ---------------------------------------------------------------------------
 
-/// Rohgröße, bis zu der ein Stream mit einem Nicht-Flate-Filter ausgepackt
-/// wird. Darüber lehnen wir ab, statt einem fremden Dekoder ein unbegrenztes
-/// Speicherbudget zu geben.
-const MAX_LEGACY_STREAM_BYTES: usize = 16 * 1024 * 1024;
-
 /// Anteil nicht druckbarer Bytes, ab dem eine Nutzlast als Binärdaten gilt.
 const BINARY_RATIO: f64 = 0.10;
+
+/// Kann dieses Byte in PDF-**Syntax** außerhalb einer Zeichenkette vorkommen?
+///
+/// Zwischenraum (einschließlich NUL, das PDF ausdrücklich dazuzählt) und
+/// druckbares ASCII — mehr ist Syntax nicht. Steuerzeichen und Bytes über 126
+/// kommen nur in Zeichenketten, in Namen (dort als `#xx` oder, bei `lopdf`,
+/// auch roh) und in Stream-Nutzlast vor; Zeichenketten und Nutzlast überspringt
+/// [`Prescan::walk`] ohnehin, Namen behandelt es eigens.
+///
+/// Fast dieselbe Menge zählt [`looks_binary`] aus — dort gilt NUL allerdings
+/// als Binärzeichen. Das ist Absicht: eine Nutzlast voller Nullbytes ist keine
+/// Syntax, ein einzelnes NUL zwischen zwei Klammern aber sehr wohl.
+fn syntax_byte(b: u8) -> bool {
+    matches!(b, 0 | 9 | 10 | 12 | 13 | 32..=126)
+}
 
 /// Wie viele Bytes vom Anfang eines Streams für die Entscheidung
 /// „Nutzlast oder Syntax?“ betrachtet werden.
@@ -143,13 +306,44 @@ const BINARY_SAMPLE_BYTES: u64 = 64 * 1024;
 /// Tiefengrenze für Nutzlasten, die wie Binärdaten aussehen.
 ///
 /// Auch sie werden gezählt — sonst genügte es, einen Content-Stream mit
-/// Rauschen zu spicken, um die Prüfung zu umgehen. Weil in Binärdaten aber
-/// zufällig unpaarige `[`-Bytes vorkommen, ist die Grenze hier höher.
+/// Rauschen zu spicken, um die Prüfung zu umgehen.
 ///
-/// Belegt: über einen 6,2-MB-Stream aus gleichverteilten Zufallsbytes kommt
-/// die Zählung auf Tiefe 61; echte Schriften, Bilder und Farbprofile blieben
-/// im Test unter 30. 256 liegt weit genug darüber, dass Nutzlast keinen
-/// Fehlalarm auslöst.
+/// ## Was dort gezählt wird, und warum die reine Klammertiefe es nicht war
+///
+/// Bis v0.6.0 zählte hier **jedes** `[`-Byte. Das war keine Messung von
+/// Verschachtelung, sondern eine Irrfahrt: `]` senkt den Zähler nur bis null
+/// (`saturating_sub`), also läuft er in Rauschen nach oben davon, und sein
+/// Höchststand wächst mit der **Länge** der Nutzlast statt mit ihrer Struktur.
+/// Die Grenze war damit in Wahrheit eine Größengrenze — und eine, die nach
+/// Bytemustern ohne jede Bedeutung mal zuschlug und mal nicht.
+///
+/// Gemessen an dem Fall, der es aufdeckte: ein gewöhnlicher **Querverweis-
+/// Strom** (`/W [1 4 2]`, wie `lopdf` selbst ihn ab PDF 1.5 schreibt) besteht
+/// aus 7-Byte-Einträgen, in denen `[`- und `]`-Bytes rein zufällig vorkommen.
+/// Von 128 Dateigrößen zwischen 0,25 MB und 32 MB wurden abgelehnt:
+///
+/// | Einträge | Nutzlast | vorher | nachher |
+/// |---------:|---------:|-------:|--------:|
+/// |   20 000 |  140 kB  |   0    |    0    |
+/// |   50 000 |  350 kB  |   1    |    0    |
+/// |  100 000 |  700 kB  |  12    |    0    |
+/// |  200 000 |  1,4 MB  |  35    |    0    |
+///
+/// Ob eine gewöhnliche Datei durchkam, hing also daran, wo ihre Objekte
+/// zufällig lagen. Das ist ein Verfügbarkeitsfehler, kein Schutz.
+///
+/// Jetzt misst die Zählung in Nutzlast nur noch **zusammenhängende Syntax**:
+/// der Zähler fängt bei jedem Byte neu an, das in PDF-Syntax gar nicht
+/// vorkommt ([`syntax_byte`]) und auch nicht in einem Namen steht (dort lässt
+/// `lopdf` rohe Bytes über 126 zu). Mehr braucht es nicht, und mehr steht
+/// deshalb auch nicht da — eine Verschachtelung, die `lopdf` wirklich liest,
+/// ist ein zusammenhängender Lauf gültiger Syntax: nach jedem `[` muss ein
+/// Objekt folgen, sonst bricht der Parser ab und verschachtelt nichts.
+///
+/// Belegt in `z8_verschachtelung_in_nutzlast`: sieben Tarnungen (Rauschen
+/// davor, dahinter, Zahlen, Namen aus hohen Bytes, Nullbytes, Dictionaries)
+/// werden weiterhin abgelehnt; 6,2 MB Zufall, druckbares Rauschen und
+/// 560 gewöhnliche Querverweis-Ströme nicht mehr.
 ///
 /// Dass dieser Wert über [`Limits::max_nesting_depth`] liegt, ist kein
 /// Versehen, aber es hat einen Preis, und der ist gemessen: ein
@@ -183,12 +377,100 @@ const MAX_BINARY_NESTING_DEPTH: usize = 256;
 /// wie Größe, lässt sich sonst trivial in einem komprimierten Objekt- oder
 /// Content-Stream verstecken.
 pub fn prescan(bytes: &[u8], limits: &Limits) -> Result<()> {
+    prescan_pending(bytes, limits).map(|_| ())
+}
+
+/// Wie [`prescan`], aber mit dem Stand der Buchhaltung für die zweite
+/// Hälfte nach dem Laden ([`PendingPrescan::finish`]).
+pub fn prescan_pending<'a>(bytes: &[u8], limits: &'a Limits) -> Result<PendingPrescan<'a>> {
     let mut scan = Prescan {
         limits,
+        packed: 0,
         decompressed: 0,
         parsed: 0,
+        objects: 0,
     };
-    scan.walk(bytes, true, limits.max_nesting_depth)
+    scan.walk(bytes, true, false)?;
+    Ok(PendingPrescan(scan))
+}
+
+/// Die Vorprüfung nach ihrer ersten Hälfte — der Lauf über die Rohbytes ist
+/// verbucht, das Dokument noch nicht geladen.
+///
+/// **Warum es eine zweite Hälfte gibt.** Eine Filterkette darf Verweise
+/// tragen (`/Filter 5 0 R`, `/Filter [5 0 R]`; PDF 32000-1, 7.3.8.2). Aus den
+/// Rohbytes eines Stream-Dictionaries ist nicht zu erfahren, wohin sie
+/// zeigen; `lopdf` entpackt einen solchen Strom beim Laden auch nicht (seine
+/// `Stream::filters` kennt nur Namen), der Schreibpfad aber sehr wohl
+/// (`crate::filters::filter_names` löst auf) — und zwar ohne Grenze. Bis zur
+/// Spur-A-Runde 2 buchte die Vorprüfung einen solchen Strom mit seiner
+/// Rohgröße, und die Entpackgrenze galt für ihn nicht (Register #89).
+#[must_use = "ohne `finish` bleibt eine Filterkette mit Verweis ungebucht"]
+pub struct PendingPrescan<'a>(Prescan<'a>);
+
+impl PendingPrescan<'_> {
+    /// Verbucht jeden Strom des geladenen Dokuments, dessen Filterkette einen
+    /// Verweis trägt, mit der aufgelösten Kette — gegen dasselbe Budget wie
+    /// die Rohbytes.
+    ///
+    /// Die Rohgröße eines solchen Stroms hat die erste Hälfte schon gebucht;
+    /// hier kommt die entpackte dazu. Doppelt gezählt ist damit nur die
+    /// Rohgröße der wenigen Ströme mit Verweis in der Kette — eine Abweichung
+    /// nach oben, die keine Grenze öffnet.
+    pub fn finish(mut self, doc: &Document) -> Result<()> {
+        for object in doc.objects.values() {
+            let Object::Stream(stream) = object else {
+                continue;
+            };
+            if filter_is_indirect(&stream.dict) {
+                self.0.account_resolved(doc, stream)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Trägt `/Filter` einen Verweis — als Wert oder als Glied der Liste?
+fn filter_is_indirect(dict: &lopdf::Dictionary) -> bool {
+    match dict.get(b"Filter") {
+        Ok(Object::Reference(_)) => true,
+        Ok(Object::Array(items)) => items
+            .iter()
+            .any(|item| matches!(item, Object::Reference(_))),
+        _ => false,
+    }
+}
+
+/// Beginnt an `i` ein **Wort** der PDF-Syntax?
+///
+/// Ein Wort ist alles, woraus `lopdf` einen `Object`-Wert macht und was nicht
+/// schon an seiner öffnenden Klammer erkannt wird: eine Zahl, ein Name, ein
+/// Schlüsselwort (`true`, `false`, `null`, `R`, ein Operator im Seiteninhalt).
+/// Klammern zählt [`Prescan::walk`] selbst, an `[`, `<<`, `(` und `<`.
+///
+/// **Die Zählung darf nach oben abweichen, nie nach unten.** Deshalb hier zwei
+/// bewusste Ungenauigkeiten, beide nach oben: ein Verweis `1 0 R` ist *ein*
+/// Objekt und zählt drei Wörter, und ein Dictionary-Schlüssel ist gar kein
+/// Objekt (`lopdf` legt ihn als `Vec<u8>` ab) und zählt eins. Wer die Zählung
+/// dichter an die Wahrheit bringen will, muss aufpassen: ein Abzug für `R`
+/// ließe sich mit `R R R R …` dazu missbrauchen, echte Objekte
+/// wegzurechnen — Wörter dürfen nur addiert werden.
+fn wortanfang(bytes: &[u8], i: usize) -> bool {
+    let b = bytes[i];
+    if b == b'/' {
+        // Der Name selbst wird beim ersten Byte seines Rumpfes gezählt (dessen
+        // Vorgänger ist dieses `/`, also ein Trennzeichen). Nur der **leere**
+        // Name hat keinen Rumpf — er ist trotzdem ein Objekt und kostet ein
+        // Byte in der Datei.
+        return match bytes.get(i + 1) {
+            Some(&n) => is_whitespace(n) || is_delimiter(n),
+            None => true,
+        };
+    }
+    if is_whitespace(b) || is_delimiter(b) {
+        return false;
+    }
+    i == 0 || is_whitespace(bytes[i - 1]) || is_delimiter(bytes[i - 1])
 }
 
 fn check_depth(depth: usize, limit: usize) -> Result<()> {
@@ -205,8 +487,16 @@ fn check_depth(depth: usize, limit: usize) -> Result<()> {
 
 struct Prescan<'a> {
     limits: &'a Limits,
+    /// Die **gepackte** Größe derselben Streams, die `decompressed` zählt —
+    /// so, wie sie in der Datei stehen.
+    ///
+    /// Sie entscheidet nichts, sie erklärt nur: aus beiden Zahlen ergibt sich,
+    /// ob die Datei sich beim Öffnen wirklich vervielfacht
+    /// ([`Prescan::charge`]).
+    packed: u64,
     decompressed: u64,
     parsed: u64,
+    objects: u64,
 }
 
 impl Prescan<'_> {
@@ -217,29 +507,103 @@ impl Prescan<'_> {
     /// steuert, ob `stream … endstream` als Nutzlast behandelt wird; das gilt
     /// nur für die Datei selbst, nicht für bereits ausgepackte Streams.
     ///
-    /// `limit` ist die zulässige Tiefe — für Binärnutzlast höher, siehe
-    /// [`MAX_BINARY_NESTING_DEPTH`].
-    fn walk(&mut self, bytes: &[u8], streams: bool, limit: usize) -> Result<()> {
+    /// `binary` sagt, ob dieser Bereich wie Nutzlast aussieht. Davon hängen
+    /// drei Dinge ab: die zulässige Tiefe (siehe [`MAX_BINARY_NESTING_DEPTH`]),
+    /// ab wann die Tiefenzählung neu anfängt (siehe [`syntax_byte`]), und ob
+    /// die Objekte dieses Bereichs überhaupt verbucht werden.
+    ///
+    /// ## Der Rumpf zählt mit
+    ///
+    /// Beim Lauf über die **Datei selbst** (`streams == true`) wird am Ende
+    /// alles verbucht, was *keine* Stream-Nutzlast war: Objektköpfe,
+    /// Dictionaries, Arrays, die Querverweistabelle, der Trailer. Genau das
+    /// macht `lopdf` zu `Object`-Werten, und genau das fehlte dem Budget.
+    ///
+    /// **Warum das nötig ist — gemessen.** Ein Dictionary-Eintrag `/ab 0` kostet
+    /// 5 Byte in der Datei und 197 Byte im Speicher (`size_of::<lopdf::Object>()`
+    /// allein ist 120, dazu der Schlüssel als `Vec<u8>` und die Reserve der
+    /// `IndexMap`). Eine unkomprimierte 44,3-MB-Datei aus lauter solchen
+    /// Einträgen ergab ein `Document` von **1 804 MB — Faktor 40,7**, und zwar
+    /// **bevor** irgendein Scan lief. Vom Budget sah sie nichts: es zählte nur
+    /// Streams, und Streams hatte sie keine.
+    ///
+    /// Dieselbe Bombe in einem Objekt-Stream wurde dagegen seit jeher
+    /// abgelehnt — der Objekt-Stream wird ausgepackt und als Syntax verbucht.
+    /// Die Lücke war also nicht die Bauart der Bombe, sondern allein die Frage,
+    /// ob sie komprimiert war. Diese Unterscheidung sucht sich ein Angreifer
+    /// als Erstes aus.
+    ///
+    /// ## Und die **Objekte** zählen mit
+    ///
+    /// Die Bytes allein reichen nicht: ein leeres Array `[]` ist zwei Byte und
+    /// im Speicher 632. Deshalb zählt derselbe Lauf nebenher die Wörter der
+    /// Syntax und rechnet daraus, was das geladene Dokument belegen wird —
+    /// [`OBJEKT_BYTES`] je Wort, [`ARRAY_BYTES`] je öffnender `[`, verbucht
+    /// über [`Prescan::charge_objects`]. Gezählt wird nur außerhalb von
+    /// Nutzlast (`binary == false`): woraus `lopdf` keine `Object`-Werte macht,
+    /// kostet auch keine. Die Begründung samt Messreihe steht bei
+    /// [`OBJEKTSPEICHER_JE_BUDGETBYTE`].
+    fn walk(&mut self, bytes: &[u8], streams: bool, binary: bool) -> Result<()> {
+        let limit = if binary {
+            MAX_BINARY_NESTING_DEPTH
+        } else {
+            self.limits.max_nesting_depth
+        };
         let mut i = 0usize;
         let mut depth = 0usize;
         // Anfang des äußersten Dictionaries — das ist der Kopf des Streams,
         // der gleich folgen kann.
         let mut dict_start = 0usize;
         let mut dict_end = 0usize;
+        // Bytes, die als Stream-Nutzlast übersprungen wurden. Sie sind über
+        // [`Prescan::account`] schon verbucht und dürfen nicht doppelt zählen.
+        let mut nutzlast = 0u64;
+        // Steht dieses Byte in einem Namen (`/…`)? Dort sind auch Bytes über
+        // 126 zulässig — `lopdf` nimmt sie sogar roh an.
+        let mut in_name = false;
+        // Der gerechnete Speicher der Objekte in diesem Bereich — die Menge,
+        // an der der Speicher des geladenen Dokuments wirklich hängt. Gezählt
+        // wird nur, wo aus den Bytes auch wirklich Syntax wird: Nutzlast
+        // (`binary`) parst `lopdf` nicht zu `Object`-Werten, und ihre Bytes
+        // zählen deshalb schon heute nicht ins Parse-Budget.
+        let zaehlen = !binary;
+        let mut objektspeicher = 0u64;
 
         while i < bytes.len() {
+            if binary {
+                in_name = match bytes[i] {
+                    b'/' => true,
+                    b if is_whitespace(b) || is_delimiter(b) => false,
+                    _ => in_name,
+                };
+            }
             match bytes[i] {
+                // In Nutzlast fängt die Zählung bei jedem Byte neu an, das in
+                // PDF-Syntax gar nicht vorkommen kann. Damit misst die Tiefe
+                // nur noch **zusammenhängende Syntax** — und genau daraus
+                // besteht eine Verschachtelung, die `lopdf` wirklich liest.
+                b if binary && !in_name && !syntax_byte(b) => {
+                    depth = 0;
+                    i += 1;
+                }
                 b'%' => i = skip_to_eol(bytes, i),
-                b'(' => i = skip_literal_string(bytes, i),
+                b'(' => {
+                    objektspeicher += zaehlen as u64 * OBJEKT_BYTES;
+                    i = skip_literal_string(bytes, i);
+                }
                 b'<' if bytes.get(i + 1) == Some(&b'<') => {
                     if depth == 0 {
                         dict_start = i;
                     }
+                    objektspeicher += zaehlen as u64 * OBJEKT_BYTES;
                     depth += 1;
                     check_depth(depth, limit)?;
                     i += 2;
                 }
-                b'<' => i = skip_hex_string(bytes, i),
+                b'<' => {
+                    objektspeicher += zaehlen as u64 * OBJEKT_BYTES;
+                    i = skip_hex_string(bytes, i);
+                }
                 b'>' if bytes.get(i + 1) == Some(&b'>') => {
                     depth = depth.saturating_sub(1);
                     i += 2;
@@ -248,6 +612,7 @@ impl Prescan<'_> {
                     }
                 }
                 b'[' => {
+                    objektspeicher += zaehlen as u64 * ARRAY_BYTES;
                     depth += 1;
                     check_depth(depth, limit)?;
                     i += 1;
@@ -265,6 +630,7 @@ impl Prescan<'_> {
                         &[][..]
                     };
                     self.account(dict, &bytes[start..end.max(start)])?;
+                    nutzlast = nutzlast.saturating_add((end.max(start) - start) as u64);
                     i = end;
                 }
                 // Eingebettetes Bild in einem Content-Stream: zwischen `ID`
@@ -272,8 +638,32 @@ impl Prescan<'_> {
                 b'B' if !streams && keyword_at(bytes, i, b"BI") => {
                     i = skip_inline_image(bytes, i);
                 }
-                _ => i += 1,
+                _ => {
+                    if zaehlen && wortanfang(bytes, i) {
+                        objektspeicher += OBJEKT_BYTES;
+                    }
+                    i += 1;
+                }
             }
+        }
+        if streams {
+            // Erst hier, nicht laufend: der Lauf selbst belegt für den Rumpf
+            // keinen Speicher (er zählt nur Bytes), und die Ablehnung kommt
+            // immer noch vor `Document::load_mem` — also vor der einzigen
+            // Stelle, an der aus diesen Bytes wirklich Speicher wird.
+            let rumpf = (bytes.len() as u64).saturating_sub(nutzlast);
+            self.charge_parsed(
+                rumpf,
+                "die zu parsenden Teile der Datei (Objektköpfe, Dictionaries, \
+                 Querverweistabelle) zusammen mit den geparsten Streams",
+            )?;
+        }
+        if zaehlen {
+            // Nach dem Byte-Budget, nicht davor: reißt eine Datei beide, ist
+            // die Größe die einfachere Auskunft. Und wie dort gilt — der Lauf
+            // selbst belegt nichts, gebucht wird am Stück, und die Ablehnung
+            // kommt immer noch vor `Document::load_mem`.
+            self.charge_objects(objektspeicher)?;
         }
         Ok(())
     }
@@ -287,20 +677,44 @@ impl Prescan<'_> {
     /// [`looks_binary`]. Aus dem Dictionary wird nur die Filterkette gelesen,
     /// und die muss stimmen, sonst ließe sich der Stream gar nicht auspacken.
     fn account(&mut self, dict: &[u8], payload: &[u8]) -> Result<()> {
-        let filters = filter_names(dict);
-        // Nur diese Filter kann `lopdf` auspacken. Alles andere (DCT, JPX,
-        // CCITT, JBIG2, RunLength, Unbekanntes) wird nie zu PDF-Syntax und
-        // kann folglich auch keine Verschachtelung verstecken.
-        let decodable = filters.iter().all(|f| {
-            matches!(
-                f.as_slice(),
-                b"FlateDecode" | b"LZWDecode" | b"ASCII85Decode"
-            )
-        });
-
-        if !decodable {
-            return self.charge(payload.len() as u64, false);
+        // Ein Verweis in der Kette: welcher Filter dahinter steht, weiß erst
+        // das geladene Dokument ([`PendingPrescan::finish`] bucht ihn dort
+        // mit der aufgelösten Kette). Bis dahin zählt die Rohgröße, wie bei
+        // Nutzlast.
+        let Some(filters) = filter_names(dict) else {
+            return self.charge(payload.len() as u64, payload.len() as u64, 0);
+        };
+        // Ausgepackt wird der **Vorspann** der Kette, soweit jedes Glied
+        // einer der Filter ist, die `crate::filters` begrenzt entpacken kann
+        // — dieselben, die der Schreibpfad später auspackt. Was dahinter
+        // steht (DCT, JPX, CCITT, JBIG2, Unbekanntes), wird nie zu
+        // PDF-Syntax und kann keine Verschachtelung verstecken; ab dort wird
+        // nichts mehr ausgepackt.
+        //
+        // Bis zur Spur-A-Runde 1 fehlten `RunLengthDecode` und `ASCIIHexDecode`
+        // (und die Kurznamen), und eine Kette mit einem solchen Glied wurde
+        // **ganz** roh gebucht — auch ihr Flate-Glied davor. `/Filter
+        // [/FlateDecode /RunLengthDecode]` über einem RunLength-Strom, der
+        // sich auf 2,4 GB aufbläst, stand als 39 KB in der Datei, ging durch,
+        // und der Schreibpfad entpackte ihn ohne Grenze (Register #64).
+        //
+        // Und bis zu ihrem Nachtrag galt das Ganze-oder-nichts auch für den
+        // Vorspann: `[/FlateDecode /DCTDecode]` wurde roh gebucht, weil DCT
+        // nicht auspackbar ist — der Bilddekoder des Schreibpfads entpackte
+        // das Flate-Glied dann ohne Grenze, um an die JPEG-Bytes zu kommen.
+        // Eine 3-MB-Datei mit 3 GiB Nullen im Flate-Glied brauchte am
+        // gebauten Binary 3,1 GB Spitze, bei `--max-decompressed-mb 64`
+        // (Register #83).
+        let decodable = filters.iter().take_while(|f| is_decodable(f)).count();
+        if decodable == 0 && !filters.is_empty() {
+            return self.charge(payload.len() as u64, payload.len() as u64, 0);
         }
+        // Blieb die Kette stehen, sind die ausgepackten Bytes die Eingabe
+        // eines Bild- oder unbekannten Filters: Nutzlast, keine Syntax. Sie
+        // zählen gegen das ganze Budget, nicht gegen das enge der Syntax,
+        // und werden nicht durchlaufen.
+        let whole = decodable == filters.len();
+        let filters = &filters[..decodable];
 
         let total_room = self
             .limits
@@ -312,12 +726,11 @@ impl Prescan<'_> {
         // betrachtet ohnehin nur die ersten [`BINARY_SAMPLE_BYTES`]. Erst
         // wenn diese Frage beantwortet ist, steht fest, welches Budget gilt —
         // und damit, wie viel überhaupt ausgepackt werden darf.
-        let flate_only =
-            !filters.is_empty() && filters.iter().all(|f| f.as_slice() == b"FlateDecode");
-        let (binary, decoded) = if flate_only {
-            let probe = self.decode(&filters, payload, total_room.min(BINARY_SAMPLE_BYTES))?;
+        let flate_only = whole && !filters.is_empty() && filters.iter().all(|f| is_flate(f));
+        let (binary, decoded, room) = if flate_only {
+            let probe = self.decode(filters, payload, total_room.min(BINARY_SAMPLE_BYTES))?;
             let binary = match &probe {
-                Some((data, _)) => looks_binary(data),
+                Some((data, _, _)) => looks_binary(data),
                 None => looks_binary(payload),
             };
             // Syntax bekommt sofort das enge Budget: die Bombe fliegt auf,
@@ -327,24 +740,43 @@ impl Prescan<'_> {
             } else {
                 total_room.min(parsed_room)
             };
-            (binary, self.decode(&filters, payload, room)?)
+            (binary, self.decode(filters, payload, room)?, room)
         } else {
-            // Altlast-Filter werden nur einmal ausgepackt — ein zweiter Lauf
-            // durch `lopdf` wäre bei LZW teurer als die Klassifikation wert
-            // ist. Die Rohgröße begrenzt [`MAX_LEGACY_STREAM_BYTES`].
-            let decoded = self.decode(&filters, payload, total_room)?;
-            let binary = match &decoded {
-                Some((data, _)) => looks_binary(data),
-                None => looks_binary(payload),
-            };
-            (binary, decoded)
+            // Alle übrigen Ketten werden nur einmal ausgepackt — ein zweiter
+            // Lauf wäre bei LZW teurer als die Klassifikation wert ist.
+            let decoded = self.decode(filters, payload, total_room)?;
+            let binary = !whole
+                || match &decoded {
+                    Some((data, _, _)) => looks_binary(data),
+                    None => looks_binary(payload),
+                };
+            (binary, decoded, total_room)
         };
 
         let data = decoded
             .as_ref()
-            .map(|(d, _)| d.as_slice())
+            .map(|(d, _, _)| d.as_slice())
             .unwrap_or(payload);
-        self.charge(data.len() as u64, !binary)?;
+        // Abgeschnitten heißt: mindestens `room` und noch etwas — also mehr,
+        // als das gewährte Budget hergibt. Flate liefert diese Bytes selbst
+        // (`room + 1`); die übrigen Dekoder brechen mit `Oversize` ab und
+        // geben nichts her, gebucht wird trotzdem dasselbe.
+        let truncated = decoded.as_ref().is_some_and(|(_, hit, _)| *hit);
+        let size = if truncated {
+            (data.len() as u64).max(room.saturating_add(1))
+        } else {
+            data.len() as u64
+        };
+        // Gegen das Entpackbudget zählt die **Arbeit** der ganzen Kette, nicht
+        // die Ausgabe ihres letzten Glieds (Register #99); gegen das der
+        // Syntax nur, was am Ende geparst wird.
+        let work = decoded
+            .as_ref()
+            .map_or(size, |(_, _, work)| (*work).max(size));
+        self.charge(payload.len() as u64, work, if binary { 0 } else { size })?;
+        if !whole {
+            return Ok(());
+        }
 
         // **Jeder** auspackbare Stream wird durchlaufen, auch einer, der sich
         // als Bild ausgibt. Früher stand hier eine Ausnahme für
@@ -354,19 +786,22 @@ impl Prescan<'_> {
         // nicht mehr, und `Document::get_page_content` packt einen
         // Seiteninhalt mit `/Subtype /Image` ganz normal aus. Ein Dictionary
         // ist ohnehin kein Beleg — es gehört dem Angreifer.
-        let limit = if binary {
-            MAX_BINARY_NESTING_DEPTH
-        } else {
-            self.limits.max_nesting_depth
-        };
-        self.walk(data, false, limit)
+        self.walk(data, false, binary)
     }
 
     /// Packt einen Stream aus — speicherbegrenzt.
     ///
-    /// `FlateDecode` läuft über einen begrenzten Leser und kann deshalb nie
-    /// mehr belegen als `room`. `ASCII85Decode` schrumpft. `LZWDecode`
-    /// überlassen wir `lopdf`, begrenzen dafür aber die Rohgröße.
+    /// `FlateDecode` läuft über einen begrenzten Leser, jedes andere Glied
+    /// über die begrenzten Dekoder von `crate::filters`; keines kann mehr
+    /// belegen als `room`.
+    ///
+    /// **Eine Grenze der Rohgröße gibt es nicht mehr.** Bis zur
+    /// Spur-A-Runde 1 lehnte die Vorprüfung jede Kette mit `LZWDecode` oder
+    /// `ASCII85Decode` über 16 MiB Rohgröße ab — aus der Zeit, als `lopdf`
+    /// diese Filter ohne Grenze auspackte. Seit Register #64 packt die
+    /// Vorprüfung sie selbst aus, begrenzt auf das Budget; die Grenze schützte
+    /// nichts mehr und lehnte nur noch ein großes ASCII85-Bild ab, wie es
+    /// Distiller mit ASCII-Ausgabe schreibt (Register #82).
     ///
     /// Der zweite Rückgabewert sagt, ob `room` erreicht wurde — die Nutzlast
     /// ist dann abgeschnitten und nur noch als „mindestens so groß“ zu lesen.
@@ -375,72 +810,193 @@ impl Prescan<'_> {
         filters: &[Vec<u8>],
         payload: &[u8],
         room: u64,
-    ) -> Result<Option<(Vec<u8>, bool)>> {
+    ) -> Result<Option<(Vec<u8>, bool, u64)>> {
         if filters.is_empty() {
             return Ok(None);
         }
-        let legacy = filters.iter().any(|f| f.as_slice() != b"FlateDecode");
-        if legacy && payload.len() > MAX_LEGACY_STREAM_BYTES {
-            return Err(RedactError::Pdf(format!(
-                "Stream mit Altlast-Filter ({}) ist mit {} Bytes zu groß \
-                 (Grenze {} Bytes). Solche Streams werden nicht ausgepackt, \
-                 weil sich ihr Speicherbedarf nicht vorab begrenzen lässt.",
-                filters
-                    .iter()
-                    .map(|f| String::from_utf8_lossy(f).into_owned())
-                    .collect::<Vec<_>>()
-                    .join("+"),
-                payload.len(),
-                MAX_LEGACY_STREAM_BYTES
-            )));
-        }
-
         let mut data = payload.to_vec();
         let mut truncated = false;
+        // Die Arbeit der Kette: jedes Glied bekommt, was die davor übrig
+        // ließen (Register #99).
+        let mut work = 0u64;
         for filter in filters {
+            let room = room.saturating_sub(work);
             data = match filter.as_slice() {
-                b"FlateDecode" => match inflate_bounded(&data, room) {
-                    Some((out, hit)) => {
-                        truncated |= hit;
-                        out
+                b"FlateDecode" | b"Fl" => {
+                    let (out, hit) = inflate_bounded(&data, room);
+                    truncated |= hit;
+                    out
+                }
+                // Dieselben begrenzten Dekoder wie der Schreibpfad
+                // (`crate::filters`): kein Glied erzeugt mehr als `room`
+                // Byte. Bis zur Spur-A-Runde 1 lief hier `lopdf` ohne Grenze —
+                // ein RunLength-Glied hinter einem Flate-Glied konnte das
+                // Budget um den Faktor 64 sprengen (Register #64). Die
+                // `/DecodeParms` liest die Vorprüfung nicht: für die Größe
+                // zählt der Prädiktor nicht, und ein LZW-`EarlyChange` 0
+                // liefert andere Bytes in gleicher Menge.
+                other => match crate::filters::decode_one(
+                    other,
+                    &data,
+                    None,
+                    usize::try_from(room).unwrap_or(usize::MAX),
+                ) {
+                    Ok(Some(out)) => out,
+                    Ok(None) => return Ok(None),
+                    Err(crate::filters::Oversize) => {
+                        return Ok(Some((
+                            Vec::new(),
+                            true,
+                            work.saturating_add(room).saturating_add(1),
+                        )))
                     }
-                    // Kaputter oder verschlüsselter Stream: nicht auspackbar,
-                    // also wird er auch nicht geparst.
-                    None => return Ok(None),
-                },
-                other => match lopdf_decode(other, &data) {
-                    Some(out) => out,
-                    None => return Ok(None),
                 },
             };
+            work = work.saturating_add(data.len() as u64);
+            if truncated {
+                break;
+            }
         }
-        Ok(Some((data, truncated)))
+        Ok(Some((data, truncated, work)))
     }
 
-    fn charge(&mut self, size: u64, syntax: bool) -> Result<()> {
+    /// Verbucht einen Stream: `packed` seine Größe in der Datei, `size` die
+    /// Arbeit beim Auspacken (die Ausgaben aller Glieder zusammen), `syntax`
+    /// die Bytes, die danach als PDF-Syntax geparst werden (0 bei Nutzlast).
+    ///
+    /// **Die Meldung nennt die Ursache, die sie belegen kann.** Sie sprach
+    /// früher von einer Dekompressionsbombe — „eine kleine Datei, die sich
+    /// beim Öffnen vervielfacht“ —, auch wenn sich gar nichts vervielfacht
+    /// hatte: ein 2-MB-Strom **ohne** `/Filter` riss ein 1-MB-Budget mit dem
+    /// Faktor 1, und `leaks_many_within` reichte den Satz wörtlich weiter
+    /// (Befund R2-D, `tests/zg_r2_decke.rs`). Die Zahl stimmte, die Ursache
+    /// nicht, und sie schickte den Leser eine Bombe suchen, die es nicht gibt.
+    ///
+    /// Gebucht wird deshalb beides, und die Begründung hängt am Verhältnis:
+    /// mehr als das **Doppelte** heißt vervielfacht, alles darunter heißt
+    /// schlicht „zu viel Strominhalt“. Beide Zahlen stehen in der Meldung, so
+    /// dass der Leser das Verhältnis selbst nachrechnen kann.
+    fn charge(&mut self, packed: u64, size: u64, syntax: u64) -> Result<()> {
+        self.packed = self.packed.saturating_add(packed);
         self.decompressed = self.decompressed.saturating_add(size);
         if self.decompressed > self.limits.max_decompressed_bytes {
+            let ursache = if self.decompressed > self.packed.saturating_mul(2) {
+                "Das ist das Muster einer Dekompressionsbombe: eine kleine \
+                 Datei, die sich beim Öffnen vervielfacht."
+            } else {
+                "Beim Auspacken wächst dabei fast nichts — die Datei trägt \
+                 schlicht mehr Strominhalt, als das Budget zulässt."
+            };
             return Err(RedactError::Pdf(format!(
-                "entpackte Streams überschreiten das Budget von {} MB. \
-                 Das ist das Muster einer Dekompressionsbombe: eine kleine \
-                 Datei, die sich beim Öffnen vervielfacht.",
-                self.limits.max_decompressed_bytes / (1024 * 1024)
+                "entpackte Streams überschreiten das Budget von {} MB \
+                 ({} Byte gepackt, {} Byte entpackt). {ursache}",
+                self.limits.max_decompressed_bytes / (1024 * 1024),
+                self.packed,
+                self.decompressed
             )));
         }
-        if syntax {
-            self.parsed = self.parsed.saturating_add(size);
-            if self.parsed > self.limits.max_parsed_bytes {
-                return Err(RedactError::Pdf(format!(
-                    "die zu parsenden Streams (Seiteninhalt, Objekt-Streams) \
-                     überschreiten das Budget von {} MB. Beim Parsen wird \
-                     daraus ein Vielfaches an Arbeitsspeicher. Ob ein Stream \
-                     hierher zählt, entscheidet sein Inhalt: sieht er wie \
-                     PDF-Syntax aus statt wie Nutzlast, gilt dieses engere \
-                     Budget. Ein wirklich so großes Dokument lässt sich mit \
-                     --max-parsed-mb durchlassen.",
-                    self.limits.max_parsed_bytes / (1024 * 1024)
-                )));
+        if syntax > 0 {
+            self.charge_parsed(
+                syntax,
+                "die zu parsenden Streams (Seiteninhalt, Objekt-Streams)",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Verbucht einen Strom mit der **aufgelösten** Filterkette — der zweite
+    /// Teil von [`PendingPrescan::finish`].
+    ///
+    /// Entpackt wird über denselben Dekoder wie im Orakel und im Schreibpfad
+    /// (`crate::filters`), begrenzt auf das, was vom Budget noch übrig ist;
+    /// was sich entpacken ließ, wird wie in [`Prescan::account`] gebucht und,
+    /// wenn die Kette ganz lief, durchlaufen.
+    fn account_resolved(&mut self, doc: &Document, stream: &lopdf::Stream) -> Result<()> {
+        let room = self
+            .limits
+            .max_decompressed_bytes
+            .saturating_sub(self.decompressed);
+        let packed = stream.content.len() as u64;
+        let limit = usize::try_from(room).unwrap_or(usize::MAX);
+        match crate::filters::decoded_prefix_counted(doc, stream, limit) {
+            Ok((data, applied, work)) => {
+                let total = crate::filters::filter_names(doc, &stream.dict).map_or(0, |f| f.len());
+                let whole = applied == total;
+                let binary = !whole || looks_binary(&data);
+                let size = data.len() as u64;
+                self.charge(
+                    packed,
+                    (work as u64).max(size),
+                    if binary { 0 } else { size },
+                )?;
+                if whole {
+                    self.walk(&data, false, binary)?;
+                }
+                Ok(())
             }
+            Err(crate::filters::Oversize) => self.charge(packed, room.saturating_add(1), 0),
+        }
+    }
+
+    /// Verbucht Bytes, aus denen `lopdf` PDF-Syntax macht.
+    ///
+    /// `woher` benennt die Klasse — sie steht in der Meldung, damit erkennbar
+    /// ist, welcher Teil der Datei das Budget aufgebraucht hat.
+    ///
+    /// **Was die Meldung sagen darf.** Sie nannte früher „200 bis 270 Byte je
+    /// Dictionary-Eintrag“ — auch dann, wenn ein Content-Stream das Budget
+    /// gerissen hatte, und als wäre der Faktor eine Konstante. Er ist keine:
+    /// gemessen an 4-MB-Dateien gleicher Größe reicht er von 1,1 (eine lange
+    /// Zeichenkette) bis 301,6 (leere Arrays) Byte je Dateibyte. Genau deshalb
+    /// gibt es daneben [`OBJEKTSPEICHER_JE_BUDGETBYTE`]; die Meldung verspricht
+    /// hier nur noch, was sie halten kann.
+    fn charge_parsed(&mut self, size: u64, woher: &str) -> Result<()> {
+        self.parsed = self.parsed.saturating_add(size);
+        if self.parsed > self.limits.max_parsed_bytes {
+            return Err(RedactError::Pdf(format!(
+                "{woher} überschreiten das Budget von {} MB. Beim Parsen wird \
+                 daraus ein Vielfaches an Arbeitsspeicher — wie viel, hängt an \
+                 der Form der Syntax, nicht an ihrer Länge: gemessen 1 Byte je \
+                 Dateibyte bei einer langen Zeichenkette und 302 bei lauter \
+                 leeren Arrays. Ob ein Stream hierher zählt, entscheidet sein \
+                 Inhalt: sieht er wie PDF-Syntax aus statt wie Nutzlast, gilt \
+                 dieses engere Budget. Ein wirklich so großes Dokument lässt \
+                 sich mit --max-parsed-mb durchlassen.",
+                self.limits.max_parsed_bytes / (1024 * 1024)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Verbucht den **gerechneten Speicher der Objekte** — die Menge, an der
+    /// der Speicher des geladenen Dokuments wirklich hängt.
+    ///
+    /// Warum es diese zweite Buchhaltung neben [`Prescan::charge_parsed`]
+    /// gibt, steht bei [`OBJEKTSPEICHER_JE_BUDGETBYTE`].
+    fn charge_objects(&mut self, geschaetzt: u64) -> Result<()> {
+        self.objects = self.objects.saturating_add(geschaetzt);
+        let decke = self
+            .limits
+            .max_parsed_bytes
+            .saturating_mul(OBJEKTSPEICHER_JE_BUDGETBYTE);
+        if self.objects > decke {
+            return Err(RedactError::Pdf(format!(
+                "die Objekte dieser Datei belegen im Speicher gerechnet mehr \
+                 als {} MB — sie wird abgelehnt. Nicht ihre Größe entscheidet \
+                 das, sondern Zahl und Art der Objekte: {} Byte je Objekt, {} \
+                 je Array. Ein leeres Array `[]` sind zwei Byte in der Datei \
+                 und gemessen 632 im Arbeitsspeicher; eine Datei aus lauter \
+                 solchen Arrays bleibt damit unter jedem Größenbudget und \
+                 belegt trotzdem Gigabytes. Zugestanden sind {} Byte \
+                 Objektspeicher je Byte des Budgets von --max-parsed-mb — bei \
+                 einem gewöhnlichen Dokument entscheidet deshalb weiterhin \
+                 dessen Größe und nicht diese Decke. Ein wirklich so gebautes \
+                 Dokument lässt sich mit --max-parsed-mb durchlassen.",
+                decke / (1024 * 1024),
+                OBJEKT_BYTES,
+                ARRAY_BYTES,
+                OBJEKTSPEICHER_JE_BUDGETBYTE
+            )));
         }
         Ok(())
     }
@@ -451,58 +1007,449 @@ impl Prescan<'_> {
 /// Der zweite Rückgabewert meldet, dass die Grenze erreicht wurde. Belegt wird
 /// nie mehr als `limit + 1` Byte — deshalb kann eine Dekompressionsbombe hier
 /// nichts ausrichten.
-fn inflate_bounded(data: &[u8], limit: u64) -> Option<(Vec<u8>, bool)> {
+///
+/// **Gelesen wird wie in `lopdf` und im Schreibpfad**
+/// (`crate::filters::inflate_within`): ein Teilergebnis zählt, und liefert
+/// zlib gar nichts, folgt rohes Deflate hinter dem 2-Byte-Kopf. Bis zur
+/// Spur-A-Runde 2 las die Vorprüfung nur zlib und gab bei einem Fehler auf —
+/// der Strom galt als nicht auspackbar und zählte mit seiner Rohgröße,
+/// während `lopdf` (beim Laden eines Objekt-Streams) und der Schreibpfad ihn
+/// über den Rückfall ohne Grenze entpackten: rohes Deflate hinter zwei
+/// beliebigen Bytes, oder ein zlib-Strom mit kaputtem Ende (Register #89).
+/// Die Vorprüfung ist nur dann eine Schranke, wenn sie mindestens so viel
+/// liest wie jeder Leser nach ihr.
+fn inflate_bounded(data: &[u8], limit: u64) -> (Vec<u8>, bool) {
+    let cap = limit.saturating_add(1);
     let mut out = Vec::new();
-    let reader = flate2::read::ZlibDecoder::new(data);
-    if reader
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut out)
-        .is_err()
-    {
-        return None;
+    inflate_counting(data, true, cap, &mut out);
+    if out.is_empty() && data.len() > 2 {
+        inflate_counting(&data[2..], false, cap, &mut out);
     }
     let truncated = out.len() as u64 > limit;
-    Some((out, truncated))
+    (out, truncated)
 }
 
-/// Auspacken über `lopdf` — für die Filter, die wir nicht selbst können.
-fn lopdf_decode(filter: &[u8], data: &[u8]) -> Option<Vec<u8>> {
-    let mut dict = lopdf::Dictionary::new();
-    dict.set("Filter", Object::Name(filter.to_vec()));
-    lopdf::Stream::new(dict, data.to_vec())
-        .decompressed_content()
-        .ok()
+/// Entpackt `data` (zlib oder rohes Deflate) nach `out`, höchstens `cap`
+/// Byte — und behält **jedes** Byte, das der Dekoder geliefert hat, auch das
+/// aus dem Aufruf, der mit einem Fehler endet.
+///
+/// Über `flate2::Decompress` und nicht über `read::ZlibDecoder`: der Leser
+/// meldet einen Fehler (eine kaputte Prüfsumme am Ende) als `Err` und
+/// verschweigt dabei die Bytes, die derselbe Aufruf noch geschrieben hat.
+/// Wie viele das sind, hängt an der Puffergröße des Aufrufers — `lopdf`, der
+/// Schreibpfad und die Vorprüfung verlören verschieden viel, und die
+/// Vorprüfung wäre keine Schranke mehr. `total_out` zählt sie mit.
+fn inflate_counting(data: &[u8], zlib: bool, cap: u64, out: &mut Vec<u8>) {
+    let mut decoder = flate2::Decompress::new(zlib);
+    let mut chunk = vec![0u8; 64 * 1024];
+    while (out.len() as u64) < cap {
+        let consumed = usize::try_from(decoder.total_in()).unwrap_or(usize::MAX);
+        let before = decoder.total_out();
+        let result = decoder.decompress(
+            data.get(consumed..).unwrap_or(&[]),
+            &mut chunk,
+            flate2::FlushDecompress::None,
+        );
+        let produced = usize::try_from(decoder.total_out() - before).unwrap_or(usize::MAX);
+        let room = usize::try_from(cap - out.len() as u64).unwrap_or(usize::MAX);
+        out.extend_from_slice(&chunk[..produced.min(room).min(chunk.len())]);
+        match result {
+            Ok(flate2::Status::StreamEnd) | Err(_) => return,
+            // Kein Fortschritt: die Eingabe ist zu Ende, der Strom nicht.
+            Ok(_) if produced == 0 && decoder.total_in() as usize == consumed => return,
+            Ok(_) => {}
+        }
+    }
 }
 
-/// Filternamen aus den Rohbytes eines Stream-Dictionaries.
-fn filter_names(dict: &[u8]) -> Vec<Vec<u8>> {
-    let Some(pos) = find_from(dict, b"/Filter", 0) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    let mut i = pos + b"/Filter".len();
-    // Hinter `/Filter` steht entweder ein Name oder ein Array von Namen.
-    // Beides endet spätestens am nächsten Schlüssel oder am Ende.
-    while i < dict.len() {
-        match dict[i] {
-            b'/' => {
-                let start = i + 1;
-                let mut end = start;
-                while end < dict.len() && !is_delimiter(dict[end]) && !is_whitespace(dict[end]) {
-                    end += 1;
+/// Ein Filter, den `crate::filters` begrenzt entpacken kann — Lang- und
+/// Kurzname (PDF 32000-1, Tabelle 6 und Tabelle 94).
+fn is_decodable(filter: &[u8]) -> bool {
+    matches!(
+        filter,
+        b"FlateDecode"
+            | b"Fl"
+            | b"LZWDecode"
+            | b"LZW"
+            | b"ASCII85Decode"
+            | b"A85"
+            | b"ASCIIHexDecode"
+            | b"AHx"
+            | b"RunLengthDecode"
+            | b"RL"
+    )
+}
+
+/// `FlateDecode` unter beiden Namen (PDF 32000-1, Tabelle 94).
+fn is_flate(filter: &[u8]) -> bool {
+    matches!(filter, b"FlateDecode" | b"Fl")
+}
+
+/// Die Filterkette aus den Rohbytes eines Stream-Dictionaries — **so
+/// gelesen, wie `lopdf` sie liest.**
+///
+/// Nur ein Schlüssel der obersten Ebene zählt, Namen werden mit `#xx`
+/// entschlüsselt (PDF 32000-1, 7.3.5), und steht `/Filter` zweimal da, gilt
+/// der letzte Eintrag — `lopdf` legt das Dictionary mit `Dictionary::set` an.
+/// Bis zur Spur-A-Runde 2 suchte diese Funktion die ersten Bytes `/Filter` im
+/// Dictionary und las den Namen dahinter: `/Fil#74er /FlateDecode` hieß
+/// „kein Filter“, `/Filter /Flate#44ecode` „unbekannter Filter“, ein `/Filter`
+/// in einem inneren Dictionary oder in einer Zeichenkette ging dem echten
+/// vor, und hinter `/Filter 5 0 R` las sie den nächsten Schlüssel als
+/// Filternamen. Jedes Mal zählte der Strom mit seiner Rohgröße, während
+/// `lopdf` (beim Laden eines Objekt-Streams) oder der Schreibpfad ihn ohne
+/// Grenze entpackte (Register #89).
+///
+/// `None`, wenn die Kette einen Verweis trägt: den löst erst das geladene
+/// Dokument auf ([`PendingPrescan::finish`]). `null` heißt kein Filter. Ein
+/// anderer Wert, und ein Glied der Liste, das kein Name ist, steht wie in
+/// `crate::filters::filter_names` als leerer Name da — ein Glied, das niemand
+/// auspackt.
+fn filter_names(dict: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let tokens = dict_tokens(dict);
+    let mut chain = Some(Vec::new());
+    if !matches!(tokens.first(), Some(Token::DictOpen)) {
+        return chain;
+    }
+    let mut i = 1;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::DictClose => break,
+            Token::Name(key) => {
+                let (value, next) = read_value(&tokens, i + 1);
+                if key.as_slice() == b"Filter" {
+                    chain = match value {
+                        Wert::Name(name) => Some(vec![name]),
+                        Wert::Null => Some(Vec::new()),
+                        Wert::Verweis => None,
+                        Wert::Liste(items) => {
+                            if items.iter().any(|w| matches!(w, Wert::Verweis)) {
+                                None
+                            } else {
+                                Some(
+                                    items
+                                        .into_iter()
+                                        .map(|w| match w {
+                                            Wert::Name(name) => name,
+                                            _ => Vec::new(),
+                                        })
+                                        .collect(),
+                                )
+                            }
+                        }
+                        Wert::Anderes => Some(vec![Vec::new()]),
+                    };
                 }
-                out.push(dict[start..end].to_vec());
-                i = end;
-                // Ein einzelner Name (kein Array) beendet die Liste.
-                if out.len() == 1 && !dict[pos..start].contains(&b'[') {
-                    break;
-                }
+                i = next.max(i + 1);
             }
-            b']' | b'>' => break,
+            // Kein Name an der Stelle eines Schlüssels: so liest `lopdf`
+            // dieses Dictionary nicht. Weiter zum nächsten Namen.
             _ => i += 1,
         }
     }
+    chain
+}
+
+/// Ein Wort der Syntax in einem Stream-Dictionary, soweit
+/// [`filter_names`] es unterscheiden muss.
+enum Token<'a> {
+    DictOpen,
+    DictClose,
+    ArrOpen,
+    ArrClose,
+    /// Ein Name, `#xx` schon entschlüsselt.
+    Name(Vec<u8>),
+    /// Zahl oder Schlüsselwort (`R`, `null`, `true`, …).
+    Word(&'a [u8]),
+    /// Zeichenkette oder verirrtes Trennzeichen.
+    Other,
+}
+
+/// Ein Wert hinter einem Schlüssel.
+enum Wert {
+    Name(Vec<u8>),
+    Verweis,
+    Null,
+    Liste(Vec<Wert>),
+    Anderes,
+}
+
+fn dict_tokens(bytes: &[u8]) -> Vec<Token<'_>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            _ if is_whitespace(b) => i += 1,
+            b'%' => i = skip_to_eol(bytes, i),
+            b'(' => {
+                out.push(Token::Other);
+                i = skip_literal_string(bytes, i);
+            }
+            b'<' if bytes.get(i + 1) == Some(&b'<') => {
+                out.push(Token::DictOpen);
+                i += 2;
+            }
+            b'<' => {
+                out.push(Token::Other);
+                i = skip_hex_string(bytes, i);
+            }
+            b'>' if bytes.get(i + 1) == Some(&b'>') => {
+                out.push(Token::DictClose);
+                i += 2;
+            }
+            b'[' => {
+                out.push(Token::ArrOpen);
+                i += 1;
+            }
+            b']' => {
+                out.push(Token::ArrClose);
+                i += 1;
+            }
+            b'/' => {
+                let mut name = Vec::new();
+                let mut j = i + 1;
+                while j < bytes.len() && !is_whitespace(bytes[j]) && !is_delimiter(bytes[j]) {
+                    if bytes[j] == b'#' {
+                        // Wie `lopdf`: `#` mit zwei Hexziffern ist ein Byte;
+                        // ohne sie endet der Name hier.
+                        match (hex_value(bytes.get(j + 1)), hex_value(bytes.get(j + 2))) {
+                            (Some(high), Some(low)) => {
+                                name.push((high << 4) | low);
+                                j += 3;
+                                continue;
+                            }
+                            _ => break,
+                        }
+                    }
+                    name.push(bytes[j]);
+                    j += 1;
+                }
+                out.push(Token::Name(name));
+                i = j.max(i + 1);
+            }
+            _ if is_delimiter(b) => {
+                out.push(Token::Other);
+                i += 1;
+            }
+            _ => {
+                let start = i;
+                while i < bytes.len() && !is_whitespace(bytes[i]) && !is_delimiter(bytes[i]) {
+                    i += 1;
+                }
+                out.push(Token::Word(&bytes[start..i]));
+            }
+        }
+    }
     out
+}
+
+/// Der Wert zu `key` auf der obersten Ebene eines **rohen** Dictionarys —
+/// als `lopdf::Object`, zerlegt mit demselben Wortzerleger wie
+/// [`filter_names`].
+///
+/// Für die Rohsicht des Orakels, die ein Stream-Dictionary aus den Rohbytes
+/// liest, weil die Altrevision eines inkrementellen Updates in keinem
+/// Objektgraphen mehr steht. Bis zur Spur-A-Runde 2 trennte sie die Wörter
+/// dort nur an Leerraum: `/Filter[/ASCII85Decode/FlateDecode]`, wie iText es
+/// schreibt, war **ein** Name, `/DecodeParms<</Predictor 12/Columns 5>>`
+/// ein Prädiktor ohne Zahl — die Kette lief nicht oder falsch, und das
+/// Geheimnis darin kam als „nicht gefunden“ zurück (Register #95).
+///
+/// Ein Verweis bleibt ein [`Object::Reference`]; ihn aufzulösen ist Sache des
+/// Aufrufers. Eine Zeichenkette steht als leere Zeichenkette da — kein
+/// Filtername, aber auch nicht `null`. Tiefer als [`RAW_OBJECT_DEPTH`]
+/// Ebenen wird nicht gelesen.
+pub(crate) fn raw_dict_entry(dict: &[u8], key: &[u8]) -> Option<Object> {
+    let tokens = dict_tokens(dict);
+    if !matches!(tokens.first(), Some(Token::DictOpen)) {
+        return None;
+    }
+    let mut i = 1;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::DictClose => return None,
+            Token::Name(name) => {
+                let (value, next) = read_object(&tokens, i + 1, 0);
+                if name.as_slice() == key {
+                    return Some(value);
+                }
+                i = next.max(i + 1);
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Der Wert eines rohen Objekts — die Bytes hinter `N G obj`.
+pub(crate) fn raw_object_value(body: &[u8]) -> Object {
+    read_object(&dict_tokens(body), 0, 0).0
+}
+
+/// So tief liest [`read_object`] verschachtelte Listen und Dictionaries; was
+/// tiefer steht, wird übersprungen und ist `null`. Eine Filterkette braucht
+/// eine Ebene, `/DecodeParms` zwei.
+const RAW_OBJECT_DEPTH: usize = 8;
+
+/// Liest den Wert bei `tokens[i]` als `lopdf::Object`; liefert ihn und die
+/// Stelle dahinter.
+fn read_object(tokens: &[Token<'_>], i: usize, depth: usize) -> (Object, usize) {
+    match tokens.get(i) {
+        Some(Token::Name(name)) => (Object::Name(name.clone()), i + 1),
+        Some(Token::Word(word)) => {
+            if is_integer(word) {
+                if let (Some(Token::Word(generation)), Some(Token::Word(b"R"))) =
+                    (tokens.get(i + 1), tokens.get(i + 2))
+                {
+                    if is_integer(generation) {
+                        let number = std::str::from_utf8(word).ok().and_then(|w| w.parse().ok());
+                        let generation = std::str::from_utf8(generation)
+                            .ok()
+                            .and_then(|g| g.parse().ok());
+                        let value = match (number, generation) {
+                            (Some(number), Some(generation)) => {
+                                Object::Reference((number, generation))
+                            }
+                            _ => Object::Null,
+                        };
+                        return (value, i + 3);
+                    }
+                }
+            }
+            let text = std::str::from_utf8(word).unwrap_or_default();
+            let value = match text {
+                "null" => Object::Null,
+                "true" => Object::Boolean(true),
+                "false" => Object::Boolean(false),
+                _ => text
+                    .parse::<i64>()
+                    .map(Object::Integer)
+                    .or_else(|_| text.parse::<f32>().map(Object::Real))
+                    .unwrap_or(Object::Null),
+            };
+            (value, i + 1)
+        }
+        Some(Token::ArrOpen) if depth < RAW_OBJECT_DEPTH => {
+            let mut items = Vec::new();
+            let mut j = i + 1;
+            while j < tokens.len() && !matches!(tokens[j], Token::ArrClose) {
+                let (item, next) = read_object(tokens, j, depth + 1);
+                items.push(item);
+                j = next.max(j + 1);
+            }
+            (Object::Array(items), (j + 1).min(tokens.len()))
+        }
+        Some(Token::DictOpen) if depth < RAW_OBJECT_DEPTH => {
+            let mut dict = lopdf::Dictionary::new();
+            let mut j = i + 1;
+            while j < tokens.len() && !matches!(tokens[j], Token::DictClose) {
+                if let Token::Name(key) = &tokens[j] {
+                    let (value, next) = read_object(tokens, j + 1, depth + 1);
+                    dict.set(key.clone(), value);
+                    j = next.max(j + 1);
+                } else {
+                    j += 1;
+                }
+            }
+            (Object::Dictionary(dict), (j + 1).min(tokens.len()))
+        }
+        Some(Token::ArrOpen | Token::DictOpen) => (Object::Null, skip_balanced(tokens, i)),
+        Some(Token::DictClose | Token::ArrClose) | None => (Object::Null, i),
+        Some(Token::Other) => (
+            Object::String(Vec::new(), lopdf::StringFormat::Literal),
+            i + 1,
+        ),
+    }
+}
+
+/// Die Stelle hinter der Liste oder dem Dictionary, das bei `tokens[i]`
+/// beginnt.
+fn skip_balanced(tokens: &[Token<'_>], i: usize) -> usize {
+    let mut depth = 0usize;
+    let mut j = i;
+    while j < tokens.len() {
+        match tokens[j] {
+            Token::DictOpen | Token::ArrOpen => depth += 1,
+            Token::DictClose | Token::ArrClose => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return j + 1;
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    j
+}
+
+fn hex_value(b: Option<&u8>) -> Option<u8> {
+    b.and_then(|b| (*b as char).to_digit(16)).map(|d| d as u8)
+}
+
+fn is_integer(word: &[u8]) -> bool {
+    !word.is_empty() && word.iter().all(u8::is_ascii_digit)
+}
+
+/// Liest den Wert, der bei `tokens[i]` beginnt; liefert ihn und die Stelle
+/// dahinter. Eine Liste wird **eine** Ebene tief gelesen — tiefer steht in
+/// einer Filterkette nichts, was ein Filter wäre.
+fn read_value(tokens: &[Token<'_>], i: usize) -> (Wert, usize) {
+    match tokens.get(i) {
+        Some(Token::ArrOpen) => {
+            let mut items = Vec::new();
+            let mut j = i + 1;
+            while j < tokens.len() && !matches!(tokens[j], Token::ArrClose) {
+                let (item, next) = read_scalar(tokens, j);
+                items.push(item);
+                j = next.max(j + 1);
+            }
+            (Wert::Liste(items), (j + 1).min(tokens.len()))
+        }
+        _ => read_scalar(tokens, i),
+    }
+}
+
+/// Ein Wert ohne Liste: Name, Verweis, `null`, oder etwas anderes — ein
+/// inneres Dictionary oder eine innere Liste wird dabei ganz übersprungen.
+fn read_scalar(tokens: &[Token<'_>], i: usize) -> (Wert, usize) {
+    match tokens.get(i) {
+        Some(Token::Name(name)) => (Wert::Name(name.clone()), i + 1),
+        Some(Token::Word(word)) if is_integer(word) => {
+            match (tokens.get(i + 1), tokens.get(i + 2)) {
+                (Some(Token::Word(generation)), Some(Token::Word(b"R")))
+                    if is_integer(generation) =>
+                {
+                    (Wert::Verweis, i + 3)
+                }
+                _ => (Wert::Anderes, i + 1),
+            }
+        }
+        Some(Token::Word(b"null")) => (Wert::Null, i + 1),
+        Some(Token::DictOpen | Token::ArrOpen) => {
+            let mut depth = 0usize;
+            let mut j = i;
+            while j < tokens.len() {
+                match tokens[j] {
+                    Token::DictOpen | Token::ArrOpen => depth += 1,
+                    Token::DictClose | Token::ArrClose => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return (Wert::Anderes, j + 1);
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            (Wert::Anderes, j)
+        }
+        // Eine schließende Klammer an der Stelle eines Werts: nicht
+        // verbrauchen, der Aufrufer sieht sie.
+        Some(Token::DictClose | Token::ArrClose) | None => (Wert::Anderes, i),
+        Some(_) => (Wert::Anderes, i + 1),
+    }
 }
 
 /// Sieht der Stream nach Nutzlast statt nach PDF-Syntax aus?
@@ -525,11 +1472,13 @@ fn looks_binary(data: &[u8]) -> bool {
     odd as f64 / sample.len() as f64 > BINARY_RATIO
 }
 
-fn is_whitespace(b: u8) -> bool {
+/// Leerraum nach PDF 32000-1, Tabelle 1 (mit NUL und Seitenvorschub).
+pub(crate) fn is_whitespace(b: u8) -> bool {
     matches!(b, 0 | 9 | 10 | 12 | 13 | 32)
 }
 
-fn is_delimiter(b: u8) -> bool {
+/// Trennzeichen nach PDF 32000-1, Tabelle 2.
+pub(crate) fn is_delimiter(b: u8) -> bool {
     matches!(
         b,
         b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
@@ -810,10 +1759,6 @@ fn rect_from(obj: &Object) -> Option<Rect> {
 // Erreichbarkeit
 // ---------------------------------------------------------------------------
 
-/// Maximale Verschachtelungstiefe direkter Objekte (Arrays in Arrays in …).
-/// Referenzen zählen nicht mit, die laufen über die Arbeitsliste.
-const MAX_DIRECT_DEPTH: usize = 64;
-
 /// Meldet, ob das Dokument aus mehreren inkrementellen Revisionen besteht.
 ///
 /// Der Trailer der jüngsten Revision trägt in diesem Fall ein `/Prev` (Zeiger
@@ -909,7 +1854,6 @@ fn reachable_objects(doc: &Document) -> BTreeSet<ObjectId> {
     // wird, den eine künftige PDF-Version einführt.
     collect_references(
         &Object::Dictionary(doc.trailer.clone()),
-        0,
         &mut seen,
         &mut queue,
     );
@@ -919,46 +1863,38 @@ fn reachable_objects(doc: &Document) -> BTreeSet<ObjectId> {
         let Some(object) = doc.objects.get(&id) else {
             continue;
         };
-        collect_references(object, 0, &mut seen, &mut queue);
+        collect_references(object, &mut seen, &mut queue);
     }
     seen
 }
 
 /// Trägt alle Referenzen eines Objekts in die Arbeitsliste ein.
 ///
-/// Rekursiv durch Dictionaries, Arrays und Stream-Dictionaries — dort steckt
-/// unter anderem ein `/Length`, das als indirektes Objekt vorliegen darf.
-fn collect_references(
-    object: &Object,
-    depth: usize,
-    seen: &mut BTreeSet<ObjectId>,
-    queue: &mut Vec<ObjectId>,
-) {
-    if depth > MAX_DIRECT_DEPTH {
-        return;
-    }
-    match object {
-        Object::Reference(id) => {
-            if seen.insert(*id) {
-                queue.push(*id);
+/// Durch Dictionaries, Arrays und Stream-Dictionaries — dort steckt unter
+/// anderem ein `/Length`, das als indirektes Objekt vorliegen darf.
+///
+/// Ohne Rekursion und ohne Tiefengrenze: der eigene Stapel hält die noch
+/// offenen Zweige. Eine Tiefengrenze gab es hier einmal (64 Ebenen direkter
+/// Verschachtelung); alles darunter galt als **unerreichbar** und wurde von
+/// [`prune_unreachable`] gelöscht — ein XObject hinter 70 verschachtelten
+/// Arrays verschwand samt Bild aus der Ausgabe. Eine Erreichbarkeitsprüfung,
+/// die abbricht, muss „erreichbar“ sagen; hier bricht sie gar nicht mehr ab.
+/// Der Stapel wächst höchstens um die Größe des Dokuments, das ohnehin im
+/// Speicher liegt.
+fn collect_references(object: &Object, seen: &mut BTreeSet<ObjectId>, queue: &mut Vec<ObjectId>) {
+    let mut stack: Vec<&Object> = vec![object];
+    while let Some(object) = stack.pop() {
+        match object {
+            Object::Reference(id) => {
+                if seen.insert(*id) {
+                    queue.push(*id);
+                }
             }
+            Object::Array(items) => stack.extend(items.iter()),
+            Object::Dictionary(dict) => stack.extend(dict.iter().map(|(_, value)| value)),
+            Object::Stream(stream) => stack.extend(stream.dict.iter().map(|(_, value)| value)),
+            _ => {}
         }
-        Object::Array(items) => {
-            for item in items {
-                collect_references(item, depth + 1, seen, queue);
-            }
-        }
-        Object::Dictionary(dict) => {
-            for (_, value) in dict.iter() {
-                collect_references(value, depth + 1, seen, queue);
-            }
-        }
-        Object::Stream(stream) => {
-            for (_, value) in stream.dict.iter() {
-                collect_references(value, depth + 1, seen, queue);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -981,21 +1917,44 @@ pub fn prune_unreachable(doc: &mut Document) -> usize {
     before - doc.objects.len()
 }
 
+/// Die Schlüssel, die im Trailer der Ausgabe stehen dürfen (PDF 32000-1,
+/// 7.5.5, Tabelle 15 — ohne `/Prev`, das eine Vorgeschichte beschreibt, die
+/// die Ausgabe nicht hat).
+///
+/// Alles andere fällt: `reachable_objects` nimmt den **ganzen** Trailer als
+/// Wurzel, ein Objekt unter einem erfundenen Schlüssel (`<< /Zusatz 7 0 R >>`)
+/// überlebte damit jedes Aufräumen und stand mit seinem Klartext in der
+/// Ausgabe. Dazu kommen die Reste eines XRef-Stroms (`/Type`, `/W`, `/Index`,
+/// `/Filter`, `/DecodeParms`, `/Length`), die `lopdf` beim Laden im Trailer
+/// ablegt und die in einer klassischen Trailer-Zeile nichts verloren haben;
+/// schreibt `lopdf` selbst einen XRef-Strom, setzt es sie ohnehin neu.
+const TRAILER_KEYS: [&[u8]; 5] = [b"Root", b"Info", b"Encrypt", b"ID", b"Size"];
+
 /// Serialisiert das Dokument in den Speicher.
 ///
-/// Vor dem Schreiben wird aufgeräumt: unerreichbare Objekte fliegen raus und
-/// der Trailer verliert die Zeiger auf ältere Revisionen (`/Prev`,
-/// `/XRefStm`). Die Ausgabe ist genau eine Revision — ohne Vorgeschichte und
-/// ohne Karteileichen. Das Dokument des Aufrufers bleibt unverändert.
+/// Vor dem Schreiben wird aufgeräumt: der Trailer behält nur die Schlüssel
+/// aus [`TRAILER_KEYS`] (und verliert damit auch die Zeiger auf ältere
+/// Revisionen, `/Prev` und `/XRefStm`), unerreichbare Objekte fliegen raus.
+/// Die Ausgabe ist genau eine Revision — ohne Vorgeschichte und ohne
+/// Karteileichen. Das Dokument des Aufrufers bleibt unverändert.
 pub fn save_to_bytes(doc: &Document) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
     let mut copy = doc.clone();
-    prune_unreachable(&mut copy);
-    // Die Ausgabe ist eine vollständige, in sich geschlossene Datei. Ein
-    // geerbtes `/Prev` zeigt in ihr auf einen völlig anderen Offset — im
+    // Zuerst der Trailer, dann die Erreichbarkeit: was nur ein fremder
+    // Trailerschlüssel gehalten hat, ist danach unerreichbar und fällt mit.
+    // Die Ausgabe ist eine vollständige, in sich geschlossene Datei — ein
+    // geerbtes `/Prev` zeigt in ihr auf einen völlig anderen Offset, im
     // Zweifel mitten in einen Content-Stream.
-    copy.trailer.remove(b"Prev");
-    copy.trailer.remove(b"XRefStm");
+    let fremd: Vec<Vec<u8>> = copy
+        .trailer
+        .iter()
+        .map(|(key, _)| key.clone())
+        .filter(|key| !TRAILER_KEYS.contains(&key.as_slice()))
+        .collect();
+    for key in fremd {
+        copy.trailer.remove(&key);
+    }
+    prune_unreachable(&mut copy);
     copy.save_to(&mut buffer)
         .map_err(|e| RedactError::Pdf(format!("Speichern fehlgeschlagen: {e}")))?;
     Ok(buffer)
@@ -1154,7 +2113,11 @@ pub fn check_target(path: &Path, options: &WriteOptions) -> Result<Target> {
 /// Groß-/Kleinschreibung — `IN.PDF` bezeichnen alle dieselbe Datei, sehen aber
 /// verschieden aus. Deshalb wird zuerst über die Dateiidentität verglichen und
 /// nur ersatzweise über den kanonisierten Pfad.
-fn same_file(a: &Path, b: &Path) -> bool {
+///
+/// Öffentlich, damit es im Baum **eine** Antwort auf „dieselbe Datei?“ gibt:
+/// die Oberfläche misst damit, ob ein Verzeichnis Groß- und Kleinschreibung
+/// unterscheidet (`redact_gui::app::gemessene_schreibweise`).
+pub fn same_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -1377,14 +2340,59 @@ mod tests {
 
     #[test]
     fn filters_are_read_from_the_dictionary() {
-        assert_eq!(filter_names(b"<< /Length 10 >>"), Vec::<Vec<u8>>::new());
+        let flate = || Some(vec![b"FlateDecode".to_vec()]);
+        assert_eq!(filter_names(b"<< /Length 10 >>"), Some(Vec::new()));
         assert_eq!(
             filter_names(b"<< /Filter /FlateDecode /Length 10 >>"),
-            vec![b"FlateDecode".to_vec()]
+            flate()
         );
         assert_eq!(
             filter_names(b"<< /Filter [/ASCII85Decode /FlateDecode] >>"),
-            vec![b"ASCII85Decode".to_vec(), b"FlateDecode".to_vec()]
+            Some(vec![b"ASCII85Decode".to_vec(), b"FlateDecode".to_vec()])
+        );
+        assert_eq!(
+            filter_names(b"<</Filter[/ASCII85Decode/FlateDecode]/Length 3>>"),
+            Some(vec![b"ASCII85Decode".to_vec(), b"FlateDecode".to_vec()])
+        );
+    }
+
+    /// Register #89: die Kette so, wie `lopdf` sie liest — nicht die ersten
+    /// Bytes `/Filter` im Dictionary.
+    #[test]
+    fn filters_are_read_like_lopdf_reads_them() {
+        let flate = || Some(vec![b"FlateDecode".to_vec()]);
+        // `#xx` im Schlüssel und im Namen.
+        assert_eq!(filter_names(b"<< /Fil#74er /FlateDecode >>"), flate());
+        assert_eq!(filter_names(b"<< /Filter /Flate#44ecode >>"), flate());
+        // Ein `/Filter` in einem inneren Dictionary, einer Zeichenkette oder
+        // einem Kommentar zählt nicht.
+        assert_eq!(
+            filter_names(b"<< /X << /Filter /ASCIIHexDecode >> /Filter /FlateDecode >>"),
+            flate()
+        );
+        assert_eq!(
+            filter_names(b"<< /X (/Filter /ASCIIHexDecode) /Filter /FlateDecode >>"),
+            flate()
+        );
+        assert_eq!(
+            filter_names(b"<< % /Filter /ASCIIHexDecode\n/Filter /FlateDecode >>"),
+            flate()
+        );
+        // Zweimal `/Filter`: der letzte gilt.
+        assert_eq!(
+            filter_names(b"<< /Filter /ASCIIHexDecode /Filter /FlateDecode >>"),
+            flate()
+        );
+        // Ein Verweis: das weiß erst das geladene Dokument.
+        assert_eq!(filter_names(b"<< /Filter 5 0 R /Length 10 >>"), None);
+        assert_eq!(filter_names(b"<< /Filter [/FlateDecode 5 0 R] >>"), None);
+        // `null` ist kein Filter, eine Zahl ein namenloses Glied.
+        assert_eq!(filter_names(b"<< /Filter null >>"), Some(Vec::new()));
+        assert_eq!(filter_names(b"<< /Filter 5 >>"), Some(vec![Vec::new()]));
+        // Eine Zahl vor einem Namen ist kein Verweis.
+        assert_eq!(
+            filter_names(b"<< /Length 10 /Filter /FlateDecode >>"),
+            flate()
         );
     }
 

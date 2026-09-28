@@ -204,10 +204,59 @@ pub fn pdf_point_to_screen(x: f64, y: f64, view: &PageView, zoom: f32, origin: P
     )
 }
 
+/// Der Zoomfaktor, mit dem sich vom Bildschirm zurückrechnen lässt — oder
+/// nichts.
+///
+/// # Woran die Zahl wirklich hängt
+///
+/// Hier stand `(zoom as f64).max(f64::EPSILON)`. Das war als Schutz vor der
+/// Division durch null gemeint und zählte damit die falsche Größe: es
+/// verhinderte ∞, erzeugte dafür aber *plausibel aussehende* riesige
+/// Koordinaten. `f64::max` schluckt außerdem einen NaN-Operanden, also traf es
+/// NaN, 0 und negative Werte gleichermaßen — alle drei wurden zu 2,2e-16, und
+/// ein Zug über 120 x 60 Bildschirmpunkte ergab gemessen
+/// `Rect(0, -2,7e17, 5,4e17, 842)`. Für `Rect::is_usable` ist das ein
+/// **brauchbares** Rechteck; [`crate::state::AppState::clamp_to_page`] schnitt
+/// es auf das ganze Blatt, `add_manual_region` legte es an und meldete
+/// „Manuelle Region auf Seite 1 angelegt“, die Kopfzeile sagte „1 Treffer ·
+/// 1 werden geschwärzt“. Wort für Wort die Wirkung, die die NaN-Runde
+/// abgestellt hatte — nur eine Stelle weiter vorn.
+///
+/// Die Zahl hängt nicht an „nicht null“, sondern an dem Bereich, in dem der
+/// Zoom dieses Programms überhaupt liegen kann: unterhalb von
+/// [`crate::state::MIN_ZOOM`] ist der Kehrwert nicht mehr durch die
+/// Fenstergröße beschränkt. Gemessen: mit einem Zoom aus
+/// [`crate::state::MIN_ZOOM`] … [`crate::state::MAX_ZOOM`] und
+/// Bildschirmkoordinaten bis ±1e6 liegt die größte erreichbare
+/// User-Space-Koordinate bei 4,0e6.
+///
+/// # Warum das hier steht und nicht bei `set_zoom`
+///
+/// [`crate::state::AppState::zoom`] ist ein **öffentliches Feld**.
+/// `AppState::set_zoom` prüft zwar auf Endlichkeit und klemmt, ist damit aber
+/// eine Bitte und kein Wächter: `state.zoom = f32::NAN` geht daran vorbei.
+/// Eine Zusicherung, die nur an ihrer Ursprungsstelle gilt, trägt an der
+/// nächsten nicht — also wird sie dort geprüft, wo aus ihr Koordinaten werden.
+pub fn usable_zoom(zoom: f32) -> Option<f64> {
+    (crate::state::MIN_ZOOM..=crate::state::MAX_ZOOM)
+        .contains(&zoom)
+        .then_some(zoom as f64)
+}
+
 /// Ein einzelner Bildschirmpunkt → PDF-User-Space.
+///
+/// Ohne brauchbaren Zoomfaktor ([`usable_zoom`]) gibt es keine Abbildung, und
+/// das Ergebnis sagt genau das: ein Punkt aus NaN. Er macht jedes daraus
+/// gebaute Rechteck unbrauchbar (`Rect::is_usable`), und damit greift dieselbe
+/// Absage wie für ein Rechteck neben dem Blatt — `add_manual_region` legt
+/// nichts an und sagt es, `set_region_rect` lehnt ab, `hit_test` wählt nichts
+/// aus. Eine Ersatzzahl einzusetzen hieße, ein Rechteck an einer Stelle
+/// anzulegen, die niemand angeklickt hat.
 pub fn screen_to_pdf_point(p: Pos2, view: &PageView, zoom: f32, origin: Pos2) -> Point {
+    let Some(z) = usable_zoom(zoom) else {
+        return Point::new(f64::NAN, f64::NAN);
+    };
     let page_box = view.display_box();
-    let z = (zoom as f64).max(f64::EPSILON);
     let d = Point::new(
         page_box.ll.x + (p.x - origin.x) as f64 / z,
         page_box.ur.y - (p.y - origin.y) as f64 / z,
@@ -416,6 +465,85 @@ pub const PADDING_STROKE: f32 = 1.0;
 pub const PADDING_DASH: f32 = 3.0;
 /// Lückenlänge des Polsterungsrahmens.
 pub const PADDING_GAP: f32 = 3.0;
+/// Strichlänge des Rahmens um eine Region, die nicht mitzählt.
+pub const REGION_DASH: f32 = 4.0;
+/// Lückenlänge desselben Rahmens.
+pub const REGION_GAP: f32 = 4.0;
+
+/// Höchstzahl der Striche, aus denen **eine Kante** eines gestrichelten
+/// Rahmens besteht.
+///
+/// # Woran die Zahl wirklich hängt
+///
+/// Nicht am Rechteck, sondern an dem, was ein Bildschirm zeigen kann.
+/// `epaint::Shape::dashed_line` legt **je Strich einen eigenen `Shape` an** und
+/// läuft dazu in `dashes_from_line` mit `while position < segment_length` über
+/// die Kante; die Zahl der Durchläufe ist die Kantenlänge in
+/// Bildschirmpunkten geteilt durch Strich plus Lücke, und begrenzt war sie
+/// nirgends. Ein Rechteck, das über eine Review-Datei oder
+/// `--manual-regions` hereinkommt, wird **ungeschnitten** gezeichnet
+/// ([`crate::state::AppState::apply_review_file`] legt es so ab, wie es in der
+/// Datei steht) — gemessen mit `Rect(-3,4e38, -3,4e38, 3,4e38, 3,4e38)`:
+/// `paint_padding` forderte 5 368 709 120 Byte an, und der Prozess brach mit
+/// SIGABRT ab, bevor überhaupt ein Bild stand. Das ist kein Anzeigefehler,
+/// sondern ein Speicherfresser aus einer präparierten Datei.
+///
+/// 2048 ist mehr, als je zu sehen ist: die breiteste gebräuchliche Anzeige hat
+/// 7680 Punkte, und eine Kante dieser Länge braucht mit dem engsten hier
+/// benutzten Muster (Strich 3, Lücke 3) 1280 Striche. Der Deckel greift damit
+/// für nichts, was auf einen Bildschirm passt — erst dort, wo ohnehin niemand
+/// einen Strich vom nächsten unterscheiden könnte, werden Strich und Lücke im
+/// gleichen Verhältnis länger.
+pub const MAX_DASHES_PER_EDGE: f32 = 2048.0;
+
+/// Strich- und Lückenlänge für einen gestrichelten Rahmen um `rect`.
+///
+/// `None`, wenn sich die Kantenlänge nicht ausrechnen lässt — nicht endliche
+/// Ecken, und ebenso eine Breite, die in `f32` überläuft (`3,4e38` minus
+/// `-3,4e38` ist `inf`; `dashes_from_line` liefe dann endlos). Ein Rahmen, den
+/// niemand ausrechnen kann, wird nicht gezeichnet; sichtbar ist er in diesen
+/// Fällen ohnehin nicht, denn seine Kanten liegen weit außerhalb des Blatts.
+///
+/// Sonst `Some` — und für alles, was auf einen Bildschirm passt, **unverändert**
+/// das, was hereinkam (Faktor 1). Siehe [`MAX_DASHES_PER_EDGE`].
+pub fn dash_lengths_for(rect: egui::Rect, dash: f32, gap: f32) -> Option<(f32, f32)> {
+    let period = dash + gap;
+    let longest = rect.width().max(rect.height());
+    // Alle drei Fragen **positiv** gestellt: steckt irgendwo NaN, lautet jede
+    // Antwort „nein“, und dann gibt es keine ausrechenbare Strichlänge. Als
+    // `!(period > 0.0)` geschrieben wäre das derselbe Vergleich, aber die
+    // NaN-Richtung stünde nicht mehr da, wo man sie liest.
+    if rect.is_finite() && longest.is_finite() && period > 0.0 {
+        let factor = (longest / (MAX_DASHES_PER_EDGE * period)).max(1.0);
+        return Some((dash * factor, gap * factor));
+    }
+    None
+}
+
+/// Zeichnet einen gestrichelten Rahmen um `rect`.
+///
+/// Eine Stelle für beide Aufrufer ([`paint_padding`] und [`paint_region`]) —
+/// vorher stand die Kantenschleife zweimal da, und ein Deckel hätte zweimal
+/// eingebaut werden müssen.
+pub fn paint_dashed_rect(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    stroke: Stroke,
+    dash: f32,
+    gap: f32,
+) {
+    let Some((dash, gap)) = dash_lengths_for(rect, dash, gap) else {
+        return;
+    };
+    for edge in [
+        [rect.left_top(), rect.right_top()],
+        [rect.right_top(), rect.right_bottom()],
+        [rect.right_bottom(), rect.left_bottom()],
+        [rect.left_bottom(), rect.left_top()],
+    ] {
+        painter.extend(egui::Shape::dashed_line(&edge, stroke, dash, gap));
+    }
+}
 
 /// Das Rechteck, das beim Export wirklich schwarz wird.
 ///
@@ -462,19 +590,7 @@ pub fn paint_padding(painter: &egui::Painter, rect: egui::Rect, rgb: (u8, u8, u8
         PADDING_STROKE,
         Color32::from_rgba_unmultiplied(r, g, b, 160),
     );
-    for edge in [
-        [padded.left_top(), padded.right_top()],
-        [padded.right_top(), padded.right_bottom()],
-        [padded.right_bottom(), padded.left_bottom()],
-        [padded.left_bottom(), padded.left_top()],
-    ] {
-        painter.extend(egui::Shape::dashed_line(
-            &edge,
-            stroke,
-            PADDING_DASH,
-            PADDING_GAP,
-        ));
-    }
+    paint_dashed_rect(painter, padded, stroke, PADDING_DASH, PADDING_GAP);
 }
 
 /// Zeichnet ein Schwärzungsrechteck.
@@ -509,14 +625,7 @@ pub fn paint_region(
         painter.rect_stroke(rect, NO_ROUNDING, stroke);
     } else {
         // Gestrichelt = „zählt nicht mit“.
-        for edge in [
-            [rect.left_top(), rect.right_top()],
-            [rect.right_top(), rect.right_bottom()],
-            [rect.right_bottom(), rect.left_bottom()],
-            [rect.left_bottom(), rect.left_top()],
-        ] {
-            painter.extend(egui::Shape::dashed_line(&edge, stroke, 4.0_f32, 4.0_f32));
-        }
+        paint_dashed_rect(painter, rect, stroke, REGION_DASH, REGION_GAP);
     }
     if selected {
         // Griffpunkte an den Ecken der Auswahl. Sie sind ein Versprechen: an

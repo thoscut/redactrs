@@ -500,11 +500,9 @@ fn extraction_and_redaction_survive_the_corpus() {
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             let mut doc = doc;
-            let extractor = redact_pdf::PdfExtractor::new();
-            for index in 0..pages {
-                // Fehler sind erlaubt (kaputte Seite), Paniken nicht.
-                let _ = extractor.extract_page(&doc, index);
-            }
+            // Fehler sind erlaubt (kaputte Seite), Paniken nicht — die
+            // nachsichtige Extraktion nimmt jede Seite mit, die sich lesen lässt.
+            let _ = redact_pdf::PdfExtractor::new().extract_lenient(&doc);
 
             // Je Seite ein Balken quer durch die Mitte.
             let redactions: Vec<Redaction> = (0..pages)

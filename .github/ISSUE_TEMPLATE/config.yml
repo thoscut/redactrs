@@ -1,0 +1,29 @@
+# Die Auswahlseite unter "New issue".
+#
+# Der eine Grund, warum es diese Datei gibt: eine Sicherheitsluecke darf
+# nicht als oeffentliches Issue landen. Bei einem Werkzeug, das Bankunterlagen
+# schwaerzt, ist der haeufigste denkbare Fehlerbericht - "der geschwaerzte
+# Text steht noch in der Ausgabe" - genau so eine Luecke, und ein Melder haengt
+# in guter Absicht gern noch die Beispieldatei an. Deshalb steht der Weg zur
+# privaten Advisory hier ganz oben und vor jeder Vorlage.
+#
+# Leere Issues bleiben erlaubt: fuer eine Frage oder eine Idee soll niemand
+# ein Formular ausfuellen muessen. Der Hinweis unten erscheint auf dieser
+# Seite unabhaengig davon, welchen Weg jemand waehlt.
+blank_issues_enabled: true
+
+contact_links:
+  - name: "Sicherheitslücke melden (NICHT als öffentliches Issue)"
+    url: https://github.com/thoscut/redactrs/security/advisories/new
+    about: >-
+      Steht geschwärzter Text noch in der Ausgabe? Bringt eine Datei das
+      Programm zum Absturz oder belegt sie den Rechner? Das gehört hierhin,
+      privat — nicht in ein öffentliches Issue und schon gar nicht mit
+      Beispieldatei im Anhang. Einzelheiten in SECURITY.md.
+
+  - name: "Erst lesen: was das Werkzeug zusichert — und was nicht"
+    url: https://github.com/thoscut/redactrs/blob/main/SECURITY.md
+    about: >-
+      Bekannte Grenzen, Angriffsflächen und die Frage, wogegen überhaupt
+      geprüft wird. Vieles, was wie ein Fehler aussieht, steht dort als
+      bewusste und begründete Grenze.

@@ -1,11 +1,12 @@
 [package]
 name = "redact-cli"
-description = "Command line interface for redact-rs"
+description = "The redact-rs program: command line and windowed launcher"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "redact-rs"
@@ -38,6 +39,17 @@ clap.workspace = true
 # Dateien). Steht bereits im Baum, es kommt keine Abhängigkeit hinzu.
 serde.workspace = true
 serde_json.workspace = true
+
+# Genau ein Aufruf in src/dumpable.rs, damit ein Absturz den Klartext des
+# Dokuments nicht in einen Kernabzug schreibt: prctl(PR_SET_DUMPABLE, 0) unter
+# Linux, setrlimit(RLIMIT_CORE, 0) auf den übrigen Unix-Systemen. Unter Windows
+# gäbe es ein Gegenstück — `WerAddExcludedApplication` (siehe src/dumpable.rs
+# und SECURITY.md) —, es ist aber nicht umgesetzt und stünde ohnehin nicht in
+# libc. Der Windows-Bau ruft hier nichts auf und braucht die Abhängigkeit nicht.
+# `libc` liegt über lopdf → getrandom ohnehin in jedem Bau; es kommt keine
+# Abhängigkeit in den Baum, nur eine ausgesprochene.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 redact-pdf.workspace = true

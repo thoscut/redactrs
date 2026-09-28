@@ -825,6 +825,9 @@ fn the_input_is_protected_in_every_spelling() {
     let sub = dir.join("unter");
     std::fs::create_dir_all(&sub).unwrap();
 
+    // `mut` braucht nur der Unix-Zweig darunter (Symlink, Hardlink); unter
+    // Windows hielte `clippy -D warnings` es sonst für überflüssig.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut aliases: Vec<PathBuf> = vec![
         // absolut
         input.clone(),
@@ -1500,4 +1503,131 @@ fn the_image_budget_ends_the_run_with_a_message_not_a_crash() {
     ]);
     assert!(allowed.status.success(), "{}", stderr(&allowed));
     assert!(out.exists());
+}
+
+// --- Fix-Runde 4, D1: das Budget der Nachprüfung ----------------------------
+
+/// Ein PDF mit einem Strom **ohne `/Filter`**, dessen Bytes trotzdem Flate
+/// sind — `megabytes` MB Nullen, gepackt auf wenige Kilobyte.
+///
+/// Warum gerade so: die Vorprüfung (`prescan`) packt nur aus, was das
+/// Dictionary als Flate ausweist, und lehnt eine Datei ab, deren entpackte
+/// Summe über `--max-decompressed-mb` liegt (Rückgabewert 1, siehe
+/// `a_stream_over_the_budget_is_refused_before_the_search`). Diesen Strom
+/// zählt sie roh — 4 kB — und lässt die Datei durch. Die Rohsicht der
+/// Nachprüfung dagegen bläst jeden `stream … endstream`-Block auf, dem sich
+/// Flate entlocken lässt, gleich was das Dictionary sagt: genau der Fall,
+/// in dem die Suche ohne eigenes Budget beliebig viel Speicher belegte —
+/// und in dem sie *mit* Budget sagen muss, was sie nicht gesehen hat.
+fn pdf_with_a_filterless_flate_stream(megabytes: usize) -> Vec<u8> {
+    use lopdf::{dictionary, Stream};
+
+    let mut stream = Stream::new(dictionary! {}, vec![0u8; megabytes * 1024 * 1024]);
+    stream.compress().expect("komprimierbar");
+    let mut blob = format!("<< /Length {} >>\nstream\n", stream.content.len()).into_bytes();
+    blob.extend_from_slice(&stream.content);
+    blob.extend_from_slice(b"\nendstream");
+
+    let body: Vec<(u32, Vec<u8>)> = vec![
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >>".to_vec(),
+        ),
+        (4, b"<< /Length 5 >>\nstream\nBT ET\nendstream".to_vec()),
+        (5, blob),
+    ];
+    assemble_pdf(&body)
+}
+
+/// Was die Suche unter dem Budget nicht auspacken konnte, steht in der
+/// Ausgabe — und der Rückgabewert ist **3, auch ohne Fund**. Ohne den
+/// Schalter (Vorgabe 1024 MB) wird der Strom gelesen, und derselbe Aufruf
+/// endet mit 0.
+///
+/// Mutation: `unchecked` in `check::report` nicht auswerten (Rückgabewert
+/// nach dem Fundzähler allein) → der erste Lauf endet mit 0 → rot.
+#[test]
+fn check_leaks_names_what_the_budget_left_unchecked_and_returns_3() {
+    let dir = workdir("check-leaks-budget");
+    let input = dir.join("gross.pdf");
+    let bytes = pdf_with_a_filterless_flate_stream(4);
+    assert!(
+        bytes.len() < 64 * 1024,
+        "{} Byte auf der Platte",
+        bytes.len()
+    );
+    std::fs::write(&input, &bytes).unwrap();
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--check-leaks",
+        "GEHEIM",
+        "--max-decompressed-mb",
+        "1",
+    ]);
+    let text = stdout(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "nicht geprüft ist keine 0 und kein Fehler:\n{text}{}",
+        stderr(&out)
+    );
+    let stelle = text
+        .lines()
+        .find_map(|z| z.strip_prefix("  NICHT GEPRÜFT: "))
+        .unwrap_or_else(|| panic!("die Ausgabe nennt die Stelle nicht:\n{text}"));
+    assert!(
+        !stelle.trim().is_empty(),
+        "NICHT GEPRÜFT ohne Stelle:\n{text}"
+    );
+    assert!(
+        text.contains("Stelle(n) nicht geprüft — die Antwort ist unvollständig"),
+        "das Ergebnis sagt nicht, dass es unvollständig ist:\n{text}"
+    );
+    assert!(
+        !text.contains("steht nicht mehr in der Datei"),
+        "Entwarnung trotz nicht geprüfter Stelle:\n{text}"
+    );
+
+    // Gegenprobe: mit der Vorgabe (1024 MB) passt der Strom ins Budget, wird
+    // durchsucht, enthält den Begriff nicht — 0, und keine NICHT-GEPRÜFT-Zeile.
+    let out = run(&[input.to_str().unwrap(), "--check-leaks", "GEHEIM"]);
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}{}", stderr(&out));
+    assert!(!text.contains("NICHT GEPRÜFT"), "{text}");
+    assert!(text.contains("steht nicht mehr in der Datei"), "{text}");
+}
+
+/// Die andere Tür bleibt zu: ein Strom, den das Dictionary als Flate
+/// ausweist und der entpackt über `--max-decompressed-mb` liegt, fällt schon
+/// in der Vorprüfung — Rückgabewert 1, „Prüfung ist gar nicht gelaufen“, und
+/// nie 0. Der Weg zur Antwort ist derselbe Schalter.
+#[test]
+fn a_stream_over_the_budget_is_refused_before_the_search() {
+    let dir = workdir("check-leaks-bomb");
+    let input = dir.join("bombe.pdf");
+    std::fs::write(&input, decompression_bomb(4)).unwrap();
+
+    let out = run(&[
+        input.to_str().unwrap(),
+        "--check-leaks",
+        "GEHEIM",
+        "--max-decompressed-mb",
+        "1",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("Budget"), "{}", stderr(&out));
+    assert!(
+        !stdout(&out).contains("nicht gefunden"),
+        "eine Antwort ohne Prüfung:\n{}",
+        stdout(&out)
+    );
 }

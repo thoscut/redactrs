@@ -280,7 +280,10 @@ fn a_stencil_mask_hides_the_samples_it_marks() {
     }
 }
 
-/// Der Kern von Befund 3: die versteckte Hälfte bleibt versteckt.
+/// Der Kern von Befund 3: die versteckte Hälfte bleibt versteckt — seit
+/// Register #77 über eine `/SMask` in Bildauflösung, nicht mehr über den
+/// unverändert mitgeschriebenen Stencil-Strom (der Name des Tests hält den
+/// alten Satz fest, sein Rumpf die neue Wahrheit).
 #[test]
 fn a_stencil_mask_is_written_back_unchanged() {
     let mut doc = image_with_stencil_mask();
@@ -309,25 +312,23 @@ fn a_stencil_mask_is_written_back_unchanged() {
         }
     }
 
-    // Und zwar dadurch, dass die Maske selbst mitgeschrieben wird — nicht durch
-    // eine nachgebaute Alphaebene: der Stencil-Strom steht in voller Auflösung
-    // neben dem Bild, eine Alphaebene wäre auf 8×8 heruntergebrochen.
+    // Bis zur Spur-A-Runde 1 stand hier: „und zwar dadurch, dass die Maske
+    // selbst mitgeschrieben wird“. Das war die Lücke (Register #77): die Bits
+    // der Maske sind die Form, die das Bild malt — ein Textumriss als Stencil
+    // trägt den Text auch unter der Zone. Ein **geschwärztes** Bild schreibt
+    // deshalb die Alphaebene als `/SMask` (unter der Zone undurchsichtig),
+    // und kein `/Mask` daneben; die eigene Auflösung der Maske ist der Preis,
+    // und er fällt nur bei einem wirklich geschwärzten Bild an. Eine Maske,
+    // die sich nicht lesen ließ, kommt weiter unverändert mit — siehe
+    // `a_mask_we_cannot_decode_is_still_carried_over`.
     let dict = image_dict(&out, b"Im0");
-    let mask = dict.get(b"Mask").expect("/Mask fehlt in der Ausgabe");
-    let (_, resolved) = out.dereference(mask).expect("auflösbar");
-    let mask_stream = resolved.as_stream().expect("Strom");
-    assert_eq!(
-        mask_stream
-            .dict
-            .get(b"ImageMask")
-            .and_then(Object::as_bool)
-            .ok(),
-        Some(true)
-    );
     assert!(
-        dict.get(b"SMask").is_err(),
-        "/Mask und /SMask nebeneinander sind regelwidrig: {dict:?}"
+        dict.get(b"Mask").is_err(),
+        "ein geschwärztes Bild schreibt seine Stencil-Maske nicht unverändert zurück: {dict:?}"
     );
+    let smask = dict.get(b"SMask").expect("/SMask fehlt in der Ausgabe");
+    let (_, resolved) = out.dereference(smask).expect("auflösbar");
+    resolved.as_stream().expect("Strom");
 }
 
 /// Auch das Umgekehrte muss stimmen: die Bildpunkte sind wirklich fort.
@@ -376,6 +377,13 @@ fn a_mask_we_cannot_decode_is_still_carried_over() {
 
     let (report, out) = roundtrip(&mut doc, right_half());
     assert_eq!(report.redacted_images, 1, "das Bild selbst ist lesbar");
+    // Seit Register #77 sagt der Lauf dazu, was er nicht tun konnte: die Bits
+    // einer ungelesenen Maske unter der Zone schwärzen.
+    assert!(
+        report.warnings.iter().any(|w| w.contains("/Mask")),
+        "keine Warnung zur ungelesenen Maske: {:?}",
+        report.warnings
+    );
     let dict = image_dict(&out, b"Im0");
     let mask = dict.get(b"Mask").expect("/Mask fehlt in der Ausgabe");
     let (_, resolved) = out.dereference(mask).expect("auflösbar");

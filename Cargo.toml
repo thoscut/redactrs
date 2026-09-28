@@ -3,11 +3,42 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/thoscut/redactrs"
+
+# NICHT AUF crates.io.
+#
+# Die acht Crates sind die Teile *eines* Programms, nicht acht Bibliotheken
+# fuer Fremdgebrauch. Ausgeliefert wird als fertiges Binary ueber die
+# GitHub-Releases (.github/workflows/release.yml), und nur `redact-cli`
+# bringt ueberhaupt ein Programm mit, das jemand aufruft.
+#
+# Warum ausdruecklich und nicht nur faktisch: ohne diese Zeile haelt nichts
+# ein Veroeffentlichen auf. Die versionslosen Pfad-Abhaengigkeiten in
+# [workspace.dependencies] lassen `cargo publish` zwar bei den Crates
+# scheitern, die eine solche Abhaengigkeit haben - `redact-core` hat keine
+# (nur lopdf, serde, serde_json, thiserror aus der Registry), und bis 0.6.0
+# stand diese Zeile nicht im Manifest (`git show v0.6.0:Cargo.toml`). Ein
+# `cargo publish -p redact-core` haette dort nichts aufgehalten, und der Name
+# waere mit einem Tastendruck auf crates.io belegt gewesen. `publish = false`
+# ist die Entscheidung, und sie haengt an keiner Zufaelligkeit des Graphen.
+#
+# Zwei Dinge haengen daran:
+#   * `cargo publish` lehnt jedes dieser Crates ab (nachgemessen: "cannot be
+#     published", Rueckgabewert 101). `cargo package` laeuft weiter durch -
+#     die Zeile verhindert das Hochladen, nicht das Packen.
+#   * cargo-deny zaehlt die versionslosen Pfad-Abhaengigkeiten nicht mehr als
+#     Wildcards; deshalb steht in deny.toml jetzt `wildcards = "deny"`.
+#
+# Soll spaeter doch etwas auf crates.io: dann brauchen die betroffenen Crates
+# `keywords`, `categories`, `readme`, `homepage`, `documentation` und die
+# Pfad-Abhaengigkeiten eine `version` — und die Namen `redact-core`,
+# `redact-pdf`, `redact-render` waeren dort sehr allgemeine Namen, die man
+# nicht nebenbei belegt.
+publish = false
 
 [workspace.dependencies]
 redact-core = { path = "crates/redact-core" }
@@ -33,3 +64,10 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Testbinaries tragen nur Zeilentabellen, keine Variablen- und Typbeschreibung.
+# `cargo test` baut die Testziele mit `test` und ihre Abhängigkeiten mit `dev`;
+# `test` erbt von `dev`, also reicht dieser eine Knopf. Backtraces behalten
+# Datei:Zeile. Warum: siehe CONTRIBUTING.md, „Das Gate“.
+[profile.dev]
+debug = "line-tables-only"

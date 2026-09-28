@@ -6,11 +6,15 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::Rect;
-use crate::model::{Region, Source};
+use crate::model::{page_index, Region, Source};
 
 /// Ein durch die Negativliste blockierter Treffer (für das Audit-Log).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockedRegion {
+    /// 0-basierte Seitennummer. Kommt über `blocked_by_negative_list` einer
+    /// Review-Datei von außen und wird wie [`Region::page`] geprüft — siehe
+    /// [`crate::model::MAX_PAGE_INDEX`].
+    #[serde(deserialize_with = "page_index")]
     pub page: usize,
     pub rect: Rect,
     /// Text der blockierenden Negativlisten-Region.
@@ -185,11 +189,7 @@ fn dedup(regions: &mut Vec<Region>) {
     order.sort_by(|&a, &b| {
         let (ra, rb) = (&regions[a], &regions[b]);
         ra.page.cmp(&rb.page).then_with(|| {
-            ra.rect
-                .ll
-                .x
-                .partial_cmp(&rb.rect.ll.x)
-                .unwrap_or(Ordering::Equal)
+            edge_cmp(ra.rect.ll.x, rb.rect.ll.x)
                 // Bei gleicher Kante entscheidet die Eingabereihenfolge, damit
                 // von zwei deckungsgleichen Treffern der erste bleibt.
                 .then(a.cmp(&b))
@@ -229,6 +229,44 @@ fn dedup(regions: &mut Vec<Region>) {
         }
     }
     *regions = keep;
+}
+
+/// Vergleicht zwei Rechteckkanten — mit einer Ordnung, die auch eine ist.
+///
+/// # Warum nicht `partial_cmp(…).unwrap_or(Equal)`
+///
+/// Genau so stand es hier, und das ist mit NaN **keine totale Ordnung**: NaN
+/// gilt gegenüber jedem Wert als gleich, entschieden wird dann nach dem Index.
+/// Gegenbeispiel mit drei Kanten — x=5,0 an Index 0, NaN an Index 1, x=1,0 an
+/// Index 2: `0 < 1` (Gleichstand, Index entscheidet), `1 < 2` (ebenso), aber
+/// `0 > 2` (5,0 gegen 1,0). Aus a < b und b < c müsste a < c folgen.
+///
+/// Seit Rust 1.81 erkennt `slice::sort_by` das und **beendet den Prozess mit
+/// einer Panik** („user-provided comparison function does not correctly
+/// implement a total order"). Ausgelöst wurde sie mit vierzig Treffern, davon
+/// jedem dritten mit NaN-Kante; der Nachweis steht in
+/// `redact-core/tests/z7_totale_ordnung.rs`. NaN-Koordinaten kommen aus
+/// fremden PDFs (eine `cm`-Matrix jenseits von `f32` wird zu ±∞, ∞ mal 0 zu
+/// NaN) — ein Absturz mitten in der Verarbeitung, ohne Ausgabe und ohne
+/// Audit-Log.
+///
+/// # Warum `total_cmp` und nicht „NaN vorher wegwerfen“
+///
+/// Wegwerfen wäre eine zweite Entartungsregel neben [`Rect::is_empty`], und
+/// zwar eine an der falschen Stelle: `dedup` entscheidet über *Redundanz*,
+/// nicht über Brauchbarkeit. Unbrauchbare Regionen fallen ohnehin weiter unten
+/// durch — sie überdecken nichts ([`Rect::covered_fraction`] liefert 0.0) und
+/// werden nicht gezeichnet. Hier wird nur **sortiert**, und dafür genügt
+/// irgendeine feste Ordnung.
+///
+/// `f64::total_cmp` ist die IEEE-754-Totalordnung: reflexiv, antisymmetrisch,
+/// transitiv, NaN an einem festen Ende. Für endliche Werte — und das sind alle
+/// Kanten eines gewöhnlichen Dokuments — entscheidet sie genau wie
+/// `partial_cmp`. Der einzige Unterschied im endlichen Bereich ist
+/// `-0.0 < 0.0`; beide bezeichnen denselben Punkt, und welcher von zwei
+/// deckungsgleichen Treffern zuerst drankommt, ändert am Ergebnis nichts.
+fn edge_cmp(a: f64, b: f64) -> Ordering {
+    a.total_cmp(&b)
 }
 
 /// Höchstens ein Punkt (1/72 Zoll) Kantenlänge — ein Gitter aus Zellen der
@@ -333,8 +371,14 @@ pub struct RectGrid {
 }
 
 /// Nur endliche Koordinaten lassen sich auf Zellen abbilden.
+///
+/// Dieselbe Frage beantwortet [`Rect::is_usable`] — und dort steht sie
+/// inzwischen als **die** Regel des Typs, mit allen Folgen (`is_empty`,
+/// `covered_fraction`, `intersects`). Hier bleibt nur der Name stehen, damit
+/// die Stellen unten lesbar bleiben; eine zweite Definition wäre eine zweite
+/// Gelegenheit, dass die beiden auseinanderlaufen.
 fn usable(rect: &Rect) -> bool {
-    rect.ll.x.is_finite() && rect.ll.y.is_finite() && rect.ur.x.is_finite() && rect.ur.y.is_finite()
+    rect.is_usable()
 }
 
 impl RectGrid {
@@ -389,8 +433,11 @@ impl RectGrid {
     /// Zellenkoordinaten eines Punktes, noch als `f64`. Absichtlich nicht
     /// gleich `as i64`: die Umwandlung sättigt an den `i64`-Grenzen und würde
     /// die Spanne eines sehr weit außen liegenden Rechtecks zu klein ausweisen.
-    /// Gesättigte Indizes selbst sind harmlos — dann teilen sich weit entfernte
-    /// Rechtecke eine Zelle, das gibt mehr Kandidaten, nie weniger.
+    ///
+    /// **Endliche Koordinaten geben hier nicht endliche Indizes.** Liegen
+    /// Ursprung und Koordinate weit auseinander, überläuft schon die Differenz
+    /// nach ±∞. Wer mit dem Ergebnis rechnet, muss das prüfen — siehe
+    /// [`RectGrid::cell_span`], wo genau das einmal geschieht.
     fn floor_cell(&self, x: f64, y: f64) -> (f64, f64) {
         (
             ((x - self.origin_x) / self.cell_w).floor(),
@@ -398,11 +445,38 @@ impl RectGrid {
         )
     }
 
-    pub fn insert(&mut self, idx: usize, rect: &Rect) {
-        self.inserted.push(idx);
+    /// Die Zellen, die `rect` belegt: `(x0, y0, x1, y1)` — oder `None`, wenn
+    /// es keine brauchbare, hinreichend kleine Spanne gibt.
+    ///
+    /// **Hier steht die Regel einmal.** Vorher stand sie zweimal, und beim
+    /// zweiten Mal trug ihre Begründung nicht.
+    ///
+    /// # Die Begründung, die nicht mitwandern durfte
+    ///
+    /// An [`RectGrid::insert`] stand: „Beide Faktoren sind mindestens 1
+    /// (`lx <= hx`, `ly <= hy`), das Produkt also nie NaN — überläuft es nach
+    /// unendlich, greift genau diese Schranke.“ Für `insert` stimmt das: das
+    /// Gitter nimmt seinen Ursprung aus ebendiesen Rechtecken, `ll >= origin`,
+    /// also ist `x0` endlich.
+    ///
+    /// [`RectGrid::touching_into`] fragt aber mit einem **fremden** Rechteck —
+    /// einem Zeichenrechteck aus dem PDF, während der Ursprung aus den
+    /// Schwärzungsbereichen stammt. Liegen die beiden weit genug auseinander,
+    /// überläuft `(coord − origin)` nach ∞, und dann gilt die Begründung nicht
+    /// mehr. Gemessen an einem Ursprung bei −1e308 und einem Zeichenrechteck
+    /// bei +1e308: `x0 = 0`, `x1 = ∞`, `y0 = y1 = ∞`, also
+    /// `y1 − y0 = ∞ − ∞ = NaN` und damit `NaN` als Spanne. `NaN > 64.0` ist
+    /// **falsch** — die Schranke griff nicht, `∞ as i64` sättigte auf
+    /// `i64::MAX`, und die Schleife lief von 0 bis 9 223 372 036 854 775 807.
+    /// An der Kommandozeile war das eine Datei, die nie fertig wurde.
+    ///
+    /// Deshalb wird hier nicht auf „größer als die Schranke“ geprüft, sondern
+    /// zuerst darauf, dass die Spanne überhaupt eine **Zahl** ist. Ein
+    /// Vergleich, dessen falsches Ergebnis an der teuren Schleife vorbeiführt,
+    /// darf nicht die einzige Prüfung sein.
+    fn cell_span(&self, rect: &Rect) -> Option<(i64, i64, i64, i64)> {
         if !usable(rect) {
-            self.everywhere.push(idx);
-            return;
+            return None;
         }
         // Bewusst über min/max statt über `ll`/`ur`: `Region::new`
         // normalisiert zwar, aber die Felder sind öffentlich. Ein verdrehtes
@@ -411,15 +485,21 @@ impl RectGrid {
         let (ly, hy) = (rect.ll.y.min(rect.ur.y), rect.ll.y.max(rect.ur.y));
         let (x0, y0) = self.floor_cell(lx, ly);
         let (x1, y1) = self.floor_cell(hx, hy);
-        // Beide Faktoren sind mindestens 1 (lx <= hx, ly <= hy), das Produkt
-        // also nie NaN — überläuft es nach unendlich, greift genau diese
-        // Schranke.
-        if (x1 - x0 + 1.0) * (y1 - y0 + 1.0) > MAX_CELLS_PER_RECT {
+        let zellen = (x1 - x0 + 1.0) * (y1 - y0 + 1.0);
+        if !zellen.is_finite() || zellen > MAX_CELLS_PER_RECT {
+            return None;
+        }
+        Some((x0 as i64, y0 as i64, x1 as i64, y1 as i64))
+    }
+
+    pub fn insert(&mut self, idx: usize, rect: &Rect) {
+        self.inserted.push(idx);
+        let Some((x0, y0, x1, y1)) = self.cell_span(rect) else {
             self.everywhere.push(idx);
             return;
-        }
-        for x in x0 as i64..=x1 as i64 {
-            for y in y0 as i64..=y1 as i64 {
+        };
+        for x in x0..=x1 {
+            for y in y0..=y1 {
                 self.cells.entry((x, y)).or_default().push(idx);
             }
         }
@@ -467,30 +547,39 @@ impl RectGrid {
     /// Belegt das **abgefragte** Rechteck selbst zu viele Zellen (ein
     /// riesenhaftes Zeichen bei winzigen Bereichen), wäre das Absuchen teurer
     /// als das Prüfen: dann wird alles Eingetragene geliefert. Das ist immer
-    /// korrekt, nur langsamer.
+    /// korrekt, nur langsamer. Dieselbe Rückfallebene greift, wenn sich die
+    /// Zellenspanne gar nicht ausrechnen ließ — der Fall, an dem diese Abfrage
+    /// bis v0.6.0 nicht mehr fertig wurde; die Begründung steht bei
+    /// [`RectGrid::cell_span`].
     pub fn touching_into(&self, rect: &Rect, out: &mut Vec<usize>) {
         out.clear();
-        if !usable(rect) {
-            // Ein Rechteck mit unbrauchbaren Koordinaten berührt nichts:
-            // jeder Vergleich mit NaN ist falsch. Die Einträge aus
-            // `everywhere` bleiben trotzdem dabei — dort steht auch, was
-            // selbst unbrauchbare Koordinaten hat.
-            out.extend_from_slice(&self.everywhere);
+        let Some((x0, y0, x1, y1)) = self.cell_span(rect) else {
+            if usable(rect) {
+                // Zu viele Zellen — oder eine Spanne, die sich gar nicht
+                // ausrechnen ließ (siehe [`RectGrid::cell_span`]). Beides
+                // beantwortet dieselbe Rückfallebene: alles Eingetragene.
+                // `inserted` enthält jeden Eintrag genau einmal, `everywhere`
+                // ist eine Teilmenge davon — hier ist nichts zu entdoppeln.
+                out.extend_from_slice(&self.inserted);
+            } else {
+                // Ein Rechteck mit unbrauchbaren Koordinaten berührt nichts:
+                // jeder Vergleich mit NaN ist falsch. Die Einträge aus
+                // `everywhere` bleiben trotzdem dabei — dort steht auch, was
+                // selbst unbrauchbare Koordinaten hat.
+                //
+                // Bewusst **nicht** mit dem Zweig darüber zusammengelegt,
+                // obwohl `inserted` auch hier korrekt wäre: diese Abfrage
+                // läuft je Zeichen. Ein PDF, dessen Zeichenrechtecke alle
+                // unbrauchbar sind, bekäme sonst je Zeichen die volle Liste
+                // der Bereiche — also genau das quadratische Verhalten, gegen
+                // das es dieses Gitter gibt.
+                out.extend_from_slice(&self.everywhere);
+            }
             return;
-        }
-        let (lx, hx) = (rect.ll.x.min(rect.ur.x), rect.ll.x.max(rect.ur.x));
-        let (ly, hy) = (rect.ll.y.min(rect.ur.y), rect.ll.y.max(rect.ur.y));
-        let (x0, y0) = self.floor_cell(lx, ly);
-        let (x1, y1) = self.floor_cell(hx, hy);
-        if (x1 - x0 + 1.0) * (y1 - y0 + 1.0) > MAX_CELLS_PER_RECT {
-            // `inserted` enthält jeden Eintrag genau einmal, `everywhere` ist
-            // eine Teilmenge davon — hier ist nichts zu entdoppeln.
-            out.extend_from_slice(&self.inserted);
-            return;
-        }
+        };
         let mut cells = 0usize;
-        for x in x0 as i64..=x1 as i64 {
-            for y in y0 as i64..=y1 as i64 {
+        for x in x0..=x1 {
+            for y in y0..=y1 {
                 if let Some(cell) = self.cells.get(&(x, y)) {
                     out.extend_from_slice(cell);
                     cells += 1;
@@ -867,15 +956,13 @@ mod tests {
         let keep = &mut result.redact;
         let mut order: Vec<usize> = (0..keep.len()).collect();
         order.sort_by(|&a, &b| {
-            keep[a].page.cmp(&keep[b].page).then_with(|| {
-                keep[a]
-                    .rect
-                    .ll
-                    .x
-                    .partial_cmp(&keep[b].rect.ll.x)
-                    .unwrap_or(Ordering::Equal)
-                    .then(a.cmp(&b))
-            })
+            keep[a]
+                .page
+                .cmp(&keep[b].page)
+                // Dieselbe Ordnung wie in `dedup` — mit `partial_cmp` stünde
+                // hier dieselbe Panik, und die Referenz soll die Regeln
+                // nachbilden, nicht den Fehler.
+                .then_with(|| edge_cmp(keep[a].rect.ll.x, keep[b].rect.ll.x).then(a.cmp(&b)))
         });
         let mut redundant = vec![false; keep.len()];
         let mut survivors: Vec<usize> = Vec::new();

@@ -12,7 +12,7 @@
 // Nicht jede Testbinary benutzt jeden Baustein.
 #![allow(dead_code)]
 
-use lopdf::{dictionary, Document, Object, ObjectId, Stream, StringFormat};
+use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 
 /// Das Geheimnis, das in allen Szenarien versteckt wird.
 pub const SECRET: &str = "DE89 3704 0044 0532 0130 00";
@@ -59,6 +59,26 @@ impl Doc {
 
     pub fn add(&mut self, object: Object) -> ObjectId {
         self.doc.add_object(object)
+    }
+
+    /// Hängt `value` an einen zweiten Halter, den der Metadatenlauf stehen
+    /// lässt: eine Eigenschaftsliste unter `/Resources /Properties` der Seite
+    /// (frei gestaltbar, 14.6.2). Bis Register #92 dienten dazu erfundene
+    /// Schlüssel an Seite oder Katalog (`/Zusatz`) — die fallen jetzt als
+    /// Beiwerk, und ein Test, der sie als Halter nimmt, prüft nichts mehr.
+    pub fn zweiter_halter(&mut self, value: Object) {
+        let resources = self
+            .doc
+            .get_dictionary_mut(self.resources_id)
+            .expect("Ressourcen");
+        if resources.get(b"Properties").is_err() {
+            resources.set("Properties", Dictionary::new());
+        }
+        let Ok(Object::Dictionary(properties)) = resources.get_mut(b"Properties") else {
+            panic!("/Properties ist ein direktes Dictionary");
+        };
+        let name = format!("Halter{}", properties.len());
+        properties.set(name, dictionary! { "Halt" => value });
     }
 }
 

@@ -25,12 +25,15 @@
 //! deshalb in [`split_layers`] in Druckschichten zerlegt, und jede Schicht
 //! ergibt ihre eigene Zeile.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use lopdf::{Document, ObjectId};
-use redact_core::{Glyph, Rect, Result, TextRun};
+use lopdf::{Document, Object, ObjectId};
+use redact_core::{bounding_box, Glyph, Rect, Result, TextRun};
 
-use crate::content::{scan_page, GlyphItem, ScanResult};
+use crate::content::{
+    scan_page_with, AnnotationLedger, GlyphItem, MarkedTextRecord, ScanResult, ShowRecord,
+    StreamKey, MIRROR_KEYS,
+};
 
 /// Auflösung der Richtungs-Einteilung in Grad. Glyphen mit gleicher gerundeter
 /// Grundlinienrichtung kommen in dieselbe Zeile; ein 90°-Block bleibt also von
@@ -89,19 +92,14 @@ const SPACE_RATIO: f64 = 0.5;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PdfExtractor;
 
+/// Eine Seite, die der Interpreter ablehnte: ihre Kennung und die Zeile, die
+/// sagt, warum sie in der Sicht fehlt
+/// ([`PdfExtractor::extract_lenient_with_gaps`], Register #98).
+pub type PageGap = (ObjectId, String);
+
 impl PdfExtractor {
     pub fn new() -> Self {
         Self
-    }
-
-    /// Extrahiert die Zeilen einer einzelnen Seite (0-basiert).
-    pub fn extract_page(&self, doc: &Document, page_index: usize) -> Result<Vec<TextRun>> {
-        let pages = doc.get_pages();
-        let Some((_, page_id)) = pages.iter().nth(page_index) else {
-            return Ok(Vec::new());
-        };
-        let scan = scan_page(doc, *page_id)?;
-        Ok(Self::build_lines(page_index, glyph_items(&scan)))
     }
 
     /// Wie [`PdfExtractor::extract`], liefert aber zusätzlich die Warnungen des
@@ -112,15 +110,89 @@ impl PdfExtractor {
     /// Analyse findet dann nichts, die Schwärzung meldet Erfolg — und der
     /// Nutzer hält eine Datei für sauber, in der alles stehen geblieben ist.
     /// Diese Warnungen dürfen deshalb nicht im Extraktor versanden.
+    ///
+    /// Eine Seite, die der Interpreter ablehnt, kippt das **ganze** Dokument:
+    /// die Schwärzung darf keine Datei ausgeben, deren Text sie nicht
+    /// vollständig gesehen hat.
     pub fn extract_with_warnings(&self, doc: &Document) -> Result<(Vec<TextRun>, Vec<String>)> {
+        self.extract_pages(doc, false)
+            .map(|(runs, warnings, _)| (runs, warnings))
+    }
+
+    /// Wie [`PdfExtractor::extract_with_warnings`], nur **nachsichtig**: eine
+    /// Seite, die der Interpreter ablehnt, wird übersprungen und als Warnung
+    /// genannt; die übrigen Seiten kommen zurück.
+    ///
+    /// Das ist der Weg des ehrlichen Orakels (`crate::audit_bytes`), das
+    /// jede Seite so lesen will, wie der Schriftdekoder sie liest — und dem
+    /// eine kaputte Seite 1 nicht die Seiten 2 bis n nehmen darf. Für die
+    /// Schwärzung wäre dieselbe Nachsicht ein Leck; sie nimmt
+    /// [`PdfExtractor::extract_with_warnings`].
+    ///
+    /// **Ein** Durchgang, **ein** Seitenbaum: früher fiel das Orakel nach
+    /// einem Fehler auf eine Schleife über eine seitenweise Extraktion
+    /// zurück, und die baute je Aufruf den Seitenbaum neu (`get_pages()`,
+    /// eine frische `BTreeMap` über alle Seiten) — quadratisch in der
+    /// Seitenzahl. Jetzt teilen sich beide Wege dieselbe Schleife in
+    /// [`PdfExtractor::extract_pages`]; die Seitenschleife um einen
+    /// seitenweisen Aufruf gibt es nicht mehr, und damit lässt sie sich auch
+    /// nicht mehr schreiben.
+    pub fn extract_lenient(&self, doc: &Document) -> (Vec<TextRun>, Vec<String>) {
+        // `lenient` liefert nie `Err` — der Rückfall steht nur der
+        // Signatur wegen da.
+        let (runs, warnings, _) = self.extract_pages(doc, true).unwrap_or_default();
+        (runs, warnings)
+    }
+
+    /// Wie [`PdfExtractor::extract_lenient`], dazu **je abgelehnter Seite
+    /// ihre Kennung und eine Zeile** — getrennt von den übrigen Warnungen.
+    ///
+    /// Für das Orakel: eine Seite, die der Interpreter nicht zerlegen kann,
+    /// fehlt in der Sicht des Schriftdekoders, und das ist eine Stelle, die
+    /// nicht geprüft wurde. Bis zur Spur-A-Runde 2 verwarf das Orakel die
+    /// Warnungen ganz; eine Seite mit einem Seitenvorschub als Leerraum
+    /// (`q\x0cQ`, nach PDF 32000-1, 7.2.3 zulässig) fehlte stumm, und ein
+    /// Geheimnis in einer Schrift mit eigener Kodierung darauf kam als „nicht
+    /// gefunden“ mit Rückgabewert 0 zurück (Register #98).
+    pub fn extract_lenient_with_gaps(
+        &self,
+        doc: &Document,
+    ) -> (Vec<TextRun>, Vec<String>, Vec<PageGap>) {
+        self.extract_pages(doc, true).unwrap_or_default()
+    }
+
+    /// Die eine Seitenschleife hinter [`PdfExtractor::extract_with_warnings`]
+    /// und [`PdfExtractor::extract_lenient`]; `lenient` entscheidet, was
+    /// eine abgelehnte Seite bewirkt: Abbruch oder Warnung.
+    fn extract_pages(
+        &self,
+        doc: &Document,
+        lenient: bool,
+    ) -> Result<(Vec<TextRun>, Vec<String>, Vec<PageGap>)> {
         let mut runs = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
+        let mut gaps: Vec<PageGap> = Vec::new();
         // Angeboten und gezeichnet — über **alle** Seiten hinweg, siehe
         // [`unplaced_form_warnings`].
         let mut declared: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
         let mut placed: BTreeSet<ObjectId> = BTreeSet::new();
+        // Ein Buch für alle Seiten: eine Annotation, die sich Seiten teilen,
+        // wird unter derselben Ressourcenumgebung einmal gelesen (Register #94).
+        let mut ledger = AnnotationLedger::default();
         for (index, (_, page_id)) in doc.get_pages().iter().enumerate() {
-            let scan = scan_page(doc, *page_id)?;
+            let scan = match scan_page_with(doc, *page_id, &mut ledger) {
+                Ok(scan) => scan,
+                Err(e) if lenient => {
+                    let gap = format!(
+                        "Seite {} ließ sich nicht lesen und fehlt in dieser Sicht: {e}",
+                        index + 1
+                    );
+                    warnings.push(gap.clone());
+                    gaps.push((*page_id, gap));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             for warning in &scan.warnings {
                 if !warnings.contains(warning) {
                     warnings.push(warning.clone());
@@ -131,13 +203,20 @@ impl PdfExtractor {
             }
             placed.extend(scan.form_placements.keys().copied());
             runs.extend(Self::build_lines(index, glyph_items(&scan)));
+            let (mirrors, mirror_warnings) = mirror_runs(doc, index, &scan);
+            runs.extend(mirrors);
+            for warning in mirror_warnings {
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
+                }
+            }
         }
         for warning in unplaced_form_warnings(doc, &declared, &placed) {
             if !warnings.contains(&warning) {
                 warnings.push(warning);
             }
         }
-        Ok((runs, warnings))
+        Ok((runs, warnings, gaps))
     }
 
     /// Setzt aus einzelnen Glyphen Zeilen zusammen.
@@ -177,11 +256,7 @@ impl PdfExtractor {
         // Quantisierung des Zeilenabstands fängt kleine
         // Grundlinien-Schwankungen ab.
         let tol = BASELINE_TOLERANCE.max(0.1);
-        glyphs.sort_by(|(_, a), (_, b)| {
-            sort_key(a, tol)
-                .partial_cmp(&sort_key(b, tol))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        glyphs.sort_by(|(_, a), (_, b)| key_cmp(&sort_key(a, tol), &sort_key(b, tol)));
 
         let mut lines: Vec<Vec<(usize, GlyphItem)>> = Vec::new();
         let mut current: Vec<(usize, GlyphItem)> = Vec::new();
@@ -343,6 +418,210 @@ fn glyph_items(scan: &ScanResult) -> Vec<(usize, GlyphItem)> {
         .enumerate()
         .flat_map(|(index, show)| show.glyphs().cloned().map(move |g| (index, g)))
         .collect()
+}
+
+/// Textspiegel, die etwas **anderes** sagen als die Glyphen darunter — als
+/// eigene Zeilen, samt Warnung je Abschnitt.
+///
+/// Ein `/ActualText` (oder `/Alt`, `/E`) ist Text, den ein Betrachter ausgibt:
+/// `pdftotext` bevorzugt ihn in der Voreinstellung, Kopieren im Betrachter
+/// liefert ihn. Bis 0.6.0 wurde er nur **geleert**, wenn die Schwärzung die
+/// Glyphen darunter traf, und nie **gelesen**. Gemessen an zwei Dateien:
+///
+/// * `/Span <</ActualText (IBAN: DE89 …)>> BDC (Kontodaten folgen unten) Tj EMC`
+///   — 0 Treffer, Rückgabewert 0, und Kopieren im Betrachter lieferte die
+///   IBAN aus der „geschwärzten“ Datei.
+/// * Dasselbe mit `/Alt` — gleiches Ergebnis.
+///
+/// **Deckungsgleich** heißt: nach [`fold`] gleich. Word, InDesign und jeder
+/// PDF/UA-Erzeuger schreiben Spiegel routinemäßig — für Ligaturen, weiche
+/// Trennstriche, Tabulatoren, Sonderzeichen. Die dürfen keine Warnung geben,
+/// sonst warnt jede getaggte Datei. Ein Spiegel aus **einem** Zeichen sagt für
+/// sich nichts und wird ebenfalls nicht gemeldet. Mehr Ausnahmen gibt es
+/// nicht: ein `½` mit `/ActualText (1/2)` wird gemeldet, denn ohne eine
+/// Tabelle aller Sonderzeichen ist es von einem `½` mit `/ActualText (IBAN …)`
+/// nicht zu unterscheiden — und die Warnung sagt genau das.
+///
+/// **Widerspricht** der Spiegel, kann das Werkzeug nicht wissen, welche der
+/// beiden Fassungen ein Betrachter zeigt. Deshalb beides: der Spiegel wird als
+/// eigene Zeile durchsucht (auf dem Kasten der Glyphen darunter — trifft dort
+/// ein Muster, verschwinden die Glyphen und mit ihnen der Spiegel, siehe
+/// `crate::redact::mirrors_to_clear`), **und** der Lauf meldet eine
+/// Deckungslücke — **nur für `/ActualText`**, denn nur der Ersatz muss den
+/// Glyphen gleichen (PDF 32000-1, 14.9.4). `/Alt` beschreibt und `/E`
+/// schreibt aus (14.9.3, 14.9.5); beide dürfen abweichen, werden gelesen und
+/// geleert wie der Ersatz, aber nicht gemeldet — sonst wäre jedes Bild mit
+/// `/Figure <</Alt …>> BDC /Im0 Do EMC`, die Standardform der
+/// Barrierefreiheit, ein Befund. Ein `/ActualText` ohne Glyphen darunter hat
+/// keinen Kasten, bleibt bei der Warnung — und die sagt dann ausdrücklich,
+/// dass **nicht** durchsucht wurde.
+///
+/// **Formulargrenze.** Die Glyphen unter einem Spiegel liegen nicht immer im
+/// selben Strom: `/Span <</ActualText …>> BDC /Fm0 Do EMC` setzt sie über ein
+/// Form-XObject. Die Textoperationen der Formulare im Geltungsbereich
+/// ([`MarkedTextRecord::forms`]) zählen deshalb mit — an der Stelle ihres
+/// `Do`, in Stromreihenfolge, auch über mehrere Ebenen: der Pfad der
+/// `Do`-Indizes im Datensatz ordnet ein Formular, das erst ein inneres
+/// Formular zeichnet und dann eigenen Text, genau so ein (Befund G1-A3: die
+/// frühere Fassung stellte die eigenen Glyphen stets voran und meldete eine
+/// ehrliche Datei als Widerspruch).
+///
+/// Die Warnung nennt keinen Text: sie steht später im Audit-Log, und dort
+/// hätte der Spiegel nichts verloren.
+fn mirror_runs(doc: &Document, page: usize, scan: &ScanResult) -> (Vec<TextRun>, Vec<String>) {
+    let mut runs = Vec::new();
+    let mut warnings = Vec::new();
+    // (Strom, Operation) → Textoperation. Ein mehrfach platziertes Formular
+    // liefert dieselbe Operation mehrfach; die erste Platzierung genügt, der
+    // Strom wird ohnehin nur einmal neu geschrieben.
+    let mut shows: HashMap<(StreamKey, usize), &ShowRecord> = HashMap::new();
+    for show in &scan.shows {
+        shows.entry((show.stream, show.op_index)).or_insert(show);
+    }
+    // Formular → seine Textoperationen in Stromreihenfolge, je Operation
+    // einmal — nur für die Formulare, die unter einem Spiegel stehen.
+    let mut form_shows: HashMap<ObjectId, Vec<&ShowRecord>> = scan
+        .marked
+        .iter()
+        .flat_map(|record| record.forms.iter().map(|(_, id)| (*id, Vec::new())))
+        .collect();
+    if !form_shows.is_empty() {
+        for show in &scan.shows {
+            if let StreamKey::Form(id) = show.stream {
+                if let Some(list) = form_shows.get_mut(&id) {
+                    list.push(show);
+                }
+            }
+        }
+        for list in form_shows.values_mut() {
+            list.sort_by_key(|show| show.op_index);
+            list.dedup_by_key(|show| show.op_index);
+        }
+    }
+    for record in &scan.marked {
+        // Glyphen in Stromreihenfolge: die eigenen Textoperationen an ihrem
+        // Index, die eines Formulars an der Stelle seines `Do` — als Pfad
+        // `[Do-Index, …, Operationsindex]`, damit ein inneres Formular
+        // zwischen die Textoperationen des äußeren fällt, an der Stelle
+        // seines `Do`. Die Pfade sind untereinander verschieden, die
+        // Sortierung damit eindeutig.
+        let mut parts: Vec<(Vec<usize>, &ShowRecord)> = record
+            .shows
+            .iter()
+            .filter_map(|index| {
+                shows
+                    .get(&(record.stream, *index))
+                    .map(|show| (vec![*index], *show))
+            })
+            .collect();
+        for (path, id) in &record.forms {
+            if let Some(list) = form_shows.get(id) {
+                parts.extend(list.iter().map(|show| {
+                    let mut key = path.clone();
+                    key.push(show.op_index);
+                    (key, *show)
+                }));
+            }
+        }
+        parts.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let glyphs: Vec<&GlyphItem> = parts.iter().flat_map(|(_, show)| show.glyphs()).collect();
+        let beneath = fold(glyphs.iter().map(|g| g.text.as_str()));
+        let rect = bounding_box(glyphs.iter().map(|g| &g.rect));
+        for key in MIRROR_KEYS {
+            let Some(text) = mirror_text(doc, record, key) else {
+                continue;
+            };
+            let folded = fold([text.as_str()]);
+            if folded.is_empty() || folded == beneath || folded.chars().count() == 1 {
+                continue;
+            }
+            // Nur der Ersatz muss gleichen.
+            if key == b"ActualText" {
+                warnings.push(format!(
+                    "Der Textspiegel (/{}) eines Marked-Content-Abschnitts auf Seite {} sagt \
+                     etwas anderes als die Glyphen darunter ({} Zeichen im Spiegel, {} in den \
+                     Glyphen). Welche der beiden Fassungen ein Betrachter zeigt oder kopiert, \
+                     kann das Werkzeug nicht wissen.{}",
+                    String::from_utf8_lossy(key),
+                    page + 1,
+                    folded.chars().count(),
+                    beneath.chars().count(),
+                    if rect.is_some() {
+                        " Der Spiegel wurde zusätzlich als eigener Text durchsucht; bitte das \
+                         Ergebnis dort von Hand prüfen."
+                    } else {
+                        " Ohne Glyphen darunter hat der Spiegel keinen Kasten: er wurde nicht \
+                         durchsucht und kann von diesem Werkzeug nicht geschwärzt werden."
+                    }
+                ));
+            }
+            if let Some(rect) = rect {
+                runs.push(spread(page, &text, rect));
+            }
+        }
+    }
+    (runs, warnings)
+}
+
+/// Der Spiegeltext unter `key` — auch, wenn er als Verweis in der Liste steht.
+fn mirror_text(doc: &Document, record: &MarkedTextRecord, key: &[u8]) -> Option<String> {
+    let value = record.properties.get(key).ok()?;
+    match doc.dereference(value).ok()?.1 {
+        Object::String(bytes, _) => Some(crate::audit_bytes::decode_pdf_string(bytes)),
+        _ => None,
+    }
+}
+
+/// Die Vergleichsform eines Textes: ohne Leerraum, ohne unsichtbare Zeichen,
+/// Ligaturen aufgelöst.
+///
+/// Genau die Unterschiede, die ein ehrlicher Spiegel hat: `/ActualText (fi)`
+/// über einer `ﬁ`-Ligatur, `<FEFF00AD>` (weicher Trennstrich) über einem
+/// Bindestrich am Zeilenende, `<FEFF0009>` (Tabulator) über einem Leerraum.
+fn fold<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    for part in parts {
+        for c in part.chars() {
+            match c {
+                c if c.is_whitespace() => {}
+                '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
+                '\u{FB00}' => out.push_str("ff"),
+                '\u{FB01}' => out.push_str("fi"),
+                '\u{FB02}' => out.push_str("fl"),
+                '\u{FB03}' => out.push_str("ffi"),
+                '\u{FB04}' => out.push_str("ffl"),
+                '\u{FB05}' | '\u{FB06}' => out.push_str("st"),
+                c => out.push(c),
+            }
+        }
+    }
+    out
+}
+
+/// Verteilt einen Text gleichmäßig über einen Kasten — Zeichen für Zeichen,
+/// in Schreibrichtung von links nach rechts.
+///
+/// Die Kästen sind erfunden; sie liegen aber alle **im** Kasten der Glyphen,
+/// die der Spiegel ersetzt. Ein Treffer darin berührt deshalb immer echte
+/// Glyphen, und die Schwärzung nimmt den Spiegel mit.
+fn spread(page: usize, text: &str, rect: Rect) -> TextRun {
+    let chars: Vec<char> = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let step = rect.width() / chars.len().max(1) as f64;
+    let glyphs = chars
+        .into_iter()
+        .enumerate()
+        .map(|(i, ch)| {
+            let x0 = rect.ll.x + step * i as f64;
+            Glyph {
+                ch,
+                rect: Rect::new(x0, rect.ll.y, x0 + step, rect.ur.y),
+            }
+        })
+        .collect();
+    TextRun::new(page, glyphs)
 }
 
 /// Meldet Form-XObjects, die in einem Ressourcenverzeichnis **stehen**, aber
@@ -564,13 +843,7 @@ fn split_layers(line: Vec<(usize, GlyphItem)>) -> Vec<Vec<GlyphItem>> {
     // Text, der links von ihr beginnt. Wer sie in dieser Reihenfolge einfüllt,
     // erklärt den Zeilenanfang zur zweiten Schicht.
     let mut order: Vec<usize> = spans.keys().copied().collect();
-    order.sort_by(|a, b| {
-        spans[a]
-            .0
-            .partial_cmp(&spans[b].0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.cmp(b))
-    });
+    order.sort_by(|a, b| spans[a].0.total_cmp(&spans[b].0).then(a.cmp(b)));
 
     // Belegte Schichten: (erreichter Stand, Länge der zuletzt eingefügten
     // Folge, deren Leerzeichenmaß).
@@ -590,7 +863,7 @@ fn split_layers(line: Vec<(usize, GlyphItem)>) -> Vec<Vec<GlyphItem>> {
             chosen = layers
                 .iter()
                 .enumerate()
-                .min_by(|(_, a), (_, b)| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0))
                 .map(|(index, _)| index);
         }
         match chosen {
@@ -646,7 +919,7 @@ fn line_pitch(extras: &[f64], space_width: f64) -> f64 {
         return 0.0;
     }
     let mut sorted: Vec<f64> = extras.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let median = sorted[sorted.len() / 2];
     if median <= 0.0 || median >= space_width * MAX_PITCH_IN_SPACES {
         return 0.0;
@@ -688,6 +961,42 @@ fn direction_bucket(g: &GlyphItem) -> i64 {
 
 /// Sortierschlüssel: erst nach Schreibrichtung, dann Zeile für Zeile in
 /// Vorschubrichtung, innerhalb der Zeile in Schreibrichtung.
+/// Vergleicht zwei Sortierschlüssel — mit einer **totalen** Ordnung.
+///
+/// ## Warum nicht `partial_cmp(..).unwrap_or(Equal)`
+///
+/// Weil das mit `NaN` keine Ordnung ist, sondern nur so aussieht. Gegenbeispiel
+/// mit drei Werten: `a = 5,0`, `n = NaN`, `b = 1,0` ergibt `a < n` (Equal aus
+/// dem `unwrap_or`), `n < b` (ebenso) — und trotzdem `a > b`. Aus `a ≤ n ≤ b`
+/// folgt dann nicht `a ≤ b`, die Transitivität ist verletzt.
+///
+/// Seit Rust 1.81 darf `slice::sort_by` das bemerken und den Prozess mit
+/// „user-provided comparison function does not correctly implement a total
+/// order" **abbrechen**. In einem Werkzeug, dem man fremde Dateien vorwirft,
+/// ist ein Abbruch kein Schönheitsfehler: er ist ein Weg, den Lauf von außen
+/// zu beenden. Isoliert nachgemessen tritt er ab **21 Elementen** auf (darunter
+/// benutzt `sort_by` Einfügesortierung und prüft nicht).
+///
+/// `total_cmp` bildet die Ordnung der IEEE-754-Bitmuster ab: sie ist total,
+/// braucht keinen Sonderfall und sortiert `NaN` ans Ende statt mittendrin.
+///
+/// ## Was hier **nicht** behauptet wird
+///
+/// Dass eine PDF-Datei diesen Abbruch auslösen *kann*, ist an dieser Stelle
+/// nicht belegt. Zwei Versuche mit präparierten Dateien (verkettete
+/// `cm`-Überläufe ins Unendliche, danach `0 0 0 0 0 0 cm`, jeweils mit 30
+/// Glyphen) haben hier kein `NaN` erzeugt — die Koordinatenprüfungen
+/// stromaufwärts fangen offenbar vorher ab. Die Korrektur steht trotzdem,
+/// aus dem Grund, der diesem Durchgang seinen Namen gegeben hat: eine
+/// Zusicherung, die an ihrer Ursprungsstelle gilt, wird an der nächsten gern
+/// stillschweigend mitgenommen. Hier auf „kein Aufrufer kann `NaN` liefern"
+/// zu bauen, wäre genau das.
+fn key_cmp(a: &(i64, f64, f64), b: &(i64, f64, f64)) -> std::cmp::Ordering {
+    a.0.cmp(&b.0)
+        .then(a.1.total_cmp(&b.1))
+        .then(a.2.total_cmp(&b.2))
+}
+
 fn sort_key(g: &GlyphItem, tol: f64) -> (i64, f64, f64) {
     (
         direction_bucket(g),
@@ -1110,6 +1419,58 @@ mod tests {
             lines.len(),
             1,
             "eine leichte Überschneidung darf die Zeile nicht zerlegen: {lines:?}"
+        );
+    }
+
+    /// Die Glyphensortierung bricht auch mit `NaN` nicht ab.
+    ///
+    /// `slice::sort_by` prüft ab **21 Elementen**, ob der Vergleicher eine
+    /// totale Ordnung liefert, und beendet den Prozess sonst mit
+    /// „user-provided comparison function does not correctly implement a
+    /// total order". Ein Abbruch ist in einem Werkzeug, dem man fremde
+    /// Dateien vorwirft, ein Weg, den Lauf von aussen zu beenden — deshalb
+    /// steht hier eine Zahl über der Schwelle, nicht darunter.
+    #[test]
+    fn die_glyphensortierung_ist_eine_totale_ordnung() {
+        // 25 Schlüssel, jeder dritte mit NaN in der Querlage.
+        let mut keys: Vec<(i64, f64, f64)> = (0..25)
+            .map(|i| {
+                let across = if i % 3 == 0 {
+                    f64::NAN
+                } else {
+                    f64::from(25 - i)
+                };
+                (0, across, f64::from(i))
+            })
+            .collect();
+
+        keys.sort_by(key_cmp);
+
+        // Kein Element geht verloren, und die Folge ist nach dem eigenen
+        // Vergleicher aufsteigend — mehr ist bei NaN nicht zu verlangen und
+        // weniger wäre keine Ordnung.
+        assert_eq!(keys.len(), 25);
+        assert!(
+            keys.windows(2)
+                .all(|w| key_cmp(&w[0], &w[1]) != std::cmp::Ordering::Greater),
+            "nach dem Sortieren nicht aufsteigend: {keys:?}"
+        );
+        assert_eq!(
+            keys.iter().filter(|k| k.1.is_nan()).count(),
+            9,
+            "die NaN-Schlüssel sind verschwunden"
+        );
+    }
+
+    /// Gegenprobe: gewöhnliche Schlüssel ordnen wie vorher — Zeilenband vor
+    /// Lage in der Zeile, Vorschubrichtung zuerst.
+    #[test]
+    fn gewoehnliche_schluessel_ordnen_unveraendert() {
+        let mut keys = vec![(0, 2.0, 5.0), (1, 0.0, 0.0), (0, 1.0, 9.0), (0, 1.0, 3.0)];
+        keys.sort_by(key_cmp);
+        assert_eq!(
+            keys,
+            vec![(0, 1.0, 3.0), (0, 1.0, 9.0), (0, 2.0, 5.0), (1, 0.0, 0.0)]
         );
     }
 }

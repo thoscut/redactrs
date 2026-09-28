@@ -108,6 +108,21 @@ fn falls_back_to_raw_bytes_for_an_unsupported_filter() {
     ));
     let pdf = d.finish();
     expect_leak(&pdf, "roh");
+
+    // Und der Rückfall bleibt nicht stumm: dass der Strom **nicht** entpackt
+    // werden konnte, steht seit Fix-Runde 6 auch dann in `unchecked`, wenn
+    // der unbekannte Filter das erste (hier: einzige) Glied der Kette ist.
+    // Hier lag das Geheimnis roh in der Datei; läge es gepackt darin, wäre
+    // „nicht gefunden“ ohne diese Zeile eine stille Entwarnung.
+    let check = redact_pdf::leaks_many_within(&pdf, &[SECRET], u64::MAX);
+    assert!(
+        check
+            .unchecked
+            .iter()
+            .any(|u| u.contains("/Crypt ist hier kein bekannter Filter")),
+        "der unbekannte Filter wird nicht genannt: {:#?}",
+        check.unchecked
+    );
 }
 
 // ---------------------------------------------------------------------------

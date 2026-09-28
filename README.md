@@ -3,6 +3,38 @@
 Ein schlankes, **lokales** CLI- und GUI-Werkzeug in Rust zum Schwärzen sensibler
 Daten in PDF-Dokumenten (Bankunterlagen, Kontoauszüge, Rechnungen).
 
+<table>
+<tr>
+<th width="50%">vorher — <code>kontoauszug.pdf</code></th>
+<th width="50%">nachher — <code>kontoauszug_geschwaerzt.pdf</code></th>
+</tr>
+<tr>
+<td><img src="docs/vorher.png" width="100%" alt="Gerenderte Seite eines Kontoauszugs der Musterbank AG: „Kontoinhaber: Max Mustermann“, „IBAN: DE89 3704 0044 0532 0130 00“, „BIC: COBADEFFXXX“, „Kontonummer: 532013000“, darunter vier Buchungen vom Januar 2026 mit Beträgen in Euro."></td>
+<td><img src="docs/nachher.png" width="100%" alt="Dieselbe Seite nach einem Lauf: hinter „IBAN:“, „BIC:“ und „Kontonummer:“ steht je ein schwarzer Balken statt der Angabe. Die Zeile „Kontoinhaber: Max Mustermann“ und die vier Buchungen stehen unverändert da."></td>
+</tr>
+</table>
+
+![Konsolenmitschnitt: der Aufruf „redact-rs kontoauszug.pdf“ meldet 2 Seiten, 15 Textzeilen, 7 Treffer, 7 Schwärzungen, 134 entfernte Zeichen, 7 Deck-Rechtecke und „Metadaten entfernt: /Info-Dictionary“. Der zweite Aufruf, „redact-rs kontoauszug_geschwaerzt.pdf --check-leaks“ mit der IBAN als Suchbegriff, antwortet „nicht gefunden“ und setzt hinzu, das heiße NICHT, dass in der Datei nichts mehr stehe — geprüft sei genau diese Liste. Zuletzt gibt „echo $?“ den Rückgabewert 0 aus.](docs/konsole.gif)
+
+**Der schwarze Balken ist nicht der Punkt.** Ein Rechteck über den Text legen
+kann jedes Textverarbeitungsprogramm — und darunter steht die IBAN weiter.
+Der Punkt ist, was der Konsolenmitschnitt zeigt: nach dem Lauf steht die IBAN
+**nicht mehr in der Datei** — auch nicht in einem komprimierten Objektstrom,
+nicht in einer Altrevision und nicht als UTF-16. Das wird hier nicht behauptet,
+sondern [vom Programm selbst nachgemessen](#pruefen) (`--check-leaks`,
+Rückgabewert 3 bei einem Fund).
+
+**Und „Max Mustermann“ steht rechts noch da.** Absichtlich: für Namen gibt es
+kein Muster und keine Named-Entity-Erkennung, also bleiben Kontoinhaber,
+Empfänger und Arbeitgeber stehen, bis sie von Hand oder über die Buchungsliste
+erfasst werden ([was dieses Werkzeug nicht leistet](#erkennung)). Ein Bild, das
+nur die gelungenen Fälle zeigt, wäre Werbung — und wer sich darauf verließe,
+gäbe den Namen weiter.
+
+Alle Belege — auch die Animation der Schwärzung selbst —, woraus jeder entstanden
+ist und was sie ausdrücklich **nicht** zeigen:
+[`docs/vorher-nachher.md`](docs/vorher-nachher.md).
+
 * **Manuelle Schwärzung** über Regionen (JSON oder per Maus in der GUI)
 * **Automatische Schwärzung** über Regex-Muster (IBAN, BIC, Steuer-ID, …)
 * **Buchungsliste** mit Positiv- und Negativliste (CSV)
@@ -67,6 +99,9 @@ Daneben: [`CHANGELOG.md`](CHANGELOG.md) — was sich zwischen zwei Fassungen
 geändert hat, und was davon sicherheitsrelevant war.
 [`SECURITY.md`](SECURITY.md) — Bedrohungsmodell, Grenzen für Eingabedateien,
 Messungen.
+[`docs/vorher-nachher.md`](docs/vorher-nachher.md) — die Belege oben im Langen:
+woraus jedes Bild entstanden ist, die ungekürzte Ausgabe von `--check-leaks`
+dazu und was die Bilder ausdrücklich **nicht** zeigen.
 
 ---
 
@@ -135,9 +170,9 @@ Dazu liegt in **jedem** der drei Archive (nachgesehen in
 * dieser `README.md` und [`SECURITY.md`](SECURITY.md) — sonst liefen die
   Verweise in beiden Richtungen ins Leere,
 * [`CHANGELOG.md`](CHANGELOG.md) — wer eine ältere Fassung ersetzt, muss ohne
-  Netzzugang sehen können, welche Lecks dazwischen geschlossen wurden. **Ab der
-  nächsten Fassung**; die v0.3.0-Archive enthalten ihn noch nicht (nachgesehen
-  in den ausgelieferten Archiven).
+  Netzzugang sehen können, welche Lecks dazwischen geschlossen wurden. Seit
+  v0.4.0 packt der Release-Job ihn mit; die v0.3.0-Archive enthalten ihn noch
+  nicht (nachgesehen in den ausgelieferten Archiven).
 * die drei Lizenztexte `LICENSE-MIT`, `LICENSE-APACHE` und `LICENSE-OFL.txt`
   (die eingebetteten Schriften stehen unter der SIL Open Font License),
 * das Verzeichnis `examples/`.
@@ -251,15 +286,19 @@ redact-rs [EINGABE.pdf | VERZEICHNIS …] [OPTIONEN]
       --padding <PUNKT>       Rand um jede Schwärzung (Standard: 1.0)
       --allow-undecodable-images  nicht dekodierbare Bilder durchgehen lassen
                                   (UNSICHER — siehe unten)
-      --max-decompressed-mb <MB>  Budget für alle entpackten Streams (1024)
-      --max-parsed-mb <MB>        davon für geparste Streams (16)
+      --max-decompressed-mb <MB>  Budget für alle entpackten Streams (1024);
+                                  bei --check-leaks auch das Budget der Suche
+                                  (darüber: NICHT GEPRÜFT, rc 3)
+      --max-parsed-mb <MB>        davon für alles, woraus PDF-Syntax wird (16):
+                                  geparste Streams UND der Rumpf der Datei
+                                  (Objektköpfe, Dictionaries, xref)
       --max-image-mb <MB>         gleichzeitig gehaltene dekodierte Bildbytes (256)
       --max-input-mb <MB>         Obergrenze für die Eingabedatei selbst (512)
       --max-candidates <N>        Obergrenze für Trefferkandidaten (100000)
       --check-leaks <TEXT>    NACHPRÜFEN statt schwärzen: steht dieser Text
                               noch in der Datei? Mehrfach angebbar; „-“ liest
                               die Begriffe zeilenweise von stdin. Rückgabewert
-                              3 bei einem Fund (siehe Prüfen)
+                              3 bei Fund oder nicht geprüfter Stelle (siehe Prüfen)
       --gui                   grafische Oberfläche starten
       --list-patterns         eingebaute Muster auflisten
       --write-demo <PDF>      Beispieldatei erzeugen
@@ -294,16 +333,28 @@ Rückgabewerte:
 | `0` | Erfolg — und nichts blieb ungeprüft |
 | `1` | Verarbeitungsfehler. Im Stapelbetrieb: mindestens eine Datei ist gescheitert |
 | `2` | Bedienfehler (Argumente, Einstellungsdatei, Prüfsummen, `--max-candidates`) |
-| `3` | **Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.** Beim Schwärzen: es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. Bei [`--check-leaks`](#pruefen): mindestens einer der Suchbegriffe steht noch in der Datei. |
+| `3` | **Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.** Beim Schwärzen: es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. Bei [`--check-leaks`](#pruefen): mindestens einer der Suchbegriffe steht noch in der Datei — **oder** eine Stelle konnte nicht geprüft werden (fünf Gründe, siehe [`SECURITY.md`](SECURITY.md)), auch ohne einen einzigen Fund. |
 
 `3` ist kein Fehler und kein „alles gut“ — es ist die Aufforderung, genau diese
 Stellen anzusehen. In einem Skript gehört er behandelt wie ein Fehler, solange
 niemand hingeschaut hat.
 
-Beide Fälle senden dieselbe Nachricht, und das ist der Grund für dieselbe Zahl:
-*die Datei ist nicht abgenommen.* Ein Fund unter `--check-leaks` ist ausdrücklich
-**kein** `1` — die Datei wurde gelesen, die Suche lief vollständig durch, die
-Antwort steht fest. Sie lautet nur „ja, es steht noch drin“.
+Alle drei Fälle senden dieselbe Nachricht, und das ist der Grund für dieselbe
+Zahl: *die Datei ist nicht abgenommen.* Ein Fund unter `--check-leaks` ist
+ausdrücklich **kein** `1` — die Datei wurde gelesen, die Suche lief vollständig
+durch, die Antwort steht fest. Sie lautet nur „ja, es steht noch drin“.
+
+Der dritte Fall ist der stillste und deshalb der wichtigste: `--check-leaks`
+endet **auch ohne Fund** mit `3`, wenn es eine Stelle nicht lesen konnte. Sieben
+Gründe gibt es dafür — ein Strom über dem Restbudget von
+`--max-decompressed-mb`, eine Verschachtelung unterhalb der Tiefe, bis zu der
+die Objektsicht liest, ein Filtername, den das Programm nicht kennt, eine vom
+Lader abgelehnte Vorprüfung, der Schriftdekoder, der deshalb gar nicht erst
+lief, eine Seite, die der Interpreter ablehnt, und ein Strom, den der Lader
+anders übernahm, als er in den Rohbytes steht; `SECURITY.md` zählt sie mit
+ihren Meldungen auf. Über
+eine solche Stelle sagt „nicht gefunden“ nichts, und genau deshalb darf sie
+nicht als `0` durchgehen. Sie steht als `NICHT GEPRÜFT: …` in der Ausgabe.
 
 Ein gewöhnliches `Warnung:` setzt den Rückgabewert **nicht**. Ein Rasterbild
 auf der Seite ist eine bekannte Grenze des Verfahrens und der Normalfall bei
@@ -976,6 +1027,7 @@ es nennt keine Herkunft und behauptet auch keine.
   "effect": {
     "padding": 1.0, "pages": 2, "requested": 4,
     "applied": 4, "covered": 0, "degenerate": 0, "missing_page": 0,
+    "off_page": 0,
     "removed_glyphs": 66, "drawn_rects": 4, "removed_annotations": 0,
     "redacted_images": 0, "copied_images": 0
   },
@@ -1005,7 +1057,7 @@ Menschen.
 
 `"effect"` an einem Eintrag ist **gemessen**, nicht aus dem Rechteck
 geschlossen. `removed_glyphs` daneben nennt die Zeichen, die genau diese Region
-aus dem Content-Stream entfernt hat. Vier Befunde sind möglich:
+aus dem Content-Stream entfernt hat. **Fünf** Befunde sind möglich:
 
 | Befund | Was geschah | Ist das in Ordnung? |
 |---|---|---|
@@ -1013,46 +1065,89 @@ aus dem Content-Stream entfernt hat. Vier Befunde sind möglich:
 | `covered` | Deck-Rechteck gezeichnet, aber kein Zeichen getroffen. | **Kommt darauf an.** Über einer Grafik oder einem Rasterbild steht kein Text; die Bildpunkte werden trotzdem überschrieben. Liegen die Koordinaten dagegen daneben, bleibt der Text darunter lesbar. |
 | `degenerate` | Rechteck ist nach `--padding` leer, die Region wurde übersprungen. | Nein. Ein negatives `--padding` verkleinert jeden Bereich. |
 | `missing_page` | Die genannte Seite gibt es im Dokument nicht. Es geschah **gar nichts**. | Nein. Fast immer die verwechselte Zählweise — siehe unten. |
+| `off_page` | Die Seite gibt es, das Rechteck liegt aber **vollständig neben dem Blatt**. Kein Zeichen kann darunter liegen, und was außerhalb der MediaBox gezeichnet wird, sieht kein Betrachter. | Nein. Fast immer Koordinaten aus einer Review- oder Regionsdatei, die zu einem anders großen Blatt gehören. |
+
+`off_page` gibt es seit **0.6.0**. Bis dahin kannte ihn nur die Oberfläche
+(`HitOutcome::OffPage`); im Audit-Log lief derselbe Fall als `covered` mit —
+also unter dem Befund, der auch „über einer Grafik steht eben kein Text“
+bedeutet und deshalb häufig harmlos ist. Wer ein Log aus 0.5.0 oder älter
+liest, findet das Feld nicht; wer eines aus 0.6.0 liest, muss es in seine
+Rechnung aufnehmen.
 
 Die Summen dazu stehen unter `effect`: `requested` ist die Zahl der geplanten
-Regionen, und `applied + covered + degenerate + missing_page` ergibt sie
-wieder. `pages` nennt die Seitenzahl des Dokuments, damit sich `missing_page`
+Regionen, und
+
+```
+applied + covered + degenerate + missing_page + off_page = requested
+```
+
+ergibt sie wieder. **An dieser Gleichung rechnet ein Prüfer nach, ob er alle
+wirkungslosen Regionen gesehen hat** — mit der alten, vierteiligen Fassung
+fehlte je `off_page` einer, und zwar unbemerkt: die Summe war dann kleiner als
+`requested`, ohne dass irgendetwas gefehlt hätte.
+
+`pages` nennt die Seitenzahl des Dokuments, damit sich `missing_page`
 nachprüfen lässt; `missing_pages` listet die angesprochenen Seiten (0-basiert)
-und steht nur dann im Log, wenn es welche gab.
+und steht nur dann im Log, wenn es welche gab. Dasselbe leistet
+`off_page_pages` für `off_page`.
 
 Jeder Befund außer `applied` steht auch in der Zusammenfassung auf der Konsole
 und als Warnung auf stderr — ein Lauf, der nichts entfernt hat, endet nicht
 mehr wortlos mit „Schwärzungen: 3“.
 
-Nachgemessen an einem dreiseitigen Dokument mit drei Regionen, von denen eine
-`"page": 3` nennt:
+Nachgemessen an der Demo (`--write-demo`, zwei Seiten) mit drei manuellen
+Regionen: eine über dem Kontoinhaber, eine bei `[3000 3000 3100 3100]` neben
+dem Blatt, eine auf `"page": 9`.
 
 ```console
-$ redact-rs drei.pdf -o out.pdf --no-patterns --manual-regions regionen.json
-Seiten:             3
-Textzeilen:         3
+$ redact-rs demo.pdf -o out.pdf --no-patterns --manual-regions regionen.json \
+    --audit-log audit.json
+Seiten:             2
+Textzeilen:         15
 Treffer gesamt:     3
 Automatische Erkennung: abgeschaltet (--no-patterns). …
 Schwärzungen:       3
-  davon wirksam:      2 (Zeichen entfernt)
+  davon wirksam:      1 (Zeichen entfernt)
   davon wirkungslos:  1 (Seite gibt es in diesem Dokument nicht)
-Entfernte Zeichen:  82
+  davon wirkungslos:  1 (Rechteck liegt neben der Seite)
+Entfernte Zeichen:  28
 Deck-Rechtecke:     2
 …
 Warnung: 1 von 3 Schwärzung(en) liegen auf einer Seite, die es in diesem
-Dokument nicht gibt (Seite 4; das Dokument hat 3 Seite(n)). Dort wurde nichts
+Dokument nicht gibt (Seite 10; das Dokument hat 2 Seite(n)). Dort wurde nichts
 entfernt und nichts überdeckt — der Text steht unverändert in der Ausgabe.
 Häufigste Ursache ist die Zählweise: in JSON ist die erste Seite „page“: 0, die
-letzte also 2.
+letzte also 1.
+Warnung: 1 von 3 Schwärzung(en) liegen vollständig neben der Seite, auf der sie
+stehen sollen (Seite 1). Dort kann kein Zeichen liegen und kein Deck-Rechteck
+sichtbar werden — der Text der Seite steht unverändert in der Ausgabe.
+Häufigste Ursache sind Koordinaten aus einer Review- oder Regionsdatei, die zu
+einem anders großen Blatt gehören.
 $ echo $?
 0
 ```
 
+Und dasselbe im Log — hier steht die Gleichung ausgerechnet da:
+
+```json
+"effect": {
+  "padding": 1.0, "pages": 2, "requested": 3,
+  "applied": 1, "covered": 0, "degenerate": 0,
+  "missing_page": 1, "missing_pages": [9],
+  "off_page": 1, "off_page_pages": [0],
+  "removed_glyphs": 28, "drawn_rects": 2, "removed_annotations": 0,
+  "redacted_images": 0, "copied_images": 0
+}
+```
+
+`1 + 0 + 0 + 1 + 1 = 3`. Ohne `off_page` in der Rechnung käme 2 heraus, und
+genau eine wirkungslose Region wäre unbemerkt geblieben.
+
 Der Rückgabewert bleibt hier **`0`**: die Analyse hat das Dokument vollständig
 gelesen: eine Region, die ins Leere zeigt, ist ein Fehler in der *Eingabe* des
 Nutzers und keine Stelle, die das Werkzeug nicht durchsuchen konnte. Genau
-deshalb steht der Befund in der Zusammenfassung, auf stderr **und** als
-`missing_page` im Audit-Log.
+deshalb stehen beide Befunde in der Zusammenfassung, auf stderr **und** als
+`missing_page` bzw. `off_page` im Audit-Log.
 
 ### `page` zählt überall gleich
 
@@ -1177,8 +1272,18 @@ Gesucht wird auf allen Ebenen, auf denen ein Geheimnis überleben kann: rohe
 Dateibytes, jeder roh gefundene `stream … endstream`-Block (auch
 Flate-dekomprimiert, also inklusive Altrevisionen), jedes Stream-Objekt des
 Objektgraphen dekodiert, die Objekte in `/ObjStm`-Containern und **jedes**
-Zeichenketten-Objekt unter jedem Schlüssel — jeweils in UTF-8, Latin-1/PDFDoc,
-UTF-16BE und als Hex-String. Im Zweifel meldet die Prüfung zu viel: dieselbe
+Zeichenketten-Objekt unter jedem Schlüssel — jeweils in **bis zu neun
+Byte-Kodierungen**: UTF-8/ASCII, Latin-1/PDFDoc, UTF-16BE und UTF-16LE, dazu
+jede der drei Bytefassungen (Latin-1, UTF-16BE, UTF-16LE) als Hex-String in
+Groß- und in Kleinschreibung. Neun sind es für einen Begriff aus reinem ASCII
+mit Buchstaben — dort fällt Latin-1 mit UTF-8 zusammen —, zehn mit Umlaut und
+sieben mit einem Zeichen jenseits von Latin-1. Fassungen, die auf dieselben
+Bytes fallen, werden nur einmal gesucht: bei einer IBAN aus Ziffern und `DE`
+ist der Hex-String in Groß- und in Kleinschreibung dieselbe Bytefolge, dort
+sind es sechs. Ein Begriff mit einem Zeichen, das WinAnsi anders ablegt als
+Latin-1 (`€`, `–`, `„`), wird zusätzlich in WinAnsi gesucht, roh und als
+Hex-String — so stehen Zeichenketten in einem Inhaltsstrom mit einer
+Standardschrift. Im Zweifel meldet die Prüfung zu viel: dieselbe
 Fundstelle erscheint einmal je Sichtweise. Ein Fehlalarm wird untersucht, ein
 übersehenes Leck wird ausgeliefert.
 
@@ -1191,8 +1296,8 @@ nichts nach.
 
 | Wert | heißt |
 |---|---|
-| `0` | Keiner der Begriffe steht noch in der Datei. **Kein Freibrief** — siehe unten. |
-| `3` | Mindestens einer steht noch darin. Der Lauf ist gelungen, das *Ergebnis* nicht. |
+| `0` | Keiner der Begriffe steht noch in der Datei — **und** jede Stelle konnte geprüft werden. **Kein Freibrief** — siehe unten. |
+| `3` | Mindestens einer steht noch darin — **oder** eine Stelle konnte nicht geprüft werden (`NICHT GEPRÜFT: …`, sieben mögliche Gründe, siehe unten), auch ohne einen einzigen Fund. Der Lauf ist gelungen, das *Ergebnis* nicht. |
 | `1` | Verarbeitungsfehler: die Datei ist keine PDF-Datei, nicht lesbar, zu groß oder verschlüsselt. |
 | `2` | Bedienfehler: kein Suchbegriff, mehr als eine Datei, oder ein Schalter, der nicht dazugehört. |
 
@@ -1254,6 +1359,40 @@ Lesen und Vorprüfen jeder fremden Datei. Eine **verschlüsselte** Datei wird
 abgelehnt statt durchsucht: darin stehen die Zeichenketten verschlüsselt, eine
 Bytesuche fände auch dann nichts, wenn das Geheimnis noch darin steht — und
 „nichts gefunden“ wäre hier die falscheste aller Antworten.
+
+**Die Suche hat ein Budget, und sie sagt, was nicht hineinpasste.** Mehr als
+`--max-decompressed-mb` (Vorgabe 1024 MB) packt sie in Summe nicht aus —
+dieselbe Einheit wie beim Schwärzen, je Sicht der Suche (Rohsicht,
+Objektsicht) einmal. Ein Strom, der das Restbudget sprengte, wird nicht
+entpackt; er ist weder Fund noch „nicht gefunden“: er steht als
+`NICHT GEPRÜFT: …` in der Ausgabe, und der Lauf endet **mit Rückgabewert `3`
+auch ohne Fund** — „Ergebnis: 1 Stelle(n) nicht geprüft — die Antwort ist
+unvollständig.“ Gezählt werden **Stellen**, nicht Zeilen: sind es sehr viele,
+nennt die Liste die ersten einzeln und fasst den Rest in einer Summenzeile
+zusammen, die Zahl im Ergebnissatz bleibt aber die volle.
+Ein `--check-leaks … && versenden` verschickt so keine Datei,
+deren größter Strom nie aufgemacht wurde. Wer die Stelle prüfen will, hebt den
+Schalter. (Eine Datei, deren als Flate ausgewiesene Ströme *in Summe* über dem
+Budget liegen, kommt gar nicht so weit: die Vorprüfung lehnt sie wie beim
+Schwärzen mit Rückgabewert `1` ab, bevor irgendetwas ausgepackt wird.)
+
+**Höchstens 1 000 Begriffe je Aufruf.** Nicht der Zeit wegen: seit Fix-Runde 4
+trägt ein Automat alle Begriffe in allen Kodierungen und läuft **einmal** je
+Datenblock — 1 000 Begriffe kosten kaum mehr als einer (nachgemessen an einer
+64-MiB-Datei: 5,20 s für einen, 6,27 s für 1 000, Verhältnis 1,21). Die Decke
+gilt dem Speicher: der Automat wächst linear mit der Liste, nachgemessen
+1,0 MB für 1 000 Begriffe (bis zu 12 000 Muster: bis zu zehn Byte-Kodierungen
+und der dekodierte Text je Begriff, dazu die Fassung ohne Leerraum, wo der
+Begriff welchen trägt — neun Kodierungen sind es ohne Umlaut, zehn mit),
+7,1 MB für 10 000, 68 MB für
+100 000 und **675 MB** für eine Million — dazu 25 s allein für seinen Bau,
+bevor ein Byte der Datei gelesen ist. Und jeder Begriff bekommt eine eigene
+Zeile im Bericht. Der 1 001. Begriff endet deshalb mit Rückgabewert
+`2`, bevor die Datei gelesen wird (nachgemessen: `seq 1 1001 | sed 's/^/x/' |
+redact-rs beispiel.pdf --check-leaks -` meldet „mit 1001 Suchbegriffen; mehr
+als 1000 nimmt der Lauf nicht an“; mit 1 000 Zeilen läuft derselbe Aufruf
+durch). Wer mehr hat, teilt die Liste und ruft mehrmals auf — jeder Lauf
+meldet für sich.
 
 ### Die Gegenprobe
 
@@ -1437,6 +1576,12 @@ nicht steht, ist deshalb nicht automatisch abgedeckt.
   GUI mit der Maus oder über `--manual-regions`. Was gezogen wurde, wird dann
   aber auch wirklich entfernt (siehe [Bilder](#bilder)); das ist der
   Unterschied zwischen „nicht gefunden“ und „nicht geschwärzt“.
+* **Der `/Alt` eines Bildes gehört zu demselben blinden Fleck.** Ein
+  getaggtes PDF darf ein Bild beschreiben (`/Figure <</Alt (…)>> BDC /Im0 Do
+  EMC`); steht in der Beschreibung, was auf dem Bild zu lesen ist, überlebt sie
+  die Pixel-Schwärzung. Die Analyse liest den `/Alt` eines Bildes so wenig
+  wie dessen Pixel. `--check-leaks` sieht ihn im Rohstrom — der Text steht
+  als Klartext im Seiteninhalt.
 * **Ein reiner Scan meldet 0 Schwärzungen.** Ohne extrahierbaren Text gibt es
   keine Treffer. Die Warnung dazu erscheint aber inzwischen **auch dann**, wenn
   gar nichts geschwärzt wurde — nachgemessen:
@@ -1531,6 +1676,16 @@ bevorzugt.
 Die drei Schlüssel `/ActualText`, `/Alt` und `/E`
 (`MIRROR_KEYS` in `crates/redact-pdf/src/content.rs`) werden jetzt **geleert**,
 sobald von den Glyphen darunter etwas entfernt wurde — nicht nur gefunden.
+
+Drei Schlüssel, zwei Rollen: nach PDF 32000-1 ist `/ActualText` (14.9.4) der
+*Ersatz* der Glyphen und muss ihnen gleichen; `/Alt` (14.9.3) *beschreibt*,
+`/E` (14.9.5) *schreibt aus* — beide dürfen abweichen. Gelesen und geleert
+werden alle drei; die Warnung „Spiegel widerspricht den Glyphen“ gibt es nur
+für `/ActualText`. Ein `/Figure <</Alt …>> BDC /Im0 Do EMC` ohne Glyphen
+darunter ist die Standardform der Barrierefreiheit und kein Befund — der
+`/Alt` eines Bildes gehört zu demselben blinden Fleck wie dessen Pixel, siehe
+[Gescannte Dokumente](#gescannte-dokumente); `--check-leaks` sieht ihn im
+Rohstrom.
 Gedeckt sind neun Wege, auf denen so ein Spiegel in einer Datei stehen kann:
 
 | Fall | Test |
@@ -1583,7 +1738,7 @@ cargo test -p redact-pdf --test marked_content
   |---|---|---|
   | Größe der Eingabedatei | 512 MB | `--max-input-mb` |
   | entpackte Bytes über alle Streams | 1024 MB | `--max-decompressed-mb` |
-  | davon: Streams, die geparst werden | 16 MB | `--max-parsed-mb` |
+  | davon: alles, woraus PDF-Syntax wird — geparste Streams **und** der Rumpf der Datei | 16 MB | `--max-parsed-mb` |
   | gleichzeitig gehaltene dekodierte Bildbytes | 256 MB | `--max-image-mb` |
   | Trefferkandidaten je Datei | 100 000 | `--max-candidates` (Exit 2) |
   | Zeichen, die **eine Seite** setzen darf | 1 000 000 | fest |
@@ -1594,6 +1749,58 @@ cargo test -p redact-pdf --test marked_content
   entstehen. Dagegen hilft keine Größengrenze. Das Konto zählt deshalb, was
   wirklich anfällt, und wächst mit dem Inhalt, den die Datei *mitbringt* —
   nicht mit dem, was sie daraus macht. Ist es leer, wird die Datei abgelehnt.
+  Das gilt auch über das ganze Dokument: ein Inhaltsstrom oder ein Formular,
+  das viele Seiten zeigen, bringt sein Guthaben einmal ein, nicht je Seite.
+
+  Zwei weitere Decken haben **keinen** Schalter, weil es an ihnen nichts
+  einzustellen gibt — sie begrenzen, was eine Datei über den Umweg ihrer
+  Schriften belegen kann:
+
+  | Was | Grenze | Was geschieht darüber |
+  |---|---|---|
+  | Eine `/ToUnicode`-Zuordnung (Platzbedarf, `MAX_TO_UNICODE_BYTES`) | 32 MB | Die Zuordnung wird **verworfen**, nicht abgeschnitten: der Font gilt als einer ohne `/ToUnicode`. Bei einem Type0-Font ist das eine Deckungslücke — sie steht auf stderr und im Audit-Log, und der Lauf endet mit Rückgabewert 3. |
+  | Zwischenspeicher für Schriftmetriken (Tabelleneinträge, `MAX_CACHED_FONT_ENTRIES`) | 400 000 | Nichts wird verdrängt, es wird nur nichts mehr aufgenommen. Das **Ergebnis bleibt gleich**; die betroffene Schrift wird je Platzierung neu geladen. |
+
+  Nachgemessen am gebauten Binary (0.6.0). Eine 1 064 Byte kleine Datei mit
+  einem Type0-Font, dessen `/ToUnicode` drei `bfrange`-Blöcke über je 65 536
+  Codes aufspannt (rund 50 MB Platzbedarf), reißt die erste Decke:
+
+  ```console
+  $ redact-rs tou_gross.pdf -o g.pdf --no-patterns
+  …
+  NICHT GEPRÜFT: Font „Test“ hat kein /ToUnicode; sein Text lässt sich nicht
+  dekodieren. Muster können darin nicht erkannt werden — diese Seite wurde
+  möglicherweise nicht vollständig geschwärzt.
+  $ echo $?
+  3
+  ```
+
+  Dieselbe Datei mit **einem** solchen Block (rund 16,8 MB) läuft mit
+  Rückgabewert 0 durch und dekodiert ihren Text. Für die zweite Decke: eine
+  5 235 Byte kleine Datei mit acht solchen Schriften auf einer Seite (zusammen
+  524 288 Tabelleneinträge, also über der Decke) belegt in der Debug-Fassung
+  67 MB Spitzenspeicher, dekodiert alle acht Textzeilen und endet mit 0.
+
+  **Eine unbrauchbare `/MediaBox`** — nicht endlich oder mit einer Kante
+  außerhalb des zulässigen Bereichs, etwa `[0 0 0 0]` — führt nicht zur
+  Ablehnung der Seite, sondern wird durch **A4 ersetzt** (`sane_box` in
+  `crates/redact-pdf/src/document.rs`; der Rasterizer nennt das „Unbrauchbare
+  MediaBox (0 x 0), A4 angenommen“). Sonst gäbe es kein Blatt, auf dem sich ein
+  Rechteck beschneiden oder zeichnen ließe.
+
+  **Die Oberfläche sagt es beim Laden** — nachgemessen an einem zweiseitigen
+  Dokument, dessen zweite Seite `/MediaBox [0 0 0 0]` trägt: „Seite 2 nennt
+  eine unbrauchbare Seitengröße; gerechnet und gezeichnet wird mit A4. Prüfen
+  Sie dort besonders genau, ob die Rechtecke sitzen.“
+
+  **Die Kommandozeile sagt es auch** — nachgemessen an einer einseitigen Datei
+  mit `/MediaBox [0 0 0 0]`: sie findet die IBAN, schwärzt sie (28 Zeichen
+  entfernt) und meldet dazu „Seite 1: Unbrauchbare MediaBox (0 x 0), A4
+  angenommen“ samt dem Hinweis, dass die Wirkungsprüfung dieser Seite gegen A4
+  gemessen ist und nicht gegen die Angabe der Datei. Der Lauf endet mit
+  **Rückgabewert 3** — verarbeitet, aber nicht vollständig geprüft. Wer dort
+  mit eigenen Koordinaten arbeitet, rechnet gegen A4, und das steht jetzt in
+  der Ausgabe statt nur in der Oberfläche.
 
   **Auch die Hilfsdateien haben eine Grenze**, und die ist *fest* — es gibt
   keinen Schalter dafür:
@@ -1662,9 +1869,18 @@ falsche Passwort wird nicht behalten und steht in keiner Meldung.
 
 ### Rechtecke ziehen, verschieben und an den Ecken nachziehen
 
-Ein neuer Bereich entsteht durch Aufziehen mit der Maus — sichtbar **ab dem
-Bild des Drucks** und beginnend **am Druckpunkt**, nicht erst dort, wo egui den
-Zug bemerkt. Ein Klick wählt ein vorhandenes Rechteck aus.
+Ein neuer Bereich entsteht auf **zwei** Wegen. Mit der Maus durch Aufziehen —
+sichtbar **ab dem Bild des Drucks** und beginnend **am Druckpunkt**, nicht erst
+dort, wo egui den Zug bemerkt. Ein Klick wählt ein vorhandenes Rechteck aus.
+
+**Ohne Maus** geht es seit v0.5.0 genauso: der Knopf „🔲 Rechteck“ in der
+Leiste oder **Strg+R** legt eines in der Mitte der gezeigten Seite an
+(200 × 40 pt, `NEW_REGION_SIZE` in `crates/redact-gui/src/state.rs`) und wählt
+es aus. Danach schieben die **Pfeiltasten** (1 pt, mit Umschalt 10 pt), und
+**Strg+Pfeil** ändert die Größe: die linke untere Ecke bleibt stehen, die
+rechte obere wandert. Für den Nutzer, für den dieser Weg gebaut wurde, ist das
+der ganze Weg — Aufziehen mit der Maus ist die *andere* Möglichkeit, nicht die
+einzige.
 
 Ein ausgewähltes Rechteck trägt **vier Eckgriffe** (`Handle::TopLeft` …
 `BottomRight` in `crates/redact-gui/src/selector.rs`). Daran lässt es sich
@@ -1687,8 +1903,32 @@ heraus. Eine neue Änderung nach einem Rückgängig macht den
 Wiederholen-Stapel ungültig. Beim Öffnen eines anderen Dokuments wird der
 Verlauf verworfen — er gehört zum Inhalt, nicht zum Fenster.
 
-Erfasst sind alle Änderungen an der Trefferliste: Anlegen, Löschen,
-Verschieben, Nachziehen, An- und Abwählen, das Übernehmen einer Review-Datei.
+Erfasst sind alle Änderungen an der Trefferliste. Es sind zehn, und die Liste
+ist vollständig — sie steht hier, weil eine zu kurze Aufzählung schlimmer ist
+als gar keine: wer „Analysieren“ darin nicht findet, drückt den Knopf ohne die
+Zuversicht, ihn zurücknehmen zu können.
+
+| Änderung | wo |
+|---|---|
+| Rechteck anlegen (Maus, Knopf „🔲 Rechteck“, Strg+R) | `add_manual_region` |
+| Rechteck löschen (Entf) | `delete_selected` |
+| Verschieben mit den Pfeiltasten | `move_selected` |
+| **Größe ändern** mit Strg+Pfeil | `resize_selected` |
+| Verschieben und Nachziehen mit der Maus | `begin_manual_edit` |
+| An- und Abwählen | `set_enabled` |
+| **Schwärzungsart** (Balken / weiß / Ersetzen) | `set_action` |
+| **Ersatztext** ändern | `edit_replacement` |
+| Review-Datei übernehmen | `apply_review_file` |
+| **Analysieren** | `analyze` |
+
+Der letzte ist der, den die frühere Aufzählung verschwieg, und der, bei dem es
+am meisten kostet: **Analysieren tauscht die Trefferliste aus.** Selbst
+gezogene Rechtecke trägt es ausdrücklich hinüber — die Entscheidungen an den
+**Mustertreffern** dagegen nicht: abgewählt, andere Schwärzungsart, eigener
+Ersatztext sind danach weg, weil deren Zeilen neu entstehen. Genau deshalb ist
+es ein Verlaufsschritt, und ein Strg+Z holt den alten Stand vollständig zurück
+(`r7_analysieren_ist_ein_verlaufsschritt` in
+`crates/redact-gui/src/rev8_tests.rs`).
 
 ### Miniaturansichten und Zoom
 
@@ -1707,15 +1947,30 @@ Vorschau ein und zeigt wenigstens die Lage des Textes.
 
 ### Tastaturbedienung
 
+Die Tabelle nennt die Tasten so, wie sie gedrückt werden: steht kein Strg
+davor, gilt der Eintrag für die Taste **allein**. Was dieselbe Taste mit
+gehaltener Strg tut (Strg+Bild ab, Strg+Entf, Strg+Esc …), ist hier nicht
+zugesagt.
+
 | Taste | Wirkung |
 |---|---|
 | Strg+O | PDF öffnen |
 | Strg+S | Geschwärztes PDF exportieren |
+| Strg+R | Rechteck in der Mitte der gezeigten Seite anlegen und auswählen (wie der Knopf „🔲 Rechteck“) |
 | Strg+Z / Strg+Y | Rückgängig / Wiederholen |
 | Bild auf/ab, Pos1/Ende | blättern |
 | Pfeiltasten | mit Auswahl: das Rechteck um 1 pt verschieben (mit Umschalt 10 pt) — ohne Auswahl: blättern |
+| Strg+Pfeil | mit Auswahl: die Größe um 1 pt ändern (mit Umschalt 10 pt); die linke untere Ecke bleibt stehen. Ohne Auswahl: nichts — dafür genügt der Pfeil allein |
 | Entf | ausgewähltes Rechteck löschen |
 | Esc | Auswahl aufheben |
+| Tabulator / Umschalt+Tab | von Knopf zu Knopf durch die Leiste, vorwärts bzw. rückwärts. Ausgegraute Knöpfe werden übersprungen — in beiden Richtungen |
+
+Liegt die Auswahl auf einer Seite, die gerade nicht gezeigt wird, tun
+Pfeiltasten und Strg+Pfeil **nichts** und sagen es in der Statuszeile — mit dem
+Verb, um das es ging („Nicht verschoben …“ bzw. „Größe nicht geändert …“) und
+mit dem Ausweg. Gibt es die genannte Seite im Dokument gar nicht (das kann nur
+eine Review- oder Regionsdatei mitbringen), nennt die Absage einen anderen
+Ausweg: dorthin lässt sich nicht blättern.
 
 Unter macOS tritt die Befehlstaste an die Stelle von Strg. **Liegt der Fokus in
 einem Textfeld, gehören alle Tasten dorthin** und nirgendwo sonst hin — sonst
@@ -1723,6 +1978,35 @@ löschte die Rücktaste im Feld „Ersetzen“ die ausgewählte Region. Ein Knop
 Fokus (nach einem Druck auf Tabulator) ist dabei kein Textfeld; die Kürzel
 wirken dort weiter (`a_tab_press_does_not_kill_every_shortcut` in
 `crates/redact-gui/src/app.rs`).
+
+### Nachprüfung nach dem Export
+
+Nach jedem Export liest die Oberfläche die geschriebenen Bytes zurück und
+sucht darin mit `redact_pdf::leaks_many` die Texte, die sie gerade geschwärzt
+hat — dieselbe Prüfung wie [`--check-leaks`](#pruefen), nur ohne Tippen, weil
+die Oberfläche die Suchbegriffe schon kennt. Sie läuft im Hintergrund; das
+Ergebnis steht in der Statuszeile, ein Fund zusätzlich ganz vorn in den
+Warnungen.
+
+Gesucht werden höchstens 1 000 Begriffe je Nachprüfung — dieselbe Decke wie
+bei `--check-leaks` (`redact_core::MAX_CHECK_NEEDLES`), und gezählt wird
+**jede Schreibweise**, die in einer geschwärzten Zeile steht. Was darüber
+liegt, wird gesagt und nicht verschwiegen: die Zeile nennt die Zahl der nicht
+gesuchten Texte. Geprüft ist
+*diese Liste*, nicht die Datei — ein selbst gezogenes Rechteck hat keinen
+bekannten Text, und die Zeile nennt die Zahl solcher Rechtecke.
+
+Ein Text, den Sie bewusst stehen lassen, deckt nur sich selbst: steht dieselbe
+Zeichenfolge aus einer geschwärzten Zeile noch **wörtlich** in der Ausgabe,
+wird sie gemeldet. Nur wenn allein die Fassung ohne Leerraum trifft und eine
+stehen gelassene Zeile dieselbe Zeichenfolge trägt, zählt der Fund nicht als
+Leck — die Zeile sagt, wie viele Texte das betrifft. Sind beide **wörtlich**
+gleich, wird der Text gar nicht gesucht, und die Statuszeile sagt, dass sie
+über ihn nichts aussagt — die Warnung dazu bleibt stehen.
+
+Bleiben Stellen der Datei ungeprüft, sagt die Statuszeile, wie viele es sind,
+und nennt **bis zu drei davon** beim Namen samt Grund; der Rest wird gezählt
+(„… und N weitere“). „Nicht gefunden“ ist dann keine Aussage.
 
 ### Trefferliste
 
@@ -1877,11 +2161,14 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   | jedes Formularfeld | die Werte `/V`, `/DV` und `/RV` — auch bei Widgets, die nur noch über `/Annots` erreichbar sind |
   | Katalog | `/OpenAction` und `/AA` — Aktionen, die beim Öffnen bzw. bei Ereignissen laufen und `/S /JavaScript` sein dürfen |
   | Katalog | `/OCProperties` — die Verwaltung optionaler Inhalte („Ebenen“) |
+  | Katalog | `/Outlines` — die Lesezeichen; jeder `/Title` ist frei wählbarer Text („Kontoauszug DE89 …“) |
+  | Katalog, jeder Knoten des Seitenbaums, jede Seite | **jeder Schlüssel, der nicht auf der Erlaubnisliste steht** — am Katalog bleiben nur `/Type`, `/Version`, `/Extensions`, `/Pages`, `/PageLabels`, `/OutputIntents`, `/ViewerPreferences`, `/PageLayout`, `/PageMode`, `/Lang`, `/NeedsRendering`, `/AF`; an der Seite Aufbau, Seitenrahmen, Inhalt und Darstellung. Was fällt, auch ohne dass es jemand beim Namen kennt: `/SpiderInfo` (Web Capture: abgerufene Adresse, gesendete Formulardaten), `/Legal`, `/Requirements`. `/PageLabels` und `/OutputIntents` (auch an der Seite) verlieren ihre Texte; und in **jedem Ressourcenverzeichnis** (`/Resources` an Seite, Seitenbaum, Formular, Erscheinungsbild) jeder Schlüssel, der keine der acht Ressourcenarten ist — die Einträge unter `/Properties` bleiben |
   | jede Seite | `/Metadata`, `/PieceInfo`, `/StructParents`, `/AA` |
   | jede Seite | Annotationen vom Typ `/FileAttachment` — ein Dateianhang klebt nicht nur im `/Names`-Baum |
+  | jede verbliebene Annotation **und alles, was sie erreichbar hält** (`/Popup`, `/Parent`-Kette, `/Kids`, `/IRT`) | die Aktionen `/A`, `/AA`, `/PA` und ein benanntes `/Dest` (ein ausdrückliches Ziel bleibt, auch hinter einem Verweis — ein Verweis im Feld muss auf eine Seite führen); die Klartexte `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`, `/OverlayText`, `/NM`, `/DS` und die `/MK`-Beschriftungen; dazu die Beiwerk-Dictionaries `/Movie`, `/Measure`, `/RichMediaContent`, `/RichMediaSettings` und die 3D-Einheiten `/3DU` als Ganzes (Filmdateiname, Maßangaben, eingebettete Medien-Dateien auch unter den Einstellungen; Preis: ein Film und eine Vermessung sind danach nur noch Bild) und `/Alt`/`/ActualText` an jedem erreichten Dictionary. **Nicht** `/DA` (benannte Lücke, siehe `SECURITY.md`) — was eine Annotation *zeichnet* (`/AP`), geht wie Seitentext durch die Schwärzung |
 
-  Preis: benannte Sprünge im Dokument funktionieren danach nicht mehr, und aus
-  einem Formular wird ein totes Blatt Papier. Das ist die sichere Richtung.
+  Preis: benannte Sprünge, Lesezeichen und Verweise ins Netz funktionieren
+  danach nicht mehr, und aus einem Formular wird ein totes Blatt Papier. Das ist die sichere Richtung.
   Objekte, die dadurch unerreichbar werden, werden zusätzlich aus der Datei
   geworfen (`prune_unreachable`) — `lopdf` schriebe sonst auch alles mit, was
   niemand mehr referenziert.
@@ -1911,6 +2198,17 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   werden abgelehnt, nicht repariert. Das Passwort steht in keiner erzeugten
   Datei und in keiner Meldung
   ([`SECURITY.md`](SECURITY.md#passwörter-verschlüsselter-pdfs)).
+* **Kein Kernabzug: unter Linux.** Stürzt der Prozess ab, schriebe der Kernel
+  sonst den ganzen Arbeitsspeicher weg — samt Klartext des Dokuments und
+  eingegebenem Passwort. `redact-rs` schaltet das als erste Anweisung in `main`
+  ab (`prctl(PR_SET_DUMPABLE, 0)`). **Unter macOS, BSD und den übrigen
+  Unix-Systemen setzt es stattdessen `setrlimit(RLIMIT_CORE, 0)` — eine Grenze,
+  kein Verbot. Unter Windows ist nichts umgesetzt**; die Einschränkung gehört
+  zur Zusage dazu und steht ausgeschrieben in
+  [`SECURITY.md`](SECURITY.md#kein-kernabzug-dieses-prozesses). Dort steht auch
+  der Nebeneffekt: der Prozess ist danach **unter Linux** für `ptrace` durch
+  denselben Benutzer unerreichbar — auf den übrigen Unix-Systemen hat
+  `setrlimit(RLIMIT_CORE, 0)` diesen Nebeneffekt nicht.
 * Review-Datei und Audit-Log entstehen unter Unix mit Modus `0600` — **in
   beiden Programmen**. Sie gehen durch denselben Schreibpfad
   (`redact_pipeline::write_review_file` bzw. `AuditLog::write`, beide über
@@ -1998,6 +2296,41 @@ cargo test -p redact-pdf -- --ignored                 # die bekannten Lecks
 ./scripts/build-windows.sh                            # Windows-Binary (mingw)
 cargo run --release -p redact-pdf --example gen10 -- gross.pdf 10
 ```
+
+### Die Belege in `docs/` neu erzeugen
+
+Die Bilder ganz oben sind keine Bildschirmfotos, sondern Ausgaben dieses
+Programms. Wer am **Rasterizer** (`redact-render`) oder an der **Schwärzung**
+etwas ändert, lässt danach diese beiden Befehle laufen — sonst zeigt die README
+den Stand von vorgestern:
+
+```bash
+./scripts/make-preview.sh          # erzeugt docs/*.png, *.gif, *.txt neu
+python3 scripts/check-preview.py docs   # prüft sie (54 Prüfungen, ~0,3 s)
+```
+
+`check-preview.py` ist ein zweiter, unabhängiger Leser in Python
+(eigener PNG- und GIF-Dekoder, nur Standardbibliothek), damit ein Fehler im
+eigenen Schreiber sich nicht selbst durchwinkt. Danach sagt `git status docs/`,
+ob sich etwas bewegt hat.
+
+Die Zahl der Prüfungen ist keine Zierde: das Skript druckt sie als letzte
+Zeile (`Alle N Pruefungen bestanden.`), und
+`crates/redact-cli/tests/belege.rs::die_zahl_der_pruefungen_steht_im_readme`
+vergleicht sie mit der Zahl in diesem Satz. Hier stand „36 Prüfungen“, während
+das Skript längst 54 meldete — abgeschrieben veraltet so eine Zahl still.
+
+> **Bitgleichheit gilt nur auf derselben Maschine.** Dort liefert ein zweiter
+> Lauf dieselben SHA-256-Summen für alle sechs Dateien (nachgemessen). Über
+> Maschinengrenzen ist das **nicht** zugesagt: `tiny-skia` rastert mit SIMD
+> (SSE bzw. NEON), Fließkomma-Codegen darf sich zwischen `rustc`-Fassungen
+> ändern, und die PNG-Kompression hängt an flate2/miniz_oxide aus `Cargo.lock`.
+> Ein `git status`, der auf einem anderen Rechner Bytes meldet, ist deshalb kein
+> Befund. Darum prüft auch die CI **nicht** auf Bytegleichheit, sondern lässt
+> `check-preview.py` über den eingecheckten **und** einen frisch erzeugten Satz
+> laufen (Job `belege` in `.github/workflows/ci.yml`). Die Begründung im Langen
+> steht in
+> [`docs/vorher-nachher.md`](docs/vorher-nachher.md#wie-zuverlässig-ist-nachbauen).
 
 ## Release bauen
 

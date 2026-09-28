@@ -1,0 +1,45 @@
+version: 2
+
+# Nur GitHub Actions - und das mit Absicht.
+#
+# WARUM UEBERHAUPT
+# Die Workflows nageln jede Action auf einen Commit-SHA fest
+# (`uses: actions/checkout@11bd719... # v4.2.2`). Das ist richtig so: ein
+# beweglicher Tag wie `@v4` laesst sich umhaengen, und dann laeuft in einem
+# Ablauf, der oeffentliche Binaries erzeugt, fremder Code. Der Preis dafuer
+# ist, dass ein gepinnter SHA von selbst nie altert - niemand merkt, wenn die
+# Action daneben zehn Fassungen weiter ist oder eine Schwachstelle behoben
+# hat. Bis hierher gab es dafuer keine einzige Stelle im Repository.
+#
+# Dependabot loest genau das und behaelt die Pinnung bei: es tauscht den SHA
+# aus und schreibt den neuen Versionskommentar dahinter.
+#
+# WARUM NICHT AUCH cargo
+# Zwei Gruende, beide gemessen und nicht vermutet:
+#
+#  * Die Rust-Abhaengigkeiten haben schon eine Aufsicht. `cargo deny check
+#    advisories` und `cargo audit` laufen in jedem CI-Lauf (Job
+#    "supply-chain" in ci.yml) und melden Schwachstellen und zurueckgezogene
+#    Fassungen. Ein zweiter Melder erzeugt nur denselben Befund zweimal.
+#  * Eine Fassungserhoehung ist hier nicht immer harmlos. `skrifa` ist in
+#    crates/redact-render/Cargo.toml ausdruecklich festgenagelt, weil es
+#    fremde Fontprogramme aus fremden PDFs liest - Anheben ist erlaubt, aber
+#    als eigener Schritt mit eigener Pruefung. Ein automatischer PR darauf
+#    waere genau der beilaeufige Weg, den der Kommentar dort ausschliesst.
+#
+# Sicherheitsrelevante Rust-Updates kommen ueber die Dependabot-Alerts (eine
+# Repository-Einstellung, keine Sache dieser Datei) und ueber cargo audit.
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "CI"
+    groups:
+      # Ein PR im Monat statt fuenf. Die Actions haengen ohnehin alle am
+      # selben Ablauf; einzeln gemergt heisst nur fuenfmal dieselbe CI.
+      actions:
+        patterns:
+          - "*"

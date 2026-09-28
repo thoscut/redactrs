@@ -82,14 +82,25 @@ allow = ["LicenseRef-UFL-1.0"]
 # ---------------------------------------------------------------------------
 [bans]
 multiple-versions = "warn"
-# "warn" statt "deny", und das ist eine bewusste Kroete:
-# Die Workspace-internen Pfad-Abhaengigkeiten (redact-core & Co.) haben keine
-# Versionsangabe und zaehlen damit als Wildcard. `allow-wildcard-paths`
-# greift dafuer nicht, weil cargo-deny die Crates als veroeffentlichbar
-# ansieht - sie tragen kein `publish = false`. Sobald in den
-# crates/*/Cargo.toml `publish = false` steht (die Crates gehen ohnehin nicht
-# nach crates.io), kann hier "deny" stehen und der Eintrag unten entfallen.
-wildcards = "warn"
+# Hier stand "warn", weil die versionslosen Pfad-Abhaengigkeiten des
+# Workspace (redact-core & Co.) als Wildcards zaehlten. Das ist behoben:
+# `publish = false` steht jetzt in [workspace.package] der Wurzel und wird
+# von allen acht Crates geerbt, `allow-wildcard-paths` greift damit.
+#
+# EINE KORREKTUR ZUR FRUEHEREN NOTIZ AN DIESER STELLE: sie sagte, mit
+# `publish = false` koenne `allow-wildcard-paths` *entfallen*. Das stimmt
+# nicht. Der Schluessel ist nicht die Bedingung, sondern der Schalter, der
+# die Ausnahme ueberhaupt erlaubt; `publish = false` macht die Crates nur
+# erst dazu berechtigt. Nachgemessen mit cargo-deny 0.20.2:
+#
+#   publish = true  + allow-wildcard-paths = true   -> bans FAILED
+#   publish = false + allow-wildcard-paths = true   -> bans ok
+#   publish = false ohne allow-wildcard-paths       -> bans FAILED
+#
+# Beide Zeilen muessen also stehen bleiben. Was "deny" statt "warn" bringt:
+# eine echte Wildcard-Abhaengigkeit auf ein *fremdes* Crate (`foo = "*"`)
+# bricht die CI, statt in einer Warnung unterzugehen.
+wildcards = "deny"
 allow-wildcard-paths = true
 
 # ---------------------------------------------------------------------------

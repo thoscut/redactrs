@@ -4,3 +4,22 @@
 # beim Auschecken umschreiben — und damit unbrauchbar machen, weil sich das
 # Dokument dann nicht mehr entschlüsseln lässt.
 *.pdf binary
+
+# Die Doku und die Belege werden von Tests **wörtlich** gelesen
+# (`the_needle_ceiling_is_one_number_in_code_help_and_docs`,
+# `der_dritte_fall_des_rueckgabewerts_drei_steht_ueberall`, `belege.rs`).
+# Ohne diese Zeilen checkt git sie auf einem System mit `core.autocrlf=true`
+# mit CRLF aus, und jeder Vergleich gegen einen Text mit `\n` schlägt fehl —
+# der Windows-Job der CI war genau daran zweimal rot. Quelltext und Skripte
+# stehen aus demselben Grund dabei: ein Skript mit CRLF startet unter Unix
+# nicht, und `cargo fmt --check` sieht andere Zeilen als der Autor.
+*.md text eol=lf
+*.txt text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.json text eol=lf
+*.csv text eol=lf
