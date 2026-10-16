@@ -29,6 +29,39 @@ Grundlage jedes Eintrags ist ein Commit in diesem Repository — nachlesbar mit
 
 ---
 
+## Unveröffentlicht
+
+Bereich: `git log v0.7.0..`.
+
+### Sicherheit
+
+* **⚠ Sicherheit: Zeichenketten mit festem Wertebereich tragen keinen
+  Klartext mehr durch den Lauf** (Register #73, Spur-A-Runde 1; stilles
+  Leck, bis hierher als „Einordnung offen“ mit `#[ignore]` geführt). Die
+  Norm sieht an einigen Stellen Zeichenketten vor, die niemand mit einem
+  Geheimnis füllt — und die doch jeden Text tragen: `/Lang` am Katalog und
+  an einer Annotation, die Zeitstempel `/M` und `/CreationDate`, der Zustand
+  `/State` einer Prüfnotiz, die Ansicht `/ExData /3DV /XN`,
+  `/FontDescriptor /FontFamily`, `/CIDSystemInfo /Registry` und das
+  `/ID`-Paar des Trailers. Alle standen nach dem Lauf wortwörtlich in der
+  Ausgabe, ohne Warnung und mit leerem Bericht. Jetzt bleibt ein Wert nur
+  **im** Wertebereich der Norm: `/Lang` als Sprachangabe (`de-DE`,
+  `zh-Hans-CN`, `es-419`), `/M` und `/CreationDate` als Datum nach 7.9.4,
+  `/State` und `/StateModel` aus Tabelle 172, `/Registry` und `/Ordering`
+  aus der Adobe-Registry (sonst ersetzt, beide sind Pflicht).
+  `/FontFamily` und `/ExData` fallen ganz. `/ID` bekommt eine neue
+  Kennung: MD5 der geschriebenen Datei, beide Hälften gleich — dieselbe
+  Eingabe ergibt weiter dieselbe Ausgabe. Was fällt, steht im Bericht (am
+  Katalog und an Objekten als Beiwerk, an Annotationen als Kommentartext).
+  Belege: `zo_b_traeger::b_randfaelle_normstrings` (jetzt ohne
+  `#[ignore]`), die Gegenprobe `b_normstrings_im_wertebereich_bleiben`,
+  `b_normstrings_melden_was_fiel`, `b_id_ist_neu_und_bestimmt`,
+  `b_id_platzhalter_im_strom_wird_nicht_ueberschrieben` und die
+  Wertebereiche in `meta::tests`. Mutationsnachweis: jede Korrektur
+  einzeln zurückgenommen → je ihr Fall rot.
+
+---
+
 ## 0.7.0 — 2026-09-25
 
 Bereich: `git log v0.6.0..v0.7.0`.

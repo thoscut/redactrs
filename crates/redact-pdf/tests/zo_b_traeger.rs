@@ -997,8 +997,13 @@ fn b_ap_einer_nur_ueber_popup_oder_irt_gehaltenen_annotation_faellt() {
 /// `/ExData /3DV /XN`, `/FontDescriptor /FontFamily`, `/CIDSystemInfo
 /// /Registry`, das `/ID`-Paar des Trailers. Je Fall ein eigener Lauf, damit
 /// die Meldung sagt, welcher es ist.
+///
+/// Bis Register #73 rot und `#[ignore]`: alle stilles Leck, mit leerem
+/// Bericht. Behoben in `meta.rs` (Wertebereich je Schlüssel, siehe
+/// `clean_carrier_norm_strings`, `clean_object_norm_strings`) und
+/// `document.rs` (neue `/ID`). Die Gegenprobe — was im Wertebereich liegt,
+/// bleibt — steht in [`b_normstrings_im_wertebereich_bleiben`].
 #[test]
-#[ignore = "offen: Register #73 Normstrings (Einordnung offen) — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn b_randfaelle_normstrings() {
     type Fall<'a> = (&'a str, Box<dyn Fn(&mut Doc) + 'a>);
     let faelle: Vec<Fall> = vec![
@@ -1034,6 +1039,19 @@ fn b_randfaelle_normstrings() {
             }),
         ),
         (
+            "/CIDSystemInfo als eigenes Objekt, /Ordering",
+            Box::new(|d| {
+                let font_id = d.font_id;
+                let info = d.add(Object::Dictionary(dictionary! {
+                    "Registry" => s("Adobe"), "Ordering" => s(SECRET), "Supplement" => 0,
+                }));
+                d.doc
+                    .get_dictionary_mut(font_id)
+                    .unwrap()
+                    .set("CIDSystemInfo", Object::Reference(info));
+            }),
+        ),
+        (
             "/ID im Trailer",
             Box::new(|d| {
                 d.doc.trailer.set("ID", vec![s(SECRET), s(SECRET)]);
@@ -1066,6 +1084,172 @@ fn b_randfaelle_normstrings() {
         "Randfälle, die den Lauf überstehen:\n{}",
         lecks.join("\n")
     );
+}
+
+/// Was **im** Wertebereich liegt, bleibt (Register #73, Gegenprobe zu
+/// [`b_randfaelle_normstrings`]): eine Sprachangabe am Katalog und an der
+/// Annotation, Zeitstempel nach 7.9.4, Zustand und Zustandsmodell aus
+/// Tabelle 172, `/CIDSystemInfo` der Adobe-Registry. Ein Lauf mit lauter
+/// solchen Werten meldet auch nichts.
+#[test]
+fn b_normstrings_im_wertebereich_bleiben() {
+    let mut d = probe();
+    d.catalog_set("Lang", s("de-DE"));
+    let notiz = d.add(Object::Dictionary(dictionary! {
+        "Type" => "Annot", "Subtype" => "Text", "Rect" => rect(),
+        "Lang" => s("zh-Hans-CN"), "M" => s("D:20250314093000+01'00'"),
+        "CreationDate" => s("D:2025"), "State" => s("Accepted"), "StateModel" => s("Review"),
+    }));
+    annots(&mut d, &[notiz]);
+    let font_id = d.font_id;
+    d.doc.get_dictionary_mut(font_id).unwrap().set(
+        "CIDSystemInfo",
+        dictionary! { "Registry" => s("Adobe"), "Ordering" => s("Japan1"), "Supplement" => 6 },
+    );
+    let l = lauf(&d.finish());
+    assert_eq!(l.meta.beiwerk_removed, 0, "{:?}", l.meta.summary());
+
+    let out = load_from_bytes(&l.out).expect("Ausgabe lädt");
+    let text = |o: &Object| o.as_str().map(|b| String::from_utf8_lossy(b).into_owned());
+    let katalog = out.catalog().expect("Katalog");
+    assert_eq!(text(katalog.get(b"Lang").unwrap()).unwrap(), "de-DE");
+    let notiz = out
+        .objects
+        .values()
+        .filter_map(|o| o.as_dict().ok())
+        .find(|d| d.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Text"))
+        .expect("die Notiz steht noch");
+    for (key, wert) in [
+        ("Lang", "zh-Hans-CN"),
+        ("M", "D:20250314093000+01'00'"),
+        ("CreationDate", "D:2025"),
+        ("State", "Accepted"),
+        ("StateModel", "Review"),
+    ] {
+        let got = notiz.get(key.as_bytes()).map(|o| text(o).unwrap());
+        assert_eq!(got.ok().as_deref(), Some(wert), "/{key} an der Notiz");
+    }
+    let info = out
+        .get_dictionary(font_id)
+        .unwrap()
+        .get(b"CIDSystemInfo")
+        .and_then(Object::as_dict)
+        .expect("/CIDSystemInfo steht noch");
+    assert_eq!(text(info.get(b"Registry").unwrap()).unwrap(), "Adobe");
+    assert_eq!(text(info.get(b"Ordering").unwrap()).unwrap(), "Japan1");
+}
+
+/// Was fällt, steht im Bericht (Register #73): am Katalog als Beiwerk, an der
+/// Annotation als Kommentartext; ein ersetztes `/CIDSystemInfo /Registry`
+/// steht danach auf `Adobe` — der Schlüssel ist Pflicht.
+#[test]
+fn b_normstrings_melden_was_fiel() {
+    let mut d = probe();
+    d.catalog_set("Lang", s(SECRET));
+    let font_id = d.font_id;
+    d.doc.get_dictionary_mut(font_id).unwrap().set(
+        "CIDSystemInfo",
+        dictionary! { "Registry" => s(SECRET), "Ordering" => s("Identity"), "Supplement" => 0 },
+    );
+    let l = muss_fallen(&d.finish(), "/Lang am Katalog, /Registry");
+    assert_eq!(l.meta.beiwerk_removed, 2, "{:?}", l.meta.summary());
+    let out = load_from_bytes(&l.out).expect("Ausgabe lädt");
+    let info = out
+        .get_dictionary(font_id)
+        .unwrap()
+        .get(b"CIDSystemInfo")
+        .and_then(Object::as_dict)
+        .expect("/CIDSystemInfo steht noch");
+    assert_eq!(info.get(b"Registry").unwrap().as_str().unwrap(), b"Adobe");
+
+    let mut d = probe();
+    let notiz = d.add(Object::Dictionary(dictionary! {
+        "Type" => "Annot", "Subtype" => "Square", "Rect" => rect(),
+        "M" => s(format!("D:{SECRET}")), "State" => s(SECRET),
+    }));
+    annots(&mut d, &[notiz]);
+    let l = muss_fallen(&d.finish(), "/M und /State an einer Annotation");
+    assert_eq!(l.meta.annotation_texts_cleared, 2, "{:?}", l.meta.summary());
+}
+
+/// `/ID` bekommt eine neue Kennung (Register #73): beide Hälften gleich, 16
+/// Byte, der MD5 der geschriebenen Datei mit dem Platzhalter an ihrer Stelle —
+/// und dieselbe Eingabe ergibt dieselbe Ausgabe.
+#[test]
+fn b_id_ist_neu_und_bestimmt() {
+    use md5::{Digest, Md5};
+    let mut d = probe();
+    d.doc.trailer.set("ID", vec![s(SECRET), s("zweite Hälfte")]);
+    let bytes = d.finish();
+    let a = lauf(&bytes).out;
+    let b = lauf(&bytes).out;
+    assert_eq!(a, b, "dieselbe Eingabe, zwei verschiedene Ausgaben");
+
+    let id = id_of(&a);
+    assert_eq!(id[0], id[1], "beide Hälften gleich");
+    assert_eq!(id[0].len(), 16);
+    let platzhalter: String = b"redact-rs:/ID:00"
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect();
+    let gestempelt: String = id[0].iter().map(|b| format!("{b:02X}")).collect();
+    let mut zurueck = a.clone();
+    let stellen: Vec<usize> = zurueck
+        .windows(gestempelt.len())
+        .enumerate()
+        .filter(|(_, w)| *w == gestempelt.as_bytes())
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(stellen.len(), 2, "die Kennung steht zweimal in der Datei");
+    for at in stellen {
+        zurueck[at..at + platzhalter.len()].copy_from_slice(platzhalter.as_bytes());
+    }
+    let erwartet: [u8; 16] = Md5::digest(&zurueck).into();
+    assert_eq!(id[0], erwartet, "die Kennung ist der MD5 der Datei");
+}
+
+/// Trägt ein Strom den Text des Platzhalters, ist nicht sicher, welche
+/// Fundstelle der Trailer ist: dann wird neu geschrieben, und der Strom
+/// bleibt, wie er war. Ohne `strip_metadata`, damit der Strom am Katalog bis
+/// zum Schreiben hängt.
+#[test]
+fn b_id_platzhalter_im_strom_wird_nicht_ueberschrieben() {
+    let platzhalter: String = b"redact-rs:/ID:00"
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect();
+    let mut d = probe();
+    d.doc.trailer.set("ID", vec![s("alt"), s("alt")]);
+    let fremd = d.add(Object::Stream(Stream::new(
+        dictionary! {},
+        format!("% <{platzhalter}><{platzhalter}>\n").into_bytes(),
+    )));
+    d.catalog_set("Zusatz", Object::Reference(fremd));
+    let doc = load_from_bytes(&d.finish()).expect("ladbar");
+    let out = save_to_bytes(&doc).expect("Speichern");
+
+    let id = id_of(&out);
+    assert_eq!(id[0], id[1]);
+    assert_ne!(
+        id[0].as_slice(),
+        b"redact-rs:/ID:00",
+        "Platzhalter stehen geblieben"
+    );
+    assert!(
+        String::from_utf8_lossy(&out).contains(&format!("<{platzhalter}><{platzhalter}>")),
+        "der Strom wurde überschrieben"
+    );
+}
+
+fn id_of(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let doc = load_from_bytes(bytes).expect("Ausgabe lädt");
+    doc.trailer
+        .get(b"ID")
+        .and_then(Object::as_array)
+        .expect("/ID steht im Trailer")
+        .iter()
+        .map(|o| o.as_str().expect("Zeichenkette").to_vec())
+        .collect()
 }
 
 // ===========================================================================

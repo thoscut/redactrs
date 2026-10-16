@@ -1954,10 +1954,74 @@ pub fn save_to_bytes(doc: &Document) -> Result<Vec<u8>> {
     for key in fremd {
         copy.trailer.remove(&key);
     }
+    // `/ID` bekommt eine neue Kennung — vor dem Aufräumen, damit ein Objekt
+    // hinter `/ID 9 0 R` mitfällt.
+    let new_id = copy.trailer.remove(b"ID").is_some();
+    if new_id {
+        copy.trailer.set("ID", id_pair(ID_PLACEHOLDER));
+    }
     prune_unreachable(&mut copy);
     copy.save_to(&mut buffer)
         .map_err(|e| RedactError::Pdf(format!("Speichern fehlgeschlagen: {e}")))?;
+    if new_id {
+        stamp_id(&mut copy, &mut buffer)?;
+    }
     Ok(buffer)
+}
+
+/// Platzhalter für die neue Dokumentkennung, bis ihr Wert feststeht.
+const ID_PLACEHOLDER: [u8; 16] = *b"redact-rs:/ID:00";
+
+fn id_pair(id: [u8; 16]) -> Object {
+    let one = || Object::String(id.to_vec(), lopdf::StringFormat::Hexadecimal);
+    Object::Array(vec![one(), one()])
+}
+
+/// Setzt die neue Dokumentkennung: MD5 über die geschriebene Datei, mit dem
+/// Platzhalter an der Stelle der Kennung (PDF 32000-1, 14.4: berechnet aus
+/// Zeit, Pfad, Größe und Inhalt — hier aus dem Inhalt allein, damit dieselbe
+/// Eingabe dieselbe Ausgabe ergibt). Beide Hälften sind gleich, wie bei einer
+/// neu erzeugten Datei.
+///
+/// **Warum nicht die alte Kennung behalten:** `/ID` ist eine beliebige
+/// Zeichenkette, und was ein Erzeuger dort ablegte, stand nach dem Lauf
+/// wortwörtlich in der Ausgabe (Register #73). Eine aus der alten Kennung
+/// abgeleitete wäre auch nichts: steht dort eine IBAN, ist ihr Hash in einem
+/// Nachmittag zurückgerechnet. Die Ausgabe dagegen ist geschwärzt — was aus
+/// ihr folgt, verrät nichts, was sie nicht selbst zeigt.
+///
+/// Der Platzhalter wird an Ort und Stelle überschrieben: gleiche Länge, also
+/// bleiben alle Versätze gültig. Steht er nicht genau zweimal in der Datei
+/// (ein Strom trägt denselben Text), wird die Datei mit der fertigen Kennung
+/// ein zweites Mal geschrieben.
+fn stamp_id(doc: &mut Document, buffer: &mut Vec<u8>) -> Result<()> {
+    use md5::{Digest, Md5};
+    let id: [u8; 16] = Md5::digest(buffer.as_slice()).into();
+    let hex = |bytes: &[u8; 16]| -> Vec<u8> {
+        let mut out = Vec::with_capacity(34);
+        out.push(b'<');
+        for byte in bytes {
+            out.extend_from_slice(format!("{byte:02X}").as_bytes());
+        }
+        out.push(b'>');
+        out
+    };
+    let placeholder = hex(&ID_PLACEHOLDER);
+    // Genau zwei Fundstellen, oder es wird neu geschrieben: trägt ein Strom
+    // denselben Text, ist nicht sicher, welche der Trailer ist.
+    let hits: Vec<usize> = memchr::memmem::find_iter(buffer, &placeholder).collect();
+    if hits.len() == 2 {
+        let stamped = hex(&id);
+        for at in hits {
+            buffer[at..at + stamped.len()].copy_from_slice(&stamped);
+        }
+        return Ok(());
+    }
+    doc.trailer.set("ID", id_pair(id));
+    buffer.clear();
+    doc.save_to(buffer)
+        .map_err(|e| RedactError::Pdf(format!("Speichern fehlgeschlagen: {e}")))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
