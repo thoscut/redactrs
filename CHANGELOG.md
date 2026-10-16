@@ -32,9 +32,12 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ---
 
-## Unveröffentlicht
+## 0.7.1 — 2026-10-16
 
-Bereich: `git log v0.7.0..`.
+Bereich: `git log v0.7.0..v0.7.1`.
+
+Ein Sicherheitsfix (Register #73) und die Release-Notizen zu 0.7.0 in lesbarer
+Form. Wer 0.7.0 einsetzt, aktualisiert wegen #73.
 
 ### Sicherheit
 
@@ -62,6 +65,14 @@ Bereich: `git log v0.7.0..`.
   `b_id_platzhalter_im_strom_wird_nicht_ueberschrieben` und die
   Wertebereiche in `meta::tests`. Mutationsnachweis: jede Korrektur
   einzeln zurückgenommen → je ihr Fall rot.
+
+### Doku
+
+* Der Abschnitt zu 0.7.0 ist zu Release-Notizen zusammengefasst (gegliedert
+  nach Sicherheit, Dienstverweigerung, Neu, Geändert, Behoben). Der
+  vollständige Verlauf der Prüfrunden steht wortgleich in
+  [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md) und liegt jedem
+  Archiv unter `docs/` bei.
 
 ---
 
