@@ -3482,26 +3482,6 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
         "einen Schalter dafür gibt es nicht, wie bei der Decke aus #94",
         "eine Registernummer, keine Messung",
     ),
-    (
-        "Bereich: `git log v0.7.0..`.",
-        "eine Fassungsnummer, keine Messung",
-    ),
-    (
-        "(Register #73, Spur-A-Runde 1; stilles Leck,",
-        "eine Registernummer und eine Rundennummer, keine Messung",
-    ),
-    (
-        "die Ansicht `/ExData /3DV /XN`",
-        "ein Schlüsselname, keine Messung",
-    ),
-    (
-        "`zh-Hans-CN`, `es-419`), `/M` und `/CreationDate` als Datum nach 7.9.4, `/State` und `/StateModel` aus Tabelle 172,",
-        "eine Sprachangabe, ein Abschnitt und eine Tabelle der Norm, keine Messung",
-    ),
-    (
-        "Kennung: MD5 der geschriebenen Datei",
-        "der Name eines Hashverfahrens, keine Messung",
-    ),
 ];
 
 /// Der Block der beiden letzten Fix-Runden aus `CHANGELOG.md`, geglättet.
