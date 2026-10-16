@@ -60,7 +60,10 @@ fn glatt(text: &str) -> String {
 /// Abschnitts** und gilt für den ganzen Abschnitt. Also wird der Abschnitt
 /// gelesen und nicht sein jüngstes Fenster.
 fn changelog_block() -> String {
-    let text = lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG"));
+    let text = lf(
+        &std::fs::read_to_string(repo_root().join("docs/pruefverlauf-0.7.0.md"))
+            .expect("CHANGELOG"),
+    );
     // Der jüngste Abschnitt: die erste `## `-Überschrift, gleich ob sie noch
     // `Unveröffentlicht` heißt oder schon die Fassung nennt.
     let marke = "\n## ";

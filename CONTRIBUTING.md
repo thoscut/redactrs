@@ -85,7 +85,8 @@ Läufer, der `cfg(not(unix))` ausführt, ist der Job „Build (windows-2025)“ 
 CI — lokal ist ein `cargo test` für Windows nicht zu haben (kein mingw-Linker;
 `zf_q5_plattformzusagen` hält die Messung fest). Er hat nach der Fix-Runde 9
 einen echten Fehler am Programm gefunden, den kein Linux-Lauf sehen konnte
-(CHANGELOG, „Nach der Runde 9“). Deshalb gilt: **ein Befund, ein Commit — und
+([`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md), „Nach der
+Runde 9“). Deshalb gilt: **ein Befund, ein Commit — und
 nach jedem Push wird der CI-Lauf angesehen, insbesondere der Windows-Job,
 bevor die nächste Runde beginnt.** Ein Commit, der sieben Befundklassen
 zugleich schließt, hinterlässt einen roten Job, dessen Ursache erst nach dem

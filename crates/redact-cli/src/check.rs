@@ -610,7 +610,7 @@ mod tests {
         // CHANGELOG: die Einführung der Decke, ihre Erwähnung im
         // Hilfetext-Eintrag und die beiden Sätze zur Nachprüfung der
         // Oberfläche (Gegenprüfung g4: ungebunden).
-        let changelog = lies("CHANGELOG.md");
+        let changelog = lies("docs/pruefverlauf-0.7.0.md");
         for satz in [
             format!("Obergrenze von {formatiert} Begriffen"),
             format!("Decke von {formatiert} Begriffen je `--check-leaks`-Lauf"),
@@ -624,7 +624,10 @@ mod tests {
             ),
             format!("Die Decke von {formatiert} Begriffen ist eine Zahl, nicht fünf."),
         ] {
-            assert!(changelog.contains(&satz), "CHANGELOG.md ohne „{satz}“");
+            assert!(
+                changelog.contains(&satz),
+                "docs/pruefverlauf-0.7.0.md ohne „{satz}“"
+            );
         }
 
         // Und die Fehlermeldung selbst druckt dieselbe Zahl — sonst zitierte

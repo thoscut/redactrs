@@ -52,7 +52,10 @@ fn glatt(text: &str) -> String {
 }
 
 fn changelog() -> String {
-    lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG.md lesbar"))
+    lf(
+        &std::fs::read_to_string(repo_root().join("docs/pruefverlauf-0.7.0.md"))
+            .expect("docs/pruefverlauf-0.7.0.md lesbar"),
+    )
 }
 
 fn belege_quelltext() -> String {

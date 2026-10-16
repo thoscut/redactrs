@@ -53,7 +53,10 @@ fn glatt(text: &str) -> String {
 /// Regel, wie ihr Vorspann ihn aufspannt (Schnitt wörtlich aus
 /// `zl_e_gegenwartszahl_ohne_weg`).
 fn ganzer_abschnitt() -> String {
-    let text = lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG"));
+    let text = lf(
+        &std::fs::read_to_string(repo_root().join("docs/pruefverlauf-0.7.0.md"))
+            .expect("CHANGELOG"),
+    );
     // Der jüngste Abschnitt: die erste `## `-Überschrift, gleich ob sie noch
     // `Unveröffentlicht` heißt oder schon die Fassung nennt.
     let marke = "\n## ";

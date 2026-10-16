@@ -68,7 +68,10 @@ fn glatt(text: &str) -> String {
 /// Der Block der beiden letzten Fix-Runden — derselbe Schnitt wie in
 /// `belege::changelog_block`.
 fn changelog_block() -> String {
-    let text = lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG"));
+    let text = lf(
+        &std::fs::read_to_string(repo_root().join("docs/pruefverlauf-0.7.0.md"))
+            .expect("CHANGELOG"),
+    );
     let ueberschriften: Vec<usize> = text
         .match_indices("\n### Fix-Runde ")
         .map(|(i, _)| i)
@@ -353,7 +356,10 @@ fn jede_zeit_und_speicherzahl_nennt_ihren_weg() {
 /// darüber eine Regel, die niemand mehr aufgestellt hat.
 #[test]
 fn der_vorspann_stellt_die_regel_wirklich_auf() {
-    let text = lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG"));
+    let text = lf(
+        &std::fs::read_to_string(repo_root().join("docs/pruefverlauf-0.7.0.md"))
+            .expect("CHANGELOG"),
+    );
     let vorspann = glatt(&text[..text.find("\n### Fix-Runde ").expect("erste Fix-Runde")]);
     for satzteil in [
         "Eine Messzahl stammt aus einem Lauf des **gebauten Binaries**",

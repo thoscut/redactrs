@@ -41,7 +41,7 @@ fn lies(pfad: &str) -> String {
 /// Der ganze Abschnitt `## Unveröffentlicht` — der Schnitt der
 /// Release-Notizen (`.github/workflows/release.yml`).
 fn unveroeffentlicht() -> String {
-    let text = lies("CHANGELOG.md");
+    let text = lies("docs/pruefverlauf-0.7.0.md");
     // Der jüngste Abschnitt: die erste `## `-Überschrift, gleich ob sie noch
     // `Unveröffentlicht` heißt oder schon die Fassung nennt.
     let marke = "\n## ";
@@ -55,7 +55,7 @@ fn unveroeffentlicht() -> String {
 
 /// Der Abschnitt **einer** Fix-Runde, von seiner Überschrift bis zur nächsten.
 fn runde(nummer: u32) -> String {
-    let text = lies("CHANGELOG.md");
+    let text = lies("docs/pruefverlauf-0.7.0.md");
     let marke = format!("\n### Fix-Runde {nummer}");
     let von = text.find(&marke).expect("die Überschrift der Runde");
     let bis = text[von + marke.len()..]
