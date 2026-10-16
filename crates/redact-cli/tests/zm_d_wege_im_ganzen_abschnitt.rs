@@ -54,10 +54,17 @@ fn glatt(text: &str) -> String {
 /// `zl_e_gegenwartszahl_ohne_weg`).
 fn ganzer_abschnitt() -> String {
     let text = lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG"));
-    // Der jüngste Abschnitt: die erste `## `-Überschrift, gleich ob sie noch
-    // `Unveröffentlicht` heißt oder schon die Fassung nennt.
+    // Der Abschnitt der Fix-Runden: die `## `-Überschrift vor der jüngsten
+    // `### Fix-Runde`, gleich ob sie noch `Unveröffentlicht` heißt oder schon
+    // die Fassung nennt. Nicht mehr die erste `## `-Überschrift der Datei:
+    // seit 0.7.0 steht über ihr ein neuer Abschnitt ohne Fix-Runden, und der
+    // Schnitt griff ins Leere.
     let marke = "\n## ";
-    let von = text.find(marke).expect("der Abschnitt") + 1;
+    let runde = text.find("\n### Fix-Runde ").expect("eine Fix-Runde");
+    let von = text[..runde]
+        .rfind(marke)
+        .expect("der Abschnitt der Fix-Runden")
+        + 1;
     let bis = text[von + marke.len()..]
         .find("\n## ")
         .map(|i| von + marke.len() + i)
