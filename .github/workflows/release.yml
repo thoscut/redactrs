@@ -536,6 +536,11 @@ jobs:
           for f in README.md SECURITY.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE LICENSE; do
             if [ -f "$f" ]; then cp "$f" staging/; fi
           done
+          # Der vollstaendige Pruefverlauf zu 0.7.0, auf den CHANGELOG.md
+          # verweist - sonst liefe der Verweis im Archiv ins Leere.
+          for f in docs/pruefverlauf-*.md; do
+            if [ -f "$f" ]; then mkdir -p staging/docs && cp "$f" staging/docs/; fi
+          done
           # SIL Open Font License 1.1. Die egui-Standardschriften
           # (epaint_default_fonts) sind im GUI-Binary eingebettet, und
           # crates/redact-render bringt eigene OFL-Schriften mit. Die OFL
@@ -743,12 +748,12 @@ jobs:
           # und Herkunftshinweis - und keine einzige Verhaltensaenderung.
           #
           # Ist der Abschnitt laenger als NOTES_MAX Zeichen, wird nur sein
-          # VORSPANN genommen - bis zur ersten `### `-Zeile. Der Abschnitt
-          # von 0.7.0 traegt darunter den Verlauf aller Pruefrunden, zusammen
-          # rund 150 000 Zeichen; GitHub nimmt als Release-Text hoechstens
-          # 125 000 und lehnte die Veroeffentlichung sonst ab. Der Vorspann
-          # fasst den Abschnitt zusammen, der Link darunter fuehrt zum
-          # vollstaendigen Verlauf.
+          # VORSPANN genommen - bis zur ersten `### `-Zeile. GitHub nimmt als
+          # Release-Text hoechstens 125 000 Zeichen und lehnte die
+          # Veroeffentlichung sonst ab. Der Abschnitt von 0.7.0 trug einmal
+          # den Verlauf aller Pruefrunden, rund 150 000 Zeichen; der steht
+          # jetzt in docs/pruefverlauf-0.7.0.md, und der Abschnitt ist
+          # wieder eine Zusammenfassung, die ganz hineinpasst.
           NOTES_MAX=100000
           abschnitt() {
             awk -v v="$VERSION" -v nur_vorspann="$1" '

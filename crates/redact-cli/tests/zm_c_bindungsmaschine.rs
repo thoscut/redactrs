@@ -268,7 +268,7 @@ fn die_rundenzahl_wird_gezaehlt() {
 
     // Und die Zählung geht am echten CHANGELOG auf — sonst prüft dieser Test
     // eine Regel, die die Datei selbst nicht einhält.
-    let text = quelltext("CHANGELOG.md");
+    let text = quelltext("docs/pruefverlauf-0.7.0.md");
     let numeriert = text.matches("\n### Fix-Runde ").count();
     let wort = [
         "", "Eine", "Zwei", "Drei", "Vier", "Fünf", "Sechs", "Sieben", "Acht", "Neun", "Zehn",

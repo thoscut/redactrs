@@ -1114,7 +1114,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "1 Begriff **{} s**, 1 000 Begriffe **{} s** — Verhältnis {}",
             m::EIN_BEGRIFF_S,
@@ -1149,7 +1149,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "({} MB bei 1 000 Begriffen, {} MB bei 10 000, {} MB bei 100 000, \
              **{} MB** bei einer Million, dazu {} s allein für seinen Bau)",
@@ -1161,7 +1161,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "**{} Einzelsuchen** mit `memmem` über 64 MiB kosten **{} s**, zwölf \
              davon {} s; derselbe Durchgang mit einem Automaten kostet {} s",
@@ -1233,7 +1233,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "`VmHWM` von {} kB = {} MB ≈ {} GiB — dieselbe Spitze wie beim Schwärzen \
              ({} kB = {} MB)",
@@ -1245,7 +1245,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "beide Formen nach {} s bei {} MB ab (Rückgabewert 1); mit \
              `--max-decompressed-mb 4096` — dem Lauf ohne wirksame Grenze — steigt die \
@@ -1273,7 +1273,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Tiefe der Objektsicht -------------------------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Tiefe 99 bei Breite {} kostet {} ms gegen {} ms bei einer Grenze von 100",
             m::TIEFE_BREITE,
@@ -1284,7 +1284,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Metadatenlauf ----------------------------------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Gemessen (Release): {} Felder {} s, eine `/Parent`-Kette aus {} Feldern {} s",
             m::FELDER,
@@ -1296,7 +1296,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- UTF-16LE ---------------------------------------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "(8 MiB entpackt, {} Begriffe: {} ms vorher, {} ms nachher)",
             m::LE_BEGRIFFE,
@@ -1307,7 +1307,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Spiegel über mehrfach platzierten Formularen ---------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "`/Span <</ActualText ({})>> BDC /Fm0 Do /Fm0 Do EMC`: die Schließung \
              entdoppelte über Objekt-Ids und zählte die Glyphen halb — „{} Zeichen im \
@@ -1318,7 +1318,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "höchstens {} Formularplatzierungen unter den Spiegeln einer Seite \
              (Mehrkosten gemessen: {} MB, unter {} s)",
@@ -1330,7 +1330,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Oberfläche -------------------------------------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "über eine Datei, in der die IBAN noch **{}** stand",
             m::IBAN_FUNDE
@@ -1340,7 +1340,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     // --- Kein Kernabzug ---------------------------------------------------
     satz("SECURITY.md", format!("| `core`, {} Byte |", m::CORE_BYTES));
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!("eine {} Byte große `core`-Datei", m::CORE_BYTES),
     );
 
@@ -1367,7 +1367,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "eine getaggte Seite von {} kB, die {} s und {} GB Arbeitsspeicher kostete",
             m::SPIEGEL_BOMBE_KB,
@@ -1398,7 +1398,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Der Eintrag der Fix-Runde 6 zitiert seine eigenen Zahlen ---------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "das Verhältnis {} aus {} s und {} s, die MB aus den gemessenen kB, die \
              Grenze {} aus `redact_core::MAX_AUX_FILE_BYTES`",
@@ -1409,7 +1409,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "die Tabelle nennt jetzt **{} MB** und **{} MB**",
             mit_tausendertrenner(kb_in_mb(m::BOMBE_PRUEFEN_KB)),
@@ -1417,7 +1417,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "„{} Zeichen im Spiegel, {} in den Glyphen“ aus dem Spiegeltext `{}`",
             m::SPIEGELTEXT.chars().count(),
@@ -1438,7 +1438,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Einleitung zählt, was sie aufzählt --------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Dazu {} Klartextlecks an Nachbarn von Annotationen, {} Fundorte statt \
              einem bei der direkten Eigenschaftsliste, {} falsche Alarme",
@@ -1448,7 +1448,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "{} Messwerte in README, `SECURITY.md` und `CHANGELOG.md` ließen sich in \
              einem Lauf mutieren, ohne dass ein Test rot wurde",
@@ -1456,14 +1456,14 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Die Gegenprüfung mutierte {} Zahlen und Sätze in einem Lauf",
             zahlwort(m::GEGEN5_UNGEBUNDEN)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "hatte {} ungebundene „{}“ geschlossen und dabei {} neue Zahlen \
              ungebunden angelegt",
@@ -1475,7 +1475,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- `--help` widersprach sich selbst --------------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "{} Absätze über dem Block „{} Fälle“ stand im selben Hilfetext weiter \
              „Rückgabewert: `0`, wenn keiner der Begriffe gefunden wurde, `{}`, wenn \
@@ -1487,7 +1487,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "ein Lauf über eine Datei mit einem Objekt auf Ebene {} sagt „nicht \
              gefunden“ und endet mit {RC_LECK}",
@@ -1497,7 +1497,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die fünf Gründe für „nicht geprüft“ -----------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "zählte {} Gründe für „nicht geprüft“ auf, das Orakel kennt {}**",
             zahlwort(m::GRUENDE_ALT),
@@ -1505,7 +1505,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Alle {} stehen jetzt mit ihrem Wortlaut in einer Tabelle; ein Test hält \
              jeden gegen den Quelltext des Orakels, {} davon zusätzlich gegen einen \
@@ -1517,7 +1517,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Kodierungen --------------------------------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "{} Namen für {} Muster. Gesucht wird in **{}** Byte-Kodierungen ({} mit \
              Umlaut, {} jenseits von Latin-1)",
@@ -1529,7 +1529,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Und „{} Muster ({} Begriffe × {} Kodierungen)“ hat nie gestimmt: so viele \
              **Kodierungen** gibt es nicht. Nach `Probe::new` sind es {} Muster je \
@@ -1549,7 +1549,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Drei Zusagen, die zu viel versprachen ---------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "während `MAX_NAMED_PLACES = {}` höchstens {} nennt und den Rest zählt",
             benannte_stellen(),
@@ -1557,7 +1557,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "derselbe Messwert stand im Fließtext als „{} kB ≈ {} GiB“ (durch 1024²) \
              und in der Tabelle als „{} MB“ (durch 1000)",
@@ -1569,7 +1569,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Spiegel-Bombe, jetzt am gebauten Binary ---------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "eine Datei von {} kB mit **{}** Objekten belegte {} MB und lief {} s",
             m::SPIEGEL_BOMBE_KB,
@@ -1579,7 +1579,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "dieselbe Datei am gebauten Binary **{} s und {} MB** (Release, \
              Rückgabewert {RC_LECK}); im Testprozess (Debug), der nur den Extraktor \
@@ -1592,7 +1592,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "höchstens {zuordnungen} beim Aufbau und {zuordnungen} beim Aufklappen, je \
              Seiten-Scan (zusammen rund {} MB)",
@@ -1600,7 +1600,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Genau {zuordnungen} Aufklappungen gingen auf und lieferten trotzdem \
              Rückgabewert {RC_LECK} (`decke_{}.pdf` 0, `decke_{}.pdf` {RC_LECK})",
@@ -1611,14 +1611,14 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Der Textspiegel im Ressourcenverzeichnis ------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "blieb stehen — an {} Orten.**",
             zahlwort(m::FUNDORTE_EIGENSCHAFTSLISTE)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Alle {} werden jetzt an ihrem Fundort bereinigt",
             zahlwort(m::FUNDORTE_EIGENSCHAFTSLISTE)
@@ -1627,7 +1627,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Der unbekannte Filter an erster Stelle --------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "`/Filter /FooDecode` kam als „nicht gefunden“ mit Rückgabewert 0 zurück, \
              dieselbe Datei als `/Filter [/FlateDecode /FooDecode]` mit {RC_LECK}"
@@ -1665,7 +1665,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "gemessen im Testprozess (Release, {}-MiB-Strom, `/DCTDecode`, Budget \
              {} MiB) **{} MB vorher, {} MB nachher**",
@@ -1676,7 +1676,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Die alte Kostenzahl „{} Begriffe {} s“ ist widerlegt und durch eine \
              nachstellbare Rechnung ersetzt, gemessen im Testprozess (Release): {} \
@@ -1702,14 +1702,14 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Vier Klartextlecks an Annotationsnachbarn -----------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "alle {} Beiwerk-Dictionaries fallen jetzt als Ganzes",
             zahlwort(m::BEIWERK_DICTIONARIES)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "endete mit „Schwärzungen: {}“ und Rückgabewert 0, während \
              `--check-leaks` an der Ausgabe **{} Fundstellen** fand — jetzt 0",
@@ -1720,21 +1720,21 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Zahlen im Audit-Log -----------------------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "nicht nur für die {} Nutzlast-Zähler",
             zahlwort(m::NUTZLAST_ZAEHLER)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "„{} Lesezeichen entfernt“ über einen `/Title 4 0 R`",
             m::LESEZEICHEN_GEMELDET
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "({} Annotationen mit `/Contents` als Verweis): {} ms statt {} ms",
             m::ANNOTATIONEN,
@@ -1745,21 +1745,21 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Oberfläche ---------------------------------------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "**{} weitere Sätze der Oberfläche.**",
             zahlwort_gross(m::SAETZE_OBERFLAECHE_6)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "nannte die bleibende Warnung die Decke von {} Begriffen als Grund",
             mit_tausendertrenner(redact_core::MAX_CHECK_NEEDLES as u64)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "({} → {} Zeichen bei {} Stellen)",
             m::SATZ_VORHER_ZEICHEN,
@@ -1770,21 +1770,21 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Nachträge: die Sätze, die der Vollständigkeitstest fand ---------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "**{} schwere Befunde** blieben",
             zahlwort_gross(m::SCHWERE_BEFUNDE_6)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "der das Leck-Orakel stumm machte („nicht gefunden“, Rückgabewert {RC_SAUBER}, \
              über einen Strom, den keine Sicht gelesen hatte)"
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "„bis zu {} Stellen beim Namen“ aus `MAX_NAMED_PLACES` im Quelltext der \
              Oberfläche",
@@ -1792,18 +1792,18 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!("Der Absatz nennt jetzt die Bedingung für `{RC_SAUBER}`"),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "`/Filter /FooDecode` allein kam als „nicht gefunden“ mit Rückgabewert \
              {RC_SAUBER} zurück, `/Filter [/FlateDecode /FooDecode]` mit {RC_LECK}"
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "was gemessen ist: {} Ketten, {} mit Meldung und Rückgabewert {RC_LECK}, {} \
              (Bildfilter allein und am Kettenende) ohne Meldung und mit {RC_SAUBER}",
@@ -1813,18 +1813,18 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "**{} Zusagen, die zu viel versprachen.**",
             zahlwort_gross(m::ZUSAGEN_ZU_VIEL)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!("ohne Warnung und mit Rückgabewert {RC_SAUBER}. Betroffen waren die Seite"),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "**{} Klartextlecks an Annotationsnachbarn.**",
             zahlwort_gross(m::LECKS_ANNOTATIONSNACHBARN)
@@ -1835,7 +1835,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     // Fix-Runde 7
     // =====================================================================
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "**{} stille Lecks** blieben: ein Form-XObject ohne eigenes `/Resources`, \
              dasselbe Formular unter {} Grafikumgebungen, ein `/Filter`-Wert, der gar \
@@ -1848,7 +1848,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "die je Seite statt je Dokument zählt ({} Seiten aus einer Datei von {} \
              Byte belegten beim Schwärzen {} MB, ungedeckelt am Stand `{}`) —, {} \
@@ -1864,7 +1864,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "die Gegenprüfung mutierte danach {} Stellen einzeln: {} wurden rot, **{} \
              blieben grün**",
@@ -1874,7 +1874,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "**{} Zahlen in der Doku waren falsch, alle nachgemessen.** „{} s und {} \
              MB“ für die entschärfte Spiegel-Bombe stammten aus dem **Testprozess** \
@@ -1885,7 +1885,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Über einer Tabelle mit {} Filterketten stand „{} Ketten“",
             zahlwort(filterketten()),
@@ -1893,7 +1893,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Dazu {} Sätze, die der Befund derselben Runde widerlegt hatte",
             zahlwort(m::WIDERLEGTE_SAETZE)
@@ -1921,7 +1921,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "am gebauten Binary sind es {} s und {} MB (Release) bzw. {} s und {} MB \
              (Debug), beide mit Rückgabewert {RC_LECK}",
@@ -1932,14 +1932,14 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Dieselbe Datei hat **{}** Objekte, nicht elf.",
             zahlwort(m::SPIEGEL_BOMBE_OBJEKTE)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Die README versprach „bis zu {} Muster“ für {} Begriffe und zählte im \
              selben Satz elf auf — `Probe::new` legt bis zu zwölf je Begriff an, also \
@@ -1955,7 +1955,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "begründete die Decke von {} genannten Stellen mit „{} Zeilen“, während der \
              Quelltext daneben {} ausrechnet",
@@ -1967,7 +1967,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "die Gegenprüfung änderte in der Kopie `{}` in `{}`, und kein Test wurde rot",
             zuordnungsdecke(),
@@ -1976,21 +1976,21 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     );
 
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Die {} `mkfifo`-Stellen bleiben als benannte Altlast in der Liste",
             zahlwort(m::PLATTFORM_ALTLASTEN)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "an dem der Windows-Job schon {}mal rot war",
             zahlwort(m::WINDOWS_ROT)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "{} Proben, einzeln an den Baum gehängt: {} Fehlalarm",
             zahlwort_gross(m::PLATTFORM_PROBEN),
@@ -1998,14 +1998,14 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "und {} Lücken — ein fremdes `.ok()` acht Zeilen weiter genügte als Ausweg",
             zahlwort(m::PLATTFORM_LUECKEN)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             // Der Pfad des Unix-APIs steht hier absichtlich NICHT: die
             // Plattformregel (`zf_q5_plattformzusagen`) durchsucht den
@@ -2021,7 +2021,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "„{} Stelle(n) nicht geprüft“ stand unter {} einzeln genannten Zeilen, \
              einer Summenzeile „{} weitere“ und einer über {} Ströme",
@@ -2037,7 +2037,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     // Der erste Weg, vor der Decke: das Produkt aus Klammern und
     // Textoperationen wird **abgeleitet**, nicht abgeschrieben.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "{} Klammern über {} `Tj` aus einer Datei von {} Byte ergaben {} Zuordnungen",
             mit_tausendertrenner(m::TJ_KLAMMERN as u64),
@@ -2051,7 +2051,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     // Kommandozeile es nicht zeigt. Die Zahl der Zuordnungen kommt aus dem
     // Quelltext (`zuordnungen`), nicht aus der Doku.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "bleibt dieselbe Datei bei {zuordnungen} Zuordnungen und einer Warnung; \
              `scan_page` braucht dafür {} s und die Spitze liegt bei {} MB — \
@@ -2064,7 +2064,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     // Und derselbe Fall am gebauten Binary — der Lauf, der der Runde 7
     // fehlte. Der Rückgabewert kommt aus `RC_LECK`, nicht aus der Doku.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Am gebauten Binary (`target/release/redact-rs`, Release) kostet dieselbe \
              Struktur als Datei von {} Byte {} s und {} MB Spitze, und der Lauf endet \
@@ -2080,7 +2080,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     // Testprozess. Die Vergleichszahl beschreibt den Stand davor und nennt
     // ihn deshalb.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "kosten die {} Seiten aus {} Byte am gebauten Binary {} s und {} MB statt \
              {} MB, bei genau {} zurückgestellten Abschnitten",
@@ -2094,7 +2094,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     );
     // Die Regel für Zahlen des alten Zustands: der Satz nennt den Stand.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Die {} MB dagegen beschreiben den ungedeckelten Stand `{}` und sind an \
              diesem Baum nicht mehr zu messen",
@@ -2104,7 +2104,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     );
     // Dieselbe Regel für die drei Zahlen, die nur noch am Quelltext stehen.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "der Extraktor brauchte {} s, der Redaktor {} s, und {} MB gingen allein \
              auf die Eigenschaftslisten. Sie beschreiben den ungedeckelten Stand `{}`",
@@ -2121,7 +2121,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     // gebundener Wortlaut deckt alle drei; wer den Stand austauscht, ändert
     // eine Zusage, und dieser Satz merkt es.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "am Stand `{}`, dem letzten Baum vor den Korrekturen der Runde 6",
             m::VOR_RUNDE6_STAND
@@ -2130,14 +2130,14 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Nachbesserung selbst: was gehalten hat und was nicht ---------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "dass alle {} neuen Messzahlen aus einem Testprozess (Debug) stammten",
             zahlwort(m::NEUE_MESSZAHLEN_7)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "{} Zahlen bleiben im Testprozess, und der Satz sagt es jetzt selbst samt \
              Profil",
@@ -2146,7 +2146,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     );
     // Die gestrichene Zahl und die beiden Läufe, die sie widerlegten.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "standen {} s und {} MB, zwei neue Läufe desselben Befehls im \
              Testprozess (Debug) gaben aber {} s und {} kB sowie {} s und {} kB",
@@ -2164,7 +2164,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     // Auch hier nennt der Satz den Ort und das Profil: die Statuszeile gehört
     // der Oberfläche, die keine Kommandozeile hat.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "war mit den echten Stellen eines Laufs {} Zeichen lang — gemessen im \
              Testprozess (Debug), weil die Statuszeile der Oberfläche gehört und am \
@@ -2173,7 +2173,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!("auf höchstens {} Zeichen", statuszeilendecke()),
     );
 
@@ -2182,7 +2182,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     // Wie viele Einträge `gemessene_schreibweise` höchstens ansieht — eine
     // Decke im Code, nicht gemessen, aber eine Zusage, und deshalb gebunden.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "geprüft werden höchstens {} Einträge",
             zahlwort(redact_gui::app::PROBEN_HOECHSTENS)
@@ -2195,7 +2195,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
     // messbar), der Nachher-Satz „gebauten Binaries“ (Weg 1). Dieselben Zahlen
     // stehen in CONTRIBUTING.md, an dieselben Konstanten gebunden.
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "`target/` belegte vorher {} GB, und ein GUI-Testbinary \
              (`zm_b_gleichzeitige_exporte`) war vorher {} MB groß, davon {} MB in \
@@ -2207,7 +2207,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Dasselbe Binary ist an den gebauten Binaries danach {} MB groß, davon \
              {} MB `.debug_*`, und `target/` belegt nach `cargo clean` und dem ganzen \
@@ -2235,7 +2235,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Verweiskette (Spur-A-Runde 1, Register #72) -------------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Am Stand `{}` brauchte `strip_metadata` an einer Kette aus {} Gliedern \
              {} s, an {} Gliedern {} s im Testprozess (Debug)",
@@ -2247,14 +2247,14 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "die Datei dazu ist {} kB groß",
             mit_tausendertrenner(m::VERWEISKETTE_DATEI_KB)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Dieselben {} Glieder laufen im Testprozess (Debug) jetzt in {} s; die \
              Decke des Belegs liegt bei {} s",
@@ -2266,7 +2266,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die gehaltenen Formularspiegel (Spur-A-Runde 1, Register #68) ------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Am Stand `{}` brauchte der Redaktor an je Seite einem eigenen Formular mit \
              {} × {} Paaren im Testprozess (Debug, eigener Prozess) für {} Seiten {} MB \
@@ -2283,14 +2283,14 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "deckelt sie bei {} Einträgen",
             mit_tausendertrenner(gehaltene_formularspiegel() as u64)
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Dieselben {} Seiten brauchen im Testprozess (Debug, eigener Prozess) jetzt \
              {} MB, {} Seiten {} MB",
@@ -2301,7 +2301,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "(im Testprozess, Debug, als Kindprozess: {} Seiten unter {} MB)",
             formularspiegel_seiten(),
@@ -2311,7 +2311,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Kettenbombe auf dem Schreibpfad (Spur-A-Runde 1, Register #64) --
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Am Stand `{}` stand `/Filter [/FlateDecode /RunLengthDecode]` über einem \
              RunLength-Strom, der sich auf {} GB aufbläst, als {} KB in der Datei; am \
@@ -2327,7 +2327,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Bilddecke gegen den JPEG-Kopf (Spur-A-Runde 2, Register #101) ---
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Am Stand `{}` belegte ein Bild mit {} im Dictionary über einem JPEG mit {} \
              am gebauten Binary {} MB Spitze (`/usr/bin/time -v`), bei `--max-image-mb {}`, \
@@ -2342,7 +2342,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Arbeit der Kette (Spur-A-Runde 2, Register #99) ----------------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Am Stand `{}` brauchte eine Datei von {} KB mit {} solcher Ströme zu je {} MiB \
              Nullen am gebauten Binary {} (`/usr/bin/time -v`), bei \
@@ -2360,7 +2360,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Die Vorprüfung als Schranke (Spur-A-Runde 2, Register #89) ---------
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Am Stand `{}` brauchte eine Datei von {} MB mit {} GiB Nullen hinter \
              `/Filter 6 0 R` am gebauten Binary {} GB Spitze (`/usr/bin/time -v`), bei \
@@ -2375,7 +2375,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Der Vorspann vor einem Bildfilter (Spur-A-Runde 1, Register #83) ----
     satz(
-        "CHANGELOG.md",
+        "docs/pruefverlauf-0.7.0.md",
         format!(
             "Am Stand `{}` brauchte eine Datei von {} MB mit {} GiB Nullen im Flate-Glied \
              am gebauten Binary {} GB Spitze (`/usr/bin/time -v`), bei \
@@ -3490,7 +3490,10 @@ const KEINE_MESSZAHL: &[(&str, &str)] = &[
 /// drittjüngsten — also genau das, was diese und die vorige Runde geschrieben
 /// haben.
 fn changelog_block() -> String {
-    let text = lf(&std::fs::read_to_string(repo_root().join("CHANGELOG.md")).expect("CHANGELOG"));
+    let text = lf(
+        &std::fs::read_to_string(repo_root().join("docs/pruefverlauf-0.7.0.md"))
+            .expect("CHANGELOG"),
+    );
     let ueberschriften: Vec<usize> = text
         .match_indices("\n### Fix-Runde ")
         .map(|(i, _)| i)
@@ -3713,7 +3716,7 @@ fn jede_zahl_der_letzten_runden_ist_gebunden() {
     let mut gedeckt = vec![false; block.len()];
 
     for (datei, satz) in messsaetze() {
-        if datei == "CHANGELOG.md" {
+        if datei == "docs/pruefverlauf-0.7.0.md" {
             decke(&block, &mut gedeckt, &satz);
         }
     }
