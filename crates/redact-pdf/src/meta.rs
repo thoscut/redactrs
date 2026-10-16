@@ -14,7 +14,9 @@
 //!   `/Info`, `/Encrypt`, `/ID` und `/Size` fällt beim Schreiben
 //!   ([`crate::document::save_to_bytes`]): der Trailer ist eine Wurzel der
 //!   Erreichbarkeitsprüfung, und ein Objekt unter einem erfundenen Schlüssel
-//!   (`<< /Zusatz 7 0 R >>`) überlebte sonst jedes Aufräumen.
+//!   (`<< /Zusatz 7 0 R >>`) überlebte sonst jedes Aufräumen. `/ID` bekommt
+//!   dort eine neue Kennung — die alte ist eine beliebige Zeichenkette
+//!   (Register #73).
 //!
 //! Aus dem **Katalog**:
 //!
@@ -96,6 +98,11 @@
 //!   Zeichenprogramm geschrieben hat. Ein Strom ist immer ein eigenes Objekt;
 //!   ein Durchgang durch die Objekte erreicht sie alle,
 //! * `/AF` — aus demselben Grund.
+//! * Zeichenketten mit festem Wertebereich, die niemand füllt und die doch
+//!   jeden Text tragen können (Register #73): `/Lang` bleibt nur als
+//!   Sprachangabe, `/FontFamily` am `/FontDescriptor` fällt, und
+//!   `/CIDSystemInfo` behält `/Registry` und `/Ordering` nur aus der
+//!   Adobe-Registry — sonst ersetzt, beide sind Pflicht.
 //!
 //! Aus **jeder verbliebenen Annotation** — und aus allem, was sie erreichbar
 //! hält: ihrem `/Popup`, der `/Parent`-Kette nach oben (das Feld einer
@@ -158,7 +165,13 @@
 //!   Rückgabewert 0 („Metadaten: nichts zu entfernen“), während
 //!   `--check-leaks` sie fand,
 //! * die Dateiverweise `/AF` und `/FS` ([`FILE_SPEC_KEYS`]) — beide zeigen
-//!   auf ein Filespec mit Dateinamen und eingebetteter Datei.
+//!   auf ein Filespec mit Dateinamen und eingebetteter Datei,
+//! * die Zeitstempel `/M` und `/CreationDate`, der Zustand `/State` und
+//!   `/StateModel` einer Prüfnotiz und `/Lang` — nur, wenn sie **nicht** im
+//!   Wertebereich der Norm liegen (ein Datum nach 7.9.4, ein Zustand aus
+//!   Tabelle 172, eine Sprachangabe). Gemessen (vor dieser Änderung): alle
+//!   standen mit der IBAN nach dem Lauf in der Ausgabe, ohne Warnung und mit
+//!   leerem Bericht (Register #73).
 //!
 //! **Benannte Lücke:** `/DA` (Default Appearance) bleibt. Es ist bei FreeText
 //! und Widgets Pflicht und eine Operatorfolge (`/Helv 12 Tf 0 g`), keine
@@ -298,7 +311,9 @@ pub struct MetadataReport {
     /// dazu `/Alt` und `/ActualText` an jedem erreichten Dictionary und das
     /// Beiwerk `/Movie`, `/Measure`, `/RichMediaContent`,
     /// `/RichMediaSettings`, `/3DD`, `/3DV`, `/3DU`, `/RO` sowie `/SV` (Seed-Value eines Signaturfelds: `/Reasons`,
-    /// `/LegalAttestation`) und `/Lock` (`/Fields`).
+    /// `/LegalAttestation`), `/Lock` (`/Fields`) und `/ExData`; dazu `/M`,
+    /// `/CreationDate`, `/State`, `/StateModel` und `/Lang`, wenn sie nicht im
+    /// Wertebereich der Norm lagen (Register #73).
     pub annotation_texts_cleared: usize,
     /// Seiten **außerhalb des Seitenbaums**, die ihren Inhalt verloren haben.
     ///
@@ -336,7 +351,9 @@ pub struct MetadataReport {
     /// ([`CATALOG_KEEP`], [`PAGE_KEEP`], [`PAGE_TREE_KEEP`]) — etwa
     /// `/SpiderInfo`, `/Legal`, `/Requirements` (Register #92) — und in jedem
     /// Ressourcenverzeichnis jeder Schlüssel, der keine Ressourcenart ist
-    /// ([`RESOURCES_KEEP`], Register #107).
+    /// ([`RESOURCES_KEEP`], Register #107). Und an jedem Objekt ein `/Lang`,
+    /// das keine Sprachangabe ist, `/FontFamily` am `/FontDescriptor` und ein
+    /// ersetztes `/CIDSystemInfo /Registry` oder `/Ordering` (Register #73).
     pub beiwerk_removed: usize,
 }
 
@@ -417,13 +434,13 @@ impl MetadataReport {
         );
         count(
             self.annotation_texts_cleared,
-            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /RichMediaSettings, /3DD, /3DV, /3DU, /RO, /SV, /Lock)",
-            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /RichMediaSettings, /3DD, /3DV, /3DU, /RO, /SV, /Lock)",
+            "Kommentartext an einer Annotation (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /RichMediaSettings, /3DD, /3DV, /3DU, /RO, /SV, /Lock, /ExData, /M, /CreationDate, /State, /Lang)",
+            "Kommentartexte an Annotationen (/Contents, /RC, /T, /Subj, /TU, /TM, /Opt, /OverlayText, /NM, /DS, /MK, /Alt, /ActualText, /Movie, /Measure, /RichMediaContent, /RichMediaSettings, /3DD, /3DV, /3DU, /RO, /SV, /Lock, /ExData, /M, /CreationDate, /State, /Lang)",
         );
         count(
             self.beiwerk_removed,
-            "Beiwerk mit Klartext (/Perms, /DSS, /Threads, /B, /Collection, /URI, /DPartRoot, /DPart, /PageLabels-Präfix, /OutputIntents-Text, /VP, /PresSteps, /Ref, /OPI, Schlüssel außerhalb der Erlaubnisliste)",
-            "Beiwerk mit Klartext (/Perms, /DSS, /Threads, /B, /Collection, /URI, /DPartRoot, /DPart, /PageLabels-Präfix, /OutputIntents-Text, /VP, /PresSteps, /Ref, /OPI, Schlüssel außerhalb der Erlaubnisliste)",
+            "Beiwerk mit Klartext (/Perms, /DSS, /Threads, /B, /Collection, /URI, /DPartRoot, /DPart, /PageLabels-Präfix, /OutputIntents-Text, /VP, /PresSteps, /Ref, /OPI, /Lang, /FontFamily, /CIDSystemInfo, Schlüssel außerhalb der Erlaubnisliste)",
+            "Beiwerk mit Klartext (/Perms, /DSS, /Threads, /B, /Collection, /URI, /DPartRoot, /DPart, /PageLabels-Präfix, /OutputIntents-Text, /VP, /PresSteps, /Ref, /OPI, /Lang, /FontFamily, /CIDSystemInfo, Schlüssel außerhalb der Erlaubnisliste)",
         );
         count(
             self.thumbnails_removed,
@@ -1188,7 +1205,7 @@ const ALTERNATE_TEXT_KEYS: [&[u8]; 2] = [b"Alt", b"ActualText"];
 /// nichts, kein Betrachter bricht daran ab, und der Seitentext bleibt
 /// unverändert (Beleg:
 /// `zg_r3_beiwerk::movie_annotation_ohne_movie_laedt_und_behaelt_den_seitentext`).
-const ANNOTATION_PLATE_KEYS: [&[u8]; 10] = [
+const ANNOTATION_PLATE_KEYS: [&[u8]; 11] = [
     b"Movie",
     b"Measure",
     b"RichMediaContent",
@@ -1203,6 +1220,10 @@ const ANNOTATION_PLATE_KEYS: [&[u8]; 10] = [
     // /Reasons`, `/SV /LegalAttestation`, `/Lock /Fields` (Register #70).
     b"SV",
     b"Lock",
+    // Die externen Daten einer Markup-Annotation (Tabelle 170, 13.6.7):
+    // `/ExData /3DV` ist eine 3D-Ansicht samt frei wählbarem `/XN`
+    // (Register #73).
+    b"ExData",
 ];
 
 /// Dateiverweise an einem Träger: `/AF` (zugeordnete Datei, PDF 2.0, 14.13 —
@@ -1323,6 +1344,7 @@ fn clean_carrier(dict: &mut Dictionary, keep_dest: bool) -> Cleaned {
         take(dict, key, &mut cleaned.texts);
     }
     clear_alternates(dict, &mut cleaned.texts);
+    clean_carrier_norm_strings(dict, &mut cleaned.texts);
     for key in FILE_SPEC_KEYS {
         take_file_spec(dict, key, &mut cleaned.files);
     }
@@ -2238,7 +2260,226 @@ fn clear_object_metadata(
         for key in OBJECT_BEIWERK_KEYS {
             take(dict, key, beiwerk);
         }
+        clean_object_norm_strings(dict, beiwerk);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Normstrings: Zeichenketten mit festem Wertebereich (Register #73)
+// ---------------------------------------------------------------------------
+//
+// Die Norm sieht an einigen Stellen Zeichenketten vor, die niemand mit einem
+// Geheimnis füllt — eine Sprachangabe, ein Zeitstempel, der Zustand einer
+// Prüfnotiz, der Familienname einer Schrift. Technisch ist jede davon eine
+// beliebige Zeichenkette, und was dort steht, stand nach dem Lauf
+// wortwörtlich in der Ausgabe, ohne Warnung und mit leerem Bericht (Beleg:
+// `zo_b_traeger::b_randfaelle_normstrings`). Wo der Wertebereich fest ist,
+// bleibt der Wert nur, wenn er darin liegt; wo er frei ist und nichts
+// zeichnet, fällt er.
+
+/// Die Zustände einer Prüfnotiz (`/State`, PDF 32000-1, Tabelle 172).
+const ANNOTATION_STATES: [&[u8]; 7] = [
+    b"Marked",
+    b"Unmarked",
+    b"Accepted",
+    b"Rejected",
+    b"Cancelled",
+    b"Completed",
+    b"None",
+];
+
+/// Die Zustandsmodelle (`/StateModel`, Tabelle 172).
+const ANNOTATION_STATE_MODELS: [&[u8]; 2] = [b"Marked", b"Review"];
+
+/// Die Zeitstempel einer Annotation: `/M` (Tabelle 166) und `/CreationDate`
+/// (Tabelle 170).
+const ANNOTATION_DATE_KEYS: [&[u8]; 2] = [b"M", b"CreationDate"];
+
+/// Die Werte von `/CIDSystemInfo /Registry` und `/Ordering`, die bleiben
+/// dürfen (PDF 32000-1, 9.7.3; die Zeichensammlungen der Adobe-Registry und
+/// `Identity`, 9.7.5.2). Alles andere wird ersetzt — beide Schlüssel sind
+/// Pflicht.
+const CID_REGISTRIES: [&[u8]; 1] = [b"Adobe"];
+const CID_ORDERINGS: [&[u8]; 8] = [
+    b"Identity",
+    b"Japan1",
+    b"Japan2",
+    b"GB1",
+    b"CNS1",
+    b"Korea1",
+    b"KR",
+    b"UCS",
+];
+
+/// Normstrings an einem Träger: Sprachangabe, Zeitstempel, Zustand.
+fn clean_carrier_norm_strings(dict: &mut Dictionary, into: &mut Tally) {
+    take_unless(dict, b"Lang", into, is_language_tag);
+    for key in ANNOTATION_DATE_KEYS {
+        take_unless(dict, key, into, is_pdf_date);
+    }
+    take_unless(dict, b"State", into, |v| ANNOTATION_STATES.contains(&v));
+    take_unless(dict, b"StateModel", into, |v| {
+        ANNOTATION_STATE_MODELS.contains(&v)
+    });
+}
+
+/// Normstrings an jedem Objekt: `/Lang` (am Katalog, an einer Schrift, an
+/// jedem anderen Dictionary — überall eine Sprachangabe), `/FontFamily` an
+/// einem `/FontDescriptor` (Tabelle 122, frei und nur zur Schriftsuche) und
+/// `/CIDSystemInfo` (direkt an der Schrift oder am CMap-Strom, oder als
+/// eigenes Objekt).
+fn clean_object_norm_strings(dict: &mut Dictionary, into: &mut Tally) {
+    take_unless(dict, b"Lang", into, is_language_tag);
+    if matches!(value_of(dict, b"Type"), Some(Object::Name(n)) if n == b"FontDescriptor") {
+        take(dict, b"FontFamily", into);
+    }
+    match dict.get_mut(b"CIDSystemInfo") {
+        Ok(Object::Dictionary(info)) => clean_cid_system_info(info, into),
+        Ok(Object::Array(items)) => {
+            for item in items {
+                if let Object::Dictionary(info) = item {
+                    clean_cid_system_info(info, into);
+                }
+            }
+        }
+        _ => {}
+    }
+    // Ein `/CIDSystemInfo` als eigenes Objekt: daran erkannt, dass es beide
+    // Pflichtschlüssel trägt.
+    if dict.has(b"Registry") && dict.has(b"Ordering") {
+        clean_cid_system_info(dict, into);
+    }
+}
+
+/// Ersetzt `/Registry` und `/Ordering`, wenn sie nicht auf ihrer Liste
+/// stehen. Ersetzt, nicht entfernt: beide sind Pflicht (Tabelle 116).
+fn clean_cid_system_info(info: &mut Dictionary, into: &mut Tally) {
+    for (key, allowed, fallback) in [
+        (&b"Registry"[..], &CID_REGISTRIES[..], &b"Adobe"[..]),
+        (b"Ordering", &CID_ORDERINGS[..], b"Identity"),
+    ] {
+        if !info.has(key) {
+            continue;
+        }
+        if take_unless(info, key, into, |v| allowed.contains(&v)) {
+            info.set(
+                key.to_vec(),
+                Object::String(fallback.to_vec(), StringFormat::Literal),
+            );
+        }
+    }
+}
+
+/// Entfernt `key`, wenn sein Wert keine direkte Zeichenkette ist, die `ok`
+/// annimmt, und bucht die Entfernung in `into`. Rückgabe: wurde entfernt?
+///
+/// Ein Verweis fällt immer: was dahinter steht, prüft diese Stelle nicht, und
+/// ein Normstring hinter einem Verweis ist ohnehin ungewöhnlich.
+fn take_unless(
+    dict: &mut Dictionary,
+    key: &[u8],
+    into: &mut Tally,
+    ok: impl Fn(&[u8]) -> bool,
+) -> bool {
+    let keep = match dict.get(key) {
+        Err(_) => return false,
+        Ok(Object::String(value, _)) => ok(value),
+        Ok(_) => false,
+    };
+    !keep && take(dict, key, into)
+}
+
+/// Eine Sprachangabe, wie Erzeuger sie schreiben (PDF 32000-1, 14.9.2.1;
+/// BCP 47): Sprache aus zwei oder drei Buchstaben, wahlweise eine Schrift
+/// aus vier Buchstaben, wahlweise eine Region aus zwei Buchstaben oder drei
+/// Ziffern — `de`, `de-DE`, `zh-Hans-CN`, `es-419`. Die leere Angabe heißt
+/// „unbekannt“ und bleibt auch.
+///
+/// Was BCP 47 sonst noch zulässt (Varianten, Erweiterungen, private
+/// Teile mit bis zu acht Zeichen je Glied), fällt: dort passt eine Ziffernfolge
+/// hinein, eine Sprache aus der Praxis braucht es nicht, und eine Angabe zu
+/// verlieren kostet nur die Silbentrennung im Vorleseprogramm. UTF-16 fällt
+/// aus demselben Grund.
+fn is_language_tag(value: &[u8]) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    let mut parts = value.split(|&b| b == b'-');
+    let alpha = |p: &[u8], n: std::ops::RangeInclusive<usize>| {
+        n.contains(&p.len()) && p.iter().all(u8::is_ascii_alphabetic)
+    };
+    let Some(language) = parts.next() else {
+        return false;
+    };
+    if !alpha(language, 2..=3) {
+        return false;
+    }
+    let mut rest: Vec<&[u8]> = parts.collect();
+    if rest.first().is_some_and(|p| alpha(p, 4..=4)) {
+        rest.remove(0);
+    }
+    match rest.as_slice() {
+        [] => true,
+        [region] => {
+            alpha(region, 2..=2) || (region.len() == 3 && region.iter().all(u8::is_ascii_digit))
+        }
+        _ => false,
+    }
+}
+
+/// Ein Datum nach PDF 32000-1, 7.9.4: `D:YYYYMMDDHHmmSSOHH'mm'`, jedes Glied
+/// nach dem Jahr wahlweise, jedes im Bereich seines Feldes, und danach nichts
+/// mehr. Das Präfix `D:` ist empfohlen, nicht Pflicht.
+fn is_pdf_date(value: &[u8]) -> bool {
+    let rest = value.strip_prefix(b"D:").unwrap_or(value);
+    let two = |p: &[u8], max: u8, min: u8| -> bool {
+        p.len() == 2
+            && p.iter().all(u8::is_ascii_digit)
+            && (min..=max).contains(&((p[0] - b'0') * 10 + (p[1] - b'0')))
+    };
+    if rest.len() < 4 || !rest[..4].iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    let mut at = 4;
+    // Monat, Tag, Stunde, Minute, Sekunde — jedes Glied nur, wenn das vorige
+    // stand.
+    for (max, min) in [(12, 1), (31, 1), (23, 0), (59, 0), (59, 0)] {
+        match rest.get(at..at + 2) {
+            Some(p) if p.iter().all(u8::is_ascii_digit) => {
+                if !two(p, max, min) {
+                    return false;
+                }
+                at += 2;
+            }
+            _ => break,
+        }
+    }
+    let tail = &rest[at..];
+    let Some((&sign, tail)) = tail.split_first() else {
+        return true;
+    };
+    if !matches!(sign, b'Z' | b'+' | b'-') {
+        return false;
+    }
+    // Der Versatz: `HH`, wahlweise `'`, wahlweise `mm`, wahlweise `'`.
+    let mut tail = tail;
+    if tail.is_empty() {
+        return true;
+    }
+    if !tail.get(..2).is_some_and(|p| two(p, 23, 0)) {
+        return false;
+    }
+    tail = &tail[2..];
+    tail = tail.strip_prefix(b"'").unwrap_or(tail);
+    if tail.is_empty() {
+        return true;
+    }
+    if !tail.get(..2).is_some_and(|p| two(p, 59, 0)) {
+        return false;
+    }
+    tail = &tail[2..];
+    tail = tail.strip_prefix(b"'").unwrap_or(tail);
+    tail.is_empty()
 }
 
 #[cfg(test)]
@@ -2662,6 +2903,71 @@ mod tests {
         let mut doc = doc_with_info();
         let report = strip_metadata(&mut doc);
         assert_eq!(report.summary(), vec!["/Info-Dictionary".to_string()]);
+    }
+
+    /// Register #73: was eine Sprachangabe ist und was nicht.
+    #[test]
+    fn language_tags_in_and_out_of_range() {
+        for ok in [
+            "",
+            "de",
+            "de-DE",
+            "deu",
+            "zh-Hans",
+            "zh-Hans-CN",
+            "es-419",
+            "EN-us",
+        ] {
+            assert!(is_language_tag(ok.as_bytes()), "{ok:?} fällt");
+        }
+        for bad in [
+            SECRET,
+            "DE89",
+            "de-DE89",
+            "de-DE-3704",
+            "de-1996",
+            "x-privat",
+            "de_DE",
+            "de-",
+            "-DE",
+            "de-Latn-DE-1901",
+            "deutsch",
+        ] {
+            assert!(!is_language_tag(bad.as_bytes()), "{bad:?} bleibt");
+        }
+    }
+
+    /// Register #73: was ein Datum nach 7.9.4 ist und was nicht.
+    #[test]
+    fn pdf_dates_in_and_out_of_range() {
+        for ok in [
+            "D:2025",
+            "D:202503",
+            "D:20250314093000",
+            "D:20250314093000Z",
+            "D:20250314093000Z00'00'",
+            "D:20250314093000+01'00'",
+            "D:20250314093000-05'30",
+            "D:20250314093000+01",
+            "20250314",
+        ] {
+            assert!(is_pdf_date(ok.as_bytes()), "{ok:?} fällt");
+        }
+        for bad in [
+            &format!("D:{SECRET}")[..],
+            "D:3704004405320130",
+            "D:20251314",
+            "D:20250332",
+            "D:2025031424",
+            "D:202503140960",
+            "D:20250314093000+01'00'x",
+            "D:20250314093000 Kunde",
+            "2025-03-14",
+            "D:",
+            "",
+        ] {
+            assert!(!is_pdf_date(bad.as_bytes()), "{bad:?} bleibt");
+        }
     }
 
     fn utf16be(text: &str) -> Vec<u8> {

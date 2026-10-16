@@ -64,10 +64,17 @@ fn changelog_block() -> String {
         &std::fs::read_to_string(repo_root().join("docs/pruefverlauf-0.7.0.md"))
             .expect("CHANGELOG"),
     );
-    // Der jüngste Abschnitt: die erste `## `-Überschrift, gleich ob sie noch
-    // `Unveröffentlicht` heißt oder schon die Fassung nennt.
+    // Der Abschnitt der Fix-Runden: die `## `-Überschrift vor der jüngsten
+    // `### Fix-Runde`, gleich ob sie noch `Unveröffentlicht` heißt oder schon
+    // die Fassung nennt. Nicht die erste `## `-Überschrift der Datei: über ihr
+    // kann ein Abschnitt ohne Fix-Runden stehen, und der Schnitt griffe ins
+    // Leere.
     let marke = "\n## ";
-    let von = text.find(marke).expect("der jüngste `## `-Abschnitt") + 1;
+    let runde = text.find("\n### Fix-Runde ").expect("eine Fix-Runde");
+    let von = text[..runde]
+        .rfind(marke)
+        .expect("der Abschnitt der Fix-Runden")
+        + 1;
     // Das Ende ist die nächste `## `-Überschrift — aber nur **außerhalb** eines
     // eingezäunten Codeblocks. Eine Zeile `## …` in einem Block beendete den
     // Schnitt sonst still: der geprüfte Abschnitt war um Hunderte Zeilen

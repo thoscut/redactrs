@@ -2785,6 +2785,7 @@ dependencies = [
  "aho-corasick",
  "flate2",
  "lopdf",
+ "md-5",
  "memchr",
  "redact-core",
  "weezl",

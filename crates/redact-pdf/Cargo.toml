@@ -22,4 +22,8 @@ aho-corasick = "1"
 # LZWDecode mit begrenztem Ausgabepuffer (filters): dieselbe Bibliothek, die
 # lopdf benutzt — liegt ohnehin im Graphen, siehe Cargo.lock.
 weezl = "0.1"
+# Die neue Dokumentkennung /ID (document::save_to_bytes): MD5, wie PDF
+# 32000-1, 14.4 sie vorschlaegt — liegt ohnehin im Graphen (ueber lopdf),
+# siehe Cargo.lock.
+md-5 = "0.10"
 zune-jpeg = "0.5"
