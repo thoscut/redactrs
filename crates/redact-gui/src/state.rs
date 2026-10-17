@@ -240,6 +240,9 @@ impl RegionColor {
     /// unterscheiden sich bei einer Rot-Grün-Sehschwäche kaum, die Kategorie
     /// muss aber auch dann ablesbar bleiben. Alle vier stammen aus demselben
     /// Unicode-Block „Geometric Shapes“ wie das bisher schon benutzte `●`.
+    ///
+    /// Die Oberfläche **malt** die Form ([`crate::sidebar::paint_marker`]):
+    /// die Standardschriften von egui kennen drei der vier Zeichen nicht.
     pub fn marker(self) -> &'static str {
         match self {
             RegionColor::AutoPattern => "●",
