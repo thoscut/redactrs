@@ -1885,8 +1885,8 @@ einzige.
 Ein ausgewähltes Rechteck trägt **vier Eckgriffe** (`Handle::TopLeft` …
 `BottomRight` in `crates/redact-gui/src/selector.rs`). Daran lässt es sich
 nachziehen: die gegenüberliegende Ecke bleibt stehen, der Mauszeiger zeigt die
-Ziehrichtung an. Die Fangzone ist mit 16 Bildschirmpunkten bewusst größer als
-das gezeichnete 5-pt-Quadrat — eine Zone in Zeichnungsgröße trifft man nur
+Ziehrichtung an. Die Fangzone ist mit 20 Bildschirmpunkten bewusst größer als
+das gezeichnete 7-pt-Quadrat — eine Zone in Zeichnungsgröße trifft man nur
 zufällig.
 
 Zieht man ein Rechteck über einen Treffer der **Negativliste**, überstimmt die
@@ -1932,15 +1932,19 @@ es ein Verlaufsschritt, und ein Strg+Z holt den alten Stand vollständig zurück
 
 ### Miniaturansichten und Zoom
 
-Links steht eine Spalte mit **Miniaturansichten**, Seitenzahl neben jedem Bild.
+Links steht eine Spalte mit **Miniaturansichten**, Seitenzahl unter jedem Bild, die Zahl der Schwärzungen als graue Plakette in seiner Ecke. Ohne Dokument fehlt die Spalte.
 Sie zeigt dieselben Kleinbilder, die der Hauptbereich ohnehin anfordert — es
 wird nichts doppelt gerendert. Die Spalte lässt sich am Rand zwischen 96 und
 260 Punkt breit ziehen.
 
 Der **Zoom** reicht von **0,25× bis 4×** (`MIN_ZOOM`/`MAX_ZOOM` in
-`crates/redact-gui/src/state.rs`), Schrittweite 1,25×. In der Leiste stehen
-dafür vier Knöpfe: ➖ Kleiner, ➕ Größer, ⛶ Passend (ganze Seite ins Fenster)
-und ⟲ 100 %; daneben ein Schieberegler für den stufenlosen Wert. Gerendert wird
+`crates/redact-gui/src/state.rs`), Schrittweite 1,25×. In der Ansichtsleiste
+direkt über der Seite stehen dafür vier Knöpfe: ➖ Kleiner, ➕ Größer, ⛶ Passend
+(ganze Seite ins Fenster) und ⟲ 1:1 (zurück auf 100 %); daneben ein Schieberegler, der den Wert
+in Prozent zeigt und sich auch eintippen lässt. Links davon blättern ⏴ Zurück
+und Vor ⏵, dazwischen steht, auf welcher Seite man ist. Die obere Leiste trägt
+nur noch, was mit dem Dokument geschieht; „Exportieren“ ist dort als einziger
+Knopf farbig hervorgehoben. Gerendert wird
 auf einem eigenen Thread, damit Seitenwechsel und Zoomen die Oberfläche nicht
 anhalten; lässt sich eine Seite nicht rasterisieren, springt eine schematische
 Vorschau ein und zeigt wenigstens die Lage des Textes.
@@ -2041,8 +2045,8 @@ und wieder herein — mit der SHA-256-Prüfsumme des Dokuments, geprüft von
 anderen PDF wird abgelehnt.
 
 Ob die Oberfläche hell oder dunkel startet, sagt `theme` in der
-[Einstellungsdatei](#einstellungsdatei); umschalten lässt es sich jederzeit in
-der Leiste oben. Die vier Trefferfarben erreichen in beiden Themen mindestens
+[Einstellungsdatei](#einstellungsdatei); umschalten lässt es sich jederzeit
+rechts in der Leiste oben. Die vier Trefferfarben erreichen in beiden Themen mindestens
 3:1 Kontrast (WCAG 1.4.11), geprüft gegen die Flächen, die egui wirklich malt.
 
 ### GUI und CLI teilen sich die Verarbeitungskette — und das ist geprüft

@@ -66,10 +66,20 @@ pub const DRAG_STROKE: f32 = 1.5;
 /// Kantenlänge der **gezeichneten** Griffpunkte an den Ecken der Auswahl.
 ///
 /// Angefasst werden sie über die deutlich größere Zone
-/// [`crate::selector::HANDLE_HIT_SIZE`] — 5 pt trifft man mit der Maus nicht.
-pub const HANDLE_SIZE: f32 = 5.0;
-/// Versatz des Schlagschattens unter dem Blatt.
+/// [`crate::selector::HANDLE_HIT_SIZE`] — 9 pt trifft man mit der Maus nicht
+/// zuverlässig.
+pub const HANDLE_SIZE: f32 = 9.0;
+/// Strichstärke des Rands der Griffpunkte — kräftiger als die Regionskante,
+/// damit sie neben dem Hof nicht verschwinden.
+pub const HANDLE_STROKE: f32 = 1.5;
+/// Strichstärke des Hofs um die ausgewählte Region.
+pub const SELECTION_HALO: f32 = 3.0;
+/// Abstand des Hofs zur ausgewählten Region.
+pub const SELECTION_HALO_GAP: f32 = 3.0;
+/// Versatz des Schlagschattens unter dem Blatt (nach unten).
 pub const SHADOW_OFFSET: f32 = 4.0;
+/// Unschärfe des Schlagschattens.
+pub const SHADOW_BLUR: f32 = 18.0;
 
 // ---------------------------------------------------------------------------
 // PageView — MediaBox und /Rotate
@@ -349,16 +359,23 @@ impl<'a> PagePreview<'a> {
     /// Schatten liegen soll, der Text darunter aber nicht.
     pub fn paint_sheet(&self, painter: &egui::Painter, origin: Pos2) {
         let sheet = egui::Rect::from_min_size(origin, self.size());
-        painter.rect_filled(
-            sheet.translate(Vec2::splat(SHADOW_OFFSET)),
-            SHEET_ROUNDING,
-            Color32::from_black_alpha(48),
+        // Weicher Schatten statt eines harten Versatzes: egui malt ihn
+        // unscharf, und er fällt nach unten, wie unter einem Blatt auf dem
+        // Tisch.
+        painter.add(
+            egui::epaint::Shadow {
+                offset: Vec2::new(0.0, SHADOW_OFFSET),
+                blur: SHADOW_BLUR,
+                spread: 0.0,
+                color: Color32::from_black_alpha(56),
+            }
+            .as_shape(sheet, SHEET_ROUNDING),
         );
         painter.rect(
             sheet,
             SHEET_ROUNDING,
             Color32::WHITE,
-            Stroke::new(SHEET_STROKE, Color32::from_gray(150)),
+            Stroke::new(SHEET_STROKE, Color32::from_black_alpha(40)),
         );
     }
 
@@ -628,20 +645,29 @@ pub fn paint_region(
         paint_dashed_rect(painter, rect, stroke, REGION_DASH, REGION_GAP);
     }
     if selected {
+        // Ein Hof um die Auswahl: hebt sie von ihren Nachbarn ab, auch wenn
+        // alle dieselbe Farbe tragen.
+        painter.rect_stroke(
+            rect.expand(SELECTION_HALO_GAP),
+            NO_ROUNDING,
+            Stroke::new(SELECTION_HALO, color.gamma_multiply(0.45)),
+        );
         // Griffpunkte an den Ecken der Auswahl. Sie sind ein Versprechen: an
         // ihnen lässt sich ziehen (siehe [`crate::selector::hit_handle`] und
         // `RedactApp::apply_pointer`). Wer sie zeichnet, ohne sie abzugreifen,
-        // baut eine Zusage ein, welche die Oberfläche nicht einlöst.
+        // baut eine Zusage ein, welche die Oberfläche nicht einlöst. Weiß mit
+        // farbigem Rand, damit sie auch auf der gefüllten Fläche zu sehen sind.
         for corner in [
             rect.left_top(),
             rect.right_top(),
             rect.left_bottom(),
             rect.right_bottom(),
         ] {
-            painter.rect_filled(
+            painter.rect(
                 egui::Rect::from_center_size(corner, Vec2::splat(HANDLE_SIZE)),
                 NO_ROUNDING,
-                color,
+                Color32::WHITE,
+                Stroke::new(HANDLE_STROKE, color),
             );
         }
     }

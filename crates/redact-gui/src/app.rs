@@ -1,5 +1,5 @@
-//! Die eframe-Anwendung: Leiste oben, Seitenleiste links, Seite in der Mitte,
-//! Statuszeile unten.
+//! Die eframe-Anwendung: Leiste oben, Seitenleiste links, Ansichtsleiste und
+//! Seite in der Mitte, Statuszeile unten.
 //!
 //! Dieses Modul ist absichtlich dünn. Es übersetzt Klicks und Tastendrücke in
 //! Aufrufe von [`AppState`] und zeichnet dessen Inhalt — mehr nicht. Alles,
@@ -35,7 +35,7 @@ use crate::selector::{hit_handle, hit_test, HandleDrag, PointerFrame, RectangleS
 use crate::state::{
     AppState, ExportCheck, ExportCheckPlan, HitSummary, RegionColor, MAX_ZOOM, MIN_ZOOM,
 };
-use crate::theme::Theme;
+use crate::theme::{self, Theme};
 use crate::toolbar::{self, ToolAction, ToolContext, ToolItem};
 use crate::viewer::{self, PagePreview};
 use redact_pipeline::Config;
@@ -77,17 +77,17 @@ const NUDGE_FAST: f64 = 10.0;
 // [`crate::viewer`] zu `float_literal_f32_fallback`.
 
 /// Startbreite der Seitenleiste.
-const SIDEBAR_WIDTH: f32 = 320.0;
+const SIDEBAR_WIDTH: f32 = 360.0;
 /// Kleinste Breite der Seitenleiste.
 const SIDEBAR_MIN_WIDTH: f32 = 220.0;
 /// Größte Breite der Seitenleiste.
 const SIDEBAR_MAX_WIDTH: f32 = 520.0;
-/// Vertikaler Abstand in der oberen Leiste.
-const BAR_PADDING: f32 = 2.0;
+/// Abstand zwischen den Zeilen der Passwortabfrage.
+const BAR_PADDING: f32 = 6.0;
 /// Grober Platzbedarf der Ränder für „Passend“: Trefferliste, Miniaturspalte,
-/// obere Leiste und Statuszeile. Wird das zu klein geschätzt, ragt die Seite
+/// obere Leiste, Ansichtsleiste und Statuszeile. Wird das zu klein geschätzt, ragt die Seite
 /// nach dem Einpassen aus dem Fenster.
-const CHROME_SIZE: Vec2 = Vec2::new(360.0 + crate::thumbnails::PANEL_WIDTH, 140.0);
+const CHROME_SIZE: Vec2 = Vec2::new(360.0 + crate::thumbnails::PANEL_WIDTH, 180.0);
 
 // Maße des Hinweises beim Ziehen von Dateien über das Fenster.
 
@@ -260,23 +260,49 @@ fn greyable_button(label: String, enabled: bool) -> egui::Button<'static> {
     })
 }
 
-/// Die Knopfreihe der Symbolleiste — ohne Zoomregler und Themenschalter.
+/// Die ganze Knopfreihe der Symbolleiste — beide Leisten hintereinander, ohne
+/// Zoomregler und Themenschalter.
 ///
 /// Eigene Funktion und nicht bloß eine Schleife in
 /// [`RedactApp::top_bar`], damit die Reihe **ohne** den Rest des Fensters
 /// gezeichnet werden kann: woran der Tabulator hängen bleibt, entscheidet sich
-/// hier und nirgends sonst, und ein Test, der die Reihe nachbaut, prüft seinen
-/// eigenen Nachbau statt der Leiste.
+/// in [`tool_buttons`] und nirgends sonst — die obere Leiste und die
+/// Ansichtsleiste ([`RedactApp::view_bar`]) zeichnen ihre Knöpfe durch
+/// **dieselbe** Funktion, nur mit einem anderen Ausschnitt.
 ///
 /// Gibt zurück, welcher Knopf gedrückt wurde.
+#[cfg(test)]
 fn tool_row(ui: &mut egui::Ui, context: &ToolContext) -> Option<ToolAction> {
+    tool_buttons(ui, context, |_| true)
+}
+
+/// Die Knöpfe der Symbolleiste, für die `include` wahr ist — in der
+/// Reihenfolge von [`toolbar::items`].
+///
+/// Ein Trenner erscheint nur **zwischen** zwei gezeichneten Knöpfen: fällt eine
+/// ganze Gruppe heraus, bleibt kein doppelter oder hängender Strich zurück.
+fn tool_buttons(
+    ui: &mut egui::Ui,
+    context: &ToolContext,
+    include: impl Fn(ToolAction) -> bool,
+) -> Option<ToolAction> {
     let mut clicked = None;
+    let mut drawn = false;
+    let mut pending_separator = false;
     for item in toolbar::items() {
         match item {
             ToolItem::Separator => {
-                ui.separator();
+                pending_separator = drawn;
             }
             ToolItem::Button(button) => {
+                if !include(button.action) {
+                    continue;
+                }
+                if pending_separator {
+                    ui.separator();
+                    pending_separator = false;
+                }
+                drawn = true;
                 let enabled = toolbar::is_enabled(button.action, context);
                 // Ein grauer Knopf sagt „geht gerade nicht“; **warum** steht in
                 // der Sprechblase. Für „Analysieren“ ist der Grund einer, den
@@ -294,17 +320,85 @@ fn tool_row(ui: &mut egui::Ui, context: &ToolContext) -> Option<ToolAction> {
                 } else {
                     button.hint
                 };
-                if ui
-                    .add_enabled(enabled, greyable_button(button.label(), enabled))
-                    .on_hover_text(hint)
-                    .clicked()
-                {
+                // Gefüllt nur, solange er benutzbar ist: Weiß auf blassem
+                // Violett wäre unlesbar, ein grauer Knopf sagt dasselbe besser.
+                let response = if toolbar::is_primary(button.action) && enabled {
+                    ui.add(primary_button(ui, button.label(), enabled))
+                } else {
+                    ghost(ui, |ui| {
+                        ui.add_enabled(enabled, greyable_button(button.label(), enabled))
+                    })
+                };
+                if response.on_hover_text(hint).clicked() {
                     clicked = Some(button.action);
                 }
             }
         }
     }
     clicked
+}
+
+/// Zeichnet `add` mit Knöpfen ohne Rahmen und Füllung im Ruhezustand — erst
+/// beim Darüberfahren (und mit Fokus) erscheinen sie. Eine Leiste aus lauter
+/// umrandeten Kästchen sieht aus wie eine Tastatur.
+fn ghost<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+        widgets.inactive.bg_stroke = Stroke::NONE;
+        // Nicht `noninteractive.weak_bg_fill`: dorthin blendet egui einen
+        // abgeschalteten Knopf aus — durchsichtig hieße unsichtbar.
+        widgets.noninteractive.bg_stroke = Stroke::NONE;
+        add(ui)
+    })
+    .inner
+}
+
+/// Ein Häkchenfeld, das angekreuzt in der Akzentfarbe gefüllt ist — „an“ ist
+/// so auf einen Blick von „aus“ zu unterscheiden, nicht erst am dünnen Haken.
+pub(crate) fn accent_checkbox(ui: &mut egui::Ui, checked: &mut bool, text: &str) -> egui::Response {
+    let on = *checked;
+    // Die Beschriftung behält ihre Farbe; nur Kästchen und Haken wechseln.
+    let label = RichText::new(text).color(ui.visuals().text_color());
+    ui.scope(|ui| {
+        if on {
+            let theme = Theme::of(ui.visuals());
+            let widgets = &mut ui.visuals_mut().widgets;
+            for state in [&mut widgets.inactive, &mut widgets.hovered] {
+                state.bg_fill = theme.accent();
+                state.bg_stroke.color = theme.accent();
+                state.fg_stroke.color = theme.on_accent();
+            }
+            widgets.active.bg_fill = theme.accent();
+            widgets.active.fg_stroke.color = theme.on_accent();
+        }
+        ui.checkbox(checked, label)
+    })
+    .inner
+}
+
+/// Ein Hauptknopf: in der Akzentfarbe gefüllt, sonst wie [`greyable_button`].
+fn primary_button(ui: &egui::Ui, label: String, enabled: bool) -> egui::Button<'static> {
+    let theme = Theme::of(ui.visuals());
+    egui::Button::new(RichText::new(label).strong().color(theme.on_accent()))
+        .fill(theme.accent())
+        .stroke(Stroke::NONE)
+        .sense(if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        })
+}
+
+/// Eine Zwischenüberschrift: klein, gesperrt, zurückhaltend.
+pub(crate) fn section_title(ui: &mut egui::Ui, title: &str) {
+    ui.label(
+        RichText::new(title.to_uppercase())
+            .small()
+            .strong()
+            .extra_letter_spacing(0.8)
+            .color(crate::theme::muted(ui)),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -650,22 +744,108 @@ pub fn export_status(
     text
 }
 
-/// Der leere Hauptbereich: großer Satz, darunter der zweite Weg.
-fn empty_state(ui: &mut egui::Ui) {
-    ui.centered_and_justified(|ui| {
+/// Der leere Hauptbereich: eine Ablagefläche mit großem Satz, dem Knopf zum
+/// Öffnen und dem zweiten Weg darunter.
+///
+/// Gibt zurück, ob „PDF öffnen …“ gedrückt wurde.
+fn empty_state(ui: &mut egui::Ui) -> bool {
+    let theme = Theme::of(ui.visuals());
+    let mut open = false;
+    let available = ui.available_rect_before_wrap();
+    let card = egui::Rect::from_center_size(
+        available.center(),
+        Vec2::new(
+            EMPTY_CARD_SIZE.x.min(available.width() - 32.0).max(0.0),
+            EMPTY_CARD_SIZE.y.min(available.height() - 32.0).max(0.0),
+        ),
+    );
+
+    // Eine ruhige Karte. Der gestrichelte Rahmen erscheint erst, wenn
+    // wirklich eine Datei über dem Fenster schwebt ([`RedactApp::paint_drop_hint`]).
+    let painter = ui.painter();
+    painter.add(
+        egui::epaint::Shadow {
+            offset: Vec2::new(0.0, 6.0),
+            blur: 24.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(if ui.visuals().dark_mode { 90 } else { 22 }),
+        }
+        .as_shape(card, theme::WINDOW_ROUNDING),
+    );
+    painter.rect(
+        card,
+        theme::WINDOW_ROUNDING,
+        ui.visuals().window_fill,
+        ui.visuals().window_stroke,
+    );
+
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(card.shrink(24.0)), |ui| {
         ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() / 3.0);
-            ui.label(RichText::new("🗁").size(48.0).weak());
-            ui.add_space(8.0);
-            ui.label(RichText::new(EMPTY_DOCUMENT_HINT).size(20.0));
-            ui.add_space(4.0);
+            ui.add_space((card.height() - 250.0).max(0.0) / 2.0);
+            // Das Symbol auf einem Kreis in der Auswahlfarbe.
+            let (circle, _) = ui.allocate_exact_size(Vec2::splat(64.0), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(circle.center(), 32.0, ui.visuals().selection.bg_fill);
+            ui.painter().text(
+                circle.center(),
+                egui::Align2::CENTER_CENTER,
+                "🗁",
+                egui::FontId::proportional(28.0),
+                theme.accent(),
+            );
+            ui.add_space(16.0);
             ui.label(
-                RichText::new("„🗁 Öffnen“ in der Leiste oben, Strg+O — oder eine PDF-Datei in dieses Fenster ziehen.")
-                    .weak(),
+                RichText::new(EMPTY_DOCUMENT_HINT)
+                    .size(18.0)
+                    .strong()
+                    .color(ui.visuals().strong_text_color()),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Kontoauszüge und Bankunterlagen — alles bleibt auf diesem Rechner.")
+                    .color(crate::theme::muted(ui)),
+            );
+            ui.add_space(24.0);
+            if ui
+                .add(
+                    primary_button(ui, "🗁 PDF öffnen …".to_string(), true)
+                        .min_size(Vec2::new(168.0, 34.0)),
+                )
+                .on_hover_text("PDF-Datei öffnen (Strg+O)")
+                .clicked()
+            {
+                open = true;
+            }
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Strg+O")
+                    .small()
+                    .color(crate::theme::muted(ui)),
             );
         });
     });
+    open
 }
+
+/// Die Wortmarke links in der oberen Leiste: ein geschwärzter Balken und der
+/// Programmname.
+fn wordmark(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), egui::Sense::hover());
+    let ink = ui.visuals().strong_text_color();
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, ink);
+    let bar = egui::Rect::from_center_size(rect.center(), Vec2::new(12.0, 4.0));
+    painter.rect_filled(bar, 1.0, ui.visuals().panel_fill);
+    ui.label(
+        RichText::new(crate::WINDOW_TITLE)
+            .strong()
+            .size(15.0)
+            .color(ink),
+    );
+}
+
+/// Größe der Ablagefläche im leeren Hauptbereich.
+const EMPTY_CARD_SIZE: Vec2 = Vec2::new(520.0, 320.0);
 
 /// Wer die Rückfrage vor Datenverlust beantwortet.
 ///
@@ -2215,34 +2395,56 @@ impl RedactApp {
         }
     }
 
-    /// Die Symbolleiste: Symbol **und** Text je Knopf, dahinter der
-    /// Zoomregler und der Themenschalter.
+    /// Die obere Leiste: Wortmarke, die Knöpfe für das **Dokument** (Symbol
+    /// **und** Text je Knopf) und rechts der Themenschalter.
+    ///
+    /// Blättern und Zoom stehen in der Ansichtsleiste direkt über der Seite
+    /// ([`RedactApp::view_bar`]).
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let context = self.tool_context();
         let mut clicked: Option<ToolAction> = None;
 
-        ui.horizontal_wrapped(|ui| {
-            clicked = tool_row(ui, &context);
+        ui.horizontal(|ui| {
+            wordmark(ui);
+            ui.add_space(12.0);
 
-            ui.separator();
-            ui.label("Zoom");
-            let mut zoom = self.state.zoom;
-            if ui
-                .add(egui::Slider::new(&mut zoom, MIN_ZOOM..=MAX_ZOOM).fixed_decimals(2))
-                .changed()
-            {
-                self.state.set_zoom(zoom);
+            clicked = tool_buttons(ui, &context, |action| {
+                toolbar::bar(action) == toolbar::Bar::Document && !toolbar::is_primary(action)
+            });
+
+            // Rechts außen der Hauptknopf — der Schritt, auf den alles
+            // hinausläuft, steht dort, wo der Blick endet — und daneben der
+            // Themenschalter (Einstellung, nicht Arbeitsschritt). Von links
+            // nach rechts gezeichnet und nur nach rechts geschoben, damit der
+            // Tabulator in Leserichtung bleibt.
+            let theme_label = format!("{} {}", self.theme.switch_icon(), self.theme.switch_text());
+            let export_label = toolbar::buttons()
+                .into_iter()
+                .find(|b| toolbar::is_primary(b.action))
+                .map(|b| b.label())
+                .unwrap_or_default();
+            let reserve = [&export_label, &theme_label]
+                .iter()
+                .map(|text| {
+                    let font = egui::TextStyle::Button.resolve(ui.style());
+                    let width = ui.fonts(|f| {
+                        f.layout_no_wrap((*text).clone(), font, Color32::WHITE)
+                            .size()
+                            .x
+                    });
+                    width + 2.0 * ui.spacing().button_padding.x + ui.spacing().item_spacing.x
+                })
+                .sum::<f32>()
+                + 2.0 * ui.spacing().item_spacing.x
+                + 8.0;
+            ui.add_space((ui.available_width() - reserve).max(0.0));
+
+            if let Some(action) = tool_buttons(ui, &context, toolbar::is_primary) {
+                clicked = Some(action);
             }
-
-            // Der Themenschalter gehört ans Ende: er ist Einstellung, nicht
-            // Arbeitsschritt.
             ui.separator();
-            if ui
-                .button(format!(
-                    "{} {}",
-                    self.theme.switch_icon(),
-                    self.theme.switch_text()
-                ))
+            let theme_switch = ghost(ui, |ui| ui.button(theme_label));
+            if theme_switch
                 .on_hover_text(format!(
                     "Zur {}-Darstellung wechseln (aktuell: {})",
                     self.theme.switch_text(),
@@ -2252,6 +2454,72 @@ impl RedactApp {
             {
                 clicked = Some(ToolAction::ToggleTheme);
             }
+        });
+
+        if let Some(action) = clicked {
+            self.apply_tool_action(action, ui.ctx());
+        }
+    }
+
+    /// Die Ansichtsleiste über der Seite: Blättern mit Seitenanzeige, Zoom.
+    ///
+    /// Dieselben Knöpfe wie bisher, gezeichnet durch [`tool_buttons`] — nur
+    /// nicht mehr am Ende der oberen Leiste, wo sie bei gewöhnlicher
+    /// Fensterbreite in eine zweite Zeile umbrachen.
+    fn view_bar(&mut self, ui: &mut egui::Ui) {
+        let context = self.tool_context();
+        let mut clicked: Option<ToolAction> = None;
+
+        ui.horizontal_wrapped(|ui| {
+            clicked = clicked.or(tool_buttons(ui, &context, |action| {
+                action == ToolAction::PrevPage
+            }));
+            let pages = self.state.page_count();
+            let current = if pages == 0 {
+                0
+            } else {
+                self.state.current_page + 1
+            };
+            ui.label(
+                RichText::new(format!("Seite {current} von {pages}"))
+                    .strong()
+                    .color(ui.visuals().strong_text_color()),
+            );
+            clicked = clicked.or(tool_buttons(ui, &context, |action| {
+                action == ToolAction::NextPage
+            }));
+
+            ui.separator();
+            clicked = clicked.or(tool_buttons(ui, &context, |action| {
+                action == ToolAction::ZoomOut
+            }));
+            let mut zoom = self.state.zoom;
+            if ui
+                .add_enabled(
+                    context.loaded,
+                    egui::Slider::new(&mut zoom, MIN_ZOOM..=MAX_ZOOM)
+                        .custom_formatter(|value, _| format!("{:.0} %", value * 100.0))
+                        .custom_parser(|text| {
+                            text.trim()
+                                .trim_end_matches('%')
+                                .trim()
+                                .replace(',', ".")
+                                .parse::<f64>()
+                                .ok()
+                                .map(|percent| percent / 100.0)
+                        }),
+                )
+                .on_hover_text("Zoom — ziehen, oder den Wert anklicken und eintippen")
+                .changed()
+            {
+                self.state.set_zoom(zoom);
+            }
+            clicked = clicked.or(tool_buttons(ui, &context, |action| {
+                matches!(
+                    action,
+                    ToolAction::ZoomIn | ToolAction::ZoomFit | ToolAction::ZoomReset
+                )
+            }));
         });
 
         if let Some(action) = clicked {
@@ -2464,7 +2732,7 @@ impl RedactApp {
                          gespeichert und steht in keiner Ausgabedatei, in \
                          keinem Audit-Log und in keiner Meldung.",
                     )
-                    .weak(),
+                    .color(crate::theme::muted(ui)),
                 );
                 ui.add_space(BAR_PADDING);
 
@@ -2485,12 +2753,14 @@ impl RedactApp {
 
                 ui.add_space(BAR_PADDING);
                 ui.horizontal(|ui| {
-                    submit |= ui.button("Öffnen").clicked();
+                    submit |= ui
+                        .add(primary_button(ui, "Öffnen".to_string(), true))
+                        .clicked();
                     cancel = ui.button("Abbrechen").clicked();
                 });
 
                 if let Some(message) = &error {
-                    ui.label(RichText::new(message).color(Color32::from_rgb(220, 60, 60)));
+                    ui.label(RichText::new(message).color(ui.visuals().error_fg_color));
                 }
             });
 
@@ -2502,20 +2772,15 @@ impl RedactApp {
         }
     }
 
+    /// Die Statuszeile: links, was gerade geschah (Meldung, Fehler,
+    /// Warnungen, Arbeit im Hintergrund), rechts gedämpft die Seitenzahl.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let pages = self.state.page_count();
-            let current = if pages == 0 {
-                0
-            } else {
-                self.state.current_page + 1
-            };
-            ui.label(RichText::new(format!("Seite {current} / {pages}")).strong());
-            ui.separator();
-
             match &self.error {
                 Some(message) => {
-                    ui.label(RichText::new(message).color(Color32::from_rgb(220, 60, 60)));
+                    let colour = ui.visuals().error_fg_color;
+                    ui.label(RichText::new("⚠").color(colour));
+                    ui.label(RichText::new(message).color(colour));
                 }
                 None => {
                     ui.label(&self.state.status);
@@ -2529,17 +2794,20 @@ impl RedactApp {
             let warnings = self.visible_warnings();
             if let Some(first) = warnings.first() {
                 ui.separator();
-                let mut text = first.clone();
+                let mut text = format!("⚠ {first}");
                 if warnings.len() > 1 {
                     text.push_str(&format!(" (+{} weitere)", warnings.len() - 1));
                 }
-                ui.label(RichText::new(text).color(Color32::from_rgb(160, 100, 0)))
+                ui.label(RichText::new(text).color(ui.visuals().warn_fg_color))
                     .on_hover_text(warnings.join("\n"));
             }
 
             if self.pages.is_busy() {
                 ui.separator();
-                ui.label(RichText::new("Seitenbild wird erstellt …").weak());
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.label(
+                    RichText::new("Seitenbild wird erstellt …").color(crate::theme::muted(ui)),
+                );
             }
         });
     }
@@ -2570,7 +2838,21 @@ impl RedactApp {
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let (area, response) = ui.allocate_exact_size(total, egui::Sense::click_and_drag());
+                // Das Blatt steht waagerecht in der Mitte, solange es schmaler
+                // ist als der Bereich. Bedient wird nur die Fläche um das
+                // Blatt herum — wie vorher, nur verschoben.
+                let width = total.x.max(ui.available_width());
+                let (outer, _) =
+                    ui.allocate_exact_size(Vec2::new(width, total.y), egui::Sense::hover());
+                let area = egui::Rect::from_min_size(
+                    outer.min + Vec2::new((width - total.x) / 2.0, 0.0),
+                    total,
+                );
+                let response = ui.interact(
+                    area,
+                    ui.id().with("page_area"),
+                    egui::Sense::click_and_drag(),
+                );
                 let origin = area.min + Vec2::splat(SHEET_MARGIN);
                 let painter = ui.painter_at(area);
                 let sheet = egui::Rect::from_min_size(origin, view.size_screen(zoom));
@@ -3100,7 +3382,7 @@ impl eframe::App for RedactApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Thema nur bei Änderung setzen — `set_visuals` kopiert den ganzen Stil.
         if self.applied_theme != Some(self.theme) {
-            ctx.set_visuals(self.theme.visuals());
+            self.theme.apply(ctx);
             self.applied_theme = Some(self.theme);
         }
 
@@ -3114,34 +3396,58 @@ impl eframe::App for RedactApp {
         // Einmal je Bild, nicht je Trefferzeile.
         let summary = self.state.hit_summary();
 
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.add_space(BAR_PADDING);
-            self.top_bar(ui);
-            ui.add_space(BAR_PADDING);
-        });
+        let panel_fill = ctx.style().visuals.panel_fill;
+        egui::TopBottomPanel::top("top_bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(panel_fill)
+                    .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+            )
+            .show(ctx, |ui| {
+                self.top_bar(ui);
+            });
 
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            self.status_bar(ui);
-        });
+        egui::TopBottomPanel::bottom("status_bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(panel_fill)
+                    .inner_margin(egui::Margin::symmetric(12.0, 4.0)),
+            )
+            .show(ctx, |ui| {
+                self.status_bar(ui);
+            });
 
         // Miniaturansichten ganz links; sie leben von denselben Kleinbildern,
         // die der Hauptbereich ohnehin anfordert.
         let page_changed = self.shown_page != Some(self.state.current_page);
         self.shown_page = Some(self.state.current_page);
-        egui::SidePanel::left("thumbnails")
-            .default_width(crate::thumbnails::PANEL_WIDTH)
-            .width_range(crate::thumbnails::PANEL_MIN_WIDTH..=crate::thumbnails::PANEL_MAX_WIDTH)
-            .show(ctx, |ui| {
-                crate::thumbnails::show(
-                    ui,
-                    &mut self.state,
-                    &mut self.pages,
-                    &summary,
-                    page_changed,
-                );
-            });
+        let side_frame = |margin: f32| {
+            egui::Frame::none()
+                .fill(panel_fill)
+                .inner_margin(egui::Margin::symmetric(margin, 6.0))
+        };
+        // Ohne Dokument keine Spalte: die Karte in der Mitte sagt schon, dass
+        // nichts geladen ist, und eine leere Spalte sagte es nur noch einmal.
+        if self.state.is_loaded() {
+            egui::SidePanel::left("thumbnails")
+                .frame(side_frame(10.0))
+                .default_width(crate::thumbnails::PANEL_WIDTH)
+                .width_range(
+                    crate::thumbnails::PANEL_MIN_WIDTH..=crate::thumbnails::PANEL_MAX_WIDTH,
+                )
+                .show(ctx, |ui| {
+                    crate::thumbnails::show(
+                        ui,
+                        &mut self.state,
+                        &mut self.pages,
+                        &summary,
+                        page_changed,
+                    );
+                });
+        }
 
         let toggle = egui::SidePanel::left("sidebar")
+            .frame(side_frame(14.0))
             .default_width(SIDEBAR_WIDTH)
             .width_range(SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH)
             .show(ctx, |ui| {
@@ -3154,14 +3460,36 @@ impl eframe::App for RedactApp {
             self.apply_pattern_toggle(toggle);
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.central_rect = Some(ui.max_rect());
-            if self.state.is_loaded() {
-                self.paint_page(ui, &summary);
-            } else {
-                empty_state(ui);
-            }
-        });
+        // Die Ansichtsleiste nach den Seitenspalten: so reicht sie nur über
+        // die Seite, nicht über die ganze Fensterbreite.
+        if self.state.is_loaded() {
+            egui::TopBottomPanel::top("view_bar")
+                .frame(
+                    egui::Frame::none()
+                        .fill(panel_fill)
+                        .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
+                )
+                .show(ctx, |ui| {
+                    self.view_bar(ui);
+                });
+        }
+
+        let canvas = egui::Frame::central_panel(&ctx.style()).fill(self.theme.canvas());
+        let open = egui::CentralPanel::default()
+            .frame(canvas)
+            .show(ctx, |ui| {
+                self.central_rect = Some(ui.max_rect());
+                if self.state.is_loaded() {
+                    self.paint_page(ui, &summary);
+                    false
+                } else {
+                    empty_state(ui)
+                }
+            })
+            .inner;
+        if open {
+            self.apply_tool_action(ToolAction::Open, ctx);
+        }
 
         // Die Passwortabfrage liegt über den Panels und vor der Tastatur: sie
         // hat ein Textfeld, und solange sie offen ist, gehören alle Tasten
@@ -4836,16 +5164,22 @@ mod tests {
             // `eframe::Frame` lässt sich ohne Fenster nicht bauen — deshalb
             // werden die Panels hier einzeln über dieselben Bausteine
             // gezeichnet wie in `update`.
+            theme.apply(&ctx);
             let output = ctx.run(egui::RawInput::default(), |ctx| {
-                ctx.set_visuals(theme.visuals());
                 let summary = app.borrow().state.hit_summary();
                 egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
                     app.borrow_mut().top_bar(ui);
+                });
+                egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+                    app.borrow_mut().status_bar(ui);
                 });
                 egui::SidePanel::left("thumbnails").show(ctx, |ui| {
                     let mut app = app.borrow_mut();
                     let RedactApp { state, pages, .. } = &mut *app;
                     crate::thumbnails::show(ui, state, pages, &summary, false);
+                });
+                egui::TopBottomPanel::top("view_bar").show(ctx, |ui| {
+                    app.borrow_mut().view_bar(ui);
                 });
                 egui::CentralPanel::default().show(ctx, |ui| {
                     if app.borrow().state.is_loaded() {

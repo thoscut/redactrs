@@ -67,25 +67,44 @@ pub fn show(
     state: &mut AppState,
     summary: &HitSummary,
 ) -> Option<PatternToggle> {
+    ui.add_space(SECTION_GAP);
+    crate::app::section_title(ui, "Ausgabe");
     output_name(ui, state);
-    ui.separator();
+    ui.add_space(SECTION_GAP);
 
-    ui.heading("Treffer");
-    ui.label(RichText::new(summary.headline()).strong());
+    crate::app::section_title(ui, "Treffer");
+    ui.label(
+        RichText::new(summary.headline())
+            .strong()
+            .size(15.0)
+            .color(ui.visuals().strong_text_color()),
+    );
     let toggle = detection(ui, state);
-    legend(ui);
-    padding_note(ui, state.config.padding);
+    // Legende und Polsterung erklären, was auf einer Seite zu sehen ist —
+    // ohne Dokument gibt es nichts zu erklären.
+    if state.is_loaded() {
+        legend(ui);
+        padding_note(ui, state.config.padding);
+    }
     ui.separator();
 
     // Erst der Detailbereich am unteren Rand, dann die Liste in den Rest —
     // sonst schöbe die Liste die Details aus dem sichtbaren Bereich.
-    egui::TopBottomPanel::bottom("hit_details")
-        .resizable(false)
-        .show_inside(ui, |ui| {
-            ui.add_space(BAR_PADDING);
-            details(ui, state, summary);
-            ui.add_space(BAR_PADDING);
-        });
+    // Ohne Dokument gibt es nichts auszuwählen — und keinen Platzhalter, der
+    // das ein weiteres Mal sagt.
+    if state.is_loaded() {
+        egui::TopBottomPanel::bottom("hit_details")
+            .resizable(false)
+            // Ohne eigenen Rahmen: der Standardrahmen rückt den Bereich um
+            // seinen Innenabstand ein, und die Seitenleiste verlöre ihre linke
+            // Kante. Die Trennlinie oben bleibt.
+            .frame(egui::Frame::none())
+            .show_inside(ui, |ui| {
+                ui.add_space(BAR_PADDING);
+                details(ui, state, summary);
+                ui.add_space(BAR_PADDING);
+            });
+    }
 
     hits(ui, state, summary);
 
@@ -122,8 +141,7 @@ fn detection(ui: &mut egui::Ui, state: &AppState) -> Option<PatternToggle> {
     let mut wish = None;
 
     let mut on = state.patterns_enabled();
-    if ui
-        .checkbox(&mut on, "Automatisch suchen")
+    if crate::app::accent_checkbox(ui, &mut on, "Automatisch suchen")
         .on_hover_text(DETECTION_HINT)
         .changed()
     {
@@ -156,8 +174,7 @@ fn detection(ui: &mut egui::Ui, state: &AppState) -> Option<PatternToggle> {
                         continue;
                     }
                     let mut single = def.enabled;
-                    if ui
-                        .checkbox(&mut single, &def.id)
+                    if crate::app::accent_checkbox(ui, &mut single, def.id.as_str())
                         .on_hover_text(&def.description)
                         .changed()
                     {
@@ -168,7 +185,10 @@ fn detection(ui: &mut egui::Ui, state: &AppState) -> Option<PatternToggle> {
                     }
                 }
                 if state.pattern_states().is_empty() {
-                    ui.label(RichText::new("— keine Muster in diesem Lauf —").weak());
+                    ui.label(
+                        RichText::new("— keine Muster in diesem Lauf —")
+                            .color(crate::theme::muted(ui)),
+                    );
                 }
             });
         });
@@ -183,7 +203,10 @@ fn warning_color(ui: &egui::Ui) -> Color32 {
 }
 
 /// Vertikale Luft um den Detailbereich.
-const BAR_PADDING: f32 = 4.0;
+const BAR_PADDING: f32 = 8.0;
+
+/// Luft vor einer Zwischenüberschrift.
+const SECTION_GAP: f32 = 6.0;
 
 /// Namenszusatz der Ausgabedatei samt Vorschau des Ergebnisses.
 fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
@@ -229,13 +252,24 @@ fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
 
-    let suggestion = state
+    // Ohne Dokument kein Vorschlag — dass nichts geladen ist, sagt die
+    // Mitte des Fensters schon.
+    if let Some(suggestion) = state
         .suggested_output_path()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "— kein Dokument geladen —".to_string());
-    ui.label(RichText::new(suggestion).small().weak());
+    {
+        ui.label(
+            RichText::new(suggestion)
+                .small()
+                .color(crate::theme::muted(ui)),
+        );
+    }
     if fixed {
-        ui.label(RichText::new(OUTPUT_FIXED_NOTE).small().weak());
+        ui.label(
+            RichText::new(OUTPUT_FIXED_NOTE)
+                .small()
+                .color(crate::theme::muted(ui)),
+        );
     }
 }
 
@@ -266,20 +300,116 @@ pub fn padding_text(padding: f64) -> String {
 /// beides unsichtbar: `--padding 6` ließ Nachbartext mitverschwinden, ohne dass
 /// die Oberfläche es andeutete.
 fn padding_note(ui: &mut egui::Ui, padding: f64) {
-    ui.label(RichText::new(padding_text(padding)).small().weak())
-        .on_hover_text(
-            "Kommt von --padding (Vorgabe 1,0). Der gestrichelte Rahmen im \
+    ui.label(
+        RichText::new(padding_text(padding))
+            .small()
+            .color(crate::theme::muted(ui)),
+    )
+    .on_hover_text(
+        "Kommt von --padding (Vorgabe 1,0). Der gestrichelte Rahmen im \
              Seitenbild zeigt, was wirklich schwarz wird.",
-        );
+    );
 }
 
+/// Die vier Trefferfarben, zwei je Zeile — ein Zeichen und sein Wort bleiben
+/// zusammen, statt mitten im Paar umzubrechen.
 fn legend(ui: &mut egui::Ui) {
-    ui.horizontal_wrapped(|ui| {
-        for color in REGION_COLORS {
-            ui.label(RichText::new(color.marker()).color(dot_color(color)));
-            ui.label(RichText::new(color.label()).small().weak());
+    egui::Grid::new("legend")
+        .num_columns(2)
+        .spacing([16.0, 4.0])
+        .show(ui, |ui| {
+            for (i, color) in REGION_COLORS.into_iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    marker(ui, color);
+                    ui.label(RichText::new(color.label()).small());
+                });
+                if i % 2 == 1 {
+                    ui.end_row();
+                }
+            }
+        });
+}
+
+/// Die Form, die eine Trefferart neben ihrer Farbe trägt.
+///
+/// Farbe allein reicht nicht (WCAG 1.4.1): Blau, Grün, Rot und Orange liegen
+/// bei einer Rot-Grün-Sehschwäche dicht beieinander. Gemalt statt als
+/// Schriftzeichen — die Standardschriften von egui kennen `●`, `◆` und `▲`
+/// nicht, sie erschienen als leere Kästchen und alle vier Arten sahen bis auf
+/// die Farbe gleich aus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerShape {
+    Circle,
+    Diamond,
+    Square,
+    Triangle,
+}
+
+/// Die Form zur Trefferart — dieselbe Zuordnung wie
+/// [`RegionColor::marker`].
+pub fn marker_shape(color: RegionColor) -> MarkerShape {
+    match color {
+        RegionColor::AutoPattern => MarkerShape::Circle,
+        RegionColor::AutoBookingPos => MarkerShape::Diamond,
+        RegionColor::AutoBookingNeg => MarkerShape::Square,
+        RegionColor::Manual => MarkerShape::Triangle,
+    }
+}
+
+/// Kantenlänge des Platzes für ein Zeichen der Trefferart.
+const MARKER_SIZE: f32 = 14.0;
+
+/// Malt das Zeichen der Trefferart in einen Platz von [`MARKER_SIZE`].
+pub fn marker(ui: &mut egui::Ui, color: RegionColor) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::Vec2::splat(MARKER_SIZE), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        paint_marker(ui.painter(), rect.center(), color);
+    }
+    response.on_hover_text(color.label())
+}
+
+/// Malt das Zeichen der Trefferart um `center`.
+pub fn paint_marker(painter: &egui::Painter, center: egui::Pos2, color: RegionColor) {
+    use egui::{pos2, Shape, Stroke};
+    let fill = dot_color(color);
+    let (x, y) = (center.x, center.y);
+    match marker_shape(color) {
+        MarkerShape::Circle => {
+            painter.circle_filled(center, 4.5, fill);
         }
-    });
+        MarkerShape::Square => {
+            painter.rect_filled(
+                egui::Rect::from_center_size(center, egui::Vec2::splat(8.5)),
+                1.0,
+                fill,
+            );
+        }
+        MarkerShape::Diamond => {
+            painter.add(Shape::convex_polygon(
+                vec![
+                    pos2(x, y - 5.5),
+                    pos2(x + 5.5, y),
+                    pos2(x, y + 5.5),
+                    pos2(x - 5.5, y),
+                ],
+                fill,
+                Stroke::NONE,
+            ));
+        }
+        MarkerShape::Triangle => {
+            painter.add(Shape::convex_polygon(
+                vec![
+                    pos2(x, y - 5.0),
+                    pos2(x + 5.5, y + 4.5),
+                    pos2(x - 5.5, y + 4.5),
+                ],
+                fill,
+                Stroke::NONE,
+            ));
+        }
+    }
 }
 
 /// Höhe einer Trefferzeile ohne Zwischenraum.
@@ -290,8 +420,14 @@ fn legend(ui: &mut egui::Ui) {
 /// aus dieser Zahl rechnet. Dass sie stimmt, prüft ein Test gegen die
 /// gezeichnete Zeile — mit und ohne Zusatz, mit echtem und trägem Kästchen.
 pub fn hit_row_height(ui: &egui::Ui) -> f32 {
-    ui.spacing().interact_size.y
+    ui.spacing().interact_size.y + HIT_ROW_EXTRA
 }
+
+/// Was eine Trefferzeile höher ist als ein Bedienelement — Luft, damit die
+/// Zeilen als Zeilen lesbar sind und die ganze Zeile ein bequemes Ziel ist.
+const HIT_ROW_EXTRA: f32 = 4.0;
+/// Breite der Spalte mit der Seitenzahl („S.12“).
+const PAGE_COLUMN: f32 = 34.0;
 
 /// Die Trefferliste — nur die **sichtbaren** Zeilen werden aufgebaut.
 ///
@@ -302,7 +438,10 @@ pub fn hit_row_height(ui: &egui::Ui) -> f32 {
 /// überspringt, was außerhalb des Fensters liegt.
 fn hits(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     if state.regions.is_empty() {
-        ui.label(RichText::new("Noch keine Treffer — „Analysieren“ oder Rechteck ziehen.").weak());
+        ui.label(
+            RichText::new("Noch keine Treffer — „Analysieren“ oder Rechteck ziehen.")
+                .color(crate::theme::muted(ui)),
+        );
         return;
     }
 
@@ -347,53 +486,115 @@ pub(crate) fn hit_row(
     let outcome = summary.outcome(index);
     let tooltip = format!("{}\n{}", entry.description(), outcome_tooltip(outcome));
 
-    ui.horizontal(|ui| {
-        // Negativlisten-Treffer sind nicht schaltbar. Für sie steht hier
-        // ein Platzhalter statt eines abgeschalteten Kästchens: ein
-        // abgeschaltetes Widget verschluckt in egui 0.29 den Tabulator
-        // (siehe [`crate::app::greyable_button`]), und dieses Kästchen ist
-        // das **erste** Bedienelement jeder Trefferzeile. Eine
-        // Buchungsliste mit einem Schutzeintrag an erster Stelle machte
-        // damit keine einzige Trefferzeile vorwärts ertabbar.
-        if blocking {
-            ui.add_enabled(false, inert_checkbox(enabled, ""));
+    // Die ganze Zeile ist das Ziel: ein Klick irgendwo darauf wählt den
+    // Treffer, und die Hervorhebung reicht über die volle Breite. Die Fläche
+    // wird **vor** dem Häkchenfeld angelegt — in egui liegt, was später kommt,
+    // obenauf, und das Häkchenfeld muss seine Klicks selbst bekommen.
+    let size = egui::vec2(ui.available_width(), hit_row_height(ui));
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let row = ui.interact(rect, ui.id().with(("hit_row", index)), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if selected {
+            Some(ui.visuals().selection.bg_fill)
+        } else if row.hovered() {
+            Some(ui.visuals().faint_bg_color)
         } else {
-            let checkbox = ui.add(egui::Checkbox::new(&mut enabled, ""));
-            if checkbox.changed() {
-                *toggle = Some(index);
-            }
+            None
+        };
+        if let Some(fill) = fill {
+            ui.painter()
+                .rect_filled(rect, crate::theme::WIDGET_ROUNDING, fill);
         }
-        ui.label(RichText::new(color.marker()).color(dot_color(color)));
+        if row.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                crate::theme::WIDGET_ROUNDING,
+                ui.visuals().widgets.active.bg_stroke,
+            );
+        }
+    }
 
-        let mut text = RichText::new(label);
-        match outcome {
-            // Wird geschwärzt: normal und in seiner Farbe.
-            HitOutcome::Redacted => {}
-            // Schützt Text — kein Durchstreichen, das hieße „gestrichen“.
-            HitOutcome::Protecting => text = text.color(dot_color(color)),
-            // Verworfen bzw. abgewählt: ausgegraut und durchgestrichen.
-            HitOutcome::Disabled
-            | HitOutcome::Blocked
-            | HitOutcome::Duplicate
-            | HitOutcome::OffPage
-            | HitOutcome::MissingPage => {
-                text = text.weak().strikethrough();
-            }
-        }
-        if ui
-            .selectable_label(selected, text)
-            .on_hover_text(&tooltip)
-            .clicked()
-        {
-            *select = Some(index);
-        }
+    let text_color = if selected {
+        ui.visuals().selection.stroke.color
+    } else {
+        ui.visuals().strong_text_color()
+    };
+    let (page_text, value) = label
+        .split_once(' ')
+        .map(|(page, value)| (page.to_string(), value.to_string()))
+        .unwrap_or_else(|| (String::new(), label.clone()));
 
-        let note = outcome.note();
-        if !note.is_empty() {
-            ui.label(RichText::new(note).small().weak());
-        }
-    })
-    .response
+    ui.allocate_new_ui(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(6.0, 0.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            // Negativlisten-Treffer sind nicht schaltbar. Für sie steht hier
+            // ein Platzhalter statt eines abgeschalteten Kästchens: ein
+            // abgeschaltetes Widget verschluckt in egui 0.29 den Tabulator
+            // (siehe [`crate::app::greyable_button`]), und dieses Kästchen ist
+            // das **erste** Bedienelement jeder Trefferzeile. Eine
+            // Buchungsliste mit einem Schutzeintrag an erster Stelle machte
+            // damit keine einzige Trefferzeile vorwärts ertabbar.
+            if blocking {
+                ui.add_enabled(false, inert_checkbox(enabled, ""));
+            } else {
+                let checkbox = crate::app::accent_checkbox(ui, &mut enabled, "");
+                if checkbox.changed() {
+                    *toggle = Some(index);
+                }
+            }
+            marker(ui, color);
+
+            let (page_rect, _) = ui
+                .allocate_exact_size(egui::vec2(PAGE_COLUMN, rect.height()), egui::Sense::hover());
+            ui.painter().text(
+                page_rect.left_center(),
+                egui::Align2::LEFT_CENTER,
+                &page_text,
+                egui::TextStyle::Small.resolve(ui.style()),
+                crate::theme::muted(ui),
+            );
+
+            // Feste Zeichenbreite: IBANs und Kontonummern stehen untereinander.
+            let mut text = RichText::new(value).monospace().color(text_color);
+            match outcome {
+                // Wird geschwärzt: normal.
+                HitOutcome::Redacted => {}
+                // Schützt Text — kein Durchstreichen, das hieße „gestrichen“.
+                HitOutcome::Protecting => text = text.color(dot_color(color)),
+                // Verworfen bzw. abgewählt: gedämpft und durchgestrichen.
+                HitOutcome::Disabled
+                | HitOutcome::Blocked
+                | HitOutcome::Duplicate
+                | HitOutcome::OffPage
+                | HitOutcome::MissingPage => {
+                    text = text.color(crate::theme::muted(ui)).strikethrough();
+                }
+            }
+
+            let note = outcome.note();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !note.is_empty() {
+                    ui.label(RichText::new(note).small().color(crate::theme::muted(ui)));
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(text).truncate().selectable(false));
+                });
+            });
+        },
+    );
+
+    // Die Zeile meldet sich mit ihrem Inhalt — für Sprechblase und Tastatur.
+    row.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &label)
+    });
+    let row = row.on_hover_text(&tooltip);
+    if row.clicked() {
+        *select = Some(index);
+    }
+    row
 }
 
 /// Ein Kästchen, das nur aussieht wie eins — nicht anklickbar, nicht
@@ -501,10 +702,35 @@ pub fn outcome_tooltip(outcome: HitOutcome) -> &'static str {
     }
 }
 
+/// Pfeil der Auswahlliste, immer nach unten. egui dreht ihn um, wenn die
+/// Liste nach oben aufgeht — am unteren Rand also immer —, und ein Pfeil nach
+/// oben liest sich wie „offen“ oder „sortiert“.
+fn down_arrow(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    visuals: &egui::style::WidgetVisuals,
+    _open: bool,
+    _side: egui::AboveOrBelow,
+) {
+    let rect = egui::Rect::from_center_size(
+        rect.center(),
+        egui::vec2(rect.width() * 0.7, rect.height() * 0.45),
+    );
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![rect.left_top(), rect.right_top(), rect.center_bottom()],
+        visuals.fg_stroke.color,
+        egui::Stroke::NONE,
+    ));
+}
+
 /// Detailbereich für die ausgewählte Region.
 fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     let Some(index) = state.selected_region else {
-        ui.label(RichText::new("Keine Region ausgewählt.").weak());
+        crate::app::section_title(ui, "Auswahl");
+        ui.label(
+            RichText::new("Keine Region ausgewählt — in der Liste oder auf der Seite anklicken.")
+                .color(crate::theme::muted(ui)),
+        );
         return;
     };
     let Some(entry) = state.regions.get(index) else {
@@ -518,13 +744,37 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     let outcome = summary.outcome(index);
     let mut action = entry.action.clone();
 
-    ui.label(RichText::new("Auswahl").strong());
-    // `saturating_add`, weil die Seitennummer aus fremder Hand kommt (Review-Datei,
-    // `--manual-regions`): bei `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build
-    // über und löste eine Panic aus; im Release-Build stünde „Seite 0" da. Die erste
-    // Verteidigung ist `redact_core::model::MAX_PAGE_INDEX` an der Deserialisierung;
-    // diese hier gilt für jeden Aufrufer, der `Region` selbst baut.
-    ui.label(format!("Seite {}", page.saturating_add(1)));
+    crate::app::section_title(ui, "Auswahl");
+    let color = entry.color;
+    let value = entry
+        .label()
+        .split_once(' ')
+        .map(|(_, value)| value.to_string())
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        marker(ui, color);
+        ui.add(
+            egui::Label::new(
+                RichText::new(value)
+                    .monospace()
+                    .size(14.5)
+                    .color(ui.visuals().strong_text_color()),
+            )
+            .truncate(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // `saturating_add`, weil die Seitennummer aus fremder Hand kommt
+            // (Review-Datei, `--manual-regions`): bei `usize::MAX` liefe die
+            // 1-basierte Anzeige im Debug-Build über und löste eine Panic aus;
+            // im Release-Build stünde „Seite 0" da. Die erste Verteidigung ist
+            // `redact_core::model::MAX_PAGE_INDEX` an der Deserialisierung;
+            // diese hier gilt für jeden Aufrufer, der `Region` selbst baut.
+            ui.label(
+                RichText::new(format!("Seite {}", page.saturating_add(1)))
+                    .color(crate::theme::muted(ui)),
+            );
+        });
+    });
     ui.label(description);
     ui.label(
         RichText::new(format!(
@@ -532,7 +782,7 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
             rect.ll.x, rect.ur.x, rect.ll.y, rect.ur.y
         ))
         .small()
-        .weak(),
+        .color(crate::theme::muted(ui)),
     );
 
     if blocking {
@@ -545,7 +795,11 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     }
 
     if !outcome.is_redacted() {
-        ui.label(RichText::new(outcome_tooltip(outcome)).small().weak());
+        ui.label(
+            RichText::new(outcome_tooltip(outcome))
+                .small()
+                .color(crate::theme::muted(ui)),
+        );
     }
 
     let mut changed = false;
@@ -553,49 +807,69 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     // (`--replace-with`), sonst aus [`redact_core::DEFAULT_REPLACEMENT`] —
     // hier stand fest das englische „[REDACTED]“.
     let default_replacement = state.default_replacement();
-    egui::ComboBox::from_label("Aktion")
-        .selected_text(action_label(&action))
-        .show_ui(ui, |ui| {
-            for candidate in [
-                Action::Blackout,
-                Action::Whiteout,
-                Action::Replace(default_replacement.clone()),
-            ] {
-                let text = action_label(&candidate);
-                let is_selected =
-                    std::mem::discriminant(&action) == std::mem::discriminant(&candidate);
-                if ui.selectable_label(is_selected, text).clicked() && !is_selected {
-                    action = candidate;
-                    changed = true;
+    let mut typed: Option<String> = None;
+    ui.add_space(4.0);
+    egui::Grid::new("selection_details")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Aktion");
+            egui::ComboBox::from_id_salt("region_action")
+                .selected_text(action_label(&action))
+                .icon(down_arrow)
+                .show_ui(ui, |ui| {
+                    for candidate in [
+                        Action::Blackout,
+                        Action::Whiteout,
+                        Action::Replace(default_replacement.clone()),
+                    ] {
+                        let text = action_label(&candidate);
+                        let is_selected =
+                            std::mem::discriminant(&action) == std::mem::discriminant(&candidate);
+                        if ui.selectable_label(is_selected, text).clicked() && !is_selected {
+                            action = candidate;
+                            changed = true;
+                        }
+                    }
+                });
+            ui.end_row();
+
+            // Der Ersatztext geht **nicht** über `set_action`: sonst legte jeder
+            // Tastendruck einen Verlaufsschritt an und ein Ersatztext von 50
+            // Zeichen schöbe den ganzen Stapel hinaus. Siehe
+            // [`crate::state::AppState::edit_replacement`].
+            if let Action::Replace(text) = &mut action {
+                ui.label("Ersatztext");
+                let mut buffer = text.clone();
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut buffer)
+                        // Feste Kennung — daran erkennt die Tastenauswertung
+                        // ein Textfeld, siehe [`crate::focus`].
+                        .id(crate::focus::id(crate::focus::REPLACEMENT)),
+                );
+                if field.changed() {
+                    typed = Some(buffer.clone());
                 }
+                *text = buffer;
+                ui.end_row();
             }
         });
-
-    // Der Ersatztext geht **nicht** über `set_action`: sonst legte jeder
-    // Tastendruck einen Verlaufsschritt an und ein Ersatztext von 50 Zeichen
-    // schöbe den ganzen Stapel hinaus. Siehe
-    // [`crate::state::AppState::edit_replacement`].
-    let mut typed: Option<String> = None;
-    if let Action::Replace(text) = &mut action {
-        let mut buffer = text.clone();
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut buffer)
-                // Feste Kennung — daran erkennt die Tastenauswertung ein
-                // Textfeld, siehe [`crate::focus`].
-                .id(crate::focus::id(crate::focus::REPLACEMENT)),
-        );
-        if field.changed() {
-            typed = Some(buffer.clone());
-        }
-        *text = buffer;
-    }
     if changed {
         state.set_action(index, action);
     } else if let Some(text) = typed {
         state.edit_replacement(index, text);
     }
 
-    if ui.button("Region löschen").clicked() {
+    ui.add_space(8.0);
+    let danger = ui.visuals().error_fg_color;
+    if ui
+        .add_sized(
+            egui::vec2(ui.available_width(), ui.spacing().interact_size.y + 4.0),
+            egui::Button::new(RichText::new("Region löschen").color(danger)),
+        )
+        .on_hover_text("Entfernt diese Region aus der Liste (Entf) — rückgängig mit Strg+Z")
+        .clicked()
+    {
         state.delete_selected();
     }
 }
@@ -614,6 +888,38 @@ mod tests {
     use std::ops::DerefMut;
 
     use super::*;
+
+    /// Jede Trefferart hat ihre eigene Form — Farbe allein reicht nicht
+    /// (WCAG 1.4.1) —, und die Form wird gemalt, nicht als Schriftzeichen
+    /// gesetzt: die Standardschriften von egui kennen `●`, `◆` und `▲` nicht.
+    #[test]
+    fn every_hit_kind_has_its_own_painted_shape() {
+        for (i, a) in REGION_COLORS.iter().enumerate() {
+            for b in &REGION_COLORS[i + 1..] {
+                assert_ne!(marker_shape(*a), marker_shape(*b), "{a:?} und {b:?}");
+            }
+        }
+        // Belegt, warum nicht mehr das Zeichen aus `RegionColor::marker`
+        // gesetzt wird: mindestens eines fehlt in der Schrift.
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let font = egui::FontId::proportional(14.0);
+        let missing = ctx.fonts(|fonts| {
+            REGION_COLORS
+                .iter()
+                .any(|c| !fonts.has_glyphs(&font, c.marker()))
+        });
+        assert!(missing, "alle Zeichen vorhanden — dann ginge auch Schrift");
+        // Und gemalt wird tatsächlich etwas.
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                for color in REGION_COLORS {
+                    marker(ui, color);
+                }
+            });
+        });
+        assert!(output.shapes.len() >= REGION_COLORS.len());
+    }
 
     /// Jedes Ergebnis braucht eine Erklärung, und die muss auf Deutsch
     /// erkennbar machen, ob geschwärzt wird oder nicht.

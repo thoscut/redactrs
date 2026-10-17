@@ -32,6 +32,41 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ---
 
+## Unveröffentlicht
+
+### Geändert
+
+* **Die Oberfläche ist überarbeitet** — gleiche Funktionen, gleiche Tasten,
+  ruhigeres Bild. Ein eigener Farbsatz für hell und dunkel mit einer
+  Akzentfarbe für Auswahl und Fokus; die Seite liegt mit weichem Schatten auf
+  einer eigenen, etwas dunkleren Fläche und steht waagerecht in der Mitte.
+  Blättern und Zoom sind aus der oberen Leiste in eine Ansichtsleiste über der
+  Seite gewandert: die obere Leiste brach bei gewöhnlicher Fensterbreite in
+  eine zweite Zeile um. „Exportieren“ ist als Hauptknopf hervorgehoben, der
+  Zoomregler zeigt Prozent statt einer Dezimalzahl. Die Seitenleiste hat
+  Zwischenüberschriften, eine zweispaltige Legende und eine größere kleine
+  Schrift; die Miniaturen zeigen die Zahl der Schwärzungen als neutrale
+  Plakette. Der leere Hauptbereich ist eine Ablagefläche mit einem Knopf
+  „PDF öffnen …“; ohne Dokument fehlen Miniaturspalte und Auswahlbereich. Der
+  Knopf, der den Zoom zurücksetzt, heißt „1:1“ statt ein zweites Mal
+  „100 %“, und die Statuszeile wiederholt Seite und Zoom nicht mehr.
+  Die vier Trefferfarben sind unverändert, und ihr Kontrast ist weiter gegen
+  jede Fläche geprüft, auf der sie liegen können — jetzt auch gegen die Fläche
+  um das Blatt.
+* **Barrierefreiheit der Oberfläche.** Zurückgenommene Schrift (Hinweise,
+  Dateiname, Polsterung, Koordinaten) erreicht jetzt 4,5:1 statt rund 2,5:1;
+  Rahmen von Häkchen- und Textfeldern 3:1; der Tastaturfokus ist ein breiter
+  Rand in der Akzentfarbe. Alle drei Werte sind getestet.
+* **Behoben: die Formen der Trefferarten fehlten.** Kreis, Raute und Dreieck
+  neben den Treffern kennt die Standardschrift nicht — sie erschienen als leere
+  Kästchen, und die Trefferarten waren nur noch an der Farbe zu
+  unterscheiden. Sie werden jetzt gemalt.
+* Trefferliste: ganze Zeile anklickbar und hervorgehoben, Seitenzahl in eigener
+  Spalte, Werte in fester Zeichenbreite. Auswahlbereich mit Kopfzeile und
+  „Aktion“ vor der Liste; Griffe an der Auswahl größer und leichter zu fassen.
+
+---
+
 ## 0.7.1 — 2026-10-16
 
 Bereich: `git log v0.7.0..v0.7.1`.
