@@ -23,7 +23,7 @@ use crate::state::{AppState, HitSummary};
 use crate::viewer::PageView;
 
 /// Breite der Spalte.
-pub const PANEL_WIDTH: f32 = 152.0;
+pub const PANEL_WIDTH: f32 = 124.0;
 /// Kleinste und größte Breite beim Ziehen am Rand.
 pub const PANEL_MIN_WIDTH: f32 = 96.0;
 /// Siehe [`PANEL_MIN_WIDTH`].
@@ -86,11 +86,11 @@ pub fn show(
     let count = state.page_count();
     if count == 0 {
         ui.add_space(8.0);
-        ui.label(RichText::new(crate::app::EMPTY_DOCUMENT_HINT).weak());
+        ui.label(RichText::new(crate::app::EMPTY_DOCUMENT_HINT).color(crate::theme::muted(ui)));
         return;
     }
 
-    let width = (ui.available_width() - 44.0).clamp(48.0, THUMB_WIDTH);
+    let width = (ui.available_width() - 12.0).clamp(48.0, THUMB_WIDTH);
     let mut jump: Option<usize> = None;
     // Ein Durchlauf über die Regionen für die ganze Spalte statt einer je
     // Kleinbild.
@@ -105,14 +105,11 @@ pub fn show(
                 let size = thumb_size(&state.page_view(page), width);
                 let hits = redactions.get(page).copied().unwrap_or(0);
 
+                // Das Bild, darunter die Seitenzahl; die Zahl der Schwärzungen
+                // sitzt als Plakette in der Ecke des Bildes.
                 let response = ui
-                    .horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("{}", page + 1))
-                                .small()
-                                .strong()
-                                .color(number_color(ui, current)),
-                        );
+                    .vertical_centered(|ui| {
+                        ui.spacing_mut().item_spacing.y = 3.0;
                         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
                         let visible = ui.is_rect_visible(rect);
                         if visible {
@@ -120,16 +117,49 @@ pub fn show(
                         }
                         paint_thumb(ui, rect, pages, page, current);
                         if hits > 0 {
-                            badge(ui, hits).on_hover_text("Schwärzungen auf dieser Seite");
+                            badge(ui, rect, page, hits)
+                                .on_hover_text("Schwärzungen auf dieser Seite");
                         }
-                        if pages.nothing_drawn(page) {
-                            ui.label(
-                                RichText::new(crate::app::NOTHING_DRAWN_MARK)
-                                    .small()
-                                    .color(ui.visuals().warn_fg_color),
-                            )
-                            .on_hover_text(crate::app::NOTHING_DRAWN_NOTICE);
-                        }
+                        ui.horizontal(|ui| {
+                            // Zahl und Warnzeichen zusammen mittig unter dem Bild.
+                            let warn = pages.nothing_drawn(page);
+                            let number = RichText::new(format!("{}", page + 1))
+                                .small()
+                                .strong()
+                                .color(number_color(ui, current));
+                            let font = egui::TextStyle::Small.resolve(ui.style());
+                            let mut width = ui.fonts(|f| {
+                                f.layout_no_wrap(
+                                    format!("{}", page + 1),
+                                    font.clone(),
+                                    Color32::WHITE,
+                                )
+                                .size()
+                                .x
+                            });
+                            if warn {
+                                width += ui.spacing().item_spacing.x
+                                    + ui.fonts(|f| {
+                                        f.layout_no_wrap(
+                                            crate::app::NOTHING_DRAWN_MARK.to_string(),
+                                            font,
+                                            Color32::WHITE,
+                                        )
+                                        .size()
+                                        .x
+                                    });
+                            }
+                            ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                            ui.label(number);
+                            if warn {
+                                ui.label(
+                                    RichText::new(crate::app::NOTHING_DRAWN_MARK)
+                                        .small()
+                                        .color(ui.visuals().warn_fg_color),
+                                )
+                                .on_hover_text(crate::app::NOTHING_DRAWN_NOTICE);
+                            }
+                        });
                         (response, visible)
                     })
                     .inner;
@@ -157,25 +187,26 @@ pub fn show(
     }
 }
 
-/// Die Zahl der Schwärzungen als kleine, dunkle Plakette.
-///
-/// Von Hand gemalt statt als `Frame` um ein Label: in der waagerechten Zeile
-/// würde der Rahmen auf die volle Höhe des Kleinbilds gezogen.
-fn badge(ui: &mut egui::Ui, count: usize) -> egui::Response {
+/// Die Zahl der Schwärzungen als Plakette in der rechten unteren Ecke des
+/// Kleinbilds, in der Akzentfarbe.
+fn badge(ui: &mut egui::Ui, thumb: egui::Rect, page: usize, count: usize) -> egui::Response {
+    let theme = crate::theme::Theme::of(ui.visuals());
     let galley = ui.painter().layout_no_wrap(
         count.to_string(),
         egui::TextStyle::Small.resolve(ui.style()),
-        ui.visuals().panel_fill,
+        theme.on_accent(),
     );
     let size = galley.size() + Vec2::new(10.0, 2.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    let size = Vec2::new(size.x.max(size.y), size.y);
+    let rect = egui::Rect::from_min_size(thumb.right_bottom() - size - Vec2::splat(4.0), size);
+    let response = ui.interact(rect, ui.id().with(("badge", page)), Sense::hover());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        painter.rect_filled(rect, BADGE_ROUNDING, ui.visuals().strong_text_color());
+        painter.rect_filled(rect, BADGE_ROUNDING, theme.accent());
         painter.galley(
             rect.center() - galley.size() / 2.0,
             galley,
-            ui.visuals().panel_fill,
+            theme.on_accent(),
         );
     }
     response
@@ -186,7 +217,7 @@ fn number_color(ui: &egui::Ui, current: bool) -> Color32 {
     if current {
         crate::theme::Theme::of(ui.visuals()).accent()
     } else {
-        ui.visuals().weak_text_color()
+        crate::theme::muted(ui)
     }
 }
 

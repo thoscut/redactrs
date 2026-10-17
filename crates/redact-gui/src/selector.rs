@@ -29,9 +29,9 @@ pub const MIN_DRAG_SIZE: f32 = 4.0;
 /// Durchmesser der Trefferzone eines Eckgriffs in Bildschirmpunkten.
 ///
 /// Deutlich größer als das gezeichnete Quadrat ([`crate::viewer::HANDLE_SIZE`],
-/// 5 pt): eine 5-pt-Zone trifft man mit der Maus nur zufällig. Ein Fangbereich,
+/// 7 pt): eine so kleine Zone trifft man mit der Maus nur zufällig. Ein Fangbereich,
 /// der großzügiger ist als die Zeichnung, ist bei Griffen üblich und richtig.
-pub const HANDLE_HIT_SIZE: f32 = 16.0;
+pub const HANDLE_HIT_SIZE: f32 = 20.0;
 
 /// Was egui in einem Bild über die Maus weiß — als reine Daten.
 ///
@@ -789,7 +789,7 @@ mod tests {
         }
 
         // Die Zone ist großzügiger als die Zeichnung: ein Punkt, der das
-        // gemalte Quadrat (Kantenlänge `viewer::HANDLE_SIZE`, also ±2,5 pt um
+        // gemalte Quadrat (Kantenlänge `viewer::HANDLE_SIZE`, also ±3,5 pt um
         // die Ecke) klar verfehlt, trifft den Griff trotzdem.
         let just_outside_the_drawing =
             rect.left_top() + egui::Vec2::splat(crate::viewer::HANDLE_SIZE);

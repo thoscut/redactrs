@@ -320,22 +320,61 @@ fn tool_buttons(
                 } else {
                     button.hint
                 };
-                let widget = if toolbar::is_primary(button.action) {
-                    primary_button(ui, button.label(), enabled)
+                // Gefüllt nur, solange er benutzbar ist: Weiß auf blassem
+                // Violett wäre unlesbar, ein grauer Knopf sagt dasselbe besser.
+                let response = if toolbar::is_primary(button.action) && enabled {
+                    ui.add(primary_button(ui, button.label(), enabled))
                 } else {
-                    greyable_button(button.label(), enabled)
+                    ghost(ui, |ui| {
+                        ui.add_enabled(enabled, greyable_button(button.label(), enabled))
+                    })
                 };
-                if ui
-                    .add_enabled(enabled, widget)
-                    .on_hover_text(hint)
-                    .clicked()
-                {
+                if response.on_hover_text(hint).clicked() {
                     clicked = Some(button.action);
                 }
             }
         }
     }
     clicked
+}
+
+/// Zeichnet `add` mit Knöpfen ohne Rahmen und Füllung im Ruhezustand — erst
+/// beim Darüberfahren (und mit Fokus) erscheinen sie. Eine Leiste aus lauter
+/// umrandeten Kästchen sieht aus wie eine Tastatur.
+fn ghost<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+        widgets.inactive.bg_stroke = Stroke::NONE;
+        // Nicht `noninteractive.weak_bg_fill`: dorthin blendet egui einen
+        // abgeschalteten Knopf aus — durchsichtig hieße unsichtbar.
+        widgets.noninteractive.bg_stroke = Stroke::NONE;
+        add(ui)
+    })
+    .inner
+}
+
+/// Ein Häkchenfeld, das angekreuzt in der Akzentfarbe gefüllt ist — „an“ ist
+/// so auf einen Blick von „aus“ zu unterscheiden, nicht erst am dünnen Haken.
+pub(crate) fn accent_checkbox(ui: &mut egui::Ui, checked: &mut bool, text: &str) -> egui::Response {
+    let on = *checked;
+    // Die Beschriftung behält ihre Farbe; nur Kästchen und Haken wechseln.
+    let label = RichText::new(text).color(ui.visuals().text_color());
+    ui.scope(|ui| {
+        if on {
+            let theme = Theme::of(ui.visuals());
+            let widgets = &mut ui.visuals_mut().widgets;
+            for state in [&mut widgets.inactive, &mut widgets.hovered] {
+                state.bg_fill = theme.accent();
+                state.bg_stroke.color = theme.accent();
+                state.fg_stroke.color = theme.on_accent();
+            }
+            widgets.active.bg_fill = theme.accent();
+            widgets.active.fg_stroke.color = theme.on_accent();
+        }
+        ui.checkbox(checked, label)
+    })
+    .inner
 }
 
 /// Ein Hauptknopf: in der Akzentfarbe gefüllt, sonst wie [`greyable_button`].
@@ -358,7 +397,7 @@ pub(crate) fn section_title(ui: &mut egui::Ui, title: &str) {
             .small()
             .strong()
             .extra_letter_spacing(0.8)
-            .color(ui.visuals().weak_text_color()),
+            .color(crate::theme::muted(ui)),
     );
 }
 
@@ -721,54 +760,67 @@ fn empty_state(ui: &mut egui::Ui) -> bool {
         ),
     );
 
-    // Gestrichelte Ablagefläche: sagt ohne Worte „hier kann etwas hin“.
+    // Eine ruhige Karte. Der gestrichelte Rahmen erscheint erst, wenn
+    // wirklich eine Datei über dem Fenster schwebt ([`RedactApp::paint_drop_hint`]).
     let painter = ui.painter();
-    painter.rect_filled(card, theme::WINDOW_ROUNDING, ui.visuals().window_fill);
-    let stroke = Stroke::new(1.5, ui.visuals().widgets.inactive.bg_stroke.color);
-    let edge = card.shrink(1.0);
-    let corners = [
-        edge.left_top(),
-        edge.right_top(),
-        edge.right_bottom(),
-        edge.left_bottom(),
-        edge.left_top(),
-    ];
-    for side in corners.windows(2) {
-        painter.extend(egui::Shape::dashed_line(side, stroke, 8.0, 6.0));
-    }
+    painter.add(
+        egui::epaint::Shadow {
+            offset: Vec2::new(0.0, 6.0),
+            blur: 24.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(if ui.visuals().dark_mode { 90 } else { 22 }),
+        }
+        .as_shape(card, theme::WINDOW_ROUNDING),
+    );
+    painter.rect(
+        card,
+        theme::WINDOW_ROUNDING,
+        ui.visuals().window_fill,
+        ui.visuals().window_stroke,
+    );
 
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(card.shrink(24.0)), |ui| {
         ui.vertical_centered(|ui| {
-            ui.add_space((card.height() - 230.0).max(0.0) / 2.0);
-            ui.label(RichText::new("🗁").size(44.0).color(theme.accent()));
-            ui.add_space(6.0);
+            ui.add_space((card.height() - 250.0).max(0.0) / 2.0);
+            // Das Symbol auf einem Kreis in der Auswahlfarbe.
+            let (circle, _) = ui.allocate_exact_size(Vec2::splat(64.0), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(circle.center(), 32.0, ui.visuals().selection.bg_fill);
+            ui.painter().text(
+                circle.center(),
+                egui::Align2::CENTER_CENTER,
+                "🗁",
+                egui::FontId::proportional(28.0),
+                theme.accent(),
+            );
+            ui.add_space(16.0);
             ui.label(
                 RichText::new(EMPTY_DOCUMENT_HINT)
-                    .size(19.0)
+                    .size(18.0)
                     .strong()
                     .color(ui.visuals().strong_text_color()),
             );
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.label(
                 RichText::new("Kontoauszüge und Bankunterlagen — alles bleibt auf diesem Rechner.")
-                    .weak(),
+                    .color(crate::theme::muted(ui)),
             );
-            ui.add_space(16.0);
+            ui.add_space(24.0);
             if ui
                 .add(
                     primary_button(ui, "🗁 PDF öffnen …".to_string(), true)
-                        .min_size(Vec2::new(160.0, 32.0)),
+                        .min_size(Vec2::new(168.0, 34.0)),
                 )
                 .on_hover_text("PDF-Datei öffnen (Strg+O)")
                 .clicked()
             {
                 open = true;
             }
-            ui.add_space(10.0);
+            ui.add_space(8.0);
             ui.label(
-                RichText::new("„🗁 Öffnen“ in der Leiste oben, Strg+O — oder eine PDF-Datei in dieses Fenster ziehen.")
+                RichText::new("Strg+O")
                     .small()
-                    .weak(),
+                    .color(crate::theme::muted(ui)),
             );
         });
     });
@@ -793,7 +845,7 @@ fn wordmark(ui: &mut egui::Ui) {
 }
 
 /// Größe der Ablagefläche im leeren Hauptbereich.
-const EMPTY_CARD_SIZE: Vec2 = Vec2::new(520.0, 300.0);
+const EMPTY_CARD_SIZE: Vec2 = Vec2::new(520.0, 320.0);
 
 /// Wer die Rückfrage vor Datenverlust beantwortet.
 ///
@@ -2357,28 +2409,51 @@ impl RedactApp {
             ui.add_space(12.0);
 
             clicked = tool_buttons(ui, &context, |action| {
-                toolbar::bar(action) == toolbar::Bar::Document
+                toolbar::bar(action) == toolbar::Bar::Document && !toolbar::is_primary(action)
             });
 
-            // Der Themenschalter gehört ans Ende: er ist Einstellung, nicht
-            // Arbeitsschritt.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(format!(
-                        "{} {}",
-                        self.theme.switch_icon(),
-                        self.theme.switch_text()
-                    ))
-                    .on_hover_text(format!(
-                        "Zur {}-Darstellung wechseln (aktuell: {})",
-                        self.theme.switch_text(),
-                        self.theme.label()
-                    ))
-                    .clicked()
-                {
-                    clicked = Some(ToolAction::ToggleTheme);
-                }
-            });
+            // Rechts außen der Hauptknopf — der Schritt, auf den alles
+            // hinausläuft, steht dort, wo der Blick endet — und daneben der
+            // Themenschalter (Einstellung, nicht Arbeitsschritt). Von links
+            // nach rechts gezeichnet und nur nach rechts geschoben, damit der
+            // Tabulator in Leserichtung bleibt.
+            let theme_label = format!("{} {}", self.theme.switch_icon(), self.theme.switch_text());
+            let export_label = toolbar::buttons()
+                .into_iter()
+                .find(|b| toolbar::is_primary(b.action))
+                .map(|b| b.label())
+                .unwrap_or_default();
+            let reserve = [&export_label, &theme_label]
+                .iter()
+                .map(|text| {
+                    let font = egui::TextStyle::Button.resolve(ui.style());
+                    let width = ui.fonts(|f| {
+                        f.layout_no_wrap((*text).clone(), font, Color32::WHITE)
+                            .size()
+                            .x
+                    });
+                    width + 2.0 * ui.spacing().button_padding.x + ui.spacing().item_spacing.x
+                })
+                .sum::<f32>()
+                + 2.0 * ui.spacing().item_spacing.x
+                + 8.0;
+            ui.add_space((ui.available_width() - reserve).max(0.0));
+
+            if let Some(action) = tool_buttons(ui, &context, toolbar::is_primary) {
+                clicked = Some(action);
+            }
+            ui.separator();
+            let theme_switch = ghost(ui, |ui| ui.button(theme_label));
+            if theme_switch
+                .on_hover_text(format!(
+                    "Zur {}-Darstellung wechseln (aktuell: {})",
+                    self.theme.switch_text(),
+                    self.theme.label()
+                ))
+                .clicked()
+            {
+                clicked = Some(ToolAction::ToggleTheme);
+            }
         });
 
         if let Some(action) = clicked {
@@ -2657,7 +2732,7 @@ impl RedactApp {
                          gespeichert und steht in keiner Ausgabedatei, in \
                          keinem Audit-Log und in keiner Meldung.",
                     )
-                    .weak(),
+                    .color(crate::theme::muted(ui)),
                 );
                 ui.add_space(BAR_PADDING);
 
@@ -2697,17 +2772,10 @@ impl RedactApp {
         }
     }
 
+    /// Die Statuszeile: links, was gerade geschah (Meldung, Fehler,
+    /// Warnungen, Arbeit im Hintergrund), rechts gedämpft die Seitenzahl.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let pages = self.state.page_count();
-            let current = if pages == 0 {
-                0
-            } else {
-                self.state.current_page + 1
-            };
-            ui.label(RichText::new(format!("Seite {current} / {pages}")).strong());
-            ui.separator();
-
             match &self.error {
                 Some(message) => {
                     let colour = ui.visuals().error_fg_color;
@@ -2737,8 +2805,26 @@ impl RedactApp {
             if self.pages.is_busy() {
                 ui.separator();
                 ui.add(egui::Spinner::new().size(12.0));
-                ui.label(RichText::new("Seitenbild wird erstellt …").weak());
+                ui.label(
+                    RichText::new("Seitenbild wird erstellt …").color(crate::theme::muted(ui)),
+                );
             }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let pages = self.state.page_count();
+                let current = if pages == 0 {
+                    0
+                } else {
+                    self.state.current_page + 1
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "Seite {current} / {pages}  ·  {:.0} %",
+                        self.state.zoom * 100.0
+                    ))
+                    .color(crate::theme::muted(ui)),
+                );
+            });
         });
     }
 
