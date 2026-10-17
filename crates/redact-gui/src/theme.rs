@@ -81,7 +81,8 @@ impl Theme {
         visuals.warn_fg_color = palette.warn;
         visuals.error_fg_color = palette.error;
         visuals.selection.bg_fill = palette.selection;
-        visuals.selection.stroke = Stroke::new(1.0, palette.selection_text);
+        // Auch der Rand eines Textfeldes mit Fokus — deshalb 2 pt.
+        visuals.selection.stroke = Stroke::new(2.0, palette.selection_text);
 
         visuals.window_rounding = Rounding::same(WINDOW_ROUNDING);
         visuals.menu_rounding = Rounding::same(WIDGET_ROUNDING);
@@ -116,7 +117,11 @@ impl Theme {
         // ein Knopf soll hell und ruhig bleiben.
         widgets.inactive.bg_fill = palette.rail;
         widgets.inactive.weak_bg_fill = palette.control;
-        widgets.inactive.bg_stroke = Stroke::new(1.0, palette.border);
+        // Rahmen von Häkchenfeldern, Textfeldern und Auswahllisten: 3:1 gegen
+        // jede Fläche (WCAG 1.4.11) — sonst ist ein leeres Feld nicht als Feld
+        // zu erkennen. Die Knöpfe der Leisten zeichnen ihren Rahmen erst beim
+        // Darüberfahren ([`crate::app::tool_buttons`]).
+        widgets.inactive.bg_stroke = Stroke::new(1.0, palette.control_border);
         widgets.inactive.fg_stroke = Stroke::new(1.0, palette.text_strong);
         widgets.inactive.rounding = rounding;
 
@@ -129,7 +134,9 @@ impl Theme {
 
         widgets.active.bg_fill = palette.control_active;
         widgets.active.weak_bg_fill = palette.control_active;
-        widgets.active.bg_stroke = Stroke::new(1.0, palette.accent);
+        // `active` ist auch der Zustand „hat den Tastaturfokus“: ein 2-pt-Rand
+        // in der Akzentfarbe, damit man sieht, wo der Tabulator steht.
+        widgets.active.bg_stroke = Stroke::new(2.0, palette.accent);
         widgets.active.fg_stroke = Stroke::new(2.0, palette.text_strong);
         widgets.active.rounding = rounding;
         widgets.active.expansion = 0.0;
@@ -168,7 +175,7 @@ impl Theme {
             style.text_styles = [
                 (
                     TextStyle::Small,
-                    FontId::new(11.0, FontFamily::Proportional),
+                    FontId::new(11.5, FontFamily::Proportional),
                 ),
                 (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
                 (
@@ -197,6 +204,16 @@ impl Theme {
         self.palette().canvas
     }
 
+    /// Zurückgenommene Schrift: Hinweise, Vorschläge, Nebensätze.
+    ///
+    /// Statt egui's `weak()`: das mischt die Schriftfarbe zur Hälfte mit dem
+    /// Hintergrund und landet damit bei rund 2,5:1 — für Text verlangt
+    /// WCAG 1.4.3 aber 4,5:1. Diese Farbe erreicht das auf jeder Fläche, auf
+    /// der Schrift steht (Test `muted_text_reaches_the_text_contrast_minimum`).
+    pub fn muted(self) -> Color32 {
+        self.palette().muted
+    }
+
     /// Die Akzentfarbe — Auswahl, Fokus, der Hauptknopf.
     pub fn accent(self) -> Color32 {
         self.palette().accent
@@ -221,9 +238,11 @@ impl Theme {
                 control_active: Color32::from_rgb(229, 231, 236),
                 divider: Color32::from_rgb(226, 229, 234),
                 border: Color32::from_rgb(211, 215, 222),
+                control_border: Color32::from_rgb(128, 136, 150),
                 border_strong: Color32::from_rgb(170, 177, 189),
                 text: Color32::from_rgb(55, 65, 81),
                 text_strong: Color32::from_rgb(17, 24, 39),
+                muted: Color32::from_rgb(92, 100, 112),
                 accent: Color32::from_rgb(109, 40, 217),
                 on_accent: Color32::WHITE,
                 selection: Color32::from_rgb(233, 225, 255),
@@ -244,9 +263,11 @@ impl Theme {
                 control_active: Color32::from_rgb(60, 64, 72),
                 divider: Color32::from_rgb(44, 47, 53),
                 border: Color32::from_rgb(56, 60, 68),
+                control_border: Color32::from_rgb(104, 110, 122),
                 border_strong: Color32::from_rgb(86, 92, 104),
                 text: Color32::from_rgb(200, 205, 213),
                 text_strong: Color32::from_rgb(236, 238, 242),
+                muted: Color32::from_rgb(140, 146, 156),
                 accent: Color32::from_rgb(167, 139, 250),
                 on_accent: Color32::from_rgb(24, 16, 48),
                 selection: Color32::from_rgb(64, 42, 120),
@@ -307,6 +328,12 @@ impl Theme {
     }
 }
 
+/// Die zurückgenommene Schriftfarbe zum Thema dieses `Ui` — siehe
+/// [`Theme::muted`].
+pub fn muted(ui: &egui::Ui) -> Color32 {
+    Theme::of(ui.visuals()).muted()
+}
+
 /// Eckenrundung von Knöpfen, Feldern und Menüs.
 pub const WIDGET_ROUNDING: f32 = 6.0;
 /// Eckenrundung von Fenstern (Passwortabfrage) und Karten.
@@ -326,9 +353,11 @@ struct Palette {
     control_active: Color32,
     divider: Color32,
     border: Color32,
+    control_border: Color32,
     border_strong: Color32,
     text: Color32,
     text_strong: Color32,
+    muted: Color32,
     accent: Color32,
     on_accent: Color32,
     selection: Color32,
@@ -467,6 +496,84 @@ mod tests {
             assert!(style.spacing.interact_size.y >= 24.0);
             let small = &style.text_styles[&egui::TextStyle::Small];
             assert!(small.size >= 11.0, "{theme:?}: kleine Schrift zu klein");
+        }
+    }
+    fn contrast(a: Color32, b: Color32) -> f64 {
+        fn luminance(c: Color32) -> f64 {
+            let channel = |v: u8| {
+                let v = v as f64 / 255.0;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+        }
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// Flächen, auf denen Schrift steht.
+    fn text_surfaces(theme: Theme) -> Vec<Color32> {
+        let v = theme.visuals();
+        vec![
+            v.panel_fill,
+            v.window_fill,
+            v.extreme_bg_color,
+            v.faint_bg_color,
+            theme.canvas(),
+        ]
+    }
+
+    /// Zurückgenommene Schrift erreicht trotzdem 4,5:1 (WCAG 1.4.3) — auf jeder
+    /// Fläche, auf der Schrift steht. egui's eigenes `weak()` schafft das
+    /// nicht; daran hängt, dass Hinweise und Dateinamen lesbar bleiben.
+    #[test]
+    fn muted_text_reaches_the_text_contrast_minimum() {
+        for theme in THEMES {
+            for surface in text_surfaces(theme) {
+                let ratio = contrast(theme.muted(), surface);
+                assert!(
+                    ratio >= 4.5,
+                    "{theme:?}: gedämpft gegen {surface:?} nur {ratio:.2}:1"
+                );
+                let text = theme.visuals().text_color();
+                let ratio = contrast(text, surface);
+                assert!(
+                    ratio >= 7.0,
+                    "{theme:?}: Schrift gegen {surface:?} nur {ratio:.2}:1"
+                );
+            }
+            // Gegenprobe: egui's `weak()` fiele durch — sonst bräuchte es
+            // diese Farbe nicht.
+            let v = theme.visuals();
+            assert!(
+                contrast(v.weak_text_color(), v.panel_fill) < 4.5,
+                "{theme:?}"
+            );
+        }
+    }
+
+    /// Der Rand eines Bedienelements ist als Grenze erkennbar: 3:1 nach
+    /// WCAG 1.4.11 gegen den Bereich, das Feld selbst und das Fenster.
+    #[test]
+    fn control_borders_reach_the_graphic_contrast_minimum() {
+        for theme in THEMES {
+            let v = theme.visuals();
+            let border = v.widgets.inactive.bg_stroke.color;
+            for surface in [v.panel_fill, v.window_fill, v.extreme_bg_color] {
+                let ratio = contrast(border, surface);
+                assert!(
+                    ratio >= 3.0,
+                    "{theme:?}: Rand gegen {surface:?} nur {ratio:.2}:1"
+                );
+            }
+            // Fokus: deutlich breiter als ein gewöhnlicher Rand, in der
+            // Akzentfarbe, und ebenfalls 3:1.
+            assert!(v.widgets.active.bg_stroke.width >= 2.0);
+            assert!(contrast(v.widgets.active.bg_stroke.color, v.panel_fill) >= 3.0);
+            assert!(contrast(v.selection.stroke.color, v.extreme_bg_color) >= 3.0);
         }
     }
 }
