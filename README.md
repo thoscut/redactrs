@@ -1885,8 +1885,8 @@ einzige.
 Ein ausgewähltes Rechteck trägt **vier Eckgriffe** (`Handle::TopLeft` …
 `BottomRight` in `crates/redact-gui/src/selector.rs`). Daran lässt es sich
 nachziehen: die gegenüberliegende Ecke bleibt stehen, der Mauszeiger zeigt die
-Ziehrichtung an. Die Fangzone ist mit 16 Bildschirmpunkten bewusst größer als
-das gezeichnete 5-pt-Quadrat — eine Zone in Zeichnungsgröße trifft man nur
+Ziehrichtung an. Die Fangzone ist mit 20 Bildschirmpunkten bewusst größer als
+das gezeichnete 7-pt-Quadrat — eine Zone in Zeichnungsgröße trifft man nur
 zufällig.
 
 Zieht man ein Rechteck über einen Treffer der **Negativliste**, überstimmt die
@@ -1932,7 +1932,7 @@ es ein Verlaufsschritt, und ein Strg+Z holt den alten Stand vollständig zurück
 
 ### Miniaturansichten und Zoom
 
-Links steht eine Spalte mit **Miniaturansichten**, Seitenzahl neben jedem Bild.
+Links steht eine Spalte mit **Miniaturansichten**, Seitenzahl unter jedem Bild, die Zahl der Schwärzungen als Plakette in seiner Ecke.
 Sie zeigt dieselben Kleinbilder, die der Hauptbereich ohnehin anfordert — es
 wird nichts doppelt gerendert. Die Spalte lässt sich am Rand zwischen 96 und
 260 Punkt breit ziehen.

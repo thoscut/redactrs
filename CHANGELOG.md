@@ -50,6 +50,17 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
   Die vier Trefferfarben sind unverändert, und ihr Kontrast ist weiter gegen
   jede Fläche geprüft, auf der sie liegen können — jetzt auch gegen die Fläche
   um das Blatt.
+* **Barrierefreiheit der Oberfläche.** Zurückgenommene Schrift (Hinweise,
+  Dateiname, Polsterung, Koordinaten) erreicht jetzt 4,5:1 statt rund 2,5:1;
+  Rahmen von Häkchen- und Textfeldern 3:1; der Tastaturfokus ist ein breiter
+  Rand in der Akzentfarbe. Alle drei Werte sind getestet.
+* **Behoben: die Formen der Trefferarten fehlten.** Kreis, Raute und Dreieck
+  neben den Treffern kennt die Standardschrift nicht — sie erschienen als leere
+  Kästchen, und die Trefferarten waren nur noch an der Farbe zu
+  unterscheiden. Sie werden jetzt gemalt.
+* Trefferliste: ganze Zeile anklickbar und hervorgehoben, Seitenzahl in eigener
+  Spalte, Werte in fester Zeichenbreite. Auswahlbereich mit Kopfzeile und
+  „Aktion“ vor der Liste; Griffe an der Auswahl größer und leichter zu fassen.
 
 ---
 
