@@ -67,11 +67,18 @@ pub fn show(
     state: &mut AppState,
     summary: &HitSummary,
 ) -> Option<PatternToggle> {
+    ui.add_space(SECTION_GAP);
+    crate::app::section_title(ui, "Ausgabe");
     output_name(ui, state);
-    ui.separator();
+    ui.add_space(SECTION_GAP);
 
-    ui.heading("Treffer");
-    ui.label(RichText::new(summary.headline()).strong());
+    crate::app::section_title(ui, "Treffer");
+    ui.label(
+        RichText::new(summary.headline())
+            .strong()
+            .size(15.0)
+            .color(ui.visuals().strong_text_color()),
+    );
     let toggle = detection(ui, state);
     legend(ui);
     padding_note(ui, state.config.padding);
@@ -183,7 +190,10 @@ fn warning_color(ui: &egui::Ui) -> Color32 {
 }
 
 /// Vertikale Luft um den Detailbereich.
-const BAR_PADDING: f32 = 4.0;
+const BAR_PADDING: f32 = 8.0;
+
+/// Luft vor einer Zwischenüberschrift.
+const SECTION_GAP: f32 = 6.0;
 
 /// Namenszusatz der Ausgabedatei samt Vorschau des Ergebnisses.
 fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
@@ -273,13 +283,24 @@ fn padding_note(ui: &mut egui::Ui, padding: f64) {
         );
 }
 
+/// Die vier Trefferfarben, zwei je Zeile — ein Zeichen und sein Wort bleiben
+/// zusammen, statt mitten im Paar umzubrechen.
 fn legend(ui: &mut egui::Ui) {
-    ui.horizontal_wrapped(|ui| {
-        for color in REGION_COLORS {
-            ui.label(RichText::new(color.marker()).color(dot_color(color)));
-            ui.label(RichText::new(color.label()).small().weak());
-        }
-    });
+    egui::Grid::new("legend")
+        .num_columns(2)
+        .spacing([12.0, 2.0])
+        .show(ui, |ui| {
+            for (i, color) in REGION_COLORS.into_iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(RichText::new(color.marker()).color(dot_color(color)));
+                    ui.label(RichText::new(color.label()).small());
+                });
+                if i % 2 == 1 {
+                    ui.end_row();
+                }
+            }
+        });
 }
 
 /// Höhe einer Trefferzeile ohne Zwischenraum.
@@ -504,7 +525,11 @@ pub fn outcome_tooltip(outcome: HitOutcome) -> &'static str {
 /// Detailbereich für die ausgewählte Region.
 fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     let Some(index) = state.selected_region else {
-        ui.label(RichText::new("Keine Region ausgewählt.").weak());
+        crate::app::section_title(ui, "Auswahl");
+        ui.label(
+            RichText::new("Keine Region ausgewählt — in der Liste oder auf der Seite anklicken.")
+                .weak(),
+        );
         return;
     };
     let Some(entry) = state.regions.get(index) else {
@@ -518,7 +543,7 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     let outcome = summary.outcome(index);
     let mut action = entry.action.clone();
 
-    ui.label(RichText::new("Auswahl").strong());
+    crate::app::section_title(ui, "Auswahl");
     // `saturating_add`, weil die Seitennummer aus fremder Hand kommt (Review-Datei,
     // `--manual-regions`): bei `usize::MAX` liefe die 1-basierte Anzeige im Debug-Build
     // über und löste eine Panic aus; im Release-Build stünde „Seite 0" da. Die erste
@@ -595,7 +620,12 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
         state.edit_replacement(index, text);
     }
 
-    if ui.button("Region löschen").clicked() {
+    let danger = ui.visuals().error_fg_color;
+    if ui
+        .button(RichText::new("Region löschen").color(danger))
+        .on_hover_text("Entfernt diese Region aus der Liste (Entf) — rückgängig mit Strg+Z")
+        .clicked()
+    {
         state.delete_selected();
     }
 }
