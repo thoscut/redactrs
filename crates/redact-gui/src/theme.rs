@@ -1,14 +1,25 @@
 //! Helles und dunkles Thema.
 //!
-//! Zwei Zeilen egui-Vorgabe und ein Umschalter — mehr braucht es nicht. Der
-//! einzige Punkt, an dem hier wirklich etwas zu entscheiden war: die vier
-//! Trefferfarben ([`crate::state::RegionColor`]) sind in **beiden** Themen
-//! dieselben. Zwei Farbsätze zu pflegen hieße, den Kontrast zweimal
-//! nachzurechnen und zweimal falsch machen zu können; stattdessen sind die
-//! Farben so gewählt, dass sie über hellem **und** dunklem Grund die 3:1 aus
-//! WCAG 1.4.11 erreichen. Geprüft wird das gegen genau die Flächen, auf denen
-//! sie wirklich liegen — siehe [`Theme::backgrounds`] und den Test
-//! `region_colours_reach_the_graphic_contrast_minimum` in [`crate::state`].
+//! Ein eigener Farbsatz auf Schiefer-Grundlage statt der nackten
+//! egui-Vorgabe, eine Akzentfarbe (Violett) für Auswahl, Fokus und den einen
+//! Hauptknopf, dazu Abstände, Rundungen und Schriftgrößen, die die Leisten
+//! ruhiger und die Trefferliste lesbarer machen. Alles davon steht in
+//! [`Theme::visuals`] und [`Theme::apply`] — sonst nirgends.
+//!
+//! Das Violett ist mit Absicht keine der vier Trefferfarben
+//! ([`crate::state::RegionColor`]: Blau, Grün, Rot, Orange): eine markierte
+//! Zeile darf nicht aussehen wie eine Trefferart.
+//!
+//! Der einzige Punkt, an dem hier wirklich etwas zu entscheiden war: die vier
+//! Trefferfarben sind in **beiden** Themen dieselben. Zwei Farbsätze zu
+//! pflegen hieße, den Kontrast zweimal nachzurechnen und zweimal falsch machen
+//! zu können; stattdessen sind die Flächen so gewählt, dass jede Trefferfarbe
+//! über ihnen die 3:1 aus WCAG 1.4.11 erreicht. Geprüft wird das gegen genau
+//! die Flächen, auf denen sie wirklich liegen — siehe [`Theme::backgrounds`]
+//! und den Test `region_colours_reach_the_graphic_contrast_minimum` in
+//! [`crate::state`].
+
+use egui::{Color32, Rounding, Shadow, Stroke, Vec2};
 
 /// Das Papier ist in beiden Themen weiß: eine PDF-Seite wird nicht eingefärbt,
 /// sonst stimmte die Vorschau nicht mehr mit dem Ausdruck überein.
@@ -35,6 +46,16 @@ impl Theme {
         }
     }
 
+    /// Das Thema, zu dem diese egui-Werte gehören — für Zeichenfunktionen, die
+    /// nur ein `Ui` in der Hand haben.
+    pub fn of(visuals: &egui::Visuals) -> Self {
+        if visuals.dark_mode {
+            Theme::Dark
+        } else {
+            Theme::Light
+        }
+    }
+
     /// Das jeweils andere Thema.
     pub fn toggled(self) -> Self {
         match self {
@@ -43,11 +64,197 @@ impl Theme {
         }
     }
 
-    /// Die egui-Vorgabe zum Thema.
+    /// Farben, Rundungen und Schatten des Themas.
     pub fn visuals(self) -> egui::Visuals {
-        match self {
+        let palette = self.palette();
+        let mut visuals = match self {
             Theme::Light => egui::Visuals::light(),
             Theme::Dark => egui::Visuals::dark(),
+        };
+
+        visuals.panel_fill = palette.panel;
+        visuals.window_fill = palette.window;
+        visuals.extreme_bg_color = palette.field;
+        visuals.faint_bg_color = palette.faint;
+        visuals.code_bg_color = palette.faint;
+        visuals.hyperlink_color = palette.accent;
+        visuals.warn_fg_color = palette.warn;
+        visuals.error_fg_color = palette.error;
+        visuals.selection.bg_fill = palette.selection;
+        visuals.selection.stroke = Stroke::new(1.0, palette.selection_text);
+
+        visuals.window_rounding = Rounding::same(WINDOW_ROUNDING);
+        visuals.menu_rounding = Rounding::same(WIDGET_ROUNDING);
+        visuals.window_stroke = Stroke::new(1.0, palette.border);
+        visuals.window_shadow = Shadow {
+            offset: Vec2::new(0.0, 8.0),
+            blur: 28.0,
+            spread: 0.0,
+            color: palette.shadow,
+        };
+        visuals.popup_shadow = Shadow {
+            offset: Vec2::new(0.0, 4.0),
+            blur: 12.0,
+            spread: 0.0,
+            color: palette.shadow,
+        };
+        visuals.slider_trailing_fill = true;
+        visuals.striped = false;
+        visuals.indent_has_left_vline = false;
+
+        let widgets = &mut visuals.widgets;
+        let rounding = Rounding::same(WIDGET_ROUNDING);
+
+        widgets.noninteractive.bg_fill = palette.panel;
+        widgets.noninteractive.weak_bg_fill = palette.panel;
+        widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.divider);
+        widgets.noninteractive.fg_stroke = Stroke::new(1.0, palette.text);
+        widgets.noninteractive.rounding = rounding;
+
+        // `bg_fill` tragen Häkchenfelder und die Schiene des Zoomreglers,
+        // `weak_bg_fill` die Knöpfe: die Schiene muss sich vom Bereich abheben,
+        // ein Knopf soll hell und ruhig bleiben.
+        widgets.inactive.bg_fill = palette.rail;
+        widgets.inactive.weak_bg_fill = palette.control;
+        widgets.inactive.bg_stroke = Stroke::new(1.0, palette.border);
+        widgets.inactive.fg_stroke = Stroke::new(1.0, palette.text_strong);
+        widgets.inactive.rounding = rounding;
+
+        widgets.hovered.bg_fill = palette.control_hover;
+        widgets.hovered.weak_bg_fill = palette.control_hover;
+        widgets.hovered.bg_stroke = Stroke::new(1.0, palette.border_strong);
+        widgets.hovered.fg_stroke = Stroke::new(1.5, palette.text_strong);
+        widgets.hovered.rounding = rounding;
+        widgets.hovered.expansion = 0.0;
+
+        widgets.active.bg_fill = palette.control_active;
+        widgets.active.weak_bg_fill = palette.control_active;
+        widgets.active.bg_stroke = Stroke::new(1.0, palette.accent);
+        widgets.active.fg_stroke = Stroke::new(2.0, palette.text_strong);
+        widgets.active.rounding = rounding;
+        widgets.active.expansion = 0.0;
+
+        widgets.open.bg_fill = palette.control_hover;
+        widgets.open.weak_bg_fill = palette.control_hover;
+        widgets.open.bg_stroke = Stroke::new(1.0, palette.border_strong);
+        widgets.open.fg_stroke = Stroke::new(1.0, palette.text_strong);
+        widgets.open.rounding = rounding;
+
+        visuals
+    }
+
+    /// Setzt das ganze Thema am Kontext: [`Theme::visuals`] samt Abständen
+    /// und Schriftgrößen.
+    ///
+    /// Abstände und Schriftgrößen hängen nicht vom Thema ab, gehören aber zum
+    /// selben Aufruf — `set_visuals` allein ließe sie auf der egui-Vorgabe,
+    /// und die ist für eine Liste mit 150 Treffern zu gedrängt.
+    pub fn apply(self, ctx: &egui::Context) {
+        ctx.style_mut(|style| {
+            style.visuals = self.visuals();
+
+            let spacing = &mut style.spacing;
+            spacing.item_spacing = Vec2::new(8.0, 6.0);
+            spacing.button_padding = Vec2::new(8.0, 4.0);
+            spacing.interact_size.y = 24.0;
+            spacing.icon_width = 16.0;
+            spacing.icon_width_inner = 9.0;
+            spacing.icon_spacing = 6.0;
+            spacing.combo_width = 140.0;
+            spacing.menu_margin = egui::Margin::same(6.0);
+            spacing.window_margin = egui::Margin::same(16.0);
+
+            use egui::{FontFamily, FontId, TextStyle};
+            style.text_styles = [
+                (
+                    TextStyle::Small,
+                    FontId::new(11.0, FontFamily::Proportional),
+                ),
+                (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
+                (
+                    TextStyle::Button,
+                    FontId::new(13.5, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Heading,
+                    FontId::new(17.0, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Monospace,
+                    FontId::new(12.5, FontFamily::Monospace),
+                ),
+            ]
+            .into();
+        });
+    }
+
+    /// Hintergrund der Fläche, auf der die Seite liegt.
+    ///
+    /// Eine Spur dunkler als die Leisten, damit das weiße Blatt sich abhebt —
+    /// und hell genug, dass eine Trefferfarbe auch dort, neben dem Blatt,
+    /// noch 3:1 erreicht (Rechtecke dürfen über den Rand ragen).
+    pub fn canvas(self) -> Color32 {
+        self.palette().canvas
+    }
+
+    /// Die Akzentfarbe — Auswahl, Fokus, der Hauptknopf.
+    pub fn accent(self) -> Color32 {
+        self.palette().accent
+    }
+
+    /// Schrift auf der Akzentfarbe.
+    pub fn on_accent(self) -> Color32 {
+        self.palette().on_accent
+    }
+
+    fn palette(self) -> Palette {
+        match self {
+            Theme::Light => Palette {
+                panel: Color32::from_rgb(246, 247, 249),
+                window: Color32::from_rgb(255, 255, 255),
+                field: Color32::from_rgb(255, 255, 255),
+                faint: Color32::from_rgb(238, 240, 243),
+                canvas: Color32::from_rgb(234, 236, 240),
+                control: Color32::from_rgb(255, 255, 255),
+                rail: Color32::from_rgb(226, 229, 234),
+                control_hover: Color32::from_rgb(241, 242, 245),
+                control_active: Color32::from_rgb(229, 231, 236),
+                divider: Color32::from_rgb(226, 229, 234),
+                border: Color32::from_rgb(211, 215, 222),
+                border_strong: Color32::from_rgb(170, 177, 189),
+                text: Color32::from_rgb(55, 65, 81),
+                text_strong: Color32::from_rgb(17, 24, 39),
+                accent: Color32::from_rgb(109, 40, 217),
+                on_accent: Color32::WHITE,
+                selection: Color32::from_rgb(233, 225, 255),
+                selection_text: Color32::from_rgb(76, 29, 149),
+                warn: Color32::from_rgb(161, 98, 7),
+                error: Color32::from_rgb(200, 30, 30),
+                shadow: Color32::from_black_alpha(36),
+            },
+            Theme::Dark => Palette {
+                panel: Color32::from_rgb(28, 30, 34),
+                window: Color32::from_rgb(32, 34, 39),
+                field: Color32::from_rgb(20, 21, 24),
+                faint: Color32::from_rgb(36, 39, 44),
+                canvas: Color32::from_rgb(16, 17, 20),
+                control: Color32::from_rgb(40, 43, 49),
+                rail: Color32::from_rgb(54, 58, 66),
+                control_hover: Color32::from_rgb(50, 54, 61),
+                control_active: Color32::from_rgb(60, 64, 72),
+                divider: Color32::from_rgb(44, 47, 53),
+                border: Color32::from_rgb(56, 60, 68),
+                border_strong: Color32::from_rgb(86, 92, 104),
+                text: Color32::from_rgb(200, 205, 213),
+                text_strong: Color32::from_rgb(236, 238, 242),
+                accent: Color32::from_rgb(167, 139, 250),
+                on_accent: Color32::from_rgb(24, 16, 48),
+                selection: Color32::from_rgb(64, 42, 120),
+                selection_text: Color32::from_rgb(233, 225, 255),
+                warn: Color32::from_rgb(245, 180, 70),
+                error: Color32::from_rgb(248, 113, 113),
+                shadow: Color32::from_black_alpha(110),
+            },
         }
     }
 
@@ -75,7 +282,9 @@ impl Theme {
 
     /// Die Flächen, auf denen Trefferfarben in diesem Thema liegen können.
     ///
-    /// Aus [`Theme::visuals`] entnommen statt von Hand notiert — sonst prüfte
+    /// Dazu gehört die Fläche um das Blatt ([`Theme::canvas`]): ein Rechteck,
+    /// das über den Seitenrand ragt, liegt dort. Der Rest ist aus
+    /// [`Theme::visuals`] entnommen statt von Hand notiert — sonst prüfte
     /// der Kontrasttest Farben, die egui gar nicht benutzt. `faint_bg_color`
     /// fehlt bewusst: das ist ein additiver, halbdurchsichtiger Wert und keine
     /// Fläche, gegen die sich ein Kontrast rechnen ließe.
@@ -83,6 +292,7 @@ impl Theme {
         let visuals = self.visuals();
         let mut all = vec![PAPER];
         for color in [
+            self.canvas(),
             visuals.panel_fill,
             visuals.window_fill,
             visuals.extreme_bg_color,
@@ -95,6 +305,37 @@ impl Theme {
         }
         all
     }
+}
+
+/// Eckenrundung von Knöpfen, Feldern und Menüs.
+pub const WIDGET_ROUNDING: f32 = 6.0;
+/// Eckenrundung von Fenstern (Passwortabfrage) und Karten.
+pub const WINDOW_ROUNDING: f32 = 10.0;
+
+/// Der Farbsatz eines Themas. Privat: nach außen gehen nur die egui-Werte
+/// ([`Theme::visuals`]) und die drei Farben, die egui nicht kennt.
+struct Palette {
+    panel: Color32,
+    window: Color32,
+    field: Color32,
+    faint: Color32,
+    canvas: Color32,
+    control: Color32,
+    rail: Color32,
+    control_hover: Color32,
+    control_active: Color32,
+    divider: Color32,
+    border: Color32,
+    border_strong: Color32,
+    text: Color32,
+    text_strong: Color32,
+    accent: Color32,
+    on_accent: Color32,
+    selection: Color32,
+    selection_text: Color32,
+    warn: Color32,
+    error: Color32,
+    shadow: Color32,
 }
 
 /// Beide Themen — für Tests und für die Anzeige.
@@ -177,6 +418,55 @@ mod tests {
                 "{theme:?}: Bereichshintergrund fehlt"
             );
             assert!(backgrounds.len() >= 2);
+        }
+    }
+
+    /// Die Schrift auf dem Hauptknopf muss lesbar sein: 4,5:1 nach WCAG 1.4.3,
+    /// in beiden Themen.
+    #[test]
+    fn the_primary_button_text_reads_on_the_accent() {
+        fn luminance(c: Color32) -> f64 {
+            let channel = |v: u8| {
+                let v = v as f64 / 255.0;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+        }
+        for theme in THEMES {
+            let (a, b) = (luminance(theme.accent()), luminance(theme.on_accent()));
+            let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+            assert!(ratio >= 4.5, "{theme:?}: nur {ratio:.2}:1");
+        }
+    }
+
+    /// Das Blatt muss sich von seiner Umgebung abheben — die Fläche darum ist
+    /// eine andere als die der Leisten, und sie ist nicht weiß.
+    #[test]
+    fn the_canvas_sets_the_sheet_apart() {
+        for theme in THEMES {
+            assert_ne!(theme.canvas(), theme.visuals().panel_fill, "{theme:?}");
+            let (r, g, b) = PAPER;
+            assert_ne!(theme.canvas(), Color32::from_rgb(r, g, b), "{theme:?}");
+            assert_eq!(Theme::of(&theme.visuals()), theme);
+        }
+    }
+
+    /// `apply` setzt mehr als die Farben — sonst blieben Abstände und
+    /// Schriftgrößen auf der gedrängten egui-Vorgabe.
+    #[test]
+    fn applying_the_theme_sets_colours_and_spacing() {
+        for theme in THEMES {
+            let ctx = egui::Context::default();
+            theme.apply(&ctx);
+            let style = ctx.style();
+            assert_eq!(style.visuals.panel_fill, theme.visuals().panel_fill);
+            assert!(style.spacing.interact_size.y >= 24.0);
+            let small = &style.text_styles[&egui::TextStyle::Small];
+            assert!(small.size >= 11.0, "{theme:?}: kleine Schrift zu klein");
         }
     }
 }

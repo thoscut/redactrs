@@ -68,8 +68,10 @@ pub const DRAG_STROKE: f32 = 1.5;
 /// Angefasst werden sie über die deutlich größere Zone
 /// [`crate::selector::HANDLE_HIT_SIZE`] — 5 pt trifft man mit der Maus nicht.
 pub const HANDLE_SIZE: f32 = 5.0;
-/// Versatz des Schlagschattens unter dem Blatt.
+/// Versatz des Schlagschattens unter dem Blatt (nach unten).
 pub const SHADOW_OFFSET: f32 = 4.0;
+/// Unschärfe des Schlagschattens.
+pub const SHADOW_BLUR: f32 = 18.0;
 
 // ---------------------------------------------------------------------------
 // PageView — MediaBox und /Rotate
@@ -349,16 +351,23 @@ impl<'a> PagePreview<'a> {
     /// Schatten liegen soll, der Text darunter aber nicht.
     pub fn paint_sheet(&self, painter: &egui::Painter, origin: Pos2) {
         let sheet = egui::Rect::from_min_size(origin, self.size());
-        painter.rect_filled(
-            sheet.translate(Vec2::splat(SHADOW_OFFSET)),
-            SHEET_ROUNDING,
-            Color32::from_black_alpha(48),
+        // Weicher Schatten statt eines harten Versatzes: egui malt ihn
+        // unscharf, und er fällt nach unten, wie unter einem Blatt auf dem
+        // Tisch.
+        painter.add(
+            egui::epaint::Shadow {
+                offset: Vec2::new(0.0, SHADOW_OFFSET),
+                blur: SHADOW_BLUR,
+                spread: 0.0,
+                color: Color32::from_black_alpha(56),
+            }
+            .as_shape(sheet, SHEET_ROUNDING),
         );
         painter.rect(
             sheet,
             SHEET_ROUNDING,
             Color32::WHITE,
-            Stroke::new(SHEET_STROKE, Color32::from_gray(150)),
+            Stroke::new(SHEET_STROKE, Color32::from_black_alpha(40)),
         );
     }
 
