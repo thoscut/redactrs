@@ -259,9 +259,63 @@ pub fn is_enabled(action: ToolAction, context: &ToolContext) -> bool {
     }
 }
 
+/// In welcher Leiste ein Knopf steht.
+///
+/// Alle Knöpfe in einer Reihe passten auch bei 1280 Punkt Fensterbreite nicht
+/// in eine Zeile — die Leiste brach mitten in der Seitennavigation um. Jetzt
+/// steht oben, was mit dem **Dokument** geschieht, und direkt über der Seite,
+/// was nur die **Ansicht** ändert, so wie in jedem PDF-Betrachter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bar {
+    /// Obere Leiste: Datei, Review, Verlauf.
+    Document,
+    /// Ansichtsleiste über der Seite: Blättern und Zoom.
+    View,
+}
+
+/// Die Leiste zu einer Aktion.
+pub fn bar(action: ToolAction) -> Bar {
+    match action {
+        ToolAction::ZoomOut
+        | ToolAction::ZoomIn
+        | ToolAction::ZoomFit
+        | ToolAction::ZoomReset
+        | ToolAction::PrevPage
+        | ToolAction::NextPage => Bar::View,
+        _ => Bar::Document,
+    }
+}
+
+/// Der Hauptknopf der Leiste — als einziger in der Akzentfarbe gefüllt.
+///
+/// „Exportieren“ ist der Schritt, auf den alles hinausläuft; er soll nicht
+/// zwischen „Buchungsliste“ und „Review speichern“ gesucht werden müssen.
+pub fn is_primary(action: ToolAction) -> bool {
+    action == ToolAction::Export
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Beide Leisten tragen Knöpfe, und die Aufteilung folgt der Frage
+    /// „Dokument oder Ansicht?“.
+    #[test]
+    fn every_button_lives_in_exactly_the_right_bar() {
+        let all = buttons();
+        assert!(all.iter().any(|b| bar(b.action) == Bar::Document));
+        assert!(all.iter().any(|b| bar(b.action) == Bar::View));
+        for action in [ToolAction::Open, ToolAction::Export, ToolAction::Undo] {
+            assert_eq!(bar(action), Bar::Document, "{action:?}");
+        }
+        for action in [ToolAction::NextPage, ToolAction::ZoomFit] {
+            assert_eq!(bar(action), Bar::View, "{action:?}");
+        }
+        // Genau ein Hauptknopf, und er gehört nach oben.
+        let primary: Vec<_> = all.iter().filter(|b| is_primary(b.action)).collect();
+        assert_eq!(primary.len(), 1);
+        assert_eq!(bar(primary[0].action), Bar::Document);
+    }
 
     /// Symbol **und** Text — an dieser Regel hängt die ganze Leiste.
     #[test]
