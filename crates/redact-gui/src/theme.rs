@@ -224,6 +224,17 @@ impl Theme {
         self.palette().on_accent
     }
 
+    /// Fläche der Trefferzahl auf einer Miniatur: neutral, damit Violett
+    /// allein Auswahl und Fokus bedeutet.
+    pub fn badge_fill(self) -> Color32 {
+        self.palette().muted
+    }
+
+    /// Schrift auf [`Self::badge_fill`].
+    pub fn badge_text(self) -> Color32 {
+        self.palette().panel
+    }
+
     fn palette(self) -> Palette {
         match self {
             Theme::Light => Palette {
@@ -574,6 +585,16 @@ mod tests {
             assert!(v.widgets.active.bg_stroke.width >= 2.0);
             assert!(contrast(v.widgets.active.bg_stroke.color, v.panel_fill) >= 3.0);
             assert!(contrast(v.selection.stroke.color, v.extreme_bg_color) >= 3.0);
+        }
+    }
+
+    /// Die Trefferzahl auf der Miniatur ist Text: 4,5:1 auf ihrer Fläche.
+    #[test]
+    fn the_thumbnail_badge_is_legible() {
+        for theme in THEMES {
+            let ratio = contrast(theme.badge_text(), theme.badge_fill());
+            assert!(ratio >= 4.5, "{theme:?}: Plakette nur {ratio:.2}:1");
+            assert_ne!(theme.badge_fill(), theme.accent());
         }
     }
 }

@@ -1932,7 +1932,7 @@ es ein Verlaufsschritt, und ein Strg+Z holt den alten Stand vollständig zurück
 
 ### Miniaturansichten und Zoom
 
-Links steht eine Spalte mit **Miniaturansichten**, Seitenzahl unter jedem Bild, die Zahl der Schwärzungen als Plakette in seiner Ecke.
+Links steht eine Spalte mit **Miniaturansichten**, Seitenzahl unter jedem Bild, die Zahl der Schwärzungen als graue Plakette in seiner Ecke. Ohne Dokument fehlt die Spalte.
 Sie zeigt dieselben Kleinbilder, die der Hauptbereich ohnehin anfordert — es
 wird nichts doppelt gerendert. Die Spalte lässt sich am Rand zwischen 96 und
 260 Punkt breit ziehen.
@@ -1940,7 +1940,7 @@ wird nichts doppelt gerendert. Die Spalte lässt sich am Rand zwischen 96 und
 Der **Zoom** reicht von **0,25× bis 4×** (`MIN_ZOOM`/`MAX_ZOOM` in
 `crates/redact-gui/src/state.rs`), Schrittweite 1,25×. In der Ansichtsleiste
 direkt über der Seite stehen dafür vier Knöpfe: ➖ Kleiner, ➕ Größer, ⛶ Passend
-(ganze Seite ins Fenster) und ⟲ 100 %; daneben ein Schieberegler, der den Wert
+(ganze Seite ins Fenster) und ⟲ 1:1 (zurück auf 100 %); daneben ein Schieberegler, der den Wert
 in Prozent zeigt und sich auch eintippen lässt. Links davon blättern ⏴ Zurück
 und Vor ⏵, dazwischen steht, auf welcher Seite man ist. Die obere Leiste trägt
 nur noch, was mit dem Dokument geschieht; „Exportieren“ ist dort als einziger

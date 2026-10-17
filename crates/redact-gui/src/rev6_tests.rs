@@ -530,7 +530,7 @@ fn a3_a_greyed_out_button_no_longer_cuts_the_forward_tab_chain() {
         !chain.contains(&"Wiederholen".to_string()),
         "der graue Knopf bekommt keinen Fokus: {chain:?}"
     );
-    for behind in ["Kleiner", "Größer", "Passend", "100 %", "Zurück", "Vor"] {
+    for behind in ["Kleiner", "Größer", "Passend", "1:1", "Zurück", "Vor"] {
         assert!(
             chain.contains(&behind.to_string()),
             "„{behind}“ steht hinter dem grauen Knopf und muss trotzdem \

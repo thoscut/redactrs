@@ -45,8 +45,11 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
   eine zweite Zeile um. „Exportieren“ ist als Hauptknopf hervorgehoben, der
   Zoomregler zeigt Prozent statt einer Dezimalzahl. Die Seitenleiste hat
   Zwischenüberschriften, eine zweispaltige Legende und eine größere kleine
-  Schrift; die Miniaturen zeigen die Zahl der Schwärzungen als Plakette. Der
-  leere Hauptbereich ist eine Ablagefläche mit einem Knopf „PDF öffnen …“.
+  Schrift; die Miniaturen zeigen die Zahl der Schwärzungen als neutrale
+  Plakette. Der leere Hauptbereich ist eine Ablagefläche mit einem Knopf
+  „PDF öffnen …“; ohne Dokument fehlen Miniaturspalte und Auswahlbereich. Der
+  Knopf, der den Zoom zurücksetzt, heißt „1:1“ statt ein zweites Mal
+  „100 %“, und die Statuszeile wiederholt Seite und Zoom nicht mehr.
   Die vier Trefferfarben sind unverändert, und ihr Kontrast ist weiter gegen
   jede Fläche geprüft, auf der sie liegen können — jetzt auch gegen die Fläche
   um das Blatt.

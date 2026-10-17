@@ -789,10 +789,10 @@ mod tests {
         }
 
         // Die Zone ist großzügiger als die Zeichnung: ein Punkt, der das
-        // gemalte Quadrat (Kantenlänge `viewer::HANDLE_SIZE`, also ±3,5 pt um
+        // gemalte Quadrat (Kantenlänge `viewer::HANDLE_SIZE`, also ±4,5 pt um
         // die Ecke) klar verfehlt, trifft den Griff trotzdem.
         let just_outside_the_drawing =
-            rect.left_top() + egui::Vec2::splat(crate::viewer::HANDLE_SIZE);
+            rect.left_top() + egui::Vec2::splat(crate::viewer::HANDLE_SIZE / 2.0 + 2.0);
         assert_eq!(
             hit_handle(rect, just_outside_the_drawing),
             Some(Handle::TopLeft)

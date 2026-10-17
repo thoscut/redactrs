@@ -159,8 +159,8 @@ pub fn items() -> Vec<ToolItem> {
         ),
         button(
             "⟲",
-            "100 %",
-            "Darstellung auf Originalgröße zurücksetzen",
+            "1:1",
+            "Darstellung auf Originalgröße (100 %) zurücksetzen",
             ToolAction::ZoomReset,
         ),
         ToolItem::Separator,

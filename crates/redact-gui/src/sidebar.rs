@@ -83,7 +83,6 @@ pub fn show(
     // Legende und Polsterung erklären, was auf einer Seite zu sehen ist —
     // ohne Dokument gibt es nichts zu erklären.
     if state.is_loaded() {
-        ui.add_space(2.0);
         legend(ui);
         padding_note(ui, state.config.padding);
     }
@@ -91,13 +90,21 @@ pub fn show(
 
     // Erst der Detailbereich am unteren Rand, dann die Liste in den Rest —
     // sonst schöbe die Liste die Details aus dem sichtbaren Bereich.
-    egui::TopBottomPanel::bottom("hit_details")
-        .resizable(false)
-        .show_inside(ui, |ui| {
-            ui.add_space(BAR_PADDING);
-            details(ui, state, summary);
-            ui.add_space(BAR_PADDING);
-        });
+    // Ohne Dokument gibt es nichts auszuwählen — und keinen Platzhalter, der
+    // das ein weiteres Mal sagt.
+    if state.is_loaded() {
+        egui::TopBottomPanel::bottom("hit_details")
+            .resizable(false)
+            // Ohne eigenen Rahmen: der Standardrahmen rückt den Bereich um
+            // seinen Innenabstand ein, und die Seitenleiste verlöre ihre linke
+            // Kante. Die Trennlinie oben bleibt.
+            .frame(egui::Frame::none())
+            .show_inside(ui, |ui| {
+                ui.add_space(BAR_PADDING);
+                details(ui, state, summary);
+                ui.add_space(BAR_PADDING);
+            });
+    }
 
     hits(ui, state, summary);
 
@@ -245,15 +252,18 @@ fn output_name(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
 
-    let suggestion = state
+    // Ohne Dokument kein Vorschlag — dass nichts geladen ist, sagt die
+    // Mitte des Fensters schon.
+    if let Some(suggestion) = state
         .suggested_output_path()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "— kein Dokument geladen —".to_string());
-    ui.label(
-        RichText::new(suggestion)
-            .small()
-            .color(crate::theme::muted(ui)),
-    );
+    {
+        ui.label(
+            RichText::new(suggestion)
+                .small()
+                .color(crate::theme::muted(ui)),
+        );
+    }
     if fixed {
         ui.label(
             RichText::new(OUTPUT_FIXED_NOTE)
@@ -692,6 +702,27 @@ pub fn outcome_tooltip(outcome: HitOutcome) -> &'static str {
     }
 }
 
+/// Pfeil der Auswahlliste, immer nach unten. egui dreht ihn um, wenn die
+/// Liste nach oben aufgeht — am unteren Rand also immer —, und ein Pfeil nach
+/// oben liest sich wie „offen“ oder „sortiert“.
+fn down_arrow(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    visuals: &egui::style::WidgetVisuals,
+    _open: bool,
+    _side: egui::AboveOrBelow,
+) {
+    let rect = egui::Rect::from_center_size(
+        rect.center(),
+        egui::vec2(rect.width() * 0.7, rect.height() * 0.45),
+    );
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![rect.left_top(), rect.right_top(), rect.center_bottom()],
+        visuals.fg_stroke.color,
+        egui::Stroke::NONE,
+    ));
+}
+
 /// Detailbereich für die ausgewählte Region.
 fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
     let Some(index) = state.selected_region else {
@@ -785,6 +816,7 @@ fn details(ui: &mut egui::Ui, state: &mut AppState, summary: &HitSummary) {
             ui.label("Aktion");
             egui::ComboBox::from_id_salt("region_action")
                 .selected_text(action_label(&action))
+                .icon(down_arrow)
                 .show_ui(ui, |ui| {
                     for candidate in [
                         Action::Blackout,

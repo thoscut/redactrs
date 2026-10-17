@@ -66,9 +66,12 @@ pub const DRAG_STROKE: f32 = 1.5;
 /// Kantenlänge der **gezeichneten** Griffpunkte an den Ecken der Auswahl.
 ///
 /// Angefasst werden sie über die deutlich größere Zone
-/// [`crate::selector::HANDLE_HIT_SIZE`] — 7 pt trifft man mit der Maus nicht
+/// [`crate::selector::HANDLE_HIT_SIZE`] — 9 pt trifft man mit der Maus nicht
 /// zuverlässig.
-pub const HANDLE_SIZE: f32 = 7.0;
+pub const HANDLE_SIZE: f32 = 9.0;
+/// Strichstärke des Rands der Griffpunkte — kräftiger als die Regionskante,
+/// damit sie neben dem Hof nicht verschwinden.
+pub const HANDLE_STROKE: f32 = 1.5;
 /// Strichstärke des Hofs um die ausgewählte Region.
 pub const SELECTION_HALO: f32 = 3.0;
 /// Abstand des Hofs zur ausgewählten Region.
@@ -664,7 +667,7 @@ pub fn paint_region(
                 egui::Rect::from_center_size(corner, Vec2::splat(HANDLE_SIZE)),
                 NO_ROUNDING,
                 Color32::WHITE,
-                Stroke::new(REGION_STROKE, color),
+                Stroke::new(HANDLE_STROKE, color),
             );
         }
     }

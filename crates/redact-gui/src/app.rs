@@ -77,7 +77,7 @@ const NUDGE_FAST: f64 = 10.0;
 // [`crate::viewer`] zu `float_literal_f32_fallback`.
 
 /// Startbreite der Seitenleiste.
-const SIDEBAR_WIDTH: f32 = 320.0;
+const SIDEBAR_WIDTH: f32 = 360.0;
 /// Kleinste Breite der Seitenleiste.
 const SIDEBAR_MIN_WIDTH: f32 = 220.0;
 /// Größte Breite der Seitenleiste.
@@ -2809,22 +2809,6 @@ impl RedactApp {
                     RichText::new("Seitenbild wird erstellt …").color(crate::theme::muted(ui)),
                 );
             }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let pages = self.state.page_count();
-                let current = if pages == 0 {
-                    0
-                } else {
-                    self.state.current_page + 1
-                };
-                ui.label(
-                    RichText::new(format!(
-                        "Seite {current} / {pages}  ·  {:.0} %",
-                        self.state.zoom * 100.0
-                    ))
-                    .color(crate::theme::muted(ui)),
-                );
-            });
         });
     }
 
@@ -3442,19 +3426,25 @@ impl eframe::App for RedactApp {
                 .fill(panel_fill)
                 .inner_margin(egui::Margin::symmetric(margin, 6.0))
         };
-        egui::SidePanel::left("thumbnails")
-            .frame(side_frame(10.0))
-            .default_width(crate::thumbnails::PANEL_WIDTH)
-            .width_range(crate::thumbnails::PANEL_MIN_WIDTH..=crate::thumbnails::PANEL_MAX_WIDTH)
-            .show(ctx, |ui| {
-                crate::thumbnails::show(
-                    ui,
-                    &mut self.state,
-                    &mut self.pages,
-                    &summary,
-                    page_changed,
-                );
-            });
+        // Ohne Dokument keine Spalte: die Karte in der Mitte sagt schon, dass
+        // nichts geladen ist, und eine leere Spalte sagte es nur noch einmal.
+        if self.state.is_loaded() {
+            egui::SidePanel::left("thumbnails")
+                .frame(side_frame(10.0))
+                .default_width(crate::thumbnails::PANEL_WIDTH)
+                .width_range(
+                    crate::thumbnails::PANEL_MIN_WIDTH..=crate::thumbnails::PANEL_MAX_WIDTH,
+                )
+                .show(ctx, |ui| {
+                    crate::thumbnails::show(
+                        ui,
+                        &mut self.state,
+                        &mut self.pages,
+                        &summary,
+                        page_changed,
+                    );
+                });
+        }
 
         let toggle = egui::SidePanel::left("sidebar")
             .frame(side_frame(14.0))

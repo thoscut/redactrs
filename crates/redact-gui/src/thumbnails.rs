@@ -194,7 +194,7 @@ fn badge(ui: &mut egui::Ui, thumb: egui::Rect, page: usize, count: usize) -> egu
     let galley = ui.painter().layout_no_wrap(
         count.to_string(),
         egui::TextStyle::Small.resolve(ui.style()),
-        theme.on_accent(),
+        theme.badge_text(),
     );
     let size = galley.size() + Vec2::new(10.0, 2.0);
     let size = Vec2::new(size.x.max(size.y), size.y);
@@ -202,11 +202,13 @@ fn badge(ui: &mut egui::Ui, thumb: egui::Rect, page: usize, count: usize) -> egu
     let response = ui.interact(rect, ui.id().with(("badge", page)), Sense::hover());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        painter.rect_filled(rect, BADGE_ROUNDING, theme.accent());
+        // Neutral, nicht Violett: Violett heißt Auswahl und Fokus, und eine
+        // violette Zahl läse sich wie die Seitenzahl darunter.
+        painter.rect_filled(rect, BADGE_ROUNDING, theme.badge_fill());
         painter.galley(
             rect.center() - galley.size() / 2.0,
             galley,
-            theme.on_accent(),
+            theme.badge_text(),
         );
     }
     response
