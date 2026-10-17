@@ -32,6 +32,27 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ---
 
+## Unveröffentlicht
+
+### Geändert
+
+* **Die Oberfläche ist überarbeitet** — gleiche Funktionen, gleiche Tasten,
+  ruhigeres Bild. Ein eigener Farbsatz für hell und dunkel mit einer
+  Akzentfarbe für Auswahl und Fokus; die Seite liegt mit weichem Schatten auf
+  einer eigenen, etwas dunkleren Fläche und steht waagerecht in der Mitte.
+  Blättern und Zoom sind aus der oberen Leiste in eine Ansichtsleiste über der
+  Seite gewandert: die obere Leiste brach bei gewöhnlicher Fensterbreite in
+  eine zweite Zeile um. „Exportieren“ ist als Hauptknopf hervorgehoben, der
+  Zoomregler zeigt Prozent statt einer Dezimalzahl. Die Seitenleiste hat
+  Zwischenüberschriften, eine zweispaltige Legende und eine größere kleine
+  Schrift; die Miniaturen zeigen die Zahl der Schwärzungen als Plakette. Der
+  leere Hauptbereich ist eine Ablagefläche mit einem Knopf „PDF öffnen …“.
+  Die vier Trefferfarben sind unverändert, und ihr Kontrast ist weiter gegen
+  jede Fläche geprüft, auf der sie liegen können — jetzt auch gegen die Fläche
+  um das Blatt.
+
+---
+
 ## 0.7.1 — 2026-10-16
 
 Bereich: `git log v0.7.0..v0.7.1`.
