@@ -103,9 +103,24 @@
 //!   Sprachangabe, `/FontFamily` am `/FontDescriptor` fällt, und
 //!   `/CIDSystemInfo` behält `/Registry` und `/Ordering` nur aus der
 //!   Adobe-Registry — sonst ersetzt, beide sind Pflicht.
+//! * jeder Schlüssel, den die Norm an der Art des Objekts nicht kennt — an
+//!   Schrift, Schriftbeschreibung, Kodierung, Grafikzustand, Softmaske,
+//!   Funktion, Shading, Muster, Bild- und Formular-XObject, `/OCG` und
+//!   `/OCMD`, und unter Katalog und Seite an `/ViewerPreferences`,
+//!   `/Extensions`, `/Group`, `/Trans` und `/BoxColorInfo` (Prüfrunde 2,
+//!   siehe [`Shape`]). Dazu `/CharSet` und `/Style` an der
+//!   Schriftbeschreibung, `/ID`, `/Measure` und `/PtData` an Bild und
+//!   Formular und `/URL` an einer Entwicklererweiterung — Normschlüssel, die
+//!   nichts zeichnen und nur Text tragen,
+//! * `/CharProcs` einer Type3-Schrift, die kein Inhaltsstrom setzt (siehe
+//!   `clear_unset_type3_fonts`): ihre Glyphprozeduren laufen nie, dürfen
+//!   aber Text setzen, und den sah keine Schwärzung.
 //!
-//! Aus **jeder verbliebenen Annotation** — und aus allem, was sie erreichbar
-//! hält: ihrem `/Popup`, der `/Parent`-Kette nach oben (das Feld einer
+//! Aus **jeder verbliebenen Annotation** — gleich, wer sie hält: `/Annots`
+//! einer Seite, der Feldbaum, oder irgendein anderer Schlüssel
+//! (`/Resources /Properties /MC0 << /Annot 9 0 R >>`, Prüfrunde 2) — und aus
+//! allem, was sie erreichbar hält: ihrem `/Popup`, der `/Parent`-Kette nach
+//! oben (das Feld einer
 //! Radiogruppe, das Feld hinter mehreren Widgets), `/Kids` nach unten und
 //! `/IRT` (Antwortkette). Ein Träger, den nur `/AcroForm` erreichbar machte,
 //! fällt mit dem Formular; einen, den ein Widget in `/Annots` über `/Parent`
@@ -172,6 +187,9 @@
 //!   Tabelle 172, eine Sprachangabe). Gemessen (vor dieser Änderung): alle
 //!   standen mit der IBAN nach dem Lauf in der Ausgabe, ohne Warnung und mit
 //!   leerem Bericht (Register #73).
+//! * und hinter dieser Sperrliste jeder Schlüssel, den die Norm am Untertyp
+//!   nicht kennt (Prüfrunde 2, siehe `carrier_allows`): ein `/Zusatz` an
+//!   einer Quadrat-Annotation stand vorher mit Rückgabewert 0 in der Ausgabe.
 //!
 //! **Benannte Lücke:** `/DA` (Default Appearance) bleibt. Es ist bei FreeText
 //! und Widgets Pflicht und eine Operatorfolge (`/Helv 12 Tf 0 g`), keine
@@ -313,7 +331,8 @@ pub struct MetadataReport {
     /// `/RichMediaSettings`, `/3DD`, `/3DV`, `/3DU`, `/RO` sowie `/SV` (Seed-Value eines Signaturfelds: `/Reasons`,
     /// `/LegalAttestation`), `/Lock` (`/Fields`) und `/ExData`; dazu `/M`,
     /// `/CreationDate`, `/State`, `/StateModel` und `/Lang`, wenn sie nicht im
-    /// Wertebereich der Norm lagen (Register #73).
+    /// Wertebereich der Norm lagen (Register #73), und jeder Schlüssel, den
+    /// die Norm am Untertyp nicht kennt (Prüfrunde 2).
     pub annotation_texts_cleared: usize,
     /// Seiten **außerhalb des Seitenbaums**, die ihren Inhalt verloren haben.
     ///
@@ -351,7 +370,12 @@ pub struct MetadataReport {
     /// ([`CATALOG_KEEP`], [`PAGE_KEEP`], [`PAGE_TREE_KEEP`]) — etwa
     /// `/SpiderInfo`, `/Legal`, `/Requirements` (Register #92) — und in jedem
     /// Ressourcenverzeichnis jeder Schlüssel, der keine Ressourcenart ist
-    /// ([`RESOURCES_KEEP`], Register #107). Und an jedem Objekt ein `/Lang`,
+    /// ([`RESOURCES_KEEP`], Register #107); seit der Prüfrunde 2 auch jeder
+    /// Schlüssel, den die Norm an Schrift, Grafikzustand, Bild, Formular,
+    /// Shading, Muster, Ebene oder unter `/ViewerPreferences`, `/Extensions`,
+    /// `/PageLabels`, `/Group`, `/Trans`, `/BoxColorInfo` nicht kennt, und
+    /// `/CharProcs` einer Type3-Schrift, die niemand setzt. Und an jedem Objekt
+    /// ein `/Lang`,
     /// das keine Sprachangabe ist, `/FontFamily` am `/FontDescriptor` und ein
     /// ersetztes `/CIDSystemInfo /Registry` oder `/Ordering` (Register #73).
     pub beiwerk_removed: usize,
@@ -619,6 +643,13 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
         cleaned.values +=
             clean_carriers(doc, &mut fields, false, &mut visited, &shown, &mut captions).values;
     }
+    // Und jede Annotation, die weder eine Seite noch das Formular erreicht —
+    // gehalten von irgendeinem anderen Schlüssel (`/Resources /Properties
+    // /MC0 << /Annot 9 0 R >>`). Bis zur Prüfrunde 2 lief der Trägerlauf nur
+    // von `/Annots` und `/Fields` aus, und so eine Annotation behielt
+    // `/Contents` und `/A /URI` (Beleg `r2_traeger.rs`). Sie zeigt keine
+    // Seite, also verliert sie auch ihr Erscheinungsbild (Register #90).
+    cleaned += clean_unreached_carriers(doc, &mut visited, &shown, &mut captions);
     // Ein `/MK` als eigenes Objekt — von mehreren Widgets geteilt: einmal
     // bereinigt, nach allen Wurzeln. Seine Symbole verliert es nur, wenn kein
     // gezeigtes Widget es benutzt.
@@ -653,6 +684,13 @@ pub fn strip_metadata(doc: &mut Document) -> MetadataReport {
     // Und in jedem Ressourcenverzeichnis nur, was ein Inhaltsstrom
     // nachschlagen kann (Register #107).
     clear_foreign_resources(doc, &mut beiwerk);
+    // Und **unter** den erlaubten Schlüsseln nur, was die Norm dort kennt:
+    // an Schrift, Grafikzustand, Bild, `/ViewerPreferences`, `/Group` …
+    // (Prüfrunde 2, siehe [`Shape`]).
+    restrict_to_shapes(doc, &mut beiwerk);
+    // Eine Type3-Schrift, die niemand setzt, zeichnet nichts — ihre
+    // Glyphprozeduren aber trugen Text an jeder Schwärzung vorbei.
+    clear_unset_type3_fonts(doc, &page_ids, &mut beiwerk);
 
     // --- Lesezeichen ----------------------------------------------------
     //
@@ -1354,6 +1392,9 @@ fn clean_carrier(dict: &mut Dictionary, keep_dest: bool) -> Cleaned {
     if let Ok(Object::Dictionary(mk)) = dict.get_mut(b"MK") {
         clean_captions(mk, &mut cleaned.texts);
     }
+    // Und was die Sperrliste nicht kennt, kennt die Norm am Untertyp nicht
+    // (Prüfrunde 2, siehe [`carrier_allows`]).
+    restrict_carrier(dict, &mut cleaned.texts);
     cleaned
 }
 
@@ -1380,6 +1421,419 @@ fn clean_captions(mk: &mut Dictionary, texts: &mut Tally) {
 fn clear_alternates(dict: &mut Dictionary, texts: &mut Tally) {
     for key in ALTERNATE_TEXT_KEYS {
         take(dict, key, texts);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Erlaubnislisten der Träger (Prüfrunde 2)
+// ---------------------------------------------------------------------------
+//
+// Bis zur Prüfrunde 2 nahm [`clean_carrier`] einer Annotation, was auf einer
+// **Sperrliste** stand ([`ANNOTATION_TEXT_KEYS`], [`ANNOTATION_PLATE_KEYS`]
+// …). Ein Schlüssel, den die Liste nicht kannte — ein `/Zusatz (DE89 …)` an
+// einer Quadrat-Annotation fern jeder Schwärzung —, stand nach dem Lauf in
+// der Ausgabe, Rückgabewert 0 (Beleg `r2_traeger.rs`). Die Sperrliste bleibt
+// (sie zählt, *was* fiel); dahinter steht jetzt je Untertyp die Liste der
+// Schlüssel, die ISO 32000-2 an ihm kennt. Was die Norm an einer Annotation
+// kennt und Text trägt, nimmt die Sperrliste vorher.
+
+/// Die Schlüssel jeder Annotation (Tabelle 166).
+const ANNOTATION_COMMON_KEYS: &[&[u8]] = &[
+    b"Type",
+    b"Subtype",
+    b"Rect",
+    b"Contents",
+    b"P",
+    b"NM",
+    b"M",
+    b"F",
+    b"AP",
+    b"AS",
+    b"Border",
+    b"C",
+    b"StructParent",
+    b"OC",
+    b"AF",
+    b"ca",
+    b"CA",
+    b"BM",
+    b"Lang",
+];
+
+/// Die Schlüssel jeder Markup-Annotation (Tabelle 170).
+const ANNOTATION_MARKUP_KEYS: &[&[u8]] = &[
+    b"T",
+    b"Popup",
+    b"RC",
+    b"CreationDate",
+    b"IRT",
+    b"Subj",
+    b"RT",
+    b"IT",
+    b"ExData",
+];
+
+/// Die Schlüssel eines Formularfelds — jeder Feldart (Tabellen 226, 227,
+/// 229–234). Ein Widget ist oft zugleich sein Feld (12.7.4.3), also kennt es
+/// sie alle.
+const FIELD_KEYS: &[&[u8]] = &[
+    b"FT", b"Parent", b"Kids", b"T", b"TU", b"TM", b"Ff", b"V", b"DV", b"AA", b"DA", b"Q", b"DS",
+    b"RV", b"MaxLen", b"Opt", b"TI", b"I", b"Lock", b"SV",
+    // Kein Schlüssel der Feldtabellen, sondern des Formulars (Tabelle 224) —
+    // pdf.js liest ihn aber auch geerbt am Feld, wenn es ein Erscheinungsbild
+    // neu aufbaut. Er nennt Schriften und trägt keinen Text; bleiben ist die
+    // Richtung, in der nichts anders aussieht.
+    b"DR",
+];
+
+/// Ein Untertyp, ob er Markup ist, und welche Schlüssel er darüber hinaus
+/// kennt.
+type SubtypeKeys = (&'static [u8], bool, &'static [&'static [u8]]);
+
+/// Je Untertyp: ist er Markup, und welche Schlüssel kennt er darüber hinaus
+/// (12.5.6, ISO 32000-2)?
+const ANNOTATION_SUBTYPE_KEYS: &[SubtypeKeys] = &[
+    (b"Text", true, &[b"Open", b"Name", b"State", b"StateModel"]),
+    (
+        b"Link",
+        false,
+        &[b"A", b"Dest", b"H", b"PA", b"QuadPoints", b"BS"],
+    ),
+    (
+        b"FreeText",
+        true,
+        &[
+            b"DA", b"Q", b"RC", b"DS", b"CL", b"IT", b"BE", b"RD", b"BS", b"LE",
+        ],
+    ),
+    (
+        b"Line",
+        true,
+        &[
+            b"L", b"BS", b"LE", b"IC", b"LL", b"LLE", b"Cap", b"IT", b"LLO", b"CP", b"Measure",
+            b"CO",
+        ],
+    ),
+    (b"Square", true, &[b"BS", b"IC", b"BE", b"RD"]),
+    (b"Circle", true, &[b"BS", b"IC", b"BE", b"RD"]),
+    (
+        b"Polygon",
+        true,
+        &[
+            b"Vertices",
+            b"LE",
+            b"BS",
+            b"IC",
+            b"BE",
+            b"IT",
+            b"Measure",
+            b"Path",
+        ],
+    ),
+    (
+        b"PolyLine",
+        true,
+        &[
+            b"Vertices",
+            b"LE",
+            b"BS",
+            b"IC",
+            b"BE",
+            b"IT",
+            b"Measure",
+            b"Path",
+        ],
+    ),
+    (b"Highlight", true, &[b"QuadPoints"]),
+    (b"Underline", true, &[b"QuadPoints"]),
+    (b"Squiggly", true, &[b"QuadPoints"]),
+    (b"StrikeOut", true, &[b"QuadPoints"]),
+    (b"Caret", true, &[b"RD", b"Sy"]),
+    (b"Stamp", true, &[b"Name", b"IT"]),
+    (b"Ink", true, &[b"InkList", b"BS", b"Path"]),
+    (b"Popup", false, &[b"Parent", b"Open"]),
+    (b"FileAttachment", true, &[b"FS", b"Name"]),
+    (b"Sound", true, &[b"Sound", b"Name"]),
+    (b"Movie", false, &[b"T", b"Movie", b"A"]),
+    (b"Screen", false, &[b"T", b"MK", b"A", b"AA"]),
+    // Dazu die Feldschlüssel, siehe [`carrier_allows`].
+    (
+        b"Widget",
+        false,
+        &[b"H", b"MK", b"A", b"AA", b"BS", b"Parent"],
+    ),
+    (b"PrinterMark", false, &[b"MN"]),
+    (
+        b"TrapNet",
+        false,
+        &[b"LastModified", b"Version", b"AnnotStates", b"FontFauxing"],
+    ),
+    (b"Watermark", false, &[b"FixedPrint"]),
+    (
+        b"3D",
+        false,
+        &[b"3DD", b"3DV", b"3DA", b"3DI", b"3DB", b"3DU"],
+    ),
+    (
+        b"Redact",
+        true,
+        &[
+            b"QuadPoints",
+            b"IC",
+            b"RO",
+            b"OverlayText",
+            b"Repeat",
+            b"DA",
+            b"Q",
+        ],
+    ),
+    (b"Projection", true, &[]),
+    (
+        b"RichMedia",
+        false,
+        &[b"RichMediaSettings", b"RichMediaContent"],
+    ),
+];
+
+/// Welche Schlüssel darf dieser Träger behalten? `None`: er weist sich nicht
+/// aus, und es gilt allein die Sperrliste.
+///
+/// * Ein bekannter `/Subtype`: die Schlüssel jeder Annotation, der
+///   Markup-Annotationen (wenn er eine ist) und die eigenen — ein Widget dazu
+///   die Feldschlüssel.
+/// * Kein `/Subtype`, aber Feldschlüssel (`/FT`, `/T`, `/Kids`, `/Parent`):
+///   ein Feld ohne Widget, etwa ein Elternfeld (Tabelle 226). Trägt es
+///   `/Type /Annot` oder ein `/Rect`, ist es zugleich eine Annotation ohne
+///   Untertyp und behält auch deren Schlüssel.
+/// * Ein unbekannter `/Subtype` an `/Type /Annot`: die Schlüssel jeder
+///   Annotation und jeder Markup-Annotation — mehr kennt die Norm nicht.
+/// * Sonst nichts: der Trägerlauf erreicht über `/Parent` und `/IRT` auch
+///   Dictionaries, die keine Träger sind; die bleiben, wie sie sind.
+fn carrier_allows(dict: &Dictionary) -> Option<CarrierKeys> {
+    let declared_annot =
+        matches!(value_of(dict, b"Type"), Some(Object::Name(name)) if name == b"Annot");
+    match value_of(dict, b"Subtype") {
+        Some(Object::Name(subtype)) => {
+            if let Some((name, markup, own)) = ANNOTATION_SUBTYPE_KEYS
+                .iter()
+                .find(|(name, _, _)| *name == subtype.as_slice())
+            {
+                return Some(CarrierKeys {
+                    annotation: true,
+                    markup: *markup,
+                    own,
+                    field: *name == b"Widget",
+                });
+            }
+            declared_annot.then_some(CarrierKeys {
+                annotation: true,
+                markup: true,
+                own: &[],
+                field: false,
+            })
+        }
+        _ => {
+            let field = [&b"FT"[..], b"T", b"Kids", b"Parent"]
+                .iter()
+                .any(|key| value_of(dict, key).is_some());
+            let annotation = declared_annot || value_of(dict, b"Rect").is_some();
+            (field || declared_annot).then_some(CarrierKeys {
+                annotation,
+                markup: annotation,
+                own: &[],
+                field,
+            })
+        }
+    }
+}
+
+/// Die Schlüssel, die ein Träger behalten darf — siehe [`carrier_allows`].
+struct CarrierKeys {
+    /// Die Schlüssel jeder Annotation ([`ANNOTATION_COMMON_KEYS`]).
+    annotation: bool,
+    /// Die Schlüssel jeder Markup-Annotation ([`ANNOTATION_MARKUP_KEYS`]).
+    markup: bool,
+    /// Die eigenen Schlüssel des Untertyps.
+    own: &'static [&'static [u8]],
+    /// Die Feldschlüssel ([`FIELD_KEYS`]).
+    field: bool,
+}
+
+impl CarrierKeys {
+    fn allows(&self, key: &[u8]) -> bool {
+        key == b"Type"
+            || (self.annotation && ANNOTATION_COMMON_KEYS.contains(&key))
+            || (self.markup && ANNOTATION_MARKUP_KEYS.contains(&key))
+            || self.own.contains(&key)
+            || (self.field && FIELD_KEYS.contains(&key))
+    }
+}
+
+/// Nimmt einem Träger jeden Schlüssel, den [`carrier_allows`] nicht kennt.
+fn restrict_carrier(dict: &mut Dictionary, texts: &mut Tally) {
+    let Some(allows) = carrier_allows(dict) else {
+        return;
+    };
+    let fremd: Vec<Vec<u8>> = dict
+        .iter()
+        .map(|(key, _)| key.clone())
+        .filter(|key| !allows.allows(key))
+        .collect();
+    for key in fremd {
+        take(dict, &key, texts);
+    }
+}
+
+/// Die Untertypen einer Annotation (Tabelle 171, ISO 32000-2).
+fn is_annotation_subtype(name: &[u8]) -> bool {
+    ANNOTATION_SUBTYPE_KEYS.iter().any(|(n, _, _)| *n == name)
+}
+
+/// Weist sich dieses Dictionary **selbst** als Annotation oder Feld aus?
+///
+/// Enger als [`is_carrier`]: das gilt für alles, was der Trägerlauf über
+/// `/Parent` oder `/Kids` erreicht, und nimmt dort auch ein Dictionary ohne
+/// `/Type`. Für den Lauf über **alle** Objekte ([`clean_unreached_carriers`])
+/// wäre das jedes Ressourcenverzeichnis. Hier zählt nur: `/Type /Annot`, ein
+/// bekannter Annotations-`/Subtype` mit `/Rect`, oder eine Feldart `/FT`.
+fn declares_carrier(dict: &Dictionary) -> bool {
+    match value_of(dict, b"Type") {
+        Some(Object::Name(name)) if name == b"Annot" => true,
+        Some(Object::Name(name))
+            if [&b"Page"[..], b"Pages", b"Catalog"].contains(&name.as_slice()) =>
+        {
+            false
+        }
+        _ => {
+            let annotation = matches!(value_of(dict, b"Subtype"), Some(Object::Name(n)) if is_annotation_subtype(n))
+                && value_of(dict, b"Rect").is_some();
+            let field = matches!(
+                value_of(dict, b"FT"),
+                Some(Object::Name(n)) if [&b"Btn"[..], b"Tx", b"Ch", b"Sig"].contains(&n.as_slice())
+            );
+            annotation || field
+        }
+    }
+}
+
+/// Bereinigt jede **erreichbare** Annotation, die weder eine Seite in
+/// `/Annots` noch das Formular hält — als eigenes Objekt oder direkt in
+/// einem anderen eingebettet (`/MC0 << /Annot << /Type /Annot … >> >>`).
+///
+/// Über denselben Stapel wie jeder andere Träger: was sie über `/Popup`,
+/// `/Parent`, `/Kids` und `/IRT` hält, wird mitbereinigt, und `visited`
+/// sorgt dafür, dass nichts zweimal zählt. Keine Seite zeigt sie, also
+/// verliert sie ihr Erscheinungsbild (Register #90). Unerreichbares bleibt
+/// liegen: es fällt mit `prune_unreachable`, und der Bericht zählte sonst
+/// Texte aus Annotationen, die die Schwärzung schon gestrichen hat.
+fn clean_unreached_carriers(
+    doc: &mut Document,
+    visited: &mut BTreeSet<ObjectId>,
+    shown: &BTreeSet<ObjectId>,
+    captions: &mut BTreeMap<ObjectId, bool>,
+) -> Cleaned {
+    let reachable = reachable_ids(doc);
+    let mut stack: Vec<ObjectId> = doc
+        .objects
+        .iter()
+        .filter(|(id, _)| reachable.contains(id) && !visited.contains(id))
+        .filter(|(_, object)| matches!(object, Object::Dictionary(dict) if declares_carrier(dict)))
+        .map(|(id, _)| *id)
+        .collect();
+    let mut cleaned = drain_carriers(doc, &mut stack, visited, shown, captions);
+
+    // Direkt eingebettet: an einer Kopie des Halters bereinigt, und nur die
+    // kommt zurück. Eine Seite nicht — ihre direkten `/Annots` hat der
+    // Seitenlauf, und alles andere an ihr fällt mit [`PAGE_KEEP`].
+    let holders: Vec<ObjectId> = doc
+        .objects
+        .iter()
+        .filter(|(id, _)| reachable.contains(id) && !visited.contains(id))
+        .filter(|(_, object)| {
+            !matches!(dict_of(object), Some((dict, _)) if matches!(value_of(dict, b"Type"), Some(Object::Name(n)) if n == b"Page"))
+        })
+        .filter(|(_, object)| holds_embedded_carrier(object))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in holders {
+        let Some(mut copy) = doc.objects.get(&id).cloned() else {
+            continue;
+        };
+        let mut step = Cleaned::default();
+        {
+            let mut open: Vec<&mut Object> = match &mut copy {
+                Object::Dictionary(dict) => dict.iter_mut().map(|(_, v)| v).collect(),
+                Object::Stream(stream) => stream.dict.iter_mut().map(|(_, v)| v).collect(),
+                Object::Array(items) => items.iter_mut().collect(),
+                _ => Vec::new(),
+            };
+            while let Some(item) = open.pop() {
+                match item {
+                    Object::Dictionary(dict) if declares_carrier(dict) => {
+                        step += clean_embedded(doc, item, false, &mut stack, captions);
+                    }
+                    Object::Dictionary(dict) => open.extend(dict.iter_mut().map(|(_, v)| v)),
+                    Object::Array(items) => open.extend(items.iter_mut()),
+                    _ => {}
+                }
+            }
+        }
+        if step.any() {
+            doc.objects.insert(id, copy);
+        }
+        cleaned += step;
+    }
+    cleaned += drain_carriers(doc, &mut stack, visited, shown, captions);
+    cleaned
+}
+
+/// Steht unter `object` — nicht `object` selbst — ein direkt eingebettetes
+/// Dictionary, das sich als Träger ausweist?
+fn holds_embedded_carrier(object: &Object) -> bool {
+    let mut open: Vec<&Object> = match object {
+        Object::Dictionary(dict) => dict.iter().map(|(_, v)| v).collect(),
+        Object::Stream(stream) => stream.dict.iter().map(|(_, v)| v).collect(),
+        Object::Array(items) => items.iter().collect(),
+        _ => return false,
+    };
+    while let Some(item) = open.pop() {
+        match item {
+            Object::Dictionary(dict) if declares_carrier(dict) => return true,
+            Object::Dictionary(dict) => open.extend(dict.iter().map(|(_, v)| v)),
+            Object::Array(items) => open.extend(items.iter()),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Die vom Trailer aus erreichbaren Objekte — derselbe Lauf wie in
+/// `crate::document::prune_unreachable`, ohne etwas zu entfernen.
+fn reachable_ids(doc: &Document) -> BTreeSet<ObjectId> {
+    let mut seen: BTreeSet<ObjectId> = BTreeSet::new();
+    let trailer = Object::Dictionary(doc.trailer.clone());
+    let mut open: Vec<&Object> = vec![&trailer];
+    let mut queue: Vec<ObjectId> = Vec::new();
+    loop {
+        while let Some(item) = open.pop() {
+            match item {
+                Object::Reference(id) => {
+                    if seen.insert(*id) {
+                        queue.push(*id);
+                    }
+                }
+                Object::Array(items) => open.extend(items.iter()),
+                Object::Dictionary(dict) => open.extend(dict.iter().map(|(_, v)| v)),
+                Object::Stream(stream) => open.extend(stream.dict.iter().map(|(_, v)| v)),
+                _ => {}
+            }
+        }
+        let Some(id) = queue.pop() else {
+            return seen;
+        };
+        if let Some(object) = doc.objects.get(&id) {
+            open.push(object);
+        }
     }
 }
 
@@ -1930,9 +2384,10 @@ const PAGE_TREE_KEEP: [&[u8]; 9] = [
 /// Erlaubnisliste steht — das `/Resources` darunter aber jeden Schlüssel.
 /// `/Resources << /Font … /Zusatz (Kunde …) >>` stand nach dem Lauf in der
 /// Ausgabe, mit Rückgabewert 0 und ohne Warnung (Register #107). Die
-/// Einträge **unter** den Arten bleiben unberührt: eine Eigenschaftsliste
-/// unter `/Properties` ist frei gestaltbar (14.6.2), ihre Spiegel leert die
-/// Schwärzung.
+/// Einträge **unter** den Arten beschränkt seit der Prüfrunde 2
+/// [`restrict_to_shapes`] je Art (Schrift, Grafikzustand, Shading, Muster,
+/// Bild, Formular, Ebene); eine Eigenschaftsliste unter `/Properties` ist
+/// frei gestaltbar (14.6.2) und bleibt, ihre Spiegel leert die Schwärzung.
 const RESOURCES_KEEP: [&[u8]; 8] = [
     b"ExtGState",
     b"ColorSpace",
@@ -2003,6 +2458,1015 @@ fn take_unlisted(dict: &mut Dictionary, keep: &[&[u8]], into: &mut Tally) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Erlaubnislisten unter den erlaubten Schlüsseln (Prüfrunde 2, Träger)
+// ---------------------------------------------------------------------------
+//
+// [`CATALOG_KEEP`], [`PAGE_KEEP`] und [`RESOURCES_KEEP`] wirkten genau eine
+// Ebene tief: was **unter** einem erlaubten Schlüssel stand, blieb mit jedem
+// fremden Schlüssel stehen. Gemessen (vor dieser Änderung, Beleg
+// `r2_traeger.rs`): ein `/Zusatz` mit der IBAN unter `/ViewerPreferences`,
+// eine `/URL` unter `/Extensions /ADBE`, ein fremder Schlüssel in einem
+// `/PageLabels`-Eintrag, unter `/Group`, `/Trans` und `/BoxColorInfo` der
+// Seite, an Schrift, Schriftbeschreibung (`/Style /Panose`, `/CharSet`),
+// ExtGState, Shading, Bild-XObject und `/OCG` — alle mit Rückgabewert 0 in
+// der Ausgabe, und `--check-leaks` fand sie.
+//
+// Jetzt hat jede dieser Arten ein [`Shape`]: die Schlüssel ihrer Tabelle in
+// ISO 32000-2, und für die Werte, die selbst wieder Dictionaries sind, deren
+// Schema. Was nicht in der Tabelle steht, zeichnet nichts — kein Betrachter
+// liest einen Schlüssel, den die Norm nicht kennt — und fällt als Beiwerk.
+// Was in der Tabelle steht, bleibt, auch wenn es Text tragen *kann*
+// (`/BaseFont`, `/Name`): das ist Darstellung, und die geht vor. Die wenigen
+// Ausnahmen — Normschlüssel, die nichts zeichnen und nur Text tragen — stehen
+// mit Begründung an ihrer Liste.
+//
+// **Erkannt** wird eine Art an ihren eigenen Merkmalen (`/Type`, `/Subtype`,
+// `/ShadingType`, `/PatternType`, `/FunctionType`) oder an der Stelle, an der
+// sie hängt: ein ExtGState darf `/Type` weglassen, ist aber als Wert unter
+// `/Resources /ExtGState` eindeutig. Ein Verweis bekommt das Schema seines
+// Halters mit ([`shape_hints`]); widersprechen sich zwei Halter, bleibt das
+// Objekt unberührt — lieber ein fremder Schlüssel als eine Seite, der ein
+// Schlüssel fehlt, den die andere Verwendung braucht.
+
+/// Ein Dictionary-Schema: welche Schlüssel bleiben, und welche Werte selbst
+/// wieder ein Schema haben.
+struct Shape {
+    /// Die erlaubten Schlüssel, als Gruppen (Stromschlüssel und Artschlüssel
+    /// getrennt). `None`: jeder Schlüssel bleibt — etwa am Katalog, den
+    /// [`CATALOG_KEEP`] schon beschränkt hat, oder an einem Verzeichnis wie
+    /// `/Font << /F1 … >>`, dessen Schlüssel frei gewählte Namen sind.
+    keep: Option<&'static [&'static [&'static [u8]]]>,
+    /// Die Werte bestimmter Schlüssel mit eigenem Schema — direkt, als
+    /// Verweis oder als Feld davon (`/DescendantFonts [7 0 R]`).
+    nested: &'static [(&'static [u8], &'static Shape)],
+    /// Bei einem Verzeichnis (`keep: None`): das Schema **jedes** Werts.
+    each: Option<&'static Shape>,
+}
+
+impl Shape {
+    fn allows(&self, key: &[u8]) -> bool {
+        self.keep
+            .is_none_or(|groups| groups.iter().any(|group| group.contains(&key)))
+    }
+
+    /// Darf ein Strom dieses Schema haben? Nur, wenn es die Stromschlüssel
+    /// erlaubt — sonst verlöre er `/Length` und `/Filter`. Der Fall ist echt:
+    /// `/Encoding` einer Type0-Schrift ist ein Name **oder** ein CMap-Strom,
+    /// und das Schema des Kodierungsverzeichnisses passt nur auf das eine.
+    fn fits(&self, is_stream: bool) -> bool {
+        !is_stream
+            || self
+                .keep
+                .is_none_or(|groups| groups.iter().any(|group| group.contains(&&b"Length"[..])))
+    }
+
+    fn is_foreign(&self) -> bool {
+        std::ptr::eq(self, &FOREIGN_SHAPE)
+    }
+
+    /// Das Schema des Werts unter `key`. `/Resources` ist überall ein
+    /// Ressourcenverzeichnis, gleich wer es trägt.
+    fn child(shape: Option<&'static Shape>, key: &[u8]) -> Option<&'static Shape> {
+        if let Some(shape) = shape {
+            if let Some((_, child)) = shape.nested.iter().find(|(k, _)| *k == key) {
+                return Some(child);
+            }
+            if shape.keep.is_none() && shape.each.is_some() {
+                return shape.each;
+            }
+        }
+        (key == b"Resources").then_some(&RESOURCES_SHAPE)
+    }
+}
+
+/// Die Marke eines Dictionaries mit einem `/Type`, den kein Schema kennt
+/// (`/CMap`, `/Metadata`, `/Annot`, ein erfundener). Allein beschränkt sie
+/// nichts; unter einem Halter, der sagt, was dort steht, gilt dessen Schema
+/// — sonst entginge jedes Schema mit einem erfundenen `/Type /Zusatz`.
+static FOREIGN_SHAPE: Shape = Shape {
+    keep: None,
+    nested: &[],
+    each: None,
+};
+
+/// Die Schlüssel jedes Stroms (Tabelle 5). Ohne sie ließe sich kein Strom
+/// mehr entpacken.
+const STREAM_KEYS: &[&[u8]] = &[
+    b"Length",
+    b"Filter",
+    b"DecodeParms",
+    b"F",
+    b"FFilter",
+    b"FDecodeParms",
+    b"DL",
+];
+
+/// `/ViewerPreferences` (Tabelle 147): lauter Wahrheitswerte, Namen und
+/// Zahlen — kein Schlüssel der Tabelle trägt Text.
+static VIEWER_PREFERENCES_SHAPE: Shape = Shape {
+    keep: Some(&[&[
+        b"HideToolbar",
+        b"HideMenubar",
+        b"HideWindowUI",
+        b"FitWindow",
+        b"CenterWindow",
+        b"DisplayDocTitle",
+        b"NonFullScreenPageMode",
+        b"Direction",
+        b"ViewArea",
+        b"ViewClip",
+        b"PrintArea",
+        b"PrintClip",
+        b"PrintScaling",
+        b"Duplex",
+        b"PickTrayByPDFSize",
+        b"PrintPageRange",
+        b"NumCopies",
+        b"Enforce",
+    ]]),
+    nested: &[],
+    each: None,
+};
+
+/// `/Extensions` (7.12): ein Verzeichnis je Entwicklerpräfix — die Präfixe
+/// sind frei, ihre Werte haben ein Schema (in PDF 2.0 auch ein Feld davon).
+static EXTENSIONS_SHAPE: Shape = Shape {
+    keep: None,
+    nested: &[],
+    each: Some(&DEVELOPER_EXTENSIONS_SHAPE),
+};
+
+/// Eine Entwicklererweiterung (Tabelle 49). `/URL` und `/ExtensionRevision`
+/// (PDF 2.0) fallen, obwohl die Norm sie kennt: beides ist frei wählbarer
+/// Text, und keines davon entscheidet, wie die Datei gelesen wird — das tun
+/// `/BaseVersion` und `/ExtensionLevel`.
+static DEVELOPER_EXTENSIONS_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Type", b"BaseVersion", b"ExtensionLevel"]]),
+    nested: &[],
+    each: None,
+};
+
+/// Der Katalog selbst ist schon beschränkt ([`CATALOG_KEEP`]); hier stehen
+/// die Schemata seiner Werte. `/PageLabels` bereinigt [`clean_page_labels`],
+/// `/OutputIntents` [`clean_output_intents`].
+static CATALOG_SHAPE: Shape = Shape {
+    keep: None,
+    nested: &[
+        (b"ViewerPreferences", &VIEWER_PREFERENCES_SHAPE),
+        (b"Extensions", &EXTENSIONS_SHAPE),
+    ],
+    each: None,
+};
+
+/// Die Seite ist schon beschränkt ([`PAGE_KEEP`]); hier stehen die Schemata
+/// ihrer Werte.
+static PAGE_SHAPE: Shape = Shape {
+    keep: None,
+    nested: &[
+        (b"Group", &GROUP_SHAPE),
+        (b"Trans", &TRANSITION_SHAPE),
+        (b"BoxColorInfo", &BOX_COLOR_INFO_SHAPE),
+    ],
+    each: None,
+};
+
+/// Eine Transparenzgruppe (8.11.5.1, Tabellen 94 und 145) — an Seite und
+/// Formular.
+static GROUP_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Type", b"S", b"CS", b"I", b"K"]]),
+    nested: &[],
+    each: None,
+};
+
+/// Ein Seitenübergang (12.4.4.1).
+static TRANSITION_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Type", b"S", b"D", b"Dm", b"M", b"Di", b"SS", b"B"]]),
+    nested: &[],
+    each: None,
+};
+
+/// `/BoxColorInfo` (14.11.2.2): je Seitenrahmen ein Stil.
+static BOX_COLOR_INFO_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"CropBox", b"BleedBox", b"TrimBox", b"ArtBox"]]),
+    nested: &[
+        (b"CropBox", &BOX_STYLE_SHAPE),
+        (b"BleedBox", &BOX_STYLE_SHAPE),
+        (b"TrimBox", &BOX_STYLE_SHAPE),
+        (b"ArtBox", &BOX_STYLE_SHAPE),
+    ],
+    each: None,
+};
+
+/// Der Stil eines Seitenrahmens (14.11.2.2).
+static BOX_STYLE_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"C", b"W", b"S", b"D"]]),
+    nested: &[],
+    each: None,
+};
+
+/// Ein Ressourcenverzeichnis. Seine eigenen Schlüssel beschränkt
+/// [`clear_foreign_resources`]; hier stehen die Schemata der Einträge.
+/// `/XObject` und `/Properties` erkennt jeder Eintrag selbst (`/Subtype`,
+/// `/Type`) — eine Eigenschaftsliste unter `/Properties` ist frei gestaltbar
+/// (14.6.2) und bleibt, was sie ist. `/ColorSpace` hat kein Schema: ein
+/// Farbraum ist ein Feld, und was darin steht, zeichnet.
+static RESOURCES_SHAPE: Shape = Shape {
+    keep: None,
+    nested: &[
+        (b"Font", &FONT_MAP_SHAPE),
+        (b"ExtGState", &EXT_G_STATE_MAP_SHAPE),
+        (b"Shading", &SHADING_MAP_SHAPE),
+        (b"Pattern", &PATTERN_MAP_SHAPE),
+    ],
+    each: None,
+};
+
+static FONT_MAP_SHAPE: Shape = Shape {
+    keep: None,
+    nested: &[],
+    each: Some(&FONT_SHAPE),
+};
+
+static EXT_G_STATE_MAP_SHAPE: Shape = Shape {
+    keep: None,
+    nested: &[],
+    each: Some(&EXT_G_STATE_SHAPE),
+};
+
+static SHADING_MAP_SHAPE: Shape = Shape {
+    keep: None,
+    nested: &[],
+    each: Some(&SHADING_SHAPE),
+};
+
+static PATTERN_MAP_SHAPE: Shape = Shape {
+    keep: None,
+    nested: &[],
+    each: Some(&PATTERN_SHAPE),
+};
+
+/// Eine Schrift — **jede** Art in einer Liste: einfache Schriften
+/// (Tabelle 109), Type3 (Tabelle 110), Type0 (Tabelle 119) und CIDFont
+/// (Tabelle 115). Eine Liste je Art wäre enger, aber eine Schrift mit
+/// falschem `/Subtype` verlöre dann, was ihr Betrachter trotzdem liest; die
+/// Vereinigung nimmt nur Schlüssel, die **keine** Schriftart kennt.
+static FONT_SHAPE: Shape = Shape {
+    keep: Some(&[&[
+        b"Type",
+        b"Subtype",
+        b"Name",
+        b"BaseFont",
+        b"FirstChar",
+        b"LastChar",
+        b"Widths",
+        b"FontDescriptor",
+        b"Encoding",
+        b"ToUnicode",
+        b"FontBBox",
+        b"FontMatrix",
+        b"CharProcs",
+        b"Resources",
+        b"DescendantFonts",
+        b"CIDSystemInfo",
+        b"DW",
+        b"W",
+        b"DW2",
+        b"W2",
+        b"CIDToGIDMap",
+    ]]),
+    nested: &[
+        (b"FontDescriptor", &FONT_DESCRIPTOR_SHAPE),
+        (b"Encoding", &ENCODING_SHAPE),
+        (b"DescendantFonts", &FONT_SHAPE),
+    ],
+    each: None,
+};
+
+/// Ein Kodierungsverzeichnis (Tabelle 112). Die Glyphennamen in
+/// `/Differences` bleiben: sie bestimmen, welche Glyphe gezeichnet wird.
+static ENCODING_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Type", b"BaseEncoding", b"Differences"]]),
+    nested: &[],
+    each: None,
+};
+
+/// Eine Schriftbeschreibung (Tabellen 120 und 124): Name, Maße, Merkmale,
+/// das eingebettete Schriftprogramm, `/FD` und `/CIDSet`.
+///
+/// Was **nicht** bleibt, obwohl die Norm es kennt:
+///
+/// * `/FontFamily` — fällt schon als Normstring (Register #73),
+/// * `/CharSet` — die Glyphennamen einer Type1-Untermenge als **eine
+///   Zeichenkette**; sie dient nur der Schriftsuche, kein Betrachter zeichnet
+///   danach, und sie trägt jeden Text,
+/// * `/Style` — ein Dictionary mit `/Panose`, einer Zeichenkette, die bei
+///   einer nicht eingebetteten CID-Schrift die Ersatzschrift wählen *hilft*.
+///   Ohne sie wählt der Betrachter nach `/FontName` und `/Flags`; eine
+///   eingebettete Schrift berührt das gar nicht.
+static FONT_DESCRIPTOR_SHAPE: Shape = Shape {
+    keep: Some(&[&[
+        b"Type",
+        b"FontName",
+        b"FontStretch",
+        b"FontWeight",
+        b"Flags",
+        b"FontBBox",
+        b"ItalicAngle",
+        b"Ascent",
+        b"Descent",
+        b"Leading",
+        b"CapHeight",
+        b"XHeight",
+        b"StemV",
+        b"StemH",
+        b"AvgWidth",
+        b"MaxWidth",
+        b"MissingWidth",
+        b"FontFile",
+        b"FontFile2",
+        b"FontFile3",
+        b"Lang",
+        b"FD",
+        b"CIDSet",
+    ]]),
+    nested: &[(b"FD", &FONT_DESCRIPTOR_MAP_SHAPE)],
+    each: None,
+};
+
+/// `/FD` einer CID-Schriftbeschreibung: je Glyphenklasse eine
+/// Schriftbeschreibung (9.8.3.3).
+static FONT_DESCRIPTOR_MAP_SHAPE: Shape = Shape {
+    keep: None,
+    nested: &[],
+    each: Some(&FONT_DESCRIPTOR_SHAPE),
+};
+
+/// Ein Grafikzustand (Tabelle 57) — **alle** Schlüssel der Tabelle, auch die
+/// seltenen (`/HT`, `/UCR2`, `/UseBlackPtComp`, `/HTO`): jeder davon ändert,
+/// wie gezeichnet wird.
+static EXT_G_STATE_SHAPE: Shape = Shape {
+    keep: Some(&[&[
+        b"Type",
+        b"LW",
+        b"LC",
+        b"LJ",
+        b"ML",
+        b"D",
+        b"RI",
+        b"OP",
+        b"op",
+        b"OPM",
+        b"Font",
+        b"BG",
+        b"BG2",
+        b"UCR",
+        b"UCR2",
+        b"TR",
+        b"TR2",
+        b"HT",
+        b"FL",
+        b"SM",
+        b"SA",
+        b"BM",
+        b"SMask",
+        b"CA",
+        b"ca",
+        b"AIS",
+        b"TK",
+        b"UseBlackPtComp",
+        b"HTO",
+    ]]),
+    nested: &[
+        (b"Font", &FONT_SHAPE),
+        (b"SMask", &SOFT_MASK_SHAPE),
+        (b"BG", &FUNCTION_SHAPE),
+        (b"BG2", &FUNCTION_SHAPE),
+        (b"UCR", &FUNCTION_SHAPE),
+        (b"UCR2", &FUNCTION_SHAPE),
+        (b"TR", &FUNCTION_SHAPE),
+        (b"TR2", &FUNCTION_SHAPE),
+    ],
+    each: None,
+};
+
+/// Eine Softmaske (Tabelle 142). `/G` ist ein Formular und erkennt sich
+/// selbst.
+static SOFT_MASK_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Type", b"S", b"G", b"BC", b"TR"]]),
+    nested: &[(b"TR", &FUNCTION_SHAPE)],
+    each: None,
+};
+
+/// Eine Funktion (Tabellen 38–41), als Dictionary oder als Strom.
+static FUNCTION_SHAPE: Shape = Shape {
+    keep: Some(&[
+        &[
+            b"FunctionType",
+            b"Domain",
+            b"Range",
+            b"Size",
+            b"BitsPerSample",
+            b"Order",
+            b"Encode",
+            b"Decode",
+            b"C0",
+            b"C1",
+            b"N",
+            b"Functions",
+            b"Bounds",
+        ],
+        STREAM_KEYS,
+    ]),
+    nested: &[(b"Functions", &FUNCTION_SHAPE)],
+    each: None,
+};
+
+/// Ein Shading (Tabellen 77–82), als Dictionary oder als Strom (Typ 4–7).
+static SHADING_SHAPE: Shape = Shape {
+    keep: Some(&[
+        &[
+            b"ShadingType",
+            b"ColorSpace",
+            b"Background",
+            b"BBox",
+            b"AntiAlias",
+            b"Domain",
+            b"Matrix",
+            b"Function",
+            b"Coords",
+            b"Extend",
+            b"BitsPerCoordinate",
+            b"BitsPerComponent",
+            b"BitsPerFlag",
+            b"Decode",
+            b"VerticesPerRow",
+        ],
+        STREAM_KEYS,
+    ]),
+    nested: &[(b"Function", &FUNCTION_SHAPE)],
+    each: None,
+};
+
+/// Ein Muster: Kachel (Tabelle 75, ein Strom) oder Shading-Muster
+/// (Tabelle 76) — in einer Liste, wie bei den Schriften.
+static PATTERN_SHAPE: Shape = Shape {
+    keep: Some(&[
+        &[
+            b"Type",
+            b"PatternType",
+            b"PaintType",
+            b"TilingType",
+            b"BBox",
+            b"XStep",
+            b"YStep",
+            b"Resources",
+            b"Matrix",
+            b"Shading",
+            b"ExtGState",
+        ],
+        STREAM_KEYS,
+    ]),
+    nested: &[
+        (b"Shading", &SHADING_SHAPE),
+        (b"ExtGState", &EXT_G_STATE_SHAPE),
+    ],
+    each: None,
+};
+
+/// Ein Bild-XObject (Tabellen 87 und 145).
+///
+/// `/Alt` und `/ActualText` bleiben — nicht, weil die Tabelle sie nennt,
+/// sondern weil `crate::redact::clear_image_alternates` über sie entscheidet:
+/// der Ersatztext eines Bildes fällt dort, wo seine Pixel fallen, und bleibt
+/// am Firmenlogo daneben (siehe [`ALTERNATE_TEXT_KEYS`]).
+///
+/// Was **nicht** bleibt, obwohl die Norm es kennt: `/ID` (die Kennung einer
+/// Web-Capture-Sitzung, eine beliebige Bytefolge), `/Measure` und `/PtData`
+/// (Geodaten mit frei wählbaren Einheitennamen — dieselbe Entscheidung wie an
+/// der Annotation, [`ANNOTATION_PLATE_KEYS`]). Keiner davon zeichnet.
+static IMAGE_SHAPE: Shape = Shape {
+    keep: Some(&[
+        &[
+            b"Type",
+            b"Subtype",
+            b"Width",
+            b"Height",
+            b"ColorSpace",
+            b"BitsPerComponent",
+            b"Intent",
+            b"ImageMask",
+            b"Mask",
+            b"Decode",
+            b"Interpolate",
+            b"Alternates",
+            b"SMask",
+            b"SMaskInData",
+            b"Matte",
+            b"Name",
+            b"StructParent",
+            b"OC",
+            b"Alt",
+            b"ActualText",
+        ],
+        STREAM_KEYS,
+    ]),
+    nested: &[],
+    each: None,
+};
+
+/// Ein Formular-XObject (Tabelle 93) — auch jedes Erscheinungsbild einer
+/// Annotation. `/Alt` und `/ActualText` bleiben wie am Bild. Was fällt,
+/// obwohl die Norm es kennt: `/LastModified` (ein Zeitstempel, der nur neben
+/// `/PieceInfo` etwas bedeutet, und das fällt schon), `/Measure` und
+/// `/PtData` wie am Bild.
+static FORM_SHAPE: Shape = Shape {
+    keep: Some(&[
+        &[
+            b"Type",
+            b"Subtype",
+            b"FormType",
+            b"BBox",
+            b"Matrix",
+            b"Resources",
+            b"Group",
+            b"StructParent",
+            b"StructParents",
+            b"OC",
+            b"Name",
+            b"Alt",
+            b"ActualText",
+        ],
+        STREAM_KEYS,
+    ]),
+    nested: &[(b"Group", &GROUP_SHAPE)],
+    each: None,
+};
+
+/// Eine Ebene (Tabelle 96). `/Name` leert [`clear_optional_content_names`],
+/// `/Usage` nimmt es mit — beides erst nach dem Aufräumen.
+static OCG_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Type", b"Name", b"Intent", b"Usage"]]),
+    nested: &[],
+    each: None,
+};
+
+/// Ein Ebenen-Mitgliedschaftsverzeichnis (Tabelle 97).
+static OCMD_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Type", b"OCGs", b"P", b"VE"]]),
+    nested: &[],
+    each: None,
+};
+
+/// Das Schema, das ein Dictionary an sich selbst trägt — `None`, wenn es
+/// sich nicht ausweist.
+fn marked_shape(dict: &Dictionary, is_stream: bool) -> Option<&'static Shape> {
+    let name = |key: &[u8]| match value_of(dict, key) {
+        Some(Object::Name(name)) => Some(name.as_slice()),
+        _ => None,
+    };
+    match name(b"Type") {
+        Some(b"Catalog") => return Some(&CATALOG_SHAPE),
+        Some(b"Page") => return Some(&PAGE_SHAPE),
+        Some(b"Font") => return Some(&FONT_SHAPE),
+        Some(b"FontDescriptor") => return Some(&FONT_DESCRIPTOR_SHAPE),
+        Some(b"Encoding") => return Some(&ENCODING_SHAPE),
+        Some(b"ExtGState") => return Some(&EXT_G_STATE_SHAPE),
+        Some(b"Pattern") => return Some(&PATTERN_SHAPE),
+        Some(b"Group") => return Some(&GROUP_SHAPE),
+        Some(b"Mask") => return Some(&SOFT_MASK_SHAPE),
+        Some(b"OCG") => return Some(&OCG_SHAPE),
+        Some(b"OCMD") => return Some(&OCMD_SHAPE),
+        Some(b"Trans") => return Some(&TRANSITION_SHAPE),
+        Some(b"Extensions") => return Some(&EXTENSIONS_SHAPE),
+        Some(b"DeveloperExtensions") => return Some(&DEVELOPER_EXTENSIONS_SHAPE),
+        // Ein XObject entscheidet an `/Subtype`, alles ohne `/Type` an seinen
+        // Pflichtschlüsseln.
+        None | Some(b"XObject") => {}
+        // Ein fremder `/Type`: was immer das ist, es hat kein eigenes Schema.
+        Some(_) => return Some(&FOREIGN_SHAPE),
+    }
+    if is_stream {
+        match name(b"Subtype") {
+            Some(b"Image") => return Some(&IMAGE_SHAPE),
+            Some(b"Form") => return Some(&FORM_SHAPE),
+            _ => {}
+        }
+    }
+    if dict.has(b"PatternType") {
+        Some(&PATTERN_SHAPE)
+    } else if dict.has(b"ShadingType") {
+        Some(&SHADING_SHAPE)
+    } else if dict.has(b"FunctionType") {
+        Some(&FUNCTION_SHAPE)
+    } else {
+        None
+    }
+}
+
+/// Das Schema, das gilt: das des Halters (`context`) oder das eigene. Sagen
+/// beide etwas und nicht dasselbe, gilt keines — siehe Abschnittskopf. Ein
+/// fremder `/Type` widerspricht dem Halter nicht, ein Strom einem Schema ohne
+/// Stromschlüssel schon.
+fn effective_shape(
+    context: Option<&'static Shape>,
+    marked: Option<&'static Shape>,
+    is_stream: bool,
+) -> Option<&'static Shape> {
+    let shape = match (context, marked) {
+        (Some(a), Some(b)) if b.is_foreign() => Some(a),
+        (Some(a), Some(b)) if !std::ptr::eq(a, b) => None,
+        (a, b) => a.or(b),
+    };
+    shape.filter(|shape| shape.fits(is_stream))
+}
+
+/// Das Dictionary eines Objekts — auch das eines Stroms — und ob es einer ist.
+fn dict_of(object: &Object) -> Option<(&Dictionary, bool)> {
+    match object {
+        Object::Dictionary(dict) => Some((dict, false)),
+        Object::Stream(stream) => Some((&stream.dict, true)),
+        _ => None,
+    }
+}
+
+/// Welches Schema bekommt welches Objekt über seine Halter? Läuft bis zum
+/// Fixpunkt: ein ExtGState ohne `/Type`, das nur ein Ressourcenverzeichnis
+/// als solches ausweist, gibt sein Schema an seine Softmaske weiter.
+///
+/// Ein Objekt, das sich selbst ausweist, steht hier nicht — sein eigenes
+/// Schema gilt (ein fremder `/Type` weist nichts aus). Ein Objekt, das zwei Halter verschieden ausweisen, steht hier
+/// mit `None`: es bleibt unberührt.
+fn shape_hints(
+    doc: &Document,
+    reachable: &BTreeSet<ObjectId>,
+) -> BTreeMap<ObjectId, Option<&'static Shape>> {
+    let marked_at = |id: &ObjectId| {
+        doc.objects
+            .get(id)
+            .and_then(dict_of)
+            .and_then(|(dict, is_stream)| marked_shape(dict, is_stream))
+    };
+    let mut hints: BTreeMap<ObjectId, Option<&'static Shape>> = BTreeMap::new();
+    // Nur Erreichbares weist aus: ein liegengebliebenes Objekt, das ohnehin
+    // fällt, darf kein Schema in Widerspruch setzen.
+    let mut work: Vec<(ObjectId, Option<&'static Shape>)> = doc
+        .objects
+        .keys()
+        .filter(|id| reachable.contains(id))
+        .map(|id| (*id, marked_at(id)))
+        .collect();
+    while let Some((id, shape)) = work.pop() {
+        let Some(object) = doc.objects.get(&id) else {
+            continue;
+        };
+        // Ohne Rekursion und ohne Tiefengrenze, wie [`clear_ocg_names`].
+        let mut stack: Vec<(&Object, Option<&'static Shape>)> = vec![(object, shape)];
+        while let Some((item, context)) = stack.pop() {
+            if let Object::Reference(target) = item {
+                let Some(context) = context else {
+                    continue;
+                };
+                if marked_at(target).is_some_and(|marked| !marked.is_foreign()) {
+                    continue;
+                }
+                match hints.get(target) {
+                    None => {
+                        hints.insert(*target, Some(context));
+                        work.push((*target, Some(context)));
+                    }
+                    Some(Some(known)) if !std::ptr::eq(*known, context) => {
+                        hints.insert(*target, None);
+                    }
+                    Some(_) => {}
+                }
+                continue;
+            }
+            if let Object::Array(items) = item {
+                stack.extend(items.iter().map(|inner| (inner, context)));
+                continue;
+            }
+            let Some((dict, is_stream)) = dict_of(item) else {
+                continue;
+            };
+            let shape = effective_shape(context, marked_shape(dict, is_stream), is_stream);
+            stack.extend(
+                dict.iter()
+                    .map(|(key, value)| (value, Shape::child(shape, key))),
+            );
+        }
+    }
+    hints
+}
+
+/// Wendet die Schemata auf jedes Objekt der Datei an und bucht jeden
+/// entfernten Schlüssel als Beiwerk.
+///
+/// Über **alle** erreichbaren Objekte: eine Schrift hängt an Seite, Formular,
+/// Erscheinungsbild, Kachelmuster, Type3-Schrift oder Grafikzustand, und auch
+/// ein direkt eingebettetes Dictionary wird an Ort und Stelle beschränkt.
+fn restrict_to_shapes(doc: &mut Document, into: &mut Tally) {
+    let reachable = reachable_ids(doc);
+    let hints = shape_hints(doc, &reachable);
+    for (id, object) in doc.objects.iter_mut() {
+        // Was niemand erreicht, fällt mit `prune_unreachable` — und zählte
+        // hier sonst als Beiwerk.
+        if !reachable.contains(id) {
+            continue;
+        }
+        let top = hints.get(id).copied().flatten();
+        let mut stack: Vec<(&mut Object, Option<&'static Shape>)> = vec![(object, top)];
+        while let Some((item, context)) = stack.pop() {
+            let (dict, is_stream) = match item {
+                Object::Array(items) => {
+                    stack.extend(items.iter_mut().map(|inner| (inner, context)));
+                    continue;
+                }
+                Object::Dictionary(dict) => (dict, false),
+                Object::Stream(stream) => (&mut stream.dict, true),
+                _ => continue,
+            };
+            let shape = effective_shape(context, marked_shape(dict, is_stream), is_stream);
+            if let Some(shape) = shape {
+                let fremd: Vec<Vec<u8>> = dict
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .filter(|key| !shape.allows(key))
+                    .collect();
+                for key in fremd {
+                    take(dict, &key, into);
+                }
+            }
+            stack.extend(
+                dict.iter_mut()
+                    .map(|(key, value)| (value, Shape::child(shape, key))),
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Type3-Schriften, die niemand setzt
+// ---------------------------------------------------------------------------
+
+/// Ist dieses Dictionary eine Type3-Schrift (Tabelle 110)?
+fn is_type3_font(dict: &Dictionary) -> bool {
+    matches!(value_of(dict, b"Subtype"), Some(Object::Name(n)) if n == b"Type3")
+        && matches!(value_of(dict, b"Type"), None | Some(Object::Name(_)))
+        && dict.has(b"CharProcs")
+}
+
+/// Leert `/CharProcs` jeder Type3-Schrift, die kein Inhaltsstrom setzt.
+///
+/// Eine Glyphprozedur ist ein Content-Stream, und sie darf mit einer
+/// *anderen* Schrift Text setzen (`(DE89 …) Tj`). Setzt niemand die
+/// Type3-Schrift, geht ihr Strom durch keine Schwärzung und durch keine
+/// Warnung — `crate::content` sieht ihn erst, wenn ein `Tj` die Schrift
+/// benutzt —, und er stand nach dem Lauf in der Ausgabe, Rückgabewert 0
+/// (Beleg `r2_traeger.rs`). Was niemand setzt, zeichnet nichts; ohne seine
+/// Prozeduren zeichnet es genauso wenig. Das Kodierungsverzeichnis hilft
+/// dabei nicht: eine Glyphe, die `/Differences` erreicht, ist deshalb noch
+/// lange nicht gesetzt — und eine, die es nicht erreicht, kann ein Betrachter
+/// über seine Ersatzkodierung trotzdem zeichnen.
+///
+/// **Wann eine Schrift als gesetzt gilt** — im Zweifel immer:
+///
+/// * ein `Tf` in irgendeinem Inhaltsstrom (Seiteninhalt, Formular,
+///   Kachelmuster, Erscheinungsbild — auch eines, das niemand platziert) oder
+///   in irgendeinem `/DA` nennt einen der Namen, unter denen sie in
+///   **irgendeinem** Verzeichnis steht. Welches Verzeichnis zu welchem Strom
+///   gehört, wird nicht aufgelöst: der Name genügt,
+/// * oder sie steht in einem Feld (`/Font [7 0 R 12]` eines Grafikzustands —
+///   `gs` setzt sie ohne `Tf`),
+/// * oder die Glyphprozedur einer *gesetzten* Type3-Schrift setzt sie
+///   (Fixpunkt). Die Prozeduren einer ungesetzten Schrift zählen nicht als
+///   Beleg — auch nicht für sie selbst: sie laufen nie.
+///
+/// Lässt sich **ein** Inhaltsstrom nicht vollständig lesen, gilt jede
+/// Type3-Schrift als gesetzt, und nichts wird geleert.
+fn clear_unset_type3_fonts(doc: &mut Document, page_ids: &[ObjectId], into: &mut Tally) {
+    // Die Type3-Schriften als eigene Objekte, mit ihren Prozedurströmen.
+    let fonts: BTreeMap<ObjectId, Vec<ObjectId>> = doc
+        .objects
+        .iter()
+        .filter_map(|(id, object)| match object {
+            Object::Dictionary(dict) if is_type3_font(dict) => {
+                Some((*id, char_proc_ids(doc, dict)))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut names: BTreeMap<ObjectId, BTreeSet<Vec<u8>>> = BTreeMap::new();
+    let mut in_array: BTreeSet<ObjectId> = BTreeSet::new();
+    // Die Prozeduren direkt eingebetteter Type3-Schriften zählen immer als
+    // Beleg — wer sie hält, wird nicht verfolgt.
+    let mut direct_procs: BTreeSet<ObjectId> = BTreeSet::new();
+    let mut appearances: BTreeSet<ObjectId> = BTreeSet::new();
+    let mut da_strings: Vec<Vec<u8>> = Vec::new();
+    for object in doc.objects.values() {
+        let mut stack: Vec<&Object> = vec![object];
+        while let Some(item) = stack.pop() {
+            if let Object::Array(items) = item {
+                for inner in items {
+                    if let Object::Reference(target) = inner {
+                        if fonts.contains_key(target) {
+                            in_array.insert(*target);
+                        }
+                    }
+                }
+                stack.extend(items.iter());
+                continue;
+            }
+            let Some((dict, _)) = dict_of(item) else {
+                continue;
+            };
+            for (key, value) in dict.iter() {
+                match value {
+                    Object::Reference(target) if fonts.contains_key(target) => {
+                        names.entry(*target).or_default().insert(key.clone());
+                    }
+                    Object::Dictionary(inner) if is_type3_font(inner) => {
+                        direct_procs.extend(char_proc_ids(doc, inner));
+                    }
+                    Object::String(bytes, _) if key == b"DA" => da_strings.push(bytes.clone()),
+                    _ => {}
+                }
+                if key == b"AP" {
+                    collect_appearance_ids(doc, value, &mut appearances);
+                }
+            }
+            stack.extend(dict.iter().map(|(_, value)| value));
+        }
+    }
+    let any_direct = !direct_procs.is_empty();
+    if fonts.is_empty() && !any_direct {
+        return;
+    }
+
+    // Die Belege: jeder Inhaltsstrom, der nicht nur Glyphprozedur einer
+    // Type3-Schrift als eigenes Objekt ist.
+    let proc_ids: BTreeSet<ObjectId> = fonts.values().flatten().copied().collect();
+    let mut used: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for da in &da_strings {
+        if !collect_font_names(da, &mut used) {
+            return;
+        }
+    }
+    for page_id in page_ids {
+        let data = crate::filters::page_content(doc, *page_id);
+        if !collect_font_names(&data, &mut used) {
+            return;
+        }
+    }
+    for (id, object) in &doc.objects {
+        let Object::Stream(stream) = object else {
+            continue;
+        };
+        let is_form =
+            matches!(value_of(&stream.dict, b"Subtype"), Some(Object::Name(n)) if n == b"Form");
+        let evidence = is_form
+            || stream.dict.has(b"PatternType")
+            || appearances.contains(id)
+            || (direct_procs.contains(id) && !proc_ids.contains(id));
+        if evidence && !stream_font_names(doc, stream, &mut used) {
+            return;
+        }
+    }
+
+    // Fixpunkt: was eine gesetzte Type3-Schrift setzt, ist gesetzt.
+    let mut set: BTreeSet<ObjectId> = BTreeSet::new();
+    loop {
+        let newly: Vec<ObjectId> = fonts
+            .keys()
+            .filter(|id| !set.contains(*id))
+            .filter(|id| {
+                in_array.contains(*id)
+                    || names
+                        .get(*id)
+                        .is_some_and(|n| n.iter().any(|name| used.contains(name)))
+            })
+            .copied()
+            .collect();
+        if newly.is_empty() {
+            break;
+        }
+        for id in newly {
+            set.insert(id);
+            for proc_id in &fonts[&id] {
+                if let Ok(stream) = doc.get_object(*proc_id).and_then(Object::as_stream) {
+                    if !stream_font_names(doc, stream, &mut used) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    for id in fonts.keys().filter(|id| !set.contains(*id)) {
+        if let Ok(font) = doc.get_dictionary_mut(*id) {
+            if take(font, b"CharProcs", into) {
+                font.set("CharProcs", Object::Dictionary(Dictionary::new()));
+            }
+        }
+    }
+    if !any_direct {
+        return;
+    }
+    // Eine direkt eingebettete Type3-Schrift heißt wie der Schlüssel, unter
+    // dem sie steht; in einem Feld (`/Font [<< … >> 12]`) gilt sie als
+    // gesetzt.
+    for object in doc.objects.values_mut() {
+        let mut stack: Vec<&mut Object> = vec![object];
+        while let Some(item) = stack.pop() {
+            let dict = match item {
+                Object::Dictionary(dict) => dict,
+                Object::Stream(stream) => &mut stream.dict,
+                Object::Array(items) => {
+                    stack.extend(items.iter_mut().filter(
+                        |inner| !matches!(inner, Object::Dictionary(d) if is_type3_font(d)),
+                    ));
+                    continue;
+                }
+                _ => continue,
+            };
+            for (key, value) in dict.iter_mut() {
+                if let Object::Dictionary(inner) = value {
+                    if is_type3_font(inner) && !used.contains(key) {
+                        if take(inner, b"CharProcs", into) {
+                            inner.set("CharProcs", Object::Dictionary(Dictionary::new()));
+                        }
+                        continue;
+                    }
+                }
+                stack.push(value);
+            }
+        }
+    }
+}
+
+/// Die Prozedurströme unter `/CharProcs` einer Type3-Schrift.
+fn char_proc_ids(doc: &Document, font: &Dictionary) -> Vec<ObjectId> {
+    value_of(font, b"CharProcs")
+        .and_then(|procs| resolve(doc, procs))
+        .and_then(|procs| procs.as_dict().ok())
+        .map(|procs| {
+            procs
+                .iter()
+                .filter_map(|(_, value)| value.as_reference().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Die Erscheinungsströme unter einem `/AP` — direkt, als Verweis, und eine
+/// Ebene Zustände darunter (`/N << /On 7 0 R /Off 8 0 R >>`).
+fn collect_appearance_ids(doc: &Document, ap: &Object, into: &mut BTreeSet<ObjectId>) {
+    let Some(Object::Dictionary(ap)) = resolve(doc, ap) else {
+        return;
+    };
+    for (_, value) in ap.iter() {
+        match value {
+            Object::Reference(id) => {
+                into.insert(*id);
+                if let Ok(Object::Dictionary(states)) = doc.get_object(*id) {
+                    into.extend(states.iter().filter_map(|(_, v)| v.as_reference().ok()));
+                }
+            }
+            Object::Dictionary(states) => {
+                into.extend(states.iter().filter_map(|(_, v)| v.as_reference().ok()));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Wie [`collect_font_names`], am entpackten Strom. `false`, wenn er sich
+/// nicht entpacken lässt.
+fn stream_font_names(doc: &Document, stream: &lopdf::Stream, used: &mut BTreeSet<Vec<u8>>) -> bool {
+    match crate::filters::decoded_content(doc, stream) {
+        Some(data) => collect_font_names(&data, used),
+        None => false,
+    }
+}
+
+/// Sammelt die Schriftnamen jedes `Tf` in `data`. `false`, wenn sich der
+/// Inhalt nicht vollständig in Operationen zerlegen lässt — dann ist über ihn
+/// nichts gesagt.
+fn collect_font_names(data: &[u8], used: &mut BTreeSet<Vec<u8>>) -> bool {
+    let decoded = crate::ops::decode_content_checked(data);
+    if !decoded.truncated.is_empty() {
+        return false;
+    }
+    for op in &decoded.operations {
+        if op.operator == "Tf" {
+            if let Some(Object::Name(name)) = op.operands.first() {
+                used.insert(name.clone());
+            }
+        }
+    }
+    true
+}
+
 /// Die Knoten des Seitenbaums unter `/Pages` — ohne die Seiten selbst.
 fn page_tree_nodes(doc: &Document, catalog_id: ObjectId, pages: &[ObjectId]) -> Vec<ObjectId> {
     let mut out = Vec::new();
@@ -2030,8 +3494,9 @@ fn page_tree_nodes(doc: &Document, catalog_id: ObjectId, pages: &[ObjectId]) -> 
     out
 }
 
-/// Nimmt den Seitenbeschriftungen ihr Präfix `/P` — den einzigen Klartext im
-/// Zahlenbaum `/PageLabels` (Tabelle 159). `/S` und `/St` bleiben: der
+/// Nimmt den Seitenbeschriftungen ihr Präfix `/P` — den einzigen Klartext,
+/// den die Norm im Zahlenbaum `/PageLabels` vorsieht (Tabelle 161) — und
+/// jeden Schlüssel, den sie dort nicht vorsieht. `/S` und `/St` bleiben: der
 /// Betrachter zählt weiter römisch oder arabisch, nur ohne
 /// „Kontoauszug <Konto> – “ davor.
 ///
@@ -2076,13 +3541,25 @@ fn clean_page_labels(doc: &mut Document, catalog_id: ObjectId, beiwerk: &mut Tal
     }
     for id in labels {
         if let Ok(label) = doc.get_dictionary_mut(id) {
-            take(label, b"P", beiwerk);
+            take_unlisted(label, &PAGE_LABEL_KEEP, beiwerk);
         }
     }
 }
 
-/// Ein Knoten des Zahlenbaums `/PageLabels`: nimmt jedem direkten
-/// Beschriftungs-Dictionary in `/Nums` sein `/P` und steigt in direkt
+/// Was ein Beschriftungs-Dictionary behalten darf (Tabelle 161): Zählweise
+/// und Startwert. `/P` ist das Präfix — der Klartext, um den es geht —, und
+/// alles andere kennt die Norm nicht. Bis zur Prüfrunde 2 fiel nur `/P`; ein
+/// `/Zusatz` daneben stand nach dem Lauf in der Ausgabe (Beleg
+/// `r2_traeger.rs`).
+const PAGE_LABEL_KEEP: [&[u8]; 3] = [b"Type", b"S", b"St"];
+
+/// Was ein Knoten des Zahlenbaums behalten darf (Tabelle 37).
+const NUMBER_TREE_KEEP: [&[u8]; 3] = [b"Kids", b"Nums", b"Limits"];
+
+/// Ein Knoten des Zahlenbaums `/PageLabels`: behält nur die Schlüssel eines
+/// Knotens ([`NUMBER_TREE_KEEP`]), nimmt jedem direkten
+/// Beschriftungs-Dictionary in `/Nums` alles außer [`PAGE_LABEL_KEEP`] —
+/// darunter sein Präfix `/P` — und steigt in direkt
 /// eingebettete `/Kids` ab; was als eigenes Objekt dasteht, geht auf `nodes`
 /// (Knoten) oder `labels` (Beschriftungen).
 fn clean_label_node(
@@ -2091,13 +3568,14 @@ fn clean_label_node(
     labels: &mut Vec<ObjectId>,
     beiwerk: &mut Tally,
 ) {
+    take_unlisted(node, &NUMBER_TREE_KEEP, beiwerk);
     if let Ok(Object::Array(nums)) = node.get_mut(b"Nums") {
         // Die Werte des Zahlenbaums: jedes zweite Element.
         for value in nums.iter_mut().skip(1).step_by(2) {
             match value {
                 Object::Reference(id) => labels.push(*id),
                 Object::Dictionary(label) => {
-                    take(label, b"P", beiwerk);
+                    take_unlisted(label, &PAGE_LABEL_KEEP, beiwerk);
                 }
                 _ => {}
             }

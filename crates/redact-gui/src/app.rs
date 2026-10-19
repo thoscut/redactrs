@@ -650,6 +650,54 @@ pub fn export_status(
     text
 }
 
+/// Kennzeichen einer Deckungslücke vor ihrer Warnung — **dasselbe Wort wie
+/// in der CLI** (`report_warnings` in `redact-cli`). Ohne Kennzeichen stand
+/// „lässt sich nicht dekodieren … die Pixel blieben in der Datei“ genauso
+/// unscheinbar da wie ein Hinweis, der nichts kostet.
+pub const COVERAGE_GAP_MARK: &str = "NICHT GEPRÜFT: ";
+
+/// Die Warnung mit [`COVERAGE_GAP_MARK`] davor, wenn sie eine Deckungslücke
+/// ist ([`redact_pipeline::is_coverage_gap`]); sonst unverändert.
+pub fn mark_coverage_gap(warning: &str) -> String {
+    if redact_pipeline::is_coverage_gap(warning) {
+        format!("{COVERAGE_GAP_MARK}{warning}")
+    } else {
+        warning.to_string()
+    }
+}
+
+/// Der Satz, mit dem die CLI einen nicht vollständig geprüften Lauf schließt
+/// — ohne den Rückgabewert, den es hier nicht gibt.
+pub fn not_fully_inspected_note(gaps: usize) -> String {
+    format!(
+        "{gaps} Stelle(n) in diesem Dokument wurden nicht durchsucht. Was dort \
+         steht, kann nicht geschwärzt worden sein — bitte das Ergebnis dort von \
+         Hand prüfen. (Verarbeitet, aber nicht vollständig geprüft.)"
+    )
+}
+
+/// Die Warnung, die nach einem Export in der Statuszeile steht
+/// ([`export_status`]).
+///
+/// Hier stand `outcome.warnings.first()`. Der Schwärzer schreibt aber seine
+/// allgemeinen Hinweise („… enthalten Rasterbilder. Geschwärzte Bereiche
+/// werden im Bild selbst überschrieben …“) **vor** die Warnungen je Bild —
+/// bei einem JPX-Scan unter `--allow-undecodable-images` sagte die
+/// Statuszeile damit das Gegenteil dessen, was geschehen war, und die Lücke
+/// stand nur im Tooltip. Gibt es eine Lücke, steht deshalb die **erste
+/// Lücke** da, gekennzeichnet und mit dem Satz der CLI; sonst wie bisher die
+/// erste Warnung.
+pub fn export_status_warning(outcome: &Outcome) -> Option<String> {
+    let gaps = outcome.coverage_gaps();
+    match gaps.first() {
+        Some(gap) => Some(format!(
+            "{COVERAGE_GAP_MARK}{gap} — {}",
+            not_fully_inspected_note(gaps.len())
+        )),
+        None => outcome.warnings.first().cloned(),
+    }
+}
+
 /// Der leere Hauptbereich: großer Satz, darunter der zweite Weg.
 fn empty_state(ui: &mut egui::Ui) {
     ui.centered_and_justified(|ui| {
@@ -1840,7 +1888,7 @@ impl RedactApp {
                     out,
                     audit,
                     blocked,
-                    outcome.warnings.first().map(String::as_str),
+                    export_status_warning(&outcome).as_deref(),
                 );
                 self.start_export_check(prefix, check, out.to_path_buf(), key);
             }
@@ -1885,7 +1933,7 @@ impl RedactApp {
             if self.state.extract_warnings.contains(warning) {
                 continue;
             }
-            let entry = format!("{file}: {warning}");
+            let entry = format!("{file}: {}", mark_coverage_gap(warning));
             self.state.warnings.push(entry.clone());
             self.hold_warning(key, entry);
         }
@@ -2546,13 +2594,32 @@ impl RedactApp {
 
     /// Warnungen des letzten Exports **und** des Rasterizers zur aktuellen
     /// Seite, ohne Dopplungen.
+    ///
+    /// Die Statuszeile zeigt nur die **erste**. Deshalb rücken die bekannten
+    /// Nicht-Lücken ([`redact_pipeline::is_coverage_gap`] verneint) stabil
+    /// nach hinten: ein Hinweis, der nichts kostet, darf eine Deckungslücke
+    /// nicht hinter „(+N weitere)“ verdrängen. Lücken aus dem **Laden**
+    /// ([`AppState::extract_warnings`]) bekommen hier dasselbe Kennzeichen
+    /// wie die des Exports ([`COVERAGE_GAP_MARK`]).
     fn visible_warnings(&self) -> Vec<String> {
-        let mut all = self.state.warnings.clone();
+        let mut all: Vec<String> = self
+            .state
+            .warnings
+            .iter()
+            .map(|warning| {
+                if self.state.extract_warnings.contains(warning) {
+                    mark_coverage_gap(warning)
+                } else {
+                    warning.clone()
+                }
+            })
+            .collect();
         for warning in self.pages.warnings(self.state.current_page) {
             if !all.contains(warning) {
                 all.push(warning.clone());
             }
         }
+        all.sort_by_key(|warning| !redact_pipeline::is_coverage_gap(warning));
         all
     }
 
@@ -5794,6 +5861,38 @@ mod tests {
         );
         // Enthält das Protokoll Klartext aus der Negativliste, wird gewarnt.
         assert!(warned.contains("Schutzliste"), "{warned}");
+    }
+
+    /// Die Statuszeile zeigt `visible_warnings().first()`. Eine Lücke — aus
+    /// dem Laden wie aus dem Export — muss dort vor jedem Hinweis stehen, der
+    /// nichts kostet, und dasselbe Kennzeichen tragen wie in der CLI.
+    #[test]
+    fn coverage_gaps_lead_the_warnings_and_are_marked() {
+        let benign = "Die Datei hat inkrementellen Revisionen";
+        let raster = "Seite 1 enthalten Rasterbilder";
+        let load_gap = "Font ohne /ToUnicode auf Seite 1";
+        let export_gap = "Bild auf Seite 1 lässt sich nicht dekodieren";
+        let mut app = RedactApp::new(iban_only());
+        app.state.extract_warnings = vec![benign.to_string(), load_gap.to_string()];
+        app.state.warnings = app.state.extract_warnings.clone();
+        app.note_export_warnings(
+            std::path::Path::new("/tmp/aus.pdf"),
+            "aus.pdf",
+            &[
+                benign.to_string(),
+                raster.to_string(),
+                export_gap.to_string(),
+            ],
+        );
+        assert_eq!(
+            app.visible_warnings(),
+            vec![
+                format!("{COVERAGE_GAP_MARK}{load_gap}"),
+                format!("aus.pdf: {COVERAGE_GAP_MARK}{export_gap}"),
+                benign.to_string(),
+                format!("aus.pdf: {raster}"),
+            ]
+        );
     }
 
     #[test]

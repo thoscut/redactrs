@@ -267,10 +267,259 @@ pub fn load_from_bytes_with_limits(bytes: &[u8], limits: &Limits) -> Result<Docu
     // Die zweite Hälfte: was nur das geladene Dokument kennt (eine
     // Filterkette mit Verweis), gegen dasselbe Budget.
     pending.finish(&doc)?;
+
+    // `load_mem` probiert bei `/Encrypt` von sich aus das **leere**
+    // Benutzerpasswort, entschlüsselt damit und entfernt `/Encrypt` aus dem
+    // Trailer — der übliche „Rechteschutz“ mit nur einem Eigentümerpasswort,
+    // den jeder Betrachter ohne Nachfrage öffnet. Die Vorprüfung oben hat
+    // dann nur Rauschen gesehen, und `validate` hält das Dokument für
+    // unverschlüsselt. Ohne den zweiten Durchgang galten die Budgets für so
+    // eine Datei überhaupt nicht: gemessen trieb eine 131-kB-Datei den Lauf
+    // auf 5,4 GB und in den OOM-Killer. Deshalb fragt diese Stelle nach
+    // `was_encrypted` (entschlüsselt geladen), nicht nach `is_encrypted`
+    // (noch verschlüsselt), und alle Aufrufer — Schwärzung, Oberfläche,
+    // `--check-leaks` — bekommen dieselbe Prüfung.
+    if doc.was_encrypted() {
+        finish_decrypted(bytes, &mut doc, limits)?;
+        return Ok(doc);
+    }
     restore_revision_markers(bytes, &mut doc);
+    compact_object_numbers(&mut doc);
+    normalize_page_tree(&mut doc);
 
     validate(&doc)?;
     Ok(doc)
+}
+
+/// Was nach dem **Entschlüsseln** eines Dokuments noch fehlt, bevor es
+/// weiterverarbeitet werden darf — für beide Wege dorthin dieselbe Stelle:
+/// das leere Benutzerpasswort, das `lopdf` in [`load_from_bytes_with_limits`]
+/// selbst probiert, und `--password` über `Document::load_mem_with_options`.
+///
+/// 1. [`restore_revision_markers`]: `lopdf` wirft `/Prev` beim Laden weg; ohne
+///    den Rückgriff auf die Rohbytes fehlte die Warnung „mehrere Revisionen“
+///    genau bei verschlüsselten Eingaben.
+/// 2. [`check_limits_after_decryption`]: die Budgets, die die Vorprüfung am
+///    Chiffrat nicht messen konnte — vor allem anderen, was das Dokument
+///    anfasst.
+/// 3. [`normalize_page_tree`], wie bei jeder anderen Datei.
+/// 4. [`validate`].
+pub fn finish_decrypted(bytes: &[u8], doc: &mut Document, limits: &Limits) -> Result<()> {
+    restore_revision_markers(bytes, doc);
+    check_limits_after_decryption(doc, limits)?;
+    compact_object_numbers(doc);
+    normalize_page_tree(doc);
+    validate(doc)
+}
+
+/// Ab wann [`compact_object_numbers`] neu nummeriert: höchste Nummer über
+/// `FAKTOR × Objektzahl + SOCKEL`. Ein gewöhnliches Dokument mit Lücken
+/// (gelöschte Objekte, inkrementelle Updates) bleibt weit darunter.
+const SPARSE_FACTOR: u64 = 10;
+const SPARSE_BASE: u64 = 1000;
+
+/// Nummeriert die Objekte fortlaufend ab 1, wenn die höchste Objektnummer in
+/// keinem Verhältnis zur Zahl der Objekte steht.
+///
+/// ## Warum
+///
+/// `lopdf` setzt `max_id` aus der Querverweistabelle — bei einem XRef-Strom
+/// aus `/Index`, also aus der Datei. `/Index [2147483648 8]` gibt acht
+/// Objekten Nummern um 2^31. Zwei Folgen, beide gemessen (Runde 2, Fuzzing):
+///
+/// * Der Schreibpfad (`save_to_bytes` → `lopdf`s XRef-Strom) läuft
+///   **jede** Nummer von 1 bis `max_id` ab: 25 bis 50 s für eine
+///   Datei aus wenigen hundert Byte.
+/// * `Document::new_object_id` zählt `max_id` hoch; die Schwärzung legt
+///   Objekte an, und bei `u32::MAX` läuft die Nummer über (im Debug-Bau eine
+///   Panik, sonst eine doppelte Nummer).
+///
+/// ## Wie
+///
+/// Die vorhandenen Nummern werden in ihrer Reihenfolge auf 1, 2, 3 …
+/// abgebildet (die Generation bleibt), jeder Verweis in jedem Objekt und im
+/// Trailer wird mitgezogen. Ein Verweis auf ein Objekt, das es nicht gibt,
+/// wird `null` — so liest ihn PDF ohnehin (32000-1, 7.3.10), und eine alte
+/// Nummer darf nicht auf ein neues, fremdes Objekt zeigen. Ein gewöhnliches
+/// Dokument bleibt unberührt; seine Objektnummern ändern sich nicht.
+pub fn compact_object_numbers(doc: &mut Document) {
+    let count = doc.objects.len() as u64;
+    if u64::from(doc.max_id) <= count * SPARSE_FACTOR + SPARSE_BASE {
+        return;
+    }
+    let map: std::collections::BTreeMap<ObjectId, ObjectId> = doc
+        .objects
+        .keys()
+        .zip(1u32..)
+        .map(|(old, new)| (*old, (new, old.1)))
+        .collect();
+    fn rewrite(object: &mut Object, map: &std::collections::BTreeMap<ObjectId, ObjectId>) {
+        // Ein ausdrücklicher Stapel: die Tiefe begrenzt der Lader, diese
+        // Stelle verlässt sich nicht darauf.
+        let mut stack = vec![object];
+        while let Some(object) = stack.pop() {
+            match object {
+                Object::Reference(id) => {
+                    *object = match map.get(id) {
+                        Some(new) => Object::Reference(*new),
+                        None => Object::Null,
+                    };
+                }
+                Object::Array(items) => stack.extend(items.iter_mut()),
+                Object::Dictionary(dict) => stack.extend(dict.iter_mut().map(|(_, v)| v)),
+                Object::Stream(stream) => {
+                    stack.extend(stream.dict.iter_mut().map(|(_, v)| v));
+                }
+                _ => {}
+            }
+        }
+    }
+    let old = std::mem::take(&mut doc.objects);
+    for (id, mut object) in old {
+        rewrite(&mut object, &map);
+        doc.objects.insert(map[&id], object);
+    }
+    for (_, value) in doc.trailer.iter_mut() {
+        rewrite(value, &map);
+    }
+    doc.max_id = count as u32;
+    // Die Querverweistabelle der Eingabe nennt die alten Nummern; geschrieben
+    // wird ohnehin eine neue.
+    doc.reference_table = lopdf::xref::Xref::new(0, doc.reference_table.cross_reference_type);
+}
+
+/// So tief folgt [`normalize_page_tree`] dem Seitenbaum — dieselbe Grenze wie
+/// `lopdf` beim Aufzählen der Seiten.
+const PAGE_TREE_DEPTH: usize = 256;
+
+/// Bringt den Seitenbaum in die Form, in der `lopdf` jede Seite findet, die
+/// ein Betrachter anzeigt.
+///
+/// ## Warum
+///
+/// `Document::get_pages` zählt nur, was als **Verweis** in `/Kids` steht
+/// **und** ein direktes `/Type /Page` trägt. poppler, pdf.js und mupdf sind
+/// nachsichtiger: ein Blatt ohne `/Type`, mit `/Type 9 0 R` oder mit einem
+/// Tippfehler wie `/Type /Pagex`, und ein Seiten-Dictionary, das direkt in
+/// `/Kids` steht, zeigen sie als Seite an. Für redact-rs war so eine Seite
+/// unsichtbar — nicht extrahiert, nicht geschwärzt, und weil sie im Baum
+/// hängt, auch nicht als Waise geleert. Gemessen (Runde 2): „Seiten: 1“,
+/// Rückgabewert 0, die IBAN von Seite 2 unverändert in der Ausgabe.
+///
+/// ## Was hier geschieht
+///
+/// Vom Katalog aus (`/Root /Pages`) wird der Baum abgelaufen, jedes Objekt
+/// höchstens einmal und nicht tiefer als [`PAGE_TREE_DEPTH`]:
+///
+/// * ein Kind, das **direkt** in `/Kids` steht, wird ein eigenes Objekt und
+///   `/Kids` verweist darauf (fehlt `/Parent`, wird es gesetzt);
+/// * ein indirektes `/Type` wird durch seinen Namen ersetzt;
+/// * ein Kind ohne brauchbares `/Type` (fehlend, kein Name, weder `/Page`
+///   noch `/Pages`) wird nach seiner Form eingeordnet: mit `/Kids` ein
+///   Knoten (`/Pages`), ohne ein Blatt (`/Page`) — so entscheidet auch
+///   pdf.js;
+/// * ein `/Pages` ohne `/Kids`, aber mit `/Contents`, ist ein Blatt: pdf.js
+///   zeigt es als Seite.
+///
+/// Ein korrekt gebauter Baum bleibt unverändert. Danach findet `get_pages`
+/// jede Seite, und alles Weitere — Extraktion, Schwärzung, die
+/// Waisenbehandlung in `meta.rs`, `--check-leaks` — sieht dieselben Seiten
+/// wie der Betrachter. Ein Zwischenknoten ohne `/Type` hängt damit wieder
+/// im Baum; seine Seiten werden geschwärzt statt als Waisen geleert.
+pub fn normalize_page_tree(doc: &mut Document) {
+    let Ok(root) = doc
+        .catalog()
+        .and_then(|catalog| catalog.get(b"Pages"))
+        .and_then(Object::as_reference)
+    else {
+        return;
+    };
+    let mut seen = std::collections::BTreeSet::from([root]);
+    let mut stack = vec![(root, 0usize)];
+    while let Some((node, depth)) = stack.pop() {
+        // `/Kids` des Knotens, direkt oder hinter einem Verweis.
+        let kids_at = match doc.get_dictionary(node).and_then(|d| d.get(b"Kids")) {
+            Ok(Object::Reference(id)) => Some(*id),
+            Ok(Object::Array(_)) => None,
+            _ => continue,
+        };
+        let kids: Vec<Object> = match kids_at {
+            Some(id) => match doc.get_object(id) {
+                Ok(Object::Array(items)) => items.clone(),
+                _ => continue,
+            },
+            None => match doc.get_dictionary(node).and_then(|d| d.get(b"Kids")) {
+                Ok(Object::Array(items)) => items.clone(),
+                _ => continue,
+            },
+        };
+        let mut rewritten = kids.clone();
+        for (slot, kid) in rewritten.iter_mut().enumerate() {
+            let id = match &kids[slot] {
+                Object::Reference(id) => *id,
+                // Bei erschöpftem Nummernraum liefe `add_object` über; dann
+                // lieber dieses Kind lassen, wie es ist.
+                Object::Dictionary(_) if doc.max_id == u32::MAX => continue,
+                Object::Dictionary(dict) => {
+                    let mut dict = dict.clone();
+                    if !dict.has(b"Parent") {
+                        dict.set("Parent", Object::Reference(node));
+                    }
+                    let id = doc.add_object(Object::Dictionary(dict));
+                    *kid = Object::Reference(id);
+                    id
+                }
+                _ => continue,
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            let Ok(dict) = doc.get_dictionary(id) else {
+                continue;
+            };
+            let has_kids = match dict.get(b"Kids") {
+                Ok(Object::Array(_)) => true,
+                Ok(Object::Reference(r)) => matches!(doc.get_object(*r), Ok(Object::Array(_))),
+                _ => false,
+            };
+            let named = match dict.get(b"Type") {
+                Ok(Object::Name(name)) => Some(name.clone()),
+                Ok(Object::Reference(r)) => doc
+                    .get_object(*r)
+                    .and_then(Object::as_name)
+                    .ok()
+                    .map(<[u8]>::to_vec),
+                _ => None,
+            };
+            let wanted: &[u8] = match named.as_deref() {
+                Some(b"Page") => b"Page",
+                Some(b"Pages") if has_kids || !dict.has(b"Contents") => b"Pages",
+                _ if has_kids => b"Pages",
+                _ => b"Page",
+            };
+            let direct = matches!(dict.get(b"Type"), Ok(Object::Name(n)) if n.as_slice() == wanted);
+            if !direct {
+                if let Ok(dict) = doc.get_dictionary_mut(id) {
+                    dict.set("Type", Object::Name(wanted.to_vec()));
+                }
+            }
+            if wanted == b"Pages" && depth < PAGE_TREE_DEPTH {
+                stack.push((id, depth + 1));
+            }
+        }
+        if rewritten != kids {
+            let target = match kids_at {
+                Some(id) => doc.get_object_mut(id).ok(),
+                None => doc
+                    .get_dictionary_mut(node)
+                    .ok()
+                    .and_then(|d| d.get_mut(b"Kids").ok()),
+            };
+            if let Some(slot) = target {
+                *slot = Object::Array(rewritten);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -677,6 +926,7 @@ impl Prescan<'_> {
     /// [`looks_binary`]. Aus dem Dictionary wird nur die Filterkette gelesen,
     /// und die muss stimmen, sonst ließe sich der Stream gar nicht auspacken.
     fn account(&mut self, dict: &[u8], payload: &[u8]) -> Result<()> {
+        check_xref_field_widths(dict)?;
         // Ein Verweis in der Kette: welcher Filter dahinter steht, weiß erst
         // das geladene Dokument ([`PendingPrescan::finish`] bucht ihn dort
         // mit der aufgelösten Kette). Bis dahin zählt die Rohgröße, wie bei
@@ -1088,6 +1338,48 @@ fn is_flate(filter: &[u8]) -> bool {
     matches!(filter, b"FlateDecode" | b"Fl")
 }
 
+/// Größte Feldbreite in `/W` eines XRef-Stroms, die hier durchgeht.
+///
+/// Ein Feld trägt einen Offset, eine Objektnummer oder eine Generation; mehr
+/// als 8 Byte (64 Bit) braucht davon keines, gängig sind 1 bis 4.
+const MAX_XREF_FIELD_WIDTH: i64 = 8;
+
+/// Lehnt ein `/W`-Array ab, dessen Feldbreiten kein XRef-Strom braucht.
+///
+/// `lopdf` legt beim Lesen eines XRef-Stroms je Feld `vec![0u8; W[i]]` an —
+/// mit der Breite aus der Datei, ungeprüft. `/W [1 1152921504606846976 2]`
+/// in einer 700-Byte-Datei ließ die Allokation scheitern, und Rust bricht
+/// dann den **ganzen Prozess** ab (SIGABRT): kein `Err`, keine abfangbare
+/// Panik, weder an der Kommandozeile noch in `--check-leaks` noch in der
+/// Oberfläche (Runde 2, Fuzzing).
+///
+/// Geprüft wird jedes Stream-Dictionary, nicht nur eines mit `/Type /XRef`:
+/// `lopdf` liest den Strom hinter `startxref`, gleich was in `/Type` steht.
+/// Bei doppeltem `/W` gilt wie bei `lopdf` der letzte Eintrag
+/// ([`raw_dict_entry`]). Abgelehnt wird ein Glied, das keine ganze Zahl
+/// zwischen 0 und [`MAX_XREF_FIELD_WIDTH`] ist; ein `/W`, das kein Array ist,
+/// liest `lopdf` gar nicht erst als Feldbreiten.
+fn check_xref_field_widths(dict: &[u8]) -> Result<()> {
+    if find_from(dict, b"/W", 0).is_none() {
+        return Ok(());
+    }
+    let Some(Object::Array(widths)) = raw_dict_entry(dict, b"W") else {
+        return Ok(());
+    };
+    let usable = widths.iter().all(|w| {
+        w.as_i64()
+            .is_ok_and(|w| (0..=MAX_XREF_FIELD_WIDTH).contains(&w))
+    });
+    if usable {
+        return Ok(());
+    }
+    Err(RedactError::Pdf(format!(
+        "Querverweis-Strom mit unbrauchbarer Feldbreite /W (erlaubt: ganze Zahlen \
+         von 0 bis {MAX_XREF_FIELD_WIDTH}). Eine größere Breite braucht kein PDF; \
+         der Parser legte für sie ungeprüft Speicher an und brach den Prozess ab."
+    )))
+}
+
 /// Was `lopdf` für den PNG-Prädiktor dieses Stroms **über** die entpackten
 /// Bytes hinaus belegt — 0, wenn es nichts ist.
 ///
@@ -1336,26 +1628,35 @@ fn dict_tokens(bytes: &[u8]) -> Vec<Token<'_>> {
 /// Aufrufers. Eine Zeichenkette steht als leere Zeichenkette da — kein
 /// Filtername, aber auch nicht `null`. Tiefer als [`RAW_OBJECT_DEPTH`]
 /// Ebenen wird nicht gelesen.
+///
+/// Steht `key` **mehrfach** im Dictionary, gilt der **letzte** Eintrag — wie
+/// bei `lopdf`, das jeden Eintrag mit `Dictionary::set` ablegt und damit den
+/// früheren überschreibt, und wie bei [`filter_names`]. Bis Runde 2 galt hier
+/// der erste: ein harmloses `/DecodeParms << /Predictor 1 >>` vor einem
+/// zweiten mit `/Columns 100000000` versteckte das zweite vor der
+/// Prädiktor-Vorprüfung, und eine 570-Byte-Datei belegte beim Laden 190 MB
+/// (mit größeren Zahlen bis 3,8 GB).
 pub(crate) fn raw_dict_entry(dict: &[u8], key: &[u8]) -> Option<Object> {
     let tokens = dict_tokens(dict);
     if !matches!(tokens.first(), Some(Token::DictOpen)) {
         return None;
     }
+    let mut found = None;
     let mut i = 1;
     while i < tokens.len() {
         match &tokens[i] {
-            Token::DictClose => return None,
+            Token::DictClose => break,
             Token::Name(name) => {
                 let (value, next) = read_object(&tokens, i + 1, 0);
                 if name.as_slice() == key {
-                    return Some(value);
+                    found = Some(value);
                 }
                 i = next.max(i + 1);
             }
             _ => i += 1,
         }
     }
-    None
+    found
 }
 
 /// Der Wert eines rohen Objekts — die Bytes hinter `N G obj`.
@@ -1878,6 +2179,184 @@ pub fn restore_revision_markers(bytes: &[u8], doc: &mut Document) {
             doc.trailer.set(name, Object::Integer(offset));
         }
     }
+}
+
+/// Wendet die Budgets und die Tiefengrenze auf ein **entschlüsseltes**
+/// Dokument an.
+///
+/// ## Wie
+///
+/// Das entschlüsselte Dokument wird serialisiert und die Vorprüfung läuft über
+/// diese Bytes. Das ist keine Umständlichkeit, sondern der Punkt: die Streams
+/// stehen dort als das, was sie sind — komprimiert, aber nicht mehr
+/// verschlüsselt —, und damit misst hier **derselbe Code mit denselben Grenzen
+/// und denselben Meldungen** wie bei einer unverschlüsselten Datei. Eine
+/// zweite Buchhaltung neben [`prescan`] wäre eine
+/// zweite Stelle, an der die Zahlen auseinanderlaufen könnten.
+///
+/// Teuer ist das nicht: serialisiert wird der komprimierte Zustand, für die
+/// gemessene Bombe rund 200 kB. Das Auspacken übernimmt die Vorprüfung, und
+/// die packt von vornherein nur bis zum Budget aus.
+///
+/// ## Wann es zu spät wäre
+///
+/// Erst *nach* dem Laden zu prüfen ist nur deshalb vertretbar, weil das Laden
+/// selbst billig ist: `lopdf` legt Streams als Rohbytes ab und packt sie nicht
+/// aus. Der teure Teil ist das, was danach kommt — die Zerlegung des
+/// Seiteninhalts in Operationen (rund 60 bis 100 Byte je Byte Stream **für den
+/// `Operation`-Vektor allein**; der Spitzenbedarf eines Laufs liegt höher,
+/// siehe `SECURITY.md`) — und der kommt erst nach dieser Prüfung.
+pub fn check_limits_after_decryption(doc: &Document, limits: &Limits) -> Result<()> {
+    // 1. Die bereits im Speicher stehenden Objekte, **ohne Waisen zu übergehen**.
+    //    Siehe [`check_expanded_objects`] — das ist die Hälfte, die
+    //    [`save_to_bytes`] nicht sieht.
+    check_expanded_objects(doc, limits)?;
+
+    // 2. Die serialisierte Datei, damit auch Streams (Content-Bomben) am selben
+    //    Budget gemessen werden — die stehen im Speicher noch komprimiert und
+    //    fallen unter Schritt 1 nicht auf.
+    let bytes = save_to_bytes(doc)?;
+    prescan_pending(&bytes, limits)
+        .and_then(|pending| pending.finish(doc))
+        .map_err(|e| match e {
+            // Der Zusatz sagt, welcher der beiden Durchgänge angeschlagen hat —
+            // die Datei sah von außen harmlos aus, und das gehört in die Meldung.
+            //
+            // Bewusst „entschlüsselt“ und nicht „verschlüsselt“: `redact_pipeline::password_required`
+            // sucht nach letzterem, und die Oberfläche fragte sonst wieder nach
+            // einem Passwort, das längst gepasst hat.
+            RedactError::Pdf(msg) => RedactError::Pdf(format!("entschlüsselt gilt weiter: {msg}")),
+            other => other,
+        })
+}
+
+/// Prüft die **schon entpackten** Objekte im Speicher gegen `max_parsed_bytes`.
+///
+/// ## Warum diese zweite Prüfung nötig ist — gemessen
+///
+/// [`check_limits_after_decryption`] serialisierte bisher nur über
+/// [`save_to_bytes`] und ließ [`prescan`] über die Bytes laufen. Das hat eine
+/// Lücke, und die ist ausgemessen: `save_to_bytes` ruft `prune_unreachable`,
+/// **bevor** es serialisiert. Ein Objekt, das nur über die Querverweistabelle
+/// erreichbar ist und von keinem anderen Objekt referenziert wird — eine
+/// **Waise** —, fliegt dabei heraus und wird nie gemessen.
+///
+/// Eine Dictionary-Bombe in einem verschlüsselten Objekt-Stream nutzt genau
+/// das aus. Die Vorprüfung der Rohbytes ([`load_from_bytes_with_limits`]) sieht
+/// den Objekt-Stream nur als RC4-Rauschen und kann ihn nicht auspacken.
+/// `Document::load_mem_with_options` entschlüsselt ihn dann und expandiert den
+/// darin steckenden Riesen-Dict in `document.objects` — **vor** dieser Prüfung.
+///
+/// Gemessen (Release): eine 4,7-MB-Datei mit einem einzigen Dictionary aus zwei
+/// Millionen Einträgen, als Waise gebaut, trieb VmHWM auf **+824 MB** und lief
+/// mit dem Vorgabebudget von 16 MB **fehlerfrei durch** — `save_to_bytes` warf
+/// die Waise weg, `prescan` sah nichts. Dieselbe Bombe *erreichbar* gebaut wurde
+/// bei genau demselben Budget abgelehnt. Der Unterschied war allein die
+/// Erreichbarkeit, und die entscheidet ein Angreifer. Die committete, kleine
+/// Fassung samt Nachweis steht in `redact-pipeline/tests/z7_objstm_bombe.rs` und
+/// `redact-pipeline/src/testdata/bombe_objstm_verschluesselt.pdf`.
+///
+/// ## Was hier gemessen wird
+///
+/// Die **serialisierte Syntaxgröße** aller Objekte — der einzelne Dict-Eintrag
+/// mit denselben paar Byte, mit denen ihn `prescan` im Datei-Rumpf zählt, und
+/// gegen dasselbe Budget. So bekommt ein erreichbares und ein verwaistes Objekt
+/// dieselbe Antwort, und ein gewöhnliches verschlüsseltes Dokument (dessen
+/// Objekte zusammen weit unter dem Budget liegen) läuft weiter durch.
+///
+/// **Streams zählen hier nur mit ihrem Dictionary.** Ihr Inhalt steht im
+/// Speicher noch komprimiert; ihn misst Schritt 2 über `prescan`, das ihn
+/// auspackt. Hier ihn aufzublasen hieße, die Bombe zum Messen erst scharf zu
+/// machen.
+///
+/// ## Was diese Prüfung **nicht** heilt
+///
+/// Der Spitzenspeicher entsteht **in** `load_mem_with_options`, also bevor eine
+/// einzige Zeile hier läuft — die 824 MB oben sind schon belegt, wenn diese
+/// Funktion beginnt. `lopdf` bietet keinen Haken, um das Auspacken eines
+/// verschlüsselten Objekt-Streams zu begrenzen, und der Inhalt lässt sich vor
+/// dem Entschlüsseln nicht sehen. Was diese Prüfung leistet: die Datei wird
+/// **abgelehnt statt angenommen**, und zwar bevor die Analyse (Extraktion,
+/// Konfliktauflösung, Schwärzung) auf demselben Riesen-Dict noch einmal
+/// Speicher darauflegt — und bevor `save_to_bytes` ihn für eine *erreichbare*
+/// Bombe ein zweites Mal klont. Der Rest ist eine Grenze von `lopdf`, nicht von
+/// dieser Stelle; sie ist hier benannt, damit niemand sie für geschlossen hält.
+fn check_expanded_objects(doc: &Document, limits: &Limits) -> Result<()> {
+    let budget = limits.max_parsed_bytes;
+    let mut total: u64 = 0;
+    // Ein ausdrücklicher Arbeitsstapel statt Rekursion: eine tief verschachtelte
+    // Struktur soll die Prüfung nicht ihrerseits über den Stack kippen. `lopdf`
+    // deckelt die Tiefe zwar bei 100, aber diese Prüfung verlässt sich nicht auf
+    // fremde Grenzen.
+    let mut stack: Vec<&lopdf::Object> = doc.objects.values().collect();
+    while let Some(obj) = stack.pop() {
+        total = total.saturating_add(object_syntax_bytes(obj, &mut stack));
+        if total > budget {
+            return Err(RedactError::Pdf(format!(
+                "entschlüsselt gilt weiter: die entpackten Objekte überschreiten \
+                 das Budget von {} MB. Nach dem Entschlüsseln stehen sie als \
+                 `lopdf::Object` im Speicher — je Dictionary-Eintrag 200 bis 270 \
+                 Byte, unabhängig davon, wie kurz er geschrieben ist. Ein \
+                 verschlüsselter Objekt-Stream lässt sich vorher nicht auspacken; \
+                 deshalb wird hier gemessen. Ein wirklich so großes Dokument \
+                 lässt sich mit --max-parsed-mb durchlassen.",
+                budget / (1024 * 1024)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Die serialisierte Syntaxgröße **dieses einen** Objekts (ohne seine Kinder);
+/// Kinder werden auf `stack` gelegt, damit die Prüfung früh abbrechen kann.
+///
+/// Die Zahlen sind Näherungen an das, was `lopdf` schreiben würde — es kommt
+/// nicht auf das einzelne Byte an, sondern darauf, dass eine Bombe aus vielen
+/// Einträgen die Größenordnung ihrer Serialisierung erreicht (gemessen: rund 12
+/// Byte je Eintrag, hier `1 + Schlüssellänge + 1 + Wert`).
+fn object_syntax_bytes<'a>(obj: &'a lopdf::Object, stack: &mut Vec<&'a lopdf::Object>) -> u64 {
+    use lopdf::Object::*;
+    match obj {
+        Null => 4,
+        Boolean(_) => 5,
+        Integer(i) => integer_digits(*i),
+        Real(_) => 12,
+        Name(v) => 1 + v.len() as u64,
+        String(v, _) => 2 + v.len() as u64,
+        Reference(_) => 8,
+        Array(items) => {
+            for it in items {
+                stack.push(it);
+            }
+            2 + items.len() as u64
+        }
+        Dictionary(dict) => {
+            let mut own = 4u64;
+            for (k, v) in dict.iter() {
+                own += 2 + k.len() as u64;
+                stack.push(v);
+            }
+            own
+        }
+        Stream(s) => {
+            // Nur das Dictionary — der Inhalt steht komprimiert da und wird von
+            // `prescan` gemessen.
+            let mut own = 4u64;
+            for (k, v) in s.dict.iter() {
+                own += 2 + k.len() as u64;
+                stack.push(v);
+            }
+            own
+        }
+    }
+}
+
+/// Stellenzahl einer ganzen Zahl in Dezimalschreibweise (mit Vorzeichen).
+fn integer_digits(i: i64) -> u64 {
+    if i == 0 {
+        return 1;
+    }
+    (i < 0) as u64 + i.unsigned_abs().ilog10() as u64 + 1
 }
 
 /// Der Bytebereich, in dem der Trailer der jüngsten Revision steht.

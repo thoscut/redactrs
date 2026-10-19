@@ -270,7 +270,10 @@ fn zyklen_enden() {
     let start = Instant::now();
     let report = strip_metadata(&mut d.doc);
     assert!(start.elapsed() < Duration::from_secs(5), "Zyklus hängt");
-    assert_eq!(report.annotation_texts_cleared, 2, "je Träger einmal");
+    // Je Träger einmal `/Contents` — und seit der Prüfrunde 2 dazu das
+    // `/Kids` am Popup: das kennt die Norm an einem Popup nicht (Tabelle 183),
+    // und die Erlaubnisliste je Untertyp nimmt es (`r2_traeger.rs`).
+    assert_eq!(report.annotation_texts_cleared, 3, "je Träger einmal");
 }
 
 /// Eine `/Parent`-Kette von 200 000 Feldern und ein `/Kids`-Fächer

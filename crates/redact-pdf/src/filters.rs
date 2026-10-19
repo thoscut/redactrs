@@ -320,25 +320,275 @@ pub(crate) fn filter_names(doc: &Document, dict: &Dictionary) -> Option<Vec<Vec<
 }
 
 /// Der Seiteninhalt — alle `/Contents`-Ströme in Reihenfolge, je durch
-/// [`decoded_content`], mit Zeilenumbruch dazwischen.
+/// [`decoded_content`], an den Grenzen verbunden wie in [`PageContent`]
+/// beschrieben.
 ///
 /// Die Kopie von `lopdf::Document::get_page_content`, nur mit diesem Dekoder.
 /// Wie dort bleiben die Rohbytes stehen, wenn ein Strom sich nicht auspacken
 /// lässt: sie enthalten dann keine Operationen, und [`crate::content::scan_page`]
 /// lehnt die Seite deshalb ab, statt sie still als leer zu lesen.
 pub fn page_content(doc: &Document, page_id: ObjectId) -> Vec<u8> {
-    let mut content = Vec::new();
-    for id in doc.get_page_contents(page_id) {
-        let Ok(stream) = doc.get_object(id).and_then(Object::as_stream) else {
+    page_content_checked(doc, page_id).data
+}
+
+/// Der Seiteninhalt aus [`page_content`], dazu die Grenzen, an denen die
+/// Teilströme **mitten in einem Wort** aneinanderstoßen.
+///
+/// # Wie die Teilströme verbunden werden
+///
+/// PDF 32000-1, 7.8.2: die Teilströme eines `/Contents`-Felds sind *ein*
+/// Inhalt, geteilt werden darf nur zwischen zwei lexikalischen Wörtern. Früher
+/// stand hier stets ein `\n` zwischen zwei Teilen. Das ist richtig, solange
+/// sich der Erzeuger an die Regel hält — und falsch, wenn nicht:
+///
+/// * **Grenze in einer Zeichenkette** (`(IBAN DE89 37` | `04 0044 … 00) Tj`).
+///   poppler, pdf.js und mupdf zeigen die IBAN am Stück; das eingeschobene
+///   `\n` landete *in* der Zeichenkette, zerriss sie, und kein Muster fand
+///   sie — Treffer 0, Rückgabewert 0, die IBAN stand in der Ausgabe. Jetzt
+///   wird dort **ohne** Trenner verbunden, wie es alle drei Betrachter tun.
+///   Die Schwärzung schreibt die Seite ohnehin als einen Strom neu, die
+///   verbundene Zeichenkette bleibt also gültig.
+/// * **Grenze in einem Wort** (`(…) T` | `j ET`). Hier sind sich die
+///   Betrachter *nicht* einig: pdf.js verbindet ohne Trenner und zeichnet die
+///   IBAN mit `Tj`, poppler und mupdf trennen und sehen die unbekannten
+///   Operatoren `T` und `j`. Welche Lesart gilt, entscheidet der Betrachter
+///   des Empfängers. Gelesen wird weiter getrennt (mit `\n`), aber die Stelle
+///   wird gezählt ([`PageContent::split_tokens`]) und vom Interpreter als
+///   Deckungslücke gemeldet: für die andere Lesart kann die Analyse nicht
+///   einstehen.
+///
+/// Im Leerraum, im Kommentar, in einer Hex-Zeichenkette (dort zählt Leerraum
+/// nicht) und hinter einem Trennzeichen ändert das `\n` nichts an der
+/// Lesart und bleibt wie bisher.
+pub fn page_content_checked(doc: &Document, page_id: ObjectId) -> PageContent {
+    let parts: Vec<Vec<u8>> = doc
+        .get_page_contents(page_id)
+        .into_iter()
+        .filter_map(|id| doc.get_object(id).and_then(Object::as_stream).ok())
+        .map(|stream| decoded_content(doc, stream).unwrap_or_else(|| stream.content.clone()))
+        .collect();
+    join_parts(parts.iter().map(Vec::as_slice))
+}
+
+/// Verbindet die Teilströme wie in [`page_content_checked`] beschrieben.
+fn join_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> PageContent {
+    let mut out = PageContent::default();
+    let mut lexer = SeamLexer::default();
+    for part in parts {
+        // Ein leerer Teil verschiebt keine Grenze: die nächste liegt dann
+        // zwischen dem vorigen und dem folgenden Teil.
+        let Some(&first) = part.first() else {
             continue;
         };
-        match decoded_content(doc, stream) {
-            Some(data) => content.extend_from_slice(&data),
-            None => content.extend_from_slice(&stream.content),
+        if !out.data.is_empty() {
+            match lexer.seam(first) {
+                Seam::Join => {}
+                seam => {
+                    if seam == Seam::SplitToken {
+                        out.split_tokens += 1;
+                    }
+                    out.data.push(b'\n');
+                    lexer.feed(b'\n');
+                }
+            }
         }
-        content.push(b'\n');
+        for &b in part {
+            lexer.feed(b);
+        }
+        out.data.extend_from_slice(part);
     }
-    content
+    // Der Abschluss wie bisher: hinter dem letzten Teil ein Zeilenende.
+    if !out.data.is_empty() {
+        out.data.push(b'\n');
+    }
+    out
+}
+
+/// Ergebnis von [`page_content_checked`].
+#[derive(Debug, Default, Clone)]
+pub struct PageContent {
+    /// Der verbundene Seiteninhalt.
+    pub data: Vec<u8>,
+    /// An wie vielen Grenzen zwei Teilströme mitten in einem Wort
+    /// aneinanderstoßen — Stellen, die Betrachter verschieden lesen.
+    pub split_tokens: usize,
+}
+
+/// Wie die Grenze zwischen zwei Teilströmen zu verbinden ist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seam {
+    /// Ohne Trenner — die Grenze liegt in einer Zeichenkette.
+    Join,
+    /// Mit `\n`, und die Lesart hängt am Betrachter.
+    SplitToken,
+    /// Mit `\n`, und es ist gleich, ob einer dasteht.
+    Separate,
+}
+
+/// Wo der Leser im Inhalt gerade steht — so viel Syntax, wie die Frage
+/// „liegt die Grenze in einem Wort?“ braucht, und nicht mehr.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum LexState {
+    /// Zwischen Wörtern oder in einem gewöhnlichen Wort.
+    #[default]
+    Normal,
+    /// In einer Zeichenkette `( … )`, mit Klammertiefe und offenem `\`.
+    Literal { depth: usize, escaped: bool },
+    /// Gleich hinter einem `<` — Hex-Zeichenkette oder `<<`.
+    AfterLt,
+    /// In einer Hex-Zeichenkette `< … >`.
+    Hex,
+    /// In einem Kommentar bis zum Zeilenende.
+    Comment,
+    /// In den Binärdaten eines Inline-Bilds hinter `ID`, bis `EI`.
+    InlineData,
+}
+
+/// Ein Leser über den verbundenen Inhalt, Byte für Byte, damit die Frage an
+/// jeder Grenze nur kostet, was dazugekommen ist — und nicht den ganzen
+/// Inhalt davor noch einmal (eine Seite mit zehntausend Teilen wäre sonst
+/// quadratisch).
+///
+/// Die Binärdaten eines Inline-Bilds überspringt er, damit eine `(` darin
+/// keine Zeichenkette eröffnet. Ende ist wie in [`crate::ops`] ein `EI`
+/// zwischen Leerraum und Leerraum/Trennzeichen.
+#[derive(Debug, Default)]
+struct SeamLexer {
+    state: LexState,
+    /// Länge des laufenden Worts (0: zwischen Wörtern). Ein `/` zählt mit:
+    /// `/F` | `1` ist genauso geteilt wie `T` | `j`.
+    token_len: usize,
+    /// Die letzten beiden Bytes des laufenden Worts — für `ID`.
+    token_tail: [u8; 2],
+    /// Die letzten drei Bytes in den Bilddaten — für `␣EI`.
+    window: [u8; 3],
+}
+
+impl SeamLexer {
+    fn seam(&self, next: u8) -> Seam {
+        match self.state {
+            LexState::Literal { .. } => Seam::Join,
+            LexState::Normal if self.token_len > 0 && is_regular(next) => Seam::SplitToken,
+            // `<` | `<`: aus `<<` würde `<` und eine Hex-Zeichenkette.
+            LexState::AfterLt if next == b'<' => Seam::SplitToken,
+            _ => Seam::Separate,
+        }
+    }
+
+    fn feed(&mut self, b: u8) {
+        match self.state {
+            LexState::Literal { depth, escaped } => {
+                self.state = if escaped {
+                    LexState::Literal {
+                        depth,
+                        escaped: false,
+                    }
+                } else {
+                    match b {
+                        b'\\' => LexState::Literal {
+                            depth,
+                            escaped: true,
+                        },
+                        b'(' => LexState::Literal {
+                            depth: depth + 1,
+                            escaped: false,
+                        },
+                        b')' if depth <= 1 => LexState::Normal,
+                        b')' => LexState::Literal {
+                            depth: depth - 1,
+                            escaped: false,
+                        },
+                        _ => LexState::Literal { depth, escaped },
+                    }
+                };
+            }
+            LexState::Hex => {
+                if b == b'>' {
+                    self.state = LexState::Normal;
+                }
+            }
+            LexState::Comment => {
+                if b == b'\n' || b == b'\r' {
+                    self.state = LexState::Normal;
+                }
+            }
+            LexState::InlineData => {
+                let ends = (is_whitespace(b) || is_delimiter(b))
+                    && is_whitespace(self.window[0])
+                    && self.window[1..] == *b"EI";
+                self.window = [self.window[1], self.window[2], b];
+                if ends {
+                    self.state = LexState::Normal;
+                    self.token_len = 0;
+                    self.normal(b);
+                }
+            }
+            LexState::AfterLt => {
+                if b == b'<' {
+                    // `<<` — ein Trennzeichen wie `[`.
+                    self.state = LexState::Normal;
+                } else {
+                    self.state = LexState::Hex;
+                    self.feed(b);
+                }
+            }
+            LexState::Normal => self.normal(b),
+        }
+    }
+
+    fn normal(&mut self, b: u8) {
+        if is_regular(b) {
+            if self.token_len == 0 {
+                self.token_tail = [0, 0];
+            }
+            self.token_len += 1;
+            self.token_tail = [self.token_tail[1], b];
+            return;
+        }
+        // Ein Wort endet. War es `ID`, folgen Binärdaten — das eine
+        // Leerraumzeichen dahinter gehört noch zum Operator.
+        let was_id = self.token_len == 2 && self.token_tail == *b"ID";
+        self.token_len = 0;
+        if was_id && is_whitespace(b) {
+            self.state = LexState::InlineData;
+            self.window = [0, 0, b];
+            return;
+        }
+        match b {
+            b'(' => {
+                self.state = LexState::Literal {
+                    depth: 1,
+                    escaped: false,
+                }
+            }
+            b'<' => self.state = LexState::AfterLt,
+            b'%' => self.state = LexState::Comment,
+            // Ein Name beginnt; was unmittelbar folgt, gehört zu ihm.
+            b'/' => {
+                self.token_len = 1;
+                self.token_tail = [0, b'/'];
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Leerraum nach PDF 32000-1, Tabelle 1.
+fn is_whitespace(b: u8) -> bool {
+    matches!(b, 0x00 | 0x09 | 0x0a | 0x0c | 0x0d | 0x20)
+}
+
+/// Trennzeichen nach PDF 32000-1, Tabelle 2.
+fn is_delimiter(b: u8) -> bool {
+    matches!(
+        b,
+        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+    )
+}
+
+/// Ein gewöhnliches Zeichen — Teil eines Worts.
+fn is_regular(b: u8) -> bool {
+    !is_whitespace(b) && !is_delimiter(b)
 }
 
 /// Ein einzelner Filter mit seinem `/DecodeParms`-Eintrag. `Ok(None)` für
@@ -856,6 +1106,62 @@ mod tests {
     use lopdf::dictionary;
 
     const PLAIN: &[u8] = b"BT /F1 10 Tf 72 700 Td (IBAN: DE89 3704 0044 0532 0130 00) Tj ET";
+
+    /// Teilströme verbinden und dazu die Zahl der Wortteilungen.
+    fn join(parts: &[&[u8]]) -> (Vec<u8>, usize) {
+        let joined = join_parts(parts.iter().copied());
+        (joined.data, joined.split_tokens)
+    }
+
+    /// Eine Grenze in einer Zeichenkette wird ohne Trenner verbunden — so
+    /// zeigen es poppler, pdf.js und mupdf. Mit `\n` dazwischen war die IBAN
+    /// zerrissen und wurde nicht gefunden.
+    #[test]
+    fn seam_inside_a_literal_string_joins_without_separator() {
+        let (data, split) = join(&[b"BT (IBAN DE89 37", b"04 0044) Tj ET"]);
+        assert_eq!(data, b"BT (IBAN DE89 3704 0044) Tj ET\n");
+        assert_eq!(split, 0);
+        // Verschachtelte Klammern und ein `\` direkt vor der Grenze.
+        let (data, _) = join(&[b"(a (b) \\", b") c) Tj"]);
+        assert_eq!(data, b"(a (b) \\) c) Tj\n");
+        // Hinter der geschlossenen Zeichenkette wieder wie bisher.
+        let (data, split) = join(&[b"(a) Tj", b"ET"]);
+        assert_eq!((data.as_slice(), split), (&b"(a) Tj\nET\n"[..], 1));
+    }
+
+    /// Eine Grenze mitten in einem Wort wird gezählt; getrennt wird wie
+    /// bisher. Zwischen Wörtern, hinter Trennzeichen, im Kommentar und in
+    /// einer Hex-Zeichenkette ist sie keine Teilung.
+    #[test]
+    fn seam_inside_a_token_is_counted() {
+        assert_eq!(join(&[b"(x) T", b"j ET"]), (b"(x) T\nj ET\n".to_vec(), 1));
+        assert_eq!(join(&[b"/F", b"1 10 Tf"]).1, 1);
+        assert_eq!(join(&[b"72 7", b"00 Td"]).1, 1);
+        assert_eq!(join(&[b"<", b"</A 1>> BDC"]).1, 1);
+        for parts in [
+            &[&b"(x) Tj "[..], b"ET"][..],
+            &[b"(x) Tj", b" ET"],
+            &[b"[(x)", b"(y)] TJ"],
+            &[b"/F1", b"/F2"],
+            &[b"% Kommentar", b"Tj"],
+            &[b"<4142", b"43> Tj"],
+            &[b"q", b"", b" Q"],
+        ] {
+            assert_eq!(join(parts).1, 0, "{parts:?}");
+        }
+    }
+
+    /// Die Binärdaten eines Inline-Bilds öffnen keine Zeichenkette: eine `(`
+    /// darin darf die nächste Grenze nicht zu „in einer Zeichenkette“ machen.
+    #[test]
+    fn inline_image_data_is_skipped() {
+        let (data, split) = join(&[b"BI /W 1 /H 1 /BPC 8 /CS /G ID (\xff EI Q", b"BT"]);
+        assert_eq!(data, b"BI /W 1 /H 1 /BPC 8 /CS /G ID (\xff EI Q\nBT\n");
+        assert_eq!(split, 1);
+        let (data, split) = join(&[b"BI /W 1 ID ( EI", b" (a) Tj"]);
+        assert_eq!(data, b"BI /W 1 ID ( EI\n (a) Tj\n");
+        assert_eq!(split, 0);
+    }
 
     /// [`is_decodable_filter`] nennt genau die Namen, die [`decode_one`]
     /// auspackt — sonst sagte das Orakel „die Kette läuft durch“ über eine,

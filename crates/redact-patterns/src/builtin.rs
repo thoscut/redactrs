@@ -140,12 +140,20 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
         // Vierergruppen gern mit geschütztem (U+00A0), schmalem geschütztem
         // (U+202F) oder schmalem Leerzeichen (U+2009), und Blocksatz dehnt eine
         // Lücke auf zwei Zeichen. Vorher fiel eine solche IBAN komplett durch.
-        // Der Validator streicht vor der Prüfsumme jeden Leerraum
-        // (`char::is_whitespace`), also auch diese Zeichen. Die Obergrenze
-        // `{0,2}` hält den Aufwand je Ziffer konstant.
+        //
+        // Als Trenner gilt **jeder** Leerraum (`\s`, in `fancy-regex` die
+        // Unicode-Eigenschaft `White_Space` — dieselbe Menge wie
+        // `char::is_whitespace`), nicht mehr eine Liste von vier Zeichen: ein
+        // Ziffernleerzeichen (U+2007), ein Halbgeviert (U+2002) oder ein
+        // Tabulator aus einer `/ToUnicode`-Tabelle trennt für den Leser genauso
+        // und ließ die IBAN vorher durchfallen. Der Validator streicht vor der
+        // Prüfsumme genau diese Menge. Die Obergrenze `{0,2}` hält den Aufwand
+        // je Ziffer konstant. (Unsichtbare Zeichen — Steuerzeichen, Breite
+        // null, weicher Trennstrich — nimmt schon die Textextraktion aus der
+        // Zeile, siehe `redact_pdf::extract`.)
         def(
             "iban_de",
-            r"(?<![0-9A-Za-z])DE[0-9]{2}(?:[ \x{A0}\x{2009}\x{202F}]{0,2}[0-9]){18}(?![0-9A-Za-z])",
+            r"(?<![0-9A-Za-z])DE[0-9]{2}(?:\s{0,2}[0-9]){18}(?![0-9A-Za-z])",
             "Deutsche IBAN (DE + 2 Prüfziffern + 18 Ziffern, optional gruppiert)",
             0.95,
             true,
@@ -153,7 +161,7 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
         ),
         def(
             "iban_intl",
-            r"(?<![0-9A-Za-z])[A-Z]{2}[0-9]{2}(?:[ \x{A0}\x{2009}\x{202F}]{0,2}[0-9A-Z]){11,30}(?![0-9A-Za-z])",
+            r"(?<![0-9A-Za-z])[A-Z]{2}[0-9]{2}(?:\s{0,2}[0-9A-Z]){11,30}(?![0-9A-Za-z])",
             "Internationale IBAN (standardmäßig aus, weil zu unspezifisch)",
             0.9,
             false,
@@ -215,7 +223,7 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
             // Kontextbonus — die Kontonummer daneben blieb stehen.
             mit_kontext!(
                 r"(?i:[a-zäöüß]{0,24}konto(?:nummer|[- ]?nr\.?)?|kto\.?(?:-?nr\.?)?)",
-                r"(?<![0-9A-Za-z])(?:[0-9]{4,10}(?:[ ][0-9]{2,6})+|[0-9]{6,10})(?![0-9A-Za-z])"
+                r"(?<![0-9A-Za-z])(?:[0-9]{4,10}(?:\s[0-9]{2,6})+|[0-9]{6,10})(?![0-9A-Za-z])"
             ),
             "Kontonummer (6–10 Ziffern nach einem Schlüsselwort wie „Kto.“)",
             0.85,
@@ -232,7 +240,7 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
             // nicht jede Ziffernfolge mit Lücken als BLZ durchgeht.
             mit_kontext!(
                 r"(?i:blz|bankleitzahl)",
-                ziffern!(r"[0-9]{8}|[0-9]{3}[ ][0-9]{3}[ ][0-9]{2}")
+                ziffern!(r"[0-9]{8}|[0-9]{3}\s[0-9]{3}\s[0-9]{2}")
             ),
             "Bankleitzahl (8 Ziffern nach „BLZ“ oder „Bankleitzahl“)",
             0.8,
@@ -285,7 +293,11 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
             //
             // Restrisiko: folgt einer 4-4-4-4-Karte eine *dreistellige* Zahl
             // mit einfachem Trenner, wird sie als fünfter Block gelesen.
-            r"(?<![0-9A-Za-z])(?:[0-9]{13,19}|[0-9]{4}(?:[ -][0-9]{4}){3}(?:[ -][0-9]{3})?|[0-9]{4}[ -][0-9]{6}[ -][0-9]{4,5})(?![0-9A-Za-z])",
+            //
+            // Trenner ist hier wie bei Konto-Nr., BLZ und Steuer-ID jeder
+            // **einzelne** Leerraum (`\s`) — geschützt, schmal oder Tabulator —
+            // oder der Bindestrich; vorher nur das ASCII-Leerzeichen.
+            r"(?<![0-9A-Za-z])(?:[0-9]{13,19}|[0-9]{4}(?:[\s-][0-9]{4}){3}(?:[\s-][0-9]{3})?|[0-9]{4}[\s-][0-9]{6}[\s-][0-9]{4,5})(?![0-9A-Za-z])",
             "Kreditkartennummer (13–19 Ziffern, Luhn-geprüft)",
             0.9,
             true,
@@ -300,7 +312,7 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
                 r"(?i:steuer-?(?:id|nr\.?|nummer|identifikationsnummer)|steuerliche[ ]+identifikationsnummer|identifikationsnummer|id-?nr\.?)",
                 // Neben der geschlossenen Form die amtlich gedruckte
                 // Gruppierung 2-3-3-3 („12 345 678 903").
-                ziffern!(r"[0-9]{11}|[0-9]{2}[ ][0-9]{3}[ ][0-9]{3}[ ][0-9]{3}")
+                ziffern!(r"[0-9]{11}|[0-9]{2}\s[0-9]{3}\s[0-9]{3}\s[0-9]{3}")
             ),
             "Steuerliche Identifikationsnummer (11 Ziffern nach „Steuer-ID“)",
             0.9,
@@ -568,8 +580,8 @@ mod tests {
                 "jede Wiederholung beginnt mit einem Punkt",
             ),
             (
-                r"(?:[ ][0-9]{2,6})+",
-                "jede Wiederholung beginnt mit einem Leerzeichen",
+                r"(?:\s[0-9]{2,6})+",
+                "jede Wiederholung beginnt mit einem Leerraumzeichen",
             ),
         ];
 

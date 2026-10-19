@@ -2334,7 +2334,10 @@ pub(crate) fn scan_page_with(
     }
     // Über [`crate::filters`], nicht `Document::get_page_content`: der eigene
     // Dekoder kennt `ASCIIHexDecode` und `RunLengthDecode`, `lopdf` nicht.
-    let content_data = crate::filters::page_content(doc, page_id);
+    let crate::filters::PageContent {
+        data: content_data,
+        split_tokens,
+    } = crate::filters::page_content_checked(doc, page_id);
     // Nicht `lopdf::content::Content::decode`: dessen Parser kennt kein
     // `BI … ID … EI`. Die Binärdaten hinter dem `ID` bringen ihn aus dem Tritt,
     // der Rest des Streams geht verloren — Text hinter einem Inline-Bild wäre
@@ -2377,6 +2380,19 @@ pub(crate) fn scan_page_with(
 
     let resources = page_resources(doc, page_id);
     let mut result = ScanResult::default();
+    // Eine `/Contents`-Grenze mitten in einem Wort (`… T` | `j ET`): pdf.js
+    // verbindet die Teile und zeichnet, poppler und mupdf trennen sie. Gelesen
+    // wurde die getrennte Fassung, siehe [`crate::filters::page_content_checked`].
+    if split_tokens > 0 {
+        result.warn(format!(
+            "Der Seiteninhalt ist auf mehrere Teilströme (/Contents) verteilt, und an \
+             {split_tokens} Grenze(n) liegt die Teilung mitten in einem Wort des \
+             Inhalts. Betrachter lesen eine solche Stelle verschieden: pdf.js setzt die \
+             Teile ohne Trenner zusammen, poppler und mupdf trennen sie. Gelesen wurde \
+             die getrennte Fassung; was die zusammengesetzte zeigt, wurde nicht \
+             durchsucht und kann deshalb nicht geschwärzt worden sein."
+        ));
+    }
     let mut budget = Budget::default();
     budget.credit(None, &operations);
     scan_with_budget(
