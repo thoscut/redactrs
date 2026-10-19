@@ -36,10 +36,56 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 Bereich: `git log v0.7.1..v0.7.2`.
 
-Wartung der Lieferkette, keine Sicherheitskorrektur. Wer 0.7.1 einsetzt, muss
-nicht aktualisieren; Einstellungs- und Musterdateien gelten unverändert.
+Sicherheitskorrekturen aus einem Experten-Review (PR #11) und Wartung der
+Lieferkette. **Wer 0.7.1 einsetzt, aktualisiert** — mehrere der Fälle unten
+ließen Geheimnisse in der Ausgabe stehen oder meldeten ohne Warnung Erfolg.
+Einstellungs- und Musterdateien gelten unverändert; `credit_card` erkennt nur
+noch gedruckte Formate (siehe *Geändert*).
+
+### Sicherheit
+
+* **⚠ Sicherheit: Bilder mit PNG-Prädiktor wurden falsch dekodiert.** Bei 1,
+  2 oder 4 Bit je Komponente (etwa img2pdf-Scans) oder einem überzähligen
+  Byte fiel der Dekoder still auf die Rohzeilen zurück; die Schwärzung traf
+  die falschen Bytes, und ein Teil des Textes blieb im neu kodierten Bild
+  sichtbar. Ein Prädiktor, der sich nicht rückgängig machen lässt, macht das
+  Bild jetzt unlesbar (Ablehnung bzw. Warnung). TIFF-Prädiktor 2 wird
+  angewandt.
+* **⚠ Sicherheit: Negative Schriftgröße oder negatives `Tz`** ließ eine normal
+  aussehende Zeile rückwärts lesen; die IBAN wurde nicht erkannt,
+  Rückgabewert 0.
+* **⚠ Sicherheit: Treffer nur im `/ActualText`** schwärzten eine gleichmäßig
+  verteilte Box statt der echten Glyphen; Teile der IBAN blieben stehen.
+* **⚠ Sicherheit: Rückgabewert 0 trotz Deckungslücke.** Ein Objektname aus der
+  Datei konnte eine Ausnahme-Marke tragen und „NICHT GEPRÜFT“ als
+  gewöhnliche Warnung tarnen. Namen aus der Datei werden jetzt neutralisiert.
+* **⚠ Sicherheit: `--check-leaks` meldete in drei Fällen „nicht gefunden“**,
+  obwohl der Text in der Datei stand: unlesbare Form-XObjects,
+  Inline-Bilddaten oder Kommentare mit `(` vor einem geteilten `TJ`, sowie
+  Namen und Dictionary-Schlüssel.
+* **⚠ Sicherheit: Stapel.** Zwei Eingaben mit derselben Ausgabe
+  (Nicht-UTF-8-Namen, `a` und `a.pdf`) werden vor der ersten Datei
+  abgelehnt; mit `--force` überschrieb vorher das zweite Ergebnis still das
+  erste.
+
+### Dienstverweigerung
+
+* **Speichergrenzen umgangen:** riesiges `/Columns` (504 Byte → 3,8 GB),
+  Bild-Flate mit abweichendem Rückfall, `/F` als Filter an Bild-XObjects und
+  Inline-Bild-Flate (2 MB → 2,1 GB) liefen an `--max-decompressed-mb` vorbei.
+  Die Vorprüfung liest jetzt `/DecodeParms`, jeder Bildfilter ist gedeckelt.
+* **Absturz** bei einem riesigen Index in einem `Indexed`-Farbraum.
 
 ### Geändert
+
+* Erkennung: IBAN mit geschütztem/schmalem Leerzeichen oder doppeltem
+  Leerzeichen, BLZ „370 400 44“, Steuer-ID „12 345 678 903“, „Kto.-Nr.“,
+  „Konto Nr.“ und „Identifikationsnummer“; eine Kreditkarte vor einer kurzen
+  Zahl geht nicht mehr verloren. **`credit_card` erkennt dafür nur noch die
+  gedruckten Formate** (am Stück, 4-4-4-4[-3], 4-6-5, 4-6-4).
+* Buchungsliste: Umlaute in zerlegter Form (NFD) treffen den Eintrag; der
+  CSV-Kopf darf groß geschrieben sein.
+* `--check-leaks … | head` endet ohne Panic.
 
 * **YAML liest jetzt `serde-saphyr` statt `serde_yaml`.** `serde_yaml` ist
   eingestellt, und darunter lag `unsafe-libyaml` — libyaml, maschinell nach
