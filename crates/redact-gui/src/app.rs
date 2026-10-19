@@ -3227,7 +3227,7 @@ impl RedactApp {
         }
 
         let canvas = egui::Frame::central_panel(&ctx.style()).fill(self.theme.canvas());
-        let open = egui::CentralPanel::default()
+        egui::CentralPanel::default()
             .frame(canvas)
             .show(ctx, |ui| {
                 self.central_rect = Some(ui.max_rect());
@@ -3238,8 +3238,7 @@ impl RedactApp {
                     empty_state(ui)
                 }
             })
-            .inner;
-        open
+            .inner
     }
 
     /// Warnungen des letzten Exports **und** des Rasterizers zur aktuellen
