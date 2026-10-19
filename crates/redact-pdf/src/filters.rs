@@ -46,10 +46,13 @@
 //! * **Der LZW-Dekoder** selbst ist `weezl`, dieselbe Bibliothek mit
 //!   denselben Einstellungen wie bei `lopdf` (`Msb`, 9 Bit, `EarlyChange`
 //!   aus `/DecodeParms`); nur der Ausgabepuffer ist hier begrenzt.
-//! * **Der PNG-Prädiktor** ist `lopdf::filters::png::decode_frame`; gelesen
-//!   werden `/Predictor`, `/Columns`, `/Colors`, `/BitsPerComponent` mit den
-//!   Vorgaben von `lopdf`, damit beide dasselbe Ergebnis liefern
-//!   (`ein_praediktor_liest_sich_wie_bei_lopdf`).
+//! * **Der Prädiktor** liest `/Predictor`, `/Columns`, `/Colors`,
+//!   `/BitsPerComponent` mit den Vorgaben von `lopdf`; bei 8 Bit und
+//!   vollständigen Zeilen liefert er dasselbe wie `lopdf`
+//!   (`ein_praediktor_liest_sich_wie_bei_lopdf`). Zurückgerechnet wird aber
+//!   hier ([`undo_predictor`]) und nicht mehr mit `decode_frame`: dessen
+//!   Zeilenlänge stimmt unter 8 Bit nicht, und den TIFF-Prädiktor 2 kennt
+//!   `lopdf` gar nicht — beides ließ Filterbytes als Inhalt stehen.
 //! * **Bildfilter** (`DCTDecode`, `JPXDecode`, `CCITTFaxDecode`, `JBIG2Decode`)
 //!   sind hier ein Fehler wie bei `lopdf`. Sie stehen nie an einem
 //!   Seiteninhalt; Bilder liest [`crate::image`] mit eigenem Weg.
@@ -398,10 +401,12 @@ fn decode_parms(doc: &Document, dict: &Dictionary, index: usize) -> Option<Dicti
     Some(resolved)
 }
 
-/// Entfernt den PNG-Prädiktor — genau wie `lopdf::Stream::decompress_predictor`:
-/// `/Predictor` 10–15 mit `/Columns`, `/Colors`, `/BitsPerComponent` (Vorgaben
-/// 1, 1, 8); alles andere lässt die Daten unverändert. `None`, wenn der
-/// Zeilendekoder die Daten ablehnt — bei `lopdf` ist das derselbe Fehler.
+/// Entfernt den Prädiktor hinter Flate oder LZW — `/Predictor` 2 (TIFF) und
+/// 10–15 (PNG) mit `/Columns`, `/Colors`, `/BitsPerComponent` (Vorgaben 1, 1,
+/// 8). Jeder andere `/Predictor`-Wert lässt die Daten unverändert, wie bei
+/// `lopdf`. `None`, wenn sich die Daten nicht ehrlich zurückrechnen lassen
+/// (siehe [`undo_predictor`]): dann bleibt die Kette hier stehen, statt
+/// Filterbytes als Inhalt weiterzureichen.
 fn png_predictor(data: Vec<u8>, parms: Option<&Dictionary>) -> Option<Vec<u8>> {
     let Some(parms) = parms else {
         return Some(data);
@@ -413,13 +418,226 @@ fn png_predictor(data: Vec<u8>, parms: Option<&Dictionary>) -> Option<Vec<u8>> {
             .and_then(|o| o.as_i64().ok())
             .unwrap_or(default)
     };
-    if !(10..=15).contains(&int(b"Predictor", 1)) {
+    let predictor = int(b"Predictor", 1);
+    if predictor != 2 && !(10..=15).contains(&predictor) {
         return Some(data);
     }
-    let columns = int(b"Columns", 1).max(1) as usize;
-    let colors = int(b"Colors", 1).max(1) as usize;
-    let bits = int(b"BitsPerComponent", 8).max(8) as usize;
-    lopdf::filters::png::decode_frame(&data, colors * bits / 8, columns).ok()
+    let params = PredictorParams {
+        predictor,
+        colors: int(b"Colors", 1),
+        bits: int(b"BitsPerComponent", 8),
+        columns: int(b"Columns", 1),
+    };
+    undo_predictor(data, &params).ok()
+}
+
+/// Die Prädiktorparameter aus `/DecodeParms`, bereits aufgelöst — aber
+/// ungeprüft: was davon unbrauchbar ist, entscheidet [`undo_predictor`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PredictorParams {
+    pub predictor: i64,
+    pub colors: i64,
+    pub bits: i64,
+    pub columns: i64,
+}
+
+/// Warum ein Prädiktor sich nicht zurückrechnen ließ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PredictorError {
+    /// `/Predictor` ist weder 1, 2 noch 10–15.
+    Unknown(i64),
+    /// `/Colors`, `/BitsPerComponent` oder `/Columns` ergeben keine Zeile.
+    Parameters,
+    /// TIFF-Prädiktor mit einer Bittiefe, die wir nicht zurückrechnen.
+    TiffBits(i64),
+    /// Eine PNG-Zeile beginnt mit einem Filterbyte jenseits von 0–4.
+    RowFilter(u8),
+}
+
+impl std::fmt::Display for PredictorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(p) => write!(f, "unbekannter /Predictor {p}"),
+            Self::Parameters => write!(f, "unbrauchbare Prädiktorparameter"),
+            Self::TiffBits(b) => write!(f, "TIFF-Prädiktor bei {b} Bit je Komponente"),
+            Self::RowFilter(k) => write!(f, "ungültiger PNG-Zeilenfilter {k}"),
+        }
+    }
+}
+
+/// Rechnet einen Prädiktor zurück (PDF 32000-1, 7.4.4.4) — für Bilder
+/// ([`crate::ops`]) und Seiteninhalte gleichermaßen.
+///
+/// # Warum nicht `lopdf::filters::png::decode_frame`
+///
+/// Bis zur Expertenprüfung lief der PNG-Prädiktor über `decode_frame`, mit
+/// der Zeilenlänge `Columns * Colors * max(BPC, 8) / 8`. Bei 1, 2 oder 4 Bit
+/// je Komponente ist eine Zeile aber `ceil(Columns * Colors * BPC / 8)` Byte
+/// lang — `decode_frame` lehnte **jedes** solche Bild ab (bitonale Scans aus
+/// `img2pdf` sind genau das), und der Aufrufer nahm die Rohdaten **samt
+/// Filterbytes** als Abtastwerte. Das Bild wurde geschert gelesen, die Zone
+/// schwärzte die falschen Bytes, und ein Teil des Geheimnisses stand im neu
+/// kodierten Bild — ohne Warnung. Dazu kommt: `decode_frame` scheitert an
+/// einem einzigen überzähligen Byte hinter der letzten Zeile, und sein
+/// Average-Filter rechnet `left + above / 2` statt `(left + above) / 2`.
+///
+/// # Was hier gilt
+///
+/// * Zeilenlänge `ceil(Colors * BPC * Columns / 8)`, Bytes je Bildpunkt
+///   `max(1, ceil(Colors * BPC / 8))` — wie bei pdf.js und MuPDF.
+/// * Eine **unvollständige letzte Zeile** wird so weit zurückgerechnet, wie
+///   sie reicht (wie MuPDF); ein einzelnes Restbyte ohne Daten dahinter fällt
+///   weg. Fehlen dem Bild dadurch Abtastwerte, merkt das der Leser dahinter
+///   („Abtastwerte unvollständig“) — erfunden wird nichts.
+/// * Ein unbekanntes Zeilenfilterbyte ist ein **Fehler**, kein „nimm die
+///   Rohdaten“: Rohdaten mit Filterbytes sind keine Abtastwerte, und eine
+///   Schwärzung auf falsch gelesenen Bytes ist schlimmer als eine Ablehnung.
+/// * Der TIFF-Prädiktor 2 (waagerechte Differenzen je Komponente) bei 1, 2,
+///   4, 8 und 16 Bit; die Zeile beginnt jeweils neu.
+pub(crate) fn undo_predictor(
+    data: Vec<u8>,
+    params: &PredictorParams,
+) -> Result<Vec<u8>, PredictorError> {
+    let predictor = params.predictor;
+    if predictor <= 1 {
+        return Ok(data);
+    }
+    if predictor != 2 && !(10..=15).contains(&predictor) {
+        return Err(PredictorError::Unknown(predictor));
+    }
+    // Negative oder fehlende Werte gelten wie bei `lopdf` als Vorgabe 1;
+    // eine Bittiefe jenseits von 16 kennt PDF nicht.
+    let colors = usize::try_from(params.colors.max(1)).map_err(|_| PredictorError::Parameters)?;
+    let columns = usize::try_from(params.columns.max(1)).map_err(|_| PredictorError::Parameters)?;
+    if !(1..=16).contains(&params.bits) {
+        return Err(PredictorError::Parameters);
+    }
+    let bits = params.bits as usize;
+    let bits_per_pixel = colors.checked_mul(bits).ok_or(PredictorError::Parameters)?;
+    let row_bytes = bits_per_pixel
+        .checked_mul(columns)
+        .ok_or(PredictorError::Parameters)?
+        .div_ceil(8);
+    // Eine Zeile, die länger ist als die ganze Eingabe, ist höchstens eine
+    // unvollständige erste Zeile — mehr Platz braucht niemand, und
+    // `/Columns 2147483647` reserviert so keinen Speicher.
+    let row_bytes = row_bytes.min(data.len());
+    if predictor == 2 {
+        return undo_tiff(data, colors, bits, row_bytes);
+    }
+    undo_png(&data, bits_per_pixel.div_ceil(8).max(1), row_bytes)
+}
+
+fn undo_png(data: &[u8], bpp: usize, row_bytes: usize) -> Result<Vec<u8>, PredictorError> {
+    let mut out: Vec<u8> = Vec::with_capacity(data.len());
+    let mut previous: Option<usize> = None;
+    for chunk in data.chunks(row_bytes + 1) {
+        let (&kind, row) = chunk.split_first().expect("chunks liefert nie leer");
+        if row.is_empty() {
+            // Ein Restbyte ohne Zeile dahinter (oft ein Zeilenumbruch vor
+            // `endstream`): Betrachter übergehen es, also auch wir.
+            break;
+        }
+        if kind > 4 {
+            return Err(PredictorError::RowFilter(kind));
+        }
+        let start = out.len();
+        out.extend_from_slice(row);
+        for i in 0..row.len() {
+            let left = if i >= bpp { out[start + i - bpp] } else { 0 };
+            let above = previous.map_or(0, |p| out[p + i]);
+            let upper_left = match previous {
+                Some(p) if i >= bpp => out[p + i - bpp],
+                _ => 0,
+            };
+            let predicted = match kind {
+                0 => 0,
+                1 => left,
+                2 => above,
+                3 => ((u16::from(left) + u16::from(above)) / 2) as u8,
+                _ => paeth(left, above, upper_left),
+            };
+            out[start + i] = out[start + i].wrapping_add(predicted);
+        }
+        previous = Some(start);
+    }
+    Ok(out)
+}
+
+fn paeth(left: u8, above: u8, upper_left: u8) -> u8 {
+    let estimate = i16::from(left) + i16::from(above) - i16::from(upper_left);
+    let to_left = (estimate - i16::from(left)).abs();
+    let to_above = (estimate - i16::from(above)).abs();
+    let to_upper_left = (estimate - i16::from(upper_left)).abs();
+    if to_left <= to_above && to_left <= to_upper_left {
+        left
+    } else if to_above <= to_upper_left {
+        above
+    } else {
+        upper_left
+    }
+}
+
+/// TIFF-Prädiktor 2: jede Komponente ist die Differenz zur gleichen
+/// Komponente des Bildpunkts links davon, modulo `2^BPC`.
+///
+/// Bis zur Expertenprüfung reichte [`crate::ops`] die Daten hier unverändert
+/// durch — die Differenzen galten als Abtastwerte, das Bild war ein anderes
+/// als im Betrachter, und die Schwärzung traf nicht, was dort zu sehen ist.
+fn undo_tiff(
+    mut data: Vec<u8>,
+    colors: usize,
+    bits: usize,
+    row_bytes: usize,
+) -> Result<Vec<u8>, PredictorError> {
+    if row_bytes == 0 {
+        return Ok(data);
+    }
+    for row in data.chunks_mut(row_bytes) {
+        match bits {
+            8 => {
+                for i in colors..row.len() {
+                    row[i] = row[i].wrapping_add(row[i - colors]);
+                }
+            }
+            16 => {
+                let step = 2 * colors;
+                let mut i = step;
+                while i + 1 < row.len() {
+                    let left = u16::from_be_bytes([row[i - step], row[i + 1 - step]]);
+                    let own = u16::from_be_bytes([row[i], row[i + 1]]);
+                    row[i..i + 2].copy_from_slice(&own.wrapping_add(left).to_be_bytes());
+                    i += 2;
+                }
+            }
+            1 | 2 | 4 => {
+                let mask = (1u8 << bits) - 1;
+                let components = row.len() * 8 / bits;
+                for k in colors..components {
+                    let left = sub_sample(row, k - colors, bits);
+                    let own = sub_sample(row, k, bits);
+                    set_sub_sample(row, k, bits, own.wrapping_add(left) & mask);
+                }
+            }
+            other => return Err(PredictorError::TiffBits(other as i64)),
+        }
+    }
+    Ok(data)
+}
+
+/// Die `index`-te Komponente einer Zeile mit `bits` < 8, höchstwertige Bits
+/// zuerst (PDF 32000-1, 8.9.3).
+fn sub_sample(row: &[u8], index: usize, bits: usize) -> u8 {
+    let bit = index * bits;
+    let shift = 8 - bits - bit % 8;
+    (row[bit / 8] >> shift) & ((1u8 << bits) - 1)
+}
+
+fn set_sub_sample(row: &mut [u8], index: usize, bits: usize, value: u8) {
+    let bit = index * bits;
+    let shift = 8 - bits - bit % 8;
+    let mask = ((1u8 << bits) - 1) << shift;
+    row[bit / 8] = (row[bit / 8] & !mask) | (value << shift);
 }
 
 /// Liest höchstens `limit` Byte; ein Byte mehr heißt [`Oversize`].
@@ -600,7 +818,7 @@ fn ascii85_group(group: &[u8; 5]) -> [u8; 4] {
 /// `RunLengthDecode` (PDF 32000-1, 7.4.5): Länge `0..=127` heißt „die nächsten
 /// `n+1` Bytes wörtlich“, `129..=255` heißt „das nächste Byte `257-n`-mal“,
 /// `128` ist das Ende. Höchstens `limit` Byte (ein Lauf verhundertachtundzwanzigfacht).
-fn run_length_decode_within(data: &[u8], limit: usize) -> Result<Vec<u8>, Oversize> {
+pub(crate) fn run_length_decode_within(data: &[u8], limit: usize) -> Result<Vec<u8>, Oversize> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < data.len() {

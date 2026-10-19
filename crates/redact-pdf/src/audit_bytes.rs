@@ -634,7 +634,7 @@ pub fn leaks_many_within(
                     gaps.into_iter()
                         .map(|gap| format!("Sicht 7 (Schriftdekoder): {gap}"))
                         .collect(),
-                    "Seiten",
+                    "Stellen",
                 );
             } else {
                 // Eine ganze Sicht, die nicht lief: eine Stelle mehr, auch
@@ -1483,7 +1483,7 @@ fn decode_raw_chain(
     let decoded = (applied > 0).then(|| {
         let mut label = names[..applied]
             .iter()
-            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .map(|name| crate::label(name))
             .collect::<Vec<_>>()
             .join("+");
         if stream.dict.has(b"DecodeParms") {
@@ -1894,7 +1894,7 @@ fn walk(
             };
             scan_string(raw, site, how, probe);
         }
-        Object::Name(name) => scan_raw_bytes(name, site, "Name", probe),
+        Object::Name(name) => scan_name(name, site, "Name", probe),
         Object::Array(items) => {
             for (i, item) in items.iter().enumerate() {
                 walk(
@@ -1931,11 +1931,17 @@ fn walk_dict(
     }
     let path = site.text;
     for (key, value) in dict.iter() {
+        let key_bytes = key;
         let key = String::from_utf8_lossy(key);
+        let key_site = format!("{path}/{key}");
+        // Auch der Schlüssel ist Inhalt: ein Name darf jedes Byte tragen
+        // (`#20` für ein Leerzeichen), und ein Erzeuger kann dort ablegen,
+        // was er will — der Betrachter zeigt ihn nicht, `strings` schon.
+        scan_name(key_bytes, site.with_text(&key_site), "Schlüssel", probe);
         walk(
             doc,
             value,
-            site.with_text(&format!("{path}/{key}")),
+            site.with_text(&key_site),
             probe,
             budget,
             depth + 1,
@@ -2080,7 +2086,7 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
     let chain = |names: &[Vec<u8>]| {
         names
             .iter()
-            .map(|f| String::from_utf8_lossy(f))
+            .map(|f| crate::label(f))
             .collect::<Vec<_>>()
             .join("+")
     };
@@ -2091,7 +2097,7 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
             let rest = if names[applied].is_empty() {
                 "ein Glied ohne Filternamen".to_string()
             } else {
-                format!("/{} unbekannt", String::from_utf8_lossy(&names[applied]))
+                format!("/{} unbekannt", crate::label(&names[applied]))
             };
             Some((
                 format!(
@@ -2159,6 +2165,18 @@ fn scan_raw_bytes(hay: &[u8], site: Site<'_>, how: &str, probe: &mut Probe) {
     probe.scan_bytes(hay, 4, site, how);
 }
 
+/// Name-Objekt (als Wert oder als Schlüssel): roh **und** als Text.
+///
+/// Roh allein reichte nicht. Der Lader hat `#xx` schon aufgelöst, aber der
+/// Bytevergleich kennt keine Fassung ohne Leerraum: `/DE89370400440532013000`
+/// traf den Begriff „DE89 3704 0044 0532 0130 00“ nicht, dieselben Ziffern
+/// als Zeichenkette dagegen schon. Als Text gelesen gilt für einen Namen
+/// dieselbe Regel wie für jede Zeichenkette.
+fn scan_name(name: &[u8], site: Site<'_>, how: &str, probe: &mut Probe) {
+    scan_text(&String::from_utf8_lossy(name), site, how, probe);
+    scan_raw_bytes(name, site, how, probe);
+}
+
 /// Zeichenketten-Objekt: sowohl dekodiert (PDFDocEncoding **oder** UTF-16BE)
 /// als auch roh vergleichen.
 fn scan_string(raw: &[u8], site: Site<'_>, how: &str, probe: &mut Probe) {
@@ -2223,13 +2241,25 @@ fn scan_text(text: &str, site: Site<'_>, how: &str, probe: &mut Probe) {
 /// ist der benannte blinde Fleck aus dem Modulkopf. Eine zweite Zeile dafür
 /// machte aus jeder solchen Datei einen Befund mehr, und aus der Zusage
 /// „Bildfilter am Kettenende: keine Meldung“ (`SECURITY.md`) eine falsche.
+///
+/// Dazu je Warnung des Interpreters, die selbst sagt, dass ein Teil des
+/// Inhalts nicht gelesen wurde, eine Zeile ([`decoder_coverage_gap`]).
 fn scan_decoded_text(doc: &Document, probe: &mut Probe) -> Vec<String> {
-    let (runs, _, gaps) = PdfExtractor::new().extract_lenient_with_gaps(doc);
-    let gaps = gaps
+    let (runs, warnings, gaps) = PdfExtractor::new().extract_lenient_with_gaps(doc);
+    // Jede Seitenlücke steht auch unter den Warnungen; sie zählt einmal.
+    let page_gaps: Vec<&str> = gaps.iter().map(|(_, gap)| gap.as_str()).collect();
+    let mut lines: Vec<String> = warnings
+        .iter()
+        .filter(|w| !page_gaps.contains(&w.as_str()))
+        .filter(|w| decoder_coverage_gap(doc, w))
+        .cloned()
+        .collect();
+    let mut gaps: Vec<String> = gaps
         .into_iter()
         .filter(|(page_id, _)| !page_content_undecodable(doc, *page_id))
         .map(|(_, gap)| gap)
         .collect();
+    gaps.append(&mut lines);
     // Die Zeilen kommen seitenweise sortiert; je Seite ein Text.
     for page_runs in runs.chunk_by(|a, b| a.page == b.page) {
         let text: String = page_runs
@@ -2248,6 +2278,101 @@ fn scan_decoded_text(doc: &Document, probe: &mut Probe) -> Vec<String> {
         );
     }
     gaps
+}
+
+/// Sagt diese Warnung des Interpreters, dass ein Teil des Inhalts **nicht
+/// gelesen** wurde — ein Form-XObject, ein Erscheinungsstrom, eine
+/// Maskengruppe, ein Kachelmuster, eine Type3-Glyphprozedur?
+///
+/// Bis hierher verwarf diese Sicht alle Warnungen außer der ganzen
+/// abgelehnten Seite. Ein Form-XObject, das sich nicht zerlegen ließ, fehlte
+/// dann stumm: `--check-leaks` meldete „nicht gefunden“, obwohl der
+/// Schriftdekoder dort nichts gelesen hatte — und Glyphencodes einer
+/// Teilmengen-Schrift findet keine der Bytesichten. Gemeint sind die
+/// Meldungen, die das selbst sagen („nicht durchsucht“, „nicht
+/// weitergelesen“); Hinweise wie „kein /ToUnicode“ sind keine Lücke dieser
+/// Sicht, sondern ein Urteil über den Text, den sie gelesen hat.
+///
+/// Zwei Fälle bleiben draußen, weil sie schon anders benannt sind:
+/// - ein Form-XObject, das **nirgends gezeichnet** wird: es steht nicht auf
+///   dem Papier, und das ist die einzige Aussage dieser Sicht; seinen Strom
+///   lesen die Bytesichten wie jeden anderen. Eine Zeile dafür machte aus
+///   jeder Datei mit geteilten Ressourcen einen Befund.
+/// - ein Form-XObject, das sich nicht dekodieren ließ, **weil** seine Kette
+///   ein Glied trägt, das hier niemand auspackt: wie bei
+///   [`page_content_undecodable`] nennt die Objektsicht einen unbekannten
+///   Filter selbst, und Text hinter einem Bildfilter ist der benannte blinde
+///   Fleck aus dem Modulkopf.
+fn decoder_coverage_gap(doc: &Document, warning: &str) -> bool {
+    if !(warning.contains("nicht durchsucht") || warning.contains("nicht weitergelesen")) {
+        return false;
+    }
+    if warning.contains("wird aber nirgends gezeichnet")
+        || warning.contains("werden aber nirgends gezeichnet")
+    {
+        return false;
+    }
+    if let Some(rest) = warning.strip_prefix("Form-XObject „") {
+        if let Some((label, tail)) = rest.split_once('“') {
+            if tail.starts_with(" ließ sich nicht dekodieren") && forms_undecodable(doc, label) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Trägt **jedes** Form-XObject, das unter dem Ressourcennamen `label`
+/// eingetragen ist, eine Kette mit einem Glied, das hier niemand auspackt?
+///
+/// Die Warnung nennt nur den Namen, nicht das Objekt; gesucht wird deshalb
+/// in jedem `/XObject`-Verzeichnis des Dokuments. Ein einziger Eintrag mit
+/// lesbarer Kette — dessen Dekodieren also an etwas anderem scheiterte —
+/// genügt, damit die Zeile bleibt.
+fn forms_undecodable(doc: &Document, label: &str) -> bool {
+    let mut seen = false;
+    let mut all = true;
+    let mut visit = |resources: &Dictionary| {
+        let Some(xobjects) = resources
+            .get(b"XObject")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+        else {
+            return;
+        };
+        for (name, entry) in xobjects.iter() {
+            if crate::label(name) != label {
+                continue;
+            }
+            let Ok(stream) = doc.dereference(entry).and_then(|(_, o)| o.as_stream()) else {
+                continue;
+            };
+            seen = true;
+            all &= filters::filter_names(doc, &stream.dict)
+                .unwrap_or_default()
+                .iter()
+                .any(|name| !filters::is_decodable_filter(name));
+        }
+    };
+    for object in doc.objects.values() {
+        let dict = match object {
+            Object::Dictionary(dict) => dict,
+            Object::Stream(stream) => &stream.dict,
+            _ => continue,
+        };
+        if let Some(resources) = dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+        {
+            visit(resources);
+        }
+        // Ein `/Resources`-Verzeichnis als eigenes Objekt.
+        visit(dict);
+    }
+    seen && all
 }
 
 /// Steht **jeder** Inhaltsstrom der Seite hinter einer Kette, die hier nicht
@@ -2433,13 +2558,13 @@ fn chain_gap(names: &[Vec<u8>], applied: usize) -> Option<String> {
                 format!(
                     "/{} ist ein Bildfilter und wird nicht dekodiert, aber die Kette \
                      geht dahinter weiter",
-                    String::from_utf8_lossy(name)
+                    crate::label(name)
                 )
             });
         }
         Some(format!(
             "/{} ist hier kein bekannter Filter",
-            String::from_utf8_lossy(name)
+            crate::label(name)
         ))
     });
     match grund.flatten() {
@@ -2597,6 +2722,21 @@ fn concat_pdf_strings_both(blob: &[u8]) -> (String, Option<String>) {
                 let (bytes, next) = read_hex_string(blob, i + 1);
                 push(&bytes);
                 i = next;
+            }
+            // Ein Kommentar ist keine Syntax: ein `(` darin öffnete sonst
+            // eine Zeichenkette, die erst an der nächsten `)` endet — und
+            // verschluckte dabei die Bruchstücke des folgenden `TJ`.
+            b'%' => {
+                while i < blob.len() && blob[i] != b'\n' && blob[i] != b'\r' {
+                    i += 1;
+                }
+            }
+            // Zwischen `ID` und `EI` stehen rohe Bilddaten. Ein `(` oder `<`
+            // darin ist ein Pixelwert, kein Zeichenkettenanfang; ohne diesen
+            // Sprung fraß die vermeintliche Zeichenkette die echte IBAN
+            // dahinter, und Sicht 6 fand sie nicht mehr.
+            b'B' if crate::document::keyword_at(blob, i, b"BI") => {
+                i = crate::document::skip_inline_image(blob, i);
             }
             _ => i += 1,
         }

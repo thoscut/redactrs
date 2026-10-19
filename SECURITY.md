@@ -1131,6 +1131,43 @@ lautet dann „nicht geprüft“, nicht „nicht gefunden“ (Rückgabewert 3, s
 README, „Prüfen, ob die Schwärzung gewirkt hat“). Seine gepackten Bytes
 durchsucht die Rohsicht trotzdem.
 
+### Prädiktoren und Bildfilter (Experten-Review, Oktober 2026)
+
+Drei Wege führten bis 0.7.1 an `--max-decompressed-mb` vorbei. Gemessen am
+Release-Binary mit `--max-decompressed-mb 16`:
+
+| Weg | Datei | vorher |
+|---|---|---|
+| `/DecodeParms << /Predictor 12 /Columns 2000000000 >>` am Seiteninhalt | 504 Byte | 3 821 MB, 8,3 s, Exit 1 |
+| Bild-Flate, dessen Rückfall auf rohes Deflate ab Byte 0 las (Vorprüfung ab Byte 2) | 1 MB | 1 100 MB, **Exit 0** |
+| Inline-Bild `BI … /F /Fl ID <Bombe> EI` | 2 MB | 2 131 MB, **Exit 0** |
+
+Was jetzt gilt:
+
+* **Die Vorprüfung liest `/DecodeParms`.** Eine Prädiktorzeile, die länger ist
+  als die entpackten Daten, wird gegen das Budget verbucht; ist sie absurd lang
+  (mehr als das Achtfache der Daten plus 64 KiB) oder läuft die Rechnung über,
+  wird die Datei abgelehnt. Das gilt auch für Objektströme, die `lopdf` schon
+  beim Laden entpackt.
+* **Der Prädiktor selbst legt nichts an, was länger ist als die Daten.** Die
+  Zeilenlänge ist `ceil(Colors × BPC × Columns / 8)` mit geprüfter
+  Arithmetik; vorher rechnete der Code mit mindestens 8 Bit je Komponente.
+* **Jeder Bildfilter ist gedeckelt**: Flate, LZW und RunLength entpacken beim
+  Schwärzen höchstens deklarierte Bildpunkte × 8 + 1 MiB, Inline-Bilder
+  eingeschlossen. Der Flate-Rückfall liest wie die Vorprüfung ab Byte 2.
+* **`/F` ist an einem Bild-XObject kein Filter**, sondern eine
+  Dateispezifikation; die Abkürzung gilt nur im Inline-Bild.
+* **Ein Prädiktor, der sich nicht rückgängig machen lässt** (ungültiger
+  PNG-Zeilenfilter, TIFF-Prädiktor 2 mit nicht unterstützter Bittiefe,
+  unbekannter `/Predictor` an einem Bild), macht das Bild unlesbar: der Lauf
+  lehnt ab bzw. warnt mit `--allow-undecodable-images`. Vorher fiel der Code
+  still auf die Rohzeilen zurück — das Bild wurde geschert gelesen, die
+  Schwärzung traf die falschen Bytes, und ein Teil des Geheimnisses blieb im
+  neu kodierten Bild sichtbar. TIFF-Prädiktor 2 wird jetzt angewandt.
+
+Belege: `crates/redact-pdf/tests/experten_review_grenzen.rs` (Spitzenspeicher
+über einen zählenden Allokator) und `experten_review_praediktor.rs`.
+
 ### Was die Zahl 62–100 nicht ist
 
 Sie ist der Preis des **`Operation`-Vektors**, nicht der Spitzenbedarf eines

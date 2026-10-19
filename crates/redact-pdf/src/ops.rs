@@ -519,7 +519,7 @@ impl ContentSink for OpsCollector {
 
     fn image(&mut self, cx: &SinkContext, event: &ImageEvent) {
         let index = if let Some((dict, data)) = event.inline {
-            let (image, note) = decode_image(cx.doc, cx.resources, dict, data, event.fill);
+            let (image, note) = decode_inline_image(cx.doc, cx.resources, dict, data, event.fill);
             if let Some(note) = note {
                 self.note(format!("Inline-Bild: {note}"));
             }
@@ -546,7 +546,7 @@ impl ContentSink for OpsCollector {
                         event.fill,
                     );
                     if let Some(note) = note {
-                        let label = String::from_utf8_lossy(name).into_owned();
+                        let label = crate::label(name);
                         self.note(format!("Bild /{label}: {note}"));
                     }
                     let index = self.push_image(image);
@@ -856,7 +856,25 @@ pub fn decode_image(
     raw: &[u8],
     fill: Rgb,
 ) -> (RasterImage, Option<String>) {
-    decode_image_inner(doc, resources, dict, raw, fill, true)
+    decode_image_inner(doc, resources, dict, raw, fill, true, false)
+}
+
+/// Wie [`decode_image`], für ein **Inline-Bild** (`BI … ID … EI`).
+///
+/// Nur dort gelten die Kurznamen `/F` und `/DP` für `/Filter` und
+/// `/DecodeParms` (PDF 32000-1, Tabelle 92). An einem Bild-XObject ist `/F`
+/// die Dateispezifikation eines externen Stroms; bis zur Expertenprüfung
+/// las dieser Dekoder es trotzdem als Filter — die Vorprüfung, die nur
+/// `/Filter` liest, buchte den Strom mit seiner Rohgröße, und hier wurde er
+/// ohne ihr Budget entpackt.
+pub fn decode_inline_image(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    dict: &Dictionary,
+    raw: &[u8],
+    fill: Rgb,
+) -> (RasterImage, Option<String>) {
+    decode_image_inner(doc, resources, dict, raw, fill, true, true)
 }
 
 /// `masks` ist beim Dekodieren **einer Maske** falsch.
@@ -872,6 +890,7 @@ fn decode_image_inner(
     raw: &[u8],
     fill: Rgb,
     masks: bool,
+    inline: bool,
 ) -> (RasterImage, Option<String>) {
     let width = dict_int(doc, dict, b"Width", b"W").unwrap_or(0).max(0) as u32;
     let height = dict_int(doc, dict, b"Height", b"H").unwrap_or(0).max(0) as u32;
@@ -888,7 +907,7 @@ fn decode_image_inner(
         );
     }
 
-    let payload = apply_filters(doc, dict, raw);
+    let payload = apply_filters(doc, dict, raw, inline);
     let mask = dict_bool(doc, dict, b"ImageMask", b"IM");
     let bpc = if mask {
         1
@@ -996,18 +1015,32 @@ fn decode_image_inner(
 }
 
 /// Wendet alle Filter an, die keine Bildkompression sind.
-fn apply_filters(doc: &Document, dict: &Dictionary, raw: &[u8]) -> Payload {
-    let filters = filter_names(doc, dict);
+///
+/// Jedes Glied, das wachsen kann, ist begrenzt — auf [`decode_limit`]. Bis zur
+/// Expertenprüfung lief Flate hier über ein unbegrenztes `read_to_end`, und
+/// der Rückfall auf rohes Deflate las ab Byte 0, während Vorprüfung, `lopdf`
+/// und [`crate::filters::inflate_within`] ab Byte 2 lesen: ein Strom, der
+/// dort sofort scheitert und hier eine Bombe ist, ging mit 0 gebuchten Byte
+/// durch die Vorprüfung (1 MB Datei, 1,1 GB Spitze, Rückgabewert 0). Jetzt
+/// liest auch dieser Pfad genau wie die Vorprüfung — nur zusätzlich begrenzt,
+/// denn ein Inline-Bild sieht die Vorprüfung gar nicht.
+fn apply_filters(doc: &Document, dict: &Dictionary, raw: &[u8], inline: bool) -> Payload {
+    let filters = filter_names(doc, dict, inline);
     if filters.is_empty() {
         return Payload::Samples(raw.to_vec());
     }
+    let limit = decode_limit(doc, dict);
     let mut data = raw.to_vec();
     for (index, filter) in filters.iter().enumerate() {
-        let params = filter_params(doc, dict, index);
+        let params = filter_params(doc, dict, index, inline);
         data = match filter.as_str() {
-            "FlateDecode" | "Fl" => match inflate(&data) {
-                Some(out) => apply_predictor(doc, out, params.as_ref()),
-                None => return Payload::Unsupported("FlateDecode".into()),
+            "FlateDecode" | "Fl" => match crate::filters::inflate_within(&data, limit) {
+                Ok(out) if !out.is_empty() => match apply_predictor(doc, out, params.as_ref()) {
+                    Ok(out) => out,
+                    Err(e) => return Payload::Unsupported(format!("FlateDecode ({e})")),
+                },
+                Ok(_) => return Payload::Unsupported("FlateDecode".into()),
+                Err(_) => return Payload::Unsupported("FlateDecode (zu groß)".into()),
             },
             // Derselbe Dekoder wie für Content-Streams und das Orakel
             // (`filters::lzw_within`, `weezl`). Bis zur Spur-A-Runde 1 endete
@@ -1017,14 +1050,22 @@ fn apply_filters(doc: &Document, dict: &Dictionary, raw: &[u8]) -> Payload {
             // #78). Die Grenze folgt dem, was das Bild laut Dictionary
             // braucht: mehr Abtastwerte liest niemand.
             "LZWDecode" | "LZW" => {
-                match crate::filters::lzw_within(&data, params.as_ref(), lzw_limit(doc, dict)) {
-                    Ok(out) => apply_predictor(doc, out, params.as_ref()),
+                match crate::filters::lzw_within(&data, params.as_ref(), limit) {
+                    Ok(out) => match apply_predictor(doc, out, params.as_ref()) {
+                        Ok(out) => out,
+                        Err(e) => return Payload::Unsupported(format!("LZWDecode ({e})")),
+                    },
                     Err(_) => return Payload::Unsupported("LZWDecode (zu groß)".into()),
                 }
             }
             "ASCII85Decode" | "A85" => decode_ascii85(&data),
             "ASCIIHexDecode" | "AHx" => decode_ascii_hex(&data),
-            "RunLengthDecode" | "RL" => decode_run_length(&data),
+            "RunLengthDecode" | "RL" => {
+                match crate::filters::run_length_decode_within(&data, limit) {
+                    Ok(out) => out,
+                    Err(_) => return Payload::Unsupported("RunLengthDecode (zu groß)".into()),
+                }
+            }
             "DCTDecode" | "DCT" => return Payload::Jpeg(data),
             "JPXDecode" => return Payload::Jpx,
             other => return Payload::Unsupported(other.to_string()),
@@ -1033,37 +1074,52 @@ fn apply_filters(doc: &Document, dict: &Dictionary, raw: &[u8]) -> Payload {
     Payload::Samples(data)
 }
 
-/// Wie viel ein LZW-gepacktes Bild höchstens entpacken darf: was `/Width` ×
-/// `/Height` an Abtastwerten brauchen — großzügig mit 8 Byte je Bildpunkt
-/// (16 Bit, vier Komponenten) — plus ein MiB Spielraum für Zeilenfüllung und
-/// Prädiktorbytes. Ein Strom, der mehr hergibt, malt kein Bild, er füllt
-/// Speicher.
-fn lzw_limit(doc: &Document, dict: &Dictionary) -> usize {
+/// Wie viel ein Glied der Filterkette eines Bildes höchstens entpacken darf:
+/// was `/Width` × `/Height` an Abtastwerten brauchen — großzügig mit 8 Byte je
+/// Bildpunkt (16 Bit, vier Komponenten) — plus ein MiB Spielraum für
+/// Zeilenfüllung und Prädiktorbytes. Ein Strom, der mehr hergibt, malt kein
+/// Bild, er füllt Speicher. Galt bis zur Expertenprüfung nur für LZW.
+fn decode_limit(doc: &Document, dict: &Dictionary) -> usize {
     let pixels = usize::try_from(crate::image::declared_pixels(doc, dict)).unwrap_or(usize::MAX);
     pixels.saturating_mul(8).saturating_add(1 << 20)
 }
 
-fn filter_names(doc: &Document, dict: &Dictionary) -> Vec<String> {
-    let Some(filter) = deref(doc, dict.get(b"Filter").or_else(|_| dict.get(b"F")).ok()) else {
+/// Die Filterkette; `/F` gilt nur bei `inline` (siehe [`decode_inline_image`]).
+fn filter_names(doc: &Document, dict: &Dictionary, inline: bool) -> Vec<String> {
+    let entry = match dict.get(b"Filter") {
+        Err(_) if inline => dict.get(b"F"),
+        other => other,
+    };
+    let Some(filter) = deref(doc, entry.ok()) else {
         return Vec::new();
     };
     match filter {
-        Object::Name(name) => vec![String::from_utf8_lossy(name).into_owned()],
+        // Über `crate::label`: die Namen landen in Meldungen (Befund CLI-1).
+        // Ein bekannter Filtername enthält keinen Leerraum, der Vergleich
+        // mit „FlateDecode“ & Co. ändert sich dadurch nicht.
+        Object::Name(name) => vec![crate::label(name)],
         Object::Array(items) => items
             .iter()
             .filter_map(|o| deref(doc, Some(o)))
             .filter_map(|o| o.as_name().ok())
-            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .map(crate::label)
             .collect(),
         _ => Vec::new(),
     }
 }
 
-fn filter_params(doc: &Document, dict: &Dictionary, index: usize) -> Option<Dictionary> {
-    let params = deref(
-        doc,
-        dict.get(b"DecodeParms").or_else(|_| dict.get(b"DP")).ok(),
-    )?;
+/// Die `/DecodeParms` zum `index`-ten Filter; `/DP` gilt nur bei `inline`.
+fn filter_params(
+    doc: &Document,
+    dict: &Dictionary,
+    index: usize,
+    inline: bool,
+) -> Option<Dictionary> {
+    let entry = match dict.get(b"DecodeParms") {
+        Err(_) if inline => dict.get(b"DP"),
+        other => other,
+    };
+    let params = deref(doc, entry.ok())?;
     match params {
         Object::Dictionary(d) if index == 0 => Some(d.clone()),
         Object::Array(items) => items
@@ -1075,42 +1131,31 @@ fn filter_params(doc: &Document, dict: &Dictionary, index: usize) -> Option<Dict
     }
 }
 
-/// PNG-Prädiktoren (`/Predictor >= 10`); der TIFF-Prädiktor 2 wird übergangen.
-fn apply_predictor(doc: &Document, data: Vec<u8>, params: Option<&Dictionary>) -> Vec<u8> {
+/// Rechnet den Prädiktor aus `/DecodeParms` zurück (TIFF 2, PNG 10–15).
+///
+/// Ein Fehler ist hier **kein** „nimm die Rohdaten“: bis zur Expertenprüfung
+/// endete ein abgelehnter Prädiktor in `unwrap_or(data)`, und die Rohzeilen
+/// samt PNG-Filterbytes galten als Abtastwerte — das Bild wurde geschert
+/// gelesen, die Schwärzung traf die falschen Bytes, und ein Teil des
+/// Geheimnisses stand ohne Warnung im neu kodierten Bild. Jetzt wird daraus
+/// ein nicht dekodierbares Bild, und das endet wie jedes andere in einer
+/// Ablehnung oder — mit `--allow-undecodable-images` — in einer Warnung.
+fn apply_predictor(
+    doc: &Document,
+    data: Vec<u8>,
+    params: Option<&Dictionary>,
+) -> std::result::Result<Vec<u8>, crate::filters::PredictorError> {
     let Some(params) = params else {
-        return data;
+        return Ok(data);
     };
-    let predictor = dict_int(doc, params, b"Predictor", b"Predictor").unwrap_or(1);
-    if !(10..=15).contains(&predictor) {
-        return data;
-    }
-    let columns = dict_int(doc, params, b"Columns", b"Columns")
-        .unwrap_or(1)
-        .max(1) as usize;
-    let colors = dict_int(doc, params, b"Colors", b"Colors")
-        .unwrap_or(1)
-        .max(1) as usize;
-    let bits = dict_int(doc, params, b"BitsPerComponent", b"BPC")
-        .unwrap_or(8)
-        .max(8) as usize;
-    let bytes_per_pixel = (colors * bits / 8).max(1);
-    lopdf::filters::png::decode_frame(&data, bytes_per_pixel, columns).unwrap_or(data)
-}
-
-fn inflate(data: &[u8]) -> Option<Vec<u8>> {
-    use flate2::read::{DeflateDecoder, ZlibDecoder};
-    use std::io::Read;
-
-    // Abgeschnittene Streams sind in freier Wildbahn häufig — was schon
-    // dekodiert ist, wird behalten.
-    let mut out = Vec::new();
-    let _ = ZlibDecoder::new(data).read_to_end(&mut out);
-    if !out.is_empty() {
-        return Some(out);
-    }
-    let mut raw = Vec::new();
-    let _ = DeflateDecoder::new(data).read_to_end(&mut raw);
-    (!raw.is_empty()).then_some(raw)
+    let int = |key: &[u8], default: i64| dict_int(doc, params, key, key).unwrap_or(default);
+    let params = crate::filters::PredictorParams {
+        predictor: int(b"Predictor", 1),
+        colors: int(b"Colors", 1),
+        bits: int(b"BitsPerComponent", 8),
+        columns: int(b"Columns", 1),
+    };
+    crate::filters::undo_predictor(data, &params)
 }
 
 fn decode_ascii_hex(data: &[u8]) -> Vec<u8> {
@@ -1177,32 +1222,6 @@ fn decode_ascii85(data: &[u8]) -> Vec<u8> {
             acc.wrapping_mul(85).wrapping_add(u32::from(*d))
         });
         out.extend_from_slice(&value.to_be_bytes()[..count - 1]);
-    }
-    out
-}
-
-fn decode_run_length(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < data.len() {
-        let length = data[i];
-        i += 1;
-        match length {
-            128 => break,
-            0..=127 => {
-                let n = length as usize + 1;
-                let end = (i + n).min(data.len());
-                out.extend_from_slice(&data[i..end]);
-                i = end;
-            }
-            _ => {
-                if i < data.len() {
-                    let n = 257 - length as usize;
-                    out.extend(std::iter::repeat_n(data[i], n));
-                    i += 1;
-                }
-            }
-        }
     }
     out
 }
@@ -1458,6 +1477,7 @@ fn apply_soft_mask(
         &stream.content,
         Rgb::BLACK,
         false,
+        false,
     );
     if mask.placeholder || mask.width == 0 || mask.height == 0 {
         if is_stencil {
@@ -1676,7 +1696,7 @@ fn color_key_plan(
     // verschieden. Ob das überhaupt eine Rolle spielt, hängt daran, ob
     // irgendein Wert in die Nähe des Schlüssels kommt — das ist am Dictionary
     // nicht zu sehen und wird deshalb am dekodierten Bild nachgesehen.
-    let filters = filter_names(doc, dict);
+    let filters = filter_names(doc, dict, true);
     if let Some(lossy) = filters
         .iter()
         .find(|f| matches!(f.as_str(), "DCTDecode" | "DCT" | "JPXDecode"))
