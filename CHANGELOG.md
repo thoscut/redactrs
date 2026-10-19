@@ -32,6 +32,44 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ---
 
+## 0.7.2 — 2026-10-19
+
+Bereich: `git log v0.7.1..v0.7.2`.
+
+Wartung der Lieferkette, keine Sicherheitskorrektur. Wer 0.7.1 einsetzt, muss
+nicht aktualisieren; Einstellungs- und Musterdateien gelten unverändert.
+
+### Geändert
+
+* **YAML liest jetzt `serde-saphyr` statt `serde_yaml`.** `serde_yaml` ist
+  eingestellt, und darunter lag `unsafe-libyaml` — libyaml, maschinell nach
+  Rust übersetzt, 240-mal `unsafe`, ebenfalls nicht mehr gepflegt
+  (RUSTSEC-2024-0449, seit 2026-10-12 in der Advisory-Datenbank). Beide sind
+  aus dem Abhängigkeitsgraphen verschwunden. `serde-saphyr` und sein Parser
+  sind `#![forbid(unsafe_code)]`. Gelesen wird an einer Stelle,
+  `redact_patterns::yaml`, und so wie bisher: nur `true`/`false` sind
+  Wahrheitswerte (nicht `yes`/`on`), doppelte Schlüssel sind ein Fehler, `<<`
+  ist ein unbekannter Schlüssel, und keine Fehlermeldung zitiert einen
+  Ausschnitt der Datei. Ein Unterschied bleibt: ein Zahlenwert an einer
+  Stelle, die Text erwartet (`theme: 3`), wird als Text gelesen statt sofort
+  abgelehnt — er scheitert dann an der Prüfung des Werts.
+* Die Meldung „ein Wert hat die falsche Art“ der Einstellungsdatei erkennt
+  auch die Meldungen von `serde-saphyr` (Test
+  `a_value_of_the_wrong_kind_is_named_as_such`).
+
+### Bekannt
+
+* `cargo audit` meldet drei neue, nicht mehr gepflegte Crates im Linux-Bau
+  der Oberfläche: `zvariant`, `zvariant_derive` und `zbus_names`
+  (RUSTSEC-2026-0370 bis -0372, seit 2026-10-16). Sie sind in `zbus` 6
+  aufgegangen und kommen über `rfd` → `ashpd` → `zbus` 5. Keine
+  Schwachstelle; auflösen lässt es sich erst, wenn `ashpd` und `rfd` auf
+  `zbus` 6 umstellen. Das gtk3-Backend von `rfd` wäre kein Ausweg — `gtk-rs`
+  0.18 ist selbst eingestellt. Die Begründung steht im Job `supply-chain` in
+  `.github/workflows/ci.yml`.
+
+---
+
 ## 0.7.1 — 2026-10-16
 
 Bereich: `git log v0.7.0..v0.7.1`.
