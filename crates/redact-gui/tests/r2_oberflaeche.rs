@@ -212,6 +212,7 @@ fn export_auf_das_original_wird_abgelehnt() {
 
     let sub = dir.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut targets = vec![input.clone(), sub.join("../in.pdf")];
     #[cfg(unix)]
     {
