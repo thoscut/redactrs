@@ -34,6 +34,17 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ## Unveröffentlicht
 
+### Neu
+
+* **Zwei Arbeitsansichten in der Oberfläche.** „Werkbank“ mit festen Leisten
+  (Miniaturen links, Treffer und Auswahl jetzt **rechts**) und „Fokus“, in der
+  die Seite das Fenster füllt und alles andere als Karte darüber schwebt.
+  Umschalten über den Knopf oben rechts, voreinstellen mit dem neuen Schlüssel
+  `layout: werkbank | fokus` in der Einstellungsdatei; ein unbekannter Wert
+  wird wie bei `theme` mit den erlaubten Werten abgelehnt. Die Umschalter für
+  Ansicht und Thema tragen nur noch ihr Symbol, die Sprechblase sagt, was sie
+  tun.
+
 ### Geändert
 
 * **Die Oberfläche ist überarbeitet** — gleiche Funktionen, gleiche Tasten,

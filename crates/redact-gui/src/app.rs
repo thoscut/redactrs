@@ -1,5 +1,7 @@
-//! Die eframe-Anwendung: Leiste oben, Seitenleiste links, Ansichtsleiste und
-//! Seite in der Mitte, Statuszeile unten.
+//! Die eframe-Anwendung in zwei Ansichten ([`crate::layout`]): als Werkbank
+//! mit Leiste oben, Miniaturen links, Seitenleiste rechts, Ansichtsleiste und
+//! Seite in der Mitte — oder im Fokus mit der Seite im ganzen Fenster und
+//! schwebenden Karten. Die Statuszeile steht in beiden unten.
 //!
 //! Dieses Modul ist absichtlich dünn. Es übersetzt Klicks und Tastendrücke in
 //! Aufrufe von [`AppState`] und zeichnet dessen Inhalt — mehr nicht. Alles,
@@ -30,6 +32,7 @@ use std::sync::Arc;
 use egui::{Color32, Key, Pos2, RichText, Stroke, Vec2};
 use redact_core::ReviewFile;
 
+use crate::layout::Layout;
 use crate::render::PageCache;
 use crate::selector::{hit_handle, hit_test, HandleDrag, PointerFrame, RectangleSelector};
 use crate::state::{
@@ -844,6 +847,19 @@ fn wordmark(ui: &mut egui::Ui) {
     );
 }
 
+/// Kantenlänge der Umschalter für Ansicht und Thema.
+const SWITCH_SIZE: f32 = 28.0;
+/// Abstand der schwebenden Karten zum Fensterrand und zueinander.
+const FOCUS_GAP: f32 = 14.0;
+/// Höhe der Karten oben und unten (eine Knopfzeile samt Innenabstand).
+const FOCUS_PILL_HEIGHT: f32 = 44.0;
+/// Rundung der schwebenden Karten.
+const FOCUS_CARD_ROUNDING: f32 = 12.0;
+/// Innenbreite der Miniaturkarte.
+const FOCUS_PAGES_WIDTH: f32 = crate::thumbnails::PANEL_MIN_WIDTH;
+/// Innenbreite der Trefferkarte.
+const FOCUS_HITS_WIDTH: f32 = 340.0;
+
 /// Größe der Ablagefläche im leeren Hauptbereich.
 const EMPTY_CARD_SIZE: Vec2 = Vec2::new(520.0, 320.0);
 
@@ -1342,6 +1358,10 @@ pub struct RedactApp {
     /// Zuletzt an egui übergebenes Thema — damit `set_visuals` nur bei einer
     /// Änderung läuft und nicht in jedem Bild.
     applied_theme: Option<Theme>,
+    /// Arbeitsansicht: Werkbank oder Fokus.
+    pub layout: Layout,
+    /// In der Fokus-Ansicht: ist die Trefferkarte ausgeklappt?
+    focus_hits_open: bool,
     /// Seite des vorigen Bildes; wechselt sie, rollt die Miniaturspalte mit.
     shown_page: Option<usize>,
     /// Wurde das Schließen des Fensters bereits bestätigt?
@@ -1401,6 +1421,7 @@ impl RedactApp {
         // Das Thema kommt aus derselben `Config` wie alles andere; dort hat es
         // die Einstellungsdatei hineingelegt.
         let theme = Theme::from_name(&config.theme);
+        let layout = Layout::from_name(&config.layout);
         Self {
             state: AppState::with_config(config),
             selector: RectangleSelector::new(),
@@ -1414,6 +1435,8 @@ impl RedactApp {
             ui_ctx: None,
             theme,
             applied_theme: None,
+            layout,
+            focus_hits_open: true,
             shown_page: None,
             close_confirmed: false,
             ask: Ask::User,
@@ -2417,13 +2440,13 @@ impl RedactApp {
             // Themenschalter (Einstellung, nicht Arbeitsschritt). Von links
             // nach rechts gezeichnet und nur nach rechts geschoben, damit der
             // Tabulator in Leserichtung bleibt.
-            let theme_label = format!("{} {}", self.theme.switch_icon(), self.theme.switch_text());
+            let [layout_label, theme_label] = self.switch_labels();
             let export_label = toolbar::buttons()
                 .into_iter()
                 .find(|b| toolbar::is_primary(b.action))
                 .map(|b| b.label())
                 .unwrap_or_default();
-            let reserve = [&export_label, &theme_label]
+            let reserve = [&export_label, &layout_label, &theme_label]
                 .iter()
                 .map(|text| {
                     let font = egui::TextStyle::Button.resolve(ui.style());
@@ -2432,7 +2455,8 @@ impl RedactApp {
                             .size()
                             .x
                     });
-                    width + 2.0 * ui.spacing().button_padding.x + ui.spacing().item_spacing.x
+                    (width + 2.0 * ui.spacing().button_padding.x).max(SWITCH_SIZE)
+                        + ui.spacing().item_spacing.x
                 })
                 .sum::<f32>()
                 + 2.0 * ui.spacing().item_spacing.x
@@ -2443,22 +2467,336 @@ impl RedactApp {
                 clicked = Some(action);
             }
             ui.separator();
-            let theme_switch = ghost(ui, |ui| ui.button(theme_label));
-            if theme_switch
-                .on_hover_text(format!(
-                    "Zur {}-Darstellung wechseln (aktuell: {})",
-                    self.theme.switch_text(),
-                    self.theme.label()
-                ))
-                .clicked()
-            {
-                clicked = Some(ToolAction::ToggleTheme);
+            if let Some(action) = self.view_switches(ui) {
+                clicked = Some(action);
             }
         });
 
         if let Some(action) = clicked {
             self.apply_tool_action(action, ui.ctx());
         }
+    }
+
+    /// Die Fokus-Ansicht: die Seite füllt das Fenster, alles andere schwebt
+    /// als Karte darüber. Gibt zurück, ob der Leerzustand „Öffnen“ verlangt
+    /// hat.
+    ///
+    /// Die Karten werden **vor** der Seite angelegt: so steht ihre Bedienung
+    /// in der Tabulatorfolge vorn, wie in der Werkbank die Leisten. Gezeichnet
+    /// werden sie trotzdem darüber, weil ein `Area` über dem Hauptbereich liegt
+    /// — und dort fängt es auch den Zeiger ab, bevor die Seite ihn sieht.
+    fn focus_view(
+        &mut self,
+        ctx: &egui::Context,
+        summary: &HitSummary,
+        page_changed: bool,
+    ) -> bool {
+        let loaded = self.state.is_loaded();
+        let context = self.tool_context();
+        let mut clicked: Option<ToolAction> = None;
+        // Die Fläche über der Statuszeile — an ihr richten sich die Karten aus.
+        let room = ctx.available_rect();
+        let style = ctx.style();
+        let card = || {
+            egui::Frame::window(&style)
+                .rounding(FOCUS_CARD_ROUNDING)
+                .inner_margin(egui::Margin::same(8.0))
+        };
+        let top = room.top() + FOCUS_GAP;
+        let below_top = top + FOCUS_PILL_HEIGHT + FOCUS_GAP;
+        // Mit Dokument enden die Seitenkarten über der Werkzeugleiste unten:
+        // die ist breiter als der Raum zwischen ihnen.
+        let tools_room = if loaded {
+            FOCUS_PILL_HEIGHT + FOCUS_GAP
+        } else {
+            0.0
+        };
+        let column_height = (room.bottom() - below_top - FOCUS_GAP - tools_room).max(120.0);
+
+        // Datei: Wortmarke, Name, Dateiaktionen.
+        egui::Area::new(egui::Id::new("focus_file"))
+            .movable(false)
+            .fixed_pos(egui::pos2(room.left() + FOCUS_GAP, top))
+            .show(ctx, |ui| {
+                card().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        wordmark(ui);
+                        if let Some(name) = self.state.config.input.file_name() {
+                            ui.separator();
+                            ui.label(
+                                RichText::new(name.to_string_lossy())
+                                    .strong()
+                                    .color(ui.visuals().strong_text_color()),
+                            );
+                        }
+                        ui.separator();
+                        if let Some(action) = tool_buttons(ui, &context, |action| {
+                            matches!(
+                                action,
+                                ToolAction::Open
+                                    | ToolAction::Booking
+                                    | ToolAction::ReviewSave
+                                    | ToolAction::ReviewLoad
+                            )
+                        }) {
+                            clicked = Some(action);
+                        }
+                    });
+                });
+            });
+
+        // Rechts oben: Ansicht, Thema und der Hauptknopf.
+        egui::Area::new(egui::Id::new("focus_actions"))
+            .movable(false)
+            .anchor(
+                egui::Align2::RIGHT_TOP,
+                egui::vec2(-FOCUS_GAP, top - room.top()),
+            )
+            .show(ctx, |ui| {
+                card().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // Eingeklappt steht die Trefferkarte nur noch als Knopf
+                        // hier oben — so liegt nichts mehr über der Seite.
+                        if !self.focus_hits_open
+                            && ghost(ui, |ui| ui.button(format!("☰ {}", summary.headline())))
+                                .on_hover_text("Treffer und Auswahl einblenden")
+                                .clicked()
+                        {
+                            self.focus_hits_open = true;
+                        }
+                        if let Some(action) = self.view_switches(ui) {
+                            clicked = Some(action);
+                        }
+                        ui.separator();
+                        if let Some(action) = tool_buttons(ui, &context, toolbar::is_primary) {
+                            clicked = Some(action);
+                        }
+                    });
+                });
+            });
+
+        // Links: die Miniaturen — nur mit Dokument, wie in der Werkbank.
+        if loaded {
+            egui::Area::new(egui::Id::new("focus_pages"))
+                .movable(false)
+                .fixed_pos(egui::pos2(room.left() + FOCUS_GAP, below_top))
+                .show(ctx, |ui| {
+                    card().show(ui, |ui| {
+                        let size = Vec2::new(FOCUS_PAGES_WIDTH, column_height - 16.0);
+                        ui.set_min_size(size);
+                        ui.set_max_size(size);
+                        crate::thumbnails::show(
+                            ui,
+                            &mut self.state,
+                            &mut self.pages,
+                            summary,
+                            page_changed,
+                        );
+                    });
+                });
+        }
+
+        // Rechts: Treffer und Auswahl — dieselbe Seitenleiste wie in der
+        // Werkbank, eingeklappt nur noch ihre Kopfzeile.
+        let mut toggle = None;
+        if self.focus_hits_open {
+            egui::Area::new(egui::Id::new("focus_hits"))
+                .movable(false)
+                .anchor(
+                    egui::Align2::RIGHT_TOP,
+                    egui::vec2(-FOCUS_GAP, below_top - room.top()),
+                )
+                .show(ctx, |ui| {
+                    card().show(ui, |ui| {
+                        ui.set_width(FOCUS_HITS_WIDTH);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Treffer und Auswahl")
+                                    .strong()
+                                    .color(ui.visuals().strong_text_color()),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let (text, hint) = if self.focus_hits_open {
+                                        ("Einklappen", "Treffer und Auswahl ausblenden")
+                                    } else {
+                                        ("Ausklappen", "Treffer und Auswahl einblenden")
+                                    };
+                                    if ghost(ui, |ui| ui.button(text))
+                                        .on_hover_text(hint)
+                                        .clicked()
+                                    {
+                                        self.focus_hits_open = !self.focus_hits_open;
+                                    }
+                                },
+                            );
+                        });
+                        {
+                            ui.separator();
+                            // Eine feste Fläche: der Auswahlbereich der Seitenleiste
+                            // ist ein Panel am unteren Rand, und ein Panel braucht
+                            // einen unteren Rand, an dem es stehen kann.
+                            let size = Vec2::new(
+                                FOCUS_HITS_WIDTH,
+                                column_height - FOCUS_PILL_HEIGHT - 16.0,
+                            );
+                            ui.allocate_ui_with_layout(
+                                size,
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    ui.set_min_size(size);
+                                    toggle = crate::sidebar::show(ui, &mut self.state, summary);
+                                },
+                            );
+                        }
+                    });
+                });
+        }
+
+        if let Some(toggle) = toggle {
+            self.apply_pattern_toggle(toggle);
+        }
+
+        // Unten in der Mitte: Werkzeuge, Blättern, Zoom, Verlauf.
+        if loaded {
+            let lift = ctx.screen_rect().bottom() - room.bottom() + FOCUS_GAP;
+            egui::Area::new(egui::Id::new("focus_tools"))
+                .movable(false)
+                .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -lift))
+                .show(ctx, |ui| {
+                    card().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let mut add =
+                                |ui: &mut egui::Ui, include: &dyn Fn(ToolAction) -> bool| {
+                                    if let Some(action) = tool_buttons(ui, &context, include) {
+                                        clicked = Some(action);
+                                    }
+                                };
+                            add(ui, &|a| {
+                                matches!(a, ToolAction::Analyze | ToolAction::AddRegion)
+                            });
+                            ui.separator();
+                            add(ui, &|a| a == ToolAction::PrevPage);
+                            let pages = self.state.page_count();
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} / {}",
+                                    (self.state.current_page + 1).min(pages),
+                                    pages
+                                ))
+                                .strong()
+                                .color(ui.visuals().strong_text_color()),
+                            );
+                            add(ui, &|a| a == ToolAction::NextPage);
+                            ui.separator();
+                            add(ui, &|a| a == ToolAction::ZoomOut);
+                            ui.label(
+                                RichText::new(format!("{:.0} %", self.state.zoom * 100.0))
+                                    .color(ui.visuals().strong_text_color()),
+                            );
+                            add(ui, &|a| {
+                                matches!(
+                                    a,
+                                    ToolAction::ZoomIn
+                                        | ToolAction::ZoomFit
+                                        | ToolAction::ZoomReset
+                                )
+                            });
+                            ui.separator();
+                            add(ui, &|a| matches!(a, ToolAction::Undo | ToolAction::Redo));
+                        });
+                    });
+                });
+        }
+
+        // Die Seite: das ganze Fenster, mit Rändern dort, wo Karten liegen —
+        // sonst läge der Anfang der Seite unter der Trefferkarte.
+        let right = if self.focus_hits_open {
+            FOCUS_HITS_WIDTH + 16.0 + 2.0 * FOCUS_GAP
+        } else {
+            FOCUS_GAP
+        };
+        let margin = if loaded {
+            egui::Margin {
+                left: FOCUS_PAGES_WIDTH + 16.0 + 2.0 * FOCUS_GAP,
+                right,
+                top: below_top - room.top(),
+                bottom: FOCUS_PILL_HEIGHT + 2.0 * FOCUS_GAP,
+            }
+        } else {
+            egui::Margin {
+                left: FOCUS_GAP,
+                right,
+                top: below_top - room.top(),
+                bottom: FOCUS_GAP,
+            }
+        };
+        let canvas = egui::Frame::none()
+            .fill(self.theme.canvas())
+            .inner_margin(margin);
+        let open = egui::CentralPanel::default()
+            .frame(canvas)
+            .show(ctx, |ui| {
+                self.central_rect = Some(ui.max_rect());
+                if loaded {
+                    self.paint_page(ui, summary);
+                    false
+                } else {
+                    empty_state(ui)
+                }
+            })
+            .inner;
+
+        if let Some(action) = clicked {
+            self.apply_tool_action(action, ctx);
+        }
+        open
+    }
+
+    /// Die Umschalter tragen nur ihr Symbol; was sie tun, sagt die
+    /// Sprechblase. Mit Text passten Export, Ansicht und Thema bei 1280 Punkt
+    /// nicht mehr in die obere Leiste.
+    fn switch_labels(&self) -> [String; 2] {
+        [
+            self.layout.switch_icon().to_string(),
+            self.theme.switch_icon().to_string(),
+        ]
+    }
+
+    /// Die beiden Umschalter für Ansicht und Thema. In beiden Ansichten
+    /// dieselben Knöpfe mit denselben Texten, nur an anderer Stelle.
+    fn view_switches(&self, ui: &mut egui::Ui) -> Option<ToolAction> {
+        let mut clicked = None;
+        let [layout_label, theme_label] = self.switch_labels();
+        let layout_switch = ghost(ui, |ui| {
+            ui.add(egui::Button::new(layout_label).min_size(Vec2::splat(SWITCH_SIZE)))
+        });
+        if layout_switch
+            .on_hover_text(format!(
+                "Zur Ansicht „{}“ wechseln (aktuell: {})",
+                self.layout.switch_text(),
+                self.layout.label()
+            ))
+            .clicked()
+        {
+            clicked = Some(ToolAction::ToggleLayout);
+        }
+        let theme_switch = ghost(ui, |ui| {
+            ui.add(egui::Button::new(theme_label).min_size(Vec2::splat(SWITCH_SIZE)))
+        });
+        if theme_switch
+            .on_hover_text(format!(
+                "Zur {}-Darstellung wechseln (aktuell: {})",
+                self.theme.switch_text(),
+                self.theme.label()
+            ))
+            .clicked()
+        {
+            clicked = Some(ToolAction::ToggleTheme);
+        }
+        clicked
     }
 
     /// Die Ansichtsleiste über der Seite: Blättern mit Seitenanzeige, Zoom.
@@ -2553,13 +2891,19 @@ impl RedactApp {
             ToolAction::ZoomIn => self.state.zoom_in(),
             ToolAction::ZoomFit => {
                 let view = self.state.current_page_view();
-                let available = ctx.screen_rect().size() - CHROME_SIZE;
+                // Der Bereich, den die Seite wirklich hat — in der Fokus-Ansicht
+                // ist das das Fenster ohne die Ränder für die Karten.
+                let available = match self.central_rect {
+                    Some(rect) => rect.size() - Vec2::splat(2.0 * SHEET_MARGIN),
+                    None => ctx.screen_rect().size() - CHROME_SIZE,
+                };
                 self.state.set_zoom(viewer::fit_zoom(available, &view));
             }
             ToolAction::ZoomReset => self.state.zoom_reset(),
             ToolAction::PrevPage => self.state.prev_page(),
             ToolAction::NextPage => self.state.next_page(),
             ToolAction::ToggleTheme => self.theme = self.theme.toggled(),
+            ToolAction::ToggleLayout => self.layout = self.layout.toggled(),
         }
     }
 
@@ -2810,6 +3154,92 @@ impl RedactApp {
                 );
             }
         });
+    }
+
+    /// Die Werkbank: feste Leisten oben und über der Seite, Miniaturen
+    /// links, Inspektor rechts. Gibt zurück, ob der Leerzustand „Öffnen“
+    /// verlangt hat.
+    fn workbench(&mut self, ctx: &egui::Context, summary: &HitSummary, page_changed: bool) -> bool {
+        let panel_fill = ctx.style().visuals.panel_fill;
+        egui::TopBottomPanel::top("top_bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(panel_fill)
+                    .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+            )
+            .show(ctx, |ui| {
+                self.top_bar(ui);
+            });
+
+        // Miniaturansichten ganz links; sie leben von denselben Kleinbildern,
+        // die der Hauptbereich ohnehin anfordert.
+        let side_frame = |margin: f32| {
+            egui::Frame::none()
+                .fill(panel_fill)
+                .inner_margin(egui::Margin::symmetric(margin, 6.0))
+        };
+        // Ohne Dokument keine Spalte: die Karte in der Mitte sagt schon, dass
+        // nichts geladen ist, und eine leere Spalte sagte es nur noch einmal.
+        if self.state.is_loaded() {
+            egui::SidePanel::left("thumbnails")
+                .frame(side_frame(10.0))
+                .default_width(crate::thumbnails::PANEL_WIDTH)
+                .width_range(
+                    crate::thumbnails::PANEL_MIN_WIDTH..=crate::thumbnails::PANEL_MAX_WIDTH,
+                )
+                .show(ctx, |ui| {
+                    crate::thumbnails::show(
+                        ui,
+                        &mut self.state,
+                        &mut self.pages,
+                        summary,
+                        page_changed,
+                    );
+                });
+        }
+
+        // Der Inspektor rechts: Treffer und Auswahl stehen dort, wo der Blick
+        // nach der Seite hingeht, und die Miniaturen links bleiben schmal.
+        let toggle = egui::SidePanel::right("sidebar")
+            .frame(side_frame(14.0))
+            .default_width(SIDEBAR_WIDTH)
+            .width_range(SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH)
+            .show(ctx, |ui| crate::sidebar::show(ui, &mut self.state, summary))
+            .inner;
+        // Erst zeichnen, dann umschalten: die Rückfrage öffnet ein Fenster des
+        // Systems, und das gehört nicht in die Mitte eines Panels.
+        if let Some(toggle) = toggle {
+            self.apply_pattern_toggle(toggle);
+        }
+
+        // Die Ansichtsleiste nach den Seitenspalten: so reicht sie nur über
+        // die Seite, nicht über die ganze Fensterbreite.
+        if self.state.is_loaded() {
+            egui::TopBottomPanel::top("view_bar")
+                .frame(
+                    egui::Frame::none()
+                        .fill(panel_fill)
+                        .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
+                )
+                .show(ctx, |ui| {
+                    self.view_bar(ui);
+                });
+        }
+
+        let canvas = egui::Frame::central_panel(&ctx.style()).fill(self.theme.canvas());
+        let open = egui::CentralPanel::default()
+            .frame(canvas)
+            .show(ctx, |ui| {
+                self.central_rect = Some(ui.max_rect());
+                if self.state.is_loaded() {
+                    self.paint_page(ui, summary);
+                    false
+                } else {
+                    empty_state(ui)
+                }
+            })
+            .inner;
+        open
     }
 
     /// Warnungen des letzten Exports **und** des Rasterizers zur aktuellen
@@ -3396,17 +3826,12 @@ impl eframe::App for RedactApp {
         // Einmal je Bild, nicht je Trefferzeile.
         let summary = self.state.hit_summary();
 
-        let panel_fill = ctx.style().visuals.panel_fill;
-        egui::TopBottomPanel::top("top_bar")
-            .frame(
-                egui::Frame::none()
-                    .fill(panel_fill)
-                    .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
-            )
-            .show(ctx, |ui| {
-                self.top_bar(ui);
-            });
+        let page_changed = self.shown_page != Some(self.state.current_page);
+        self.shown_page = Some(self.state.current_page);
 
+        // Die Statuszeile ist in beiden Ansichten eine feste Leiste: Warnungen
+        // zum Export dürfen nicht hinter einer schwebenden Karte liegen.
+        let panel_fill = ctx.style().visuals.panel_fill;
         egui::TopBottomPanel::bottom("status_bar")
             .frame(
                 egui::Frame::none()
@@ -3417,76 +3842,10 @@ impl eframe::App for RedactApp {
                 self.status_bar(ui);
             });
 
-        // Miniaturansichten ganz links; sie leben von denselben Kleinbildern,
-        // die der Hauptbereich ohnehin anfordert.
-        let page_changed = self.shown_page != Some(self.state.current_page);
-        self.shown_page = Some(self.state.current_page);
-        let side_frame = |margin: f32| {
-            egui::Frame::none()
-                .fill(panel_fill)
-                .inner_margin(egui::Margin::symmetric(margin, 6.0))
+        let open = match self.layout {
+            Layout::Workbench => self.workbench(ctx, &summary, page_changed),
+            Layout::Focus => self.focus_view(ctx, &summary, page_changed),
         };
-        // Ohne Dokument keine Spalte: die Karte in der Mitte sagt schon, dass
-        // nichts geladen ist, und eine leere Spalte sagte es nur noch einmal.
-        if self.state.is_loaded() {
-            egui::SidePanel::left("thumbnails")
-                .frame(side_frame(10.0))
-                .default_width(crate::thumbnails::PANEL_WIDTH)
-                .width_range(
-                    crate::thumbnails::PANEL_MIN_WIDTH..=crate::thumbnails::PANEL_MAX_WIDTH,
-                )
-                .show(ctx, |ui| {
-                    crate::thumbnails::show(
-                        ui,
-                        &mut self.state,
-                        &mut self.pages,
-                        &summary,
-                        page_changed,
-                    );
-                });
-        }
-
-        let toggle = egui::SidePanel::left("sidebar")
-            .frame(side_frame(14.0))
-            .default_width(SIDEBAR_WIDTH)
-            .width_range(SIDEBAR_MIN_WIDTH..=SIDEBAR_MAX_WIDTH)
-            .show(ctx, |ui| {
-                crate::sidebar::show(ui, &mut self.state, &summary)
-            })
-            .inner;
-        // Erst zeichnen, dann umschalten: die Rückfrage öffnet ein Fenster des
-        // Systems, und das gehört nicht in die Mitte eines Panels.
-        if let Some(toggle) = toggle {
-            self.apply_pattern_toggle(toggle);
-        }
-
-        // Die Ansichtsleiste nach den Seitenspalten: so reicht sie nur über
-        // die Seite, nicht über die ganze Fensterbreite.
-        if self.state.is_loaded() {
-            egui::TopBottomPanel::top("view_bar")
-                .frame(
-                    egui::Frame::none()
-                        .fill(panel_fill)
-                        .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
-                )
-                .show(ctx, |ui| {
-                    self.view_bar(ui);
-                });
-        }
-
-        let canvas = egui::Frame::central_panel(&ctx.style()).fill(self.theme.canvas());
-        let open = egui::CentralPanel::default()
-            .frame(canvas)
-            .show(ctx, |ui| {
-                self.central_rect = Some(ui.max_rect());
-                if self.state.is_loaded() {
-                    self.paint_page(ui, &summary);
-                    false
-                } else {
-                    empty_state(ui)
-                }
-            })
-            .inner;
         if open {
             self.apply_tool_action(ToolAction::Open, ctx);
         }
@@ -5109,6 +5468,13 @@ mod tests {
         app.apply_tool_action(ToolAction::ToggleTheme, &ctx);
         assert_eq!(app.theme, before);
 
+        // Ansicht.
+        let before = app.layout;
+        app.apply_tool_action(ToolAction::ToggleLayout, &ctx);
+        assert_ne!(app.layout, before);
+        app.apply_tool_action(ToolAction::ToggleLayout, &ctx);
+        assert_eq!(app.layout, before);
+
         // Rückgängig — die Analyse beim Öffnen ist der erste Schritt.
         let found = app.state.regions.clone();
         assert!(!found.is_empty());
@@ -5150,6 +5516,85 @@ mod tests {
         assert!(EMPTY_DOCUMENT_HINT.contains("Noch kein PDF geladen"));
         assert!(EMPTY_DOCUMENT_HINT.contains("öffnen"));
         assert!(EMPTY_DOCUMENT_HINT.contains("ziehen"));
+    }
+
+    /// Ein Bild der gewählten Ansicht, so wie `update` es zeichnet — ohne
+    /// `eframe::Frame`, den es ohne Fenster nicht gibt.
+    fn layout_frame(ctx: &egui::Context, app: &mut RedactApp) -> egui::FullOutput {
+        ctx.run(base_input(), |ctx| {
+            let summary = app.state.hit_summary();
+            egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| app.status_bar(ui));
+            match app.layout {
+                Layout::Workbench => app.workbench(ctx, &summary, false),
+                Layout::Focus => app.focus_view(ctx, &summary, false),
+            };
+        })
+    }
+
+    /// Beide Ansichten zeichnen ein ganzes Bild, leer und mit Dokument, in
+    /// beiden Themen.
+    #[test]
+    fn both_layouts_draw_a_whole_frame() {
+        for layout in crate::layout::LAYOUTS {
+            for theme in crate::theme::THEMES {
+                let ctx = egui::Context::default();
+                theme.apply(&ctx);
+                let mut app = RedactApp::silent(iban_only());
+                app.layout = layout;
+                app.theme = theme;
+                let output = layout_frame(&ctx, &mut app);
+                assert!(!output.shapes.is_empty(), "{layout:?}/{theme:?}: leer");
+                app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+                for _ in 0..2 {
+                    let output = layout_frame(&ctx, &mut app);
+                    assert!(!output.shapes.is_empty(), "{layout:?}/{theme:?}: Dokument");
+                }
+                assert!(app.central_rect.is_some());
+            }
+        }
+    }
+
+    /// In der Fokus-Ansicht liegt keine Karte über der Seite: der Hauptbereich
+    /// hält zu jeder Karte Abstand. Sonst läge der Anfang der Seite — oder
+    /// ein Treffer darauf — unter der Trefferkarte und wäre weder zu sehen
+    /// noch anzuklicken.
+    #[test]
+    fn in_focus_no_card_covers_the_page() {
+        for hits_open in [true, false] {
+            let ctx = egui::Context::default();
+            let mut app = RedactApp::silent(iban_only());
+            app.layout = Layout::Focus;
+            app.focus_hits_open = hits_open;
+            app.open_bytes_and_analyze(&redact_pdf::testing::demo_statement(), "demo.pdf");
+            // Das erste Bild misst die Karten nur aus.
+            for _ in 0..3 {
+                layout_frame(&ctx, &mut app);
+            }
+            let page = app.central_rect.expect("Hauptbereich gezeichnet");
+            let screen = ctx.screen_rect();
+            assert!(page.width() > 300.0 && page.height() > 300.0, "{page:?}");
+            for id in [
+                "focus_file",
+                "focus_actions",
+                "focus_pages",
+                "focus_hits",
+                "focus_tools",
+            ] {
+                let Some(card) = ctx.memory(|m| m.area_rect(egui::Id::new(id))) else {
+                    // Eingeklappt gibt es die Trefferkarte nicht.
+                    assert!(id == "focus_hits" && !hits_open, "Karte {id} fehlt");
+                    continue;
+                };
+                assert!(
+                    screen.contains_rect(card),
+                    "{id} ragt aus dem Fenster: {card:?}"
+                );
+                assert!(
+                    !card.shrink(1.0).intersects(page),
+                    "{id} (offen: {hits_open}) liegt über der Seite: {card:?} / {page:?}"
+                );
+            }
+        }
     }
 
     /// Rauchtest ohne Bildschirm: ein ganzes Bild zeichnen, leer und mit

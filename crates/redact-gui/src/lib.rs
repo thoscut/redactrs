@@ -16,6 +16,7 @@
 //!  sidebar.rs    Trefferliste und Details
 //!  toolbar.rs    Symbolleiste als Daten (Symbol + Text, Freigaberegeln)
 //!  theme.rs      helles und dunkles Thema
+//!  layout.rs     Arbeitsansichten Werkbank und Fokus
 //!  app.rs        eframe-App: Leisten, Tasten, Dialoge
 //! ```
 //!
@@ -144,6 +145,7 @@
 pub mod app;
 pub mod focus;
 pub mod history;
+pub mod layout;
 pub mod render;
 pub mod selector;
 pub mod sidebar;

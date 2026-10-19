@@ -37,6 +37,8 @@ pub enum ToolAction {
     PrevPage,
     NextPage,
     ToggleTheme,
+    /// Wechselt zwischen den Arbeitsansichten Werkbank und Fokus.
+    ToggleLayout,
 }
 
 /// Ein Knopf der Leiste.
@@ -237,7 +239,7 @@ pub struct ToolContext {
 pub fn is_enabled(action: ToolAction, context: &ToolContext) -> bool {
     match action {
         // Öffnen geht immer, sonst käme man nie zu einem Dokument.
-        ToolAction::Open | ToolAction::ToggleTheme => true,
+        ToolAction::Open | ToolAction::ToggleTheme | ToolAction::ToggleLayout => true,
         // Ein Knopf, der nachweislich nichts finden kann, gehört ausgegraut —
         // und zwar mit einem Satz daneben, der sagt warum (das macht
         // [`crate::app::RedactApp::top_bar`] mit [`ANALYZE_OFF_HINT`]). Dasselbe

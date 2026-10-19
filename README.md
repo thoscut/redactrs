@@ -522,6 +522,7 @@ disabled_patterns: [date_de]  # dauerhaft abgeschaltet (Vorgabe: keines)
 min_confidence: 0.4           # Mindestvertrauen      (Vorgabe: 0.5)
 padding: 2.0                  # Polsterung in Punkt   (Vorgabe: 1.0)
 theme: dunkel                 # Thema der Oberfläche  (hell | dunkel)
+layout: fokus                 # Arbeitsansicht        (werkbank | fokus)
 ```
 
 **`no_patterns` gibt es hier bewusst nicht.** „Alle automatischen Funde aus“ ist
@@ -2046,7 +2047,20 @@ anderen PDF wird abgelehnt.
 
 Ob die Oberfläche hell oder dunkel startet, sagt `theme` in der
 [Einstellungsdatei](#einstellungsdatei); umschalten lässt es sich jederzeit
-rechts in der Leiste oben. Die vier Trefferfarben erreichen in beiden Themen mindestens
+rechts in der Leiste oben (🌙/☀).
+
+Es gibt zwei **Arbeitsansichten**, umschaltbar mit dem Knopf daneben (⛶/☰)
+und voreingestellt über `layout` in der Einstellungsdatei:
+
+* **Werkbank** (`werkbank`, Vorgabe) — feste Leisten: oben die
+  Dokument-Aktionen, links die Miniaturen, rechts Treffer und Auswahl, über
+  der Seite Blättern und Zoom.
+* **Fokus** (`fokus`) — die Seite füllt das Fenster; Datei, Treffer,
+  Miniaturen und Werkzeuge schweben als Karten darüber. Die Trefferkarte lässt
+  sich einklappen, dann bekommt die Seite ihren Platz.
+
+Beide Ansichten haben dieselben Knöpfe mit denselben Texten und Tasten; die
+Statuszeile mit Warnungen bleibt in beiden eine feste Leiste. Die vier Trefferfarben erreichen in beiden Themen mindestens
 3:1 Kontrast (WCAG 1.4.11), geprüft gegen die Flächen, die egui wirklich malt.
 
 ### GUI und CLI teilen sich die Verarbeitungskette — und das ist geprüft

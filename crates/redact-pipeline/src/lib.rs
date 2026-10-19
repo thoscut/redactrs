@@ -224,6 +224,10 @@ pub struct Config {
     /// Stelle, an der beide auseinanderlaufen könnten. Auf das Ergebnis der
     /// Schwärzung hat der Wert keinen Einfluss.
     pub theme: String,
+    /// Arbeitsansicht der Oberfläche (`werkbank` oder `fokus`) — aus demselben
+    /// Grund hier wie [`Config::theme`], und ebenso ohne Einfluss auf das
+    /// Ergebnis.
+    pub layout: String,
 }
 
 impl Default for Config {
@@ -255,6 +259,7 @@ impl Default for Config {
             max_candidates: DEFAULT_MAX_CANDIDATES,
             password: None,
             theme: settings::THEMES[0].to_string(),
+            layout: settings::LAYOUTS[0].to_string(),
         }
     }
 }
