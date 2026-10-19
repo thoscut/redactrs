@@ -426,7 +426,7 @@ impl PatternMatcher {
 
     /// Wie [`PatternMatcher::from_config_file`], aber aus einem YAML-String.
     pub fn from_yaml(s: &str) -> Result<Self> {
-        let config: PatternConfig = serde_yaml::from_str(s)
+        let config: PatternConfig = crate::yaml::from_str(s)
             .map_err(|e| RedactError::Parse(format!("Pattern-Konfiguration (YAML): {e}")))?;
         Self::from_config(&config)
     }
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn config_defaults_extend_builtins() {
-        let cfg: PatternConfig = serde_yaml::from_str("patterns: []").unwrap();
+        let cfg: PatternConfig = crate::yaml::from_str("patterns: []").unwrap();
         assert!(cfg.extend_builtins);
         assert_eq!(cfg.resolve().unwrap().len(), builtin_patterns().len());
     }
