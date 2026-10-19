@@ -147,6 +147,56 @@ fn reject_single_target_switches(cli: &Cli) -> Result<()> {
     }
 }
 
+/// Zwei **verschiedene** Eingaben, deren Ergebnisse auf denselben Pfad fielen.
+///
+/// Die Namensregel trennt die Ergebnisse fast immer — aber nicht immer:
+/// `a` und `a.pdf` werden beide zu `a_geschwaerzt.pdf`. Ohne `--force`
+/// scheiterte die zweite am Schreibpfad und wurde gemeldet; mit `--force`
+/// überschrieb sie die erste, die Zusammenfassung zählte zwei Erfolge, und
+/// der Rückgabewert war 0 — für einen Auszug gab es dann keine geschwärzte
+/// Fassung, und nichts sagte es (Experten-Review, Befund CLI-3). Deshalb wird
+/// das **vor** der ersten Datei geprüft und der ganze Stapel abgelehnt.
+///
+/// Dieselbe Datei zweimal genannt ist kein solcher Fall: das Ergebnis wäre
+/// dasselbe, und ohne `--force` meldet der Schreibpfad es wie bisher.
+fn reject_shared_targets(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> Result<()> {
+    // Verglichen wird über das aufgelöste Verzeichnis, damit `./a` und `a`
+    // als gleich gelten; gibt es das Verzeichnis nicht, der Pfad wie er ist.
+    fn key(path: &Path) -> PathBuf {
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+        let dir = dir
+            .map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        match path.file_name() {
+            Some(name) => dir.join(name),
+            None => dir,
+        }
+    }
+    let mut seen: std::collections::HashMap<PathBuf, (PathBuf, PathBuf)> =
+        std::collections::HashMap::new();
+    for input in inputs {
+        let output = redact_pipeline::output_path(&cli.config_for(settings, input));
+        let same_input = std::fs::canonicalize(input).unwrap_or_else(|_| key(input));
+        match seen.get(&key(&output)) {
+            Some((earlier, earlier_input)) if *earlier_input != same_input => {
+                return Err(RedactError::Config(format!(
+                    "{} und {} ergäben dieselbe Ausgabe {} — das zweite Ergebnis \
+                     überschriebe das erste. Bitte eine der beiden Dateien \
+                     umbenennen oder einzeln verarbeiten.",
+                    safe_path(earlier),
+                    safe_path(input),
+                    safe_path(&output)
+                )));
+            }
+            Some(_) => {}
+            None => {
+                seen.insert(key(&output), (input.clone(), same_input));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Arbeitet den Stapel ab.
 ///
 /// Der Rückgabewert ist die Antwort auf „ist alles gut gegangen?“, und
@@ -155,6 +205,7 @@ fn reject_single_target_switches(cli: &Cli) -> Result<()> {
 /// **eine** nicht vollständig durchsucht werden konnte. Siehe [`exit_code`].
 pub fn run(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> Result<ExitCode> {
     reject_single_target_switches(cli)?;
+    reject_shared_targets(cli, settings, inputs)?;
 
     let mut entries = Vec::with_capacity(inputs.len());
     let total = inputs.len();

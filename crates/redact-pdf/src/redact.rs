@@ -1771,7 +1771,7 @@ fn clean_property_list(dict: &Dictionary) -> (Dictionary, Vec<String>) {
             continue;
         }
         if matches!(value, Object::Reference(_)) {
-            dropped.push(format!("/{}", String::from_utf8_lossy(key)));
+            dropped.push(format!("/{}", crate::label(key)));
             continue;
         }
         cleaned.set(key.to_vec(), value.clone());
@@ -2356,14 +2356,14 @@ fn annotation_label(doc: &Document, dict: &Dictionary) -> String {
         .ok()
         .and_then(|o| doc.dereference(o).ok())
         .and_then(|(_, o)| o.as_name().ok())
-        .map(|n| format!("/{}", String::from_utf8_lossy(n)))
+        .map(|n| format!("/{}", crate::label(n)))
         .unwrap_or_else(|| "ohne /Subtype".into());
     let title = dict
         .get(b"T")
         .ok()
         .and_then(|o| doc.dereference(o).ok())
         .and_then(|(_, o)| o.as_str().ok())
-        .map(crate::audit_bytes::decode_pdf_string)
+        .map(|s| crate::label_text(&crate::audit_bytes::decode_pdf_string(s)))
         .filter(|s| !s.is_empty());
     match title {
         Some(name) => format!("{subtype} „{name}“"),

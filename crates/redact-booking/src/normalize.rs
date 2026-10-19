@@ -7,7 +7,9 @@
 //! auch das Muster (Nadel) vor dem Vergleich normalisiert:
 //!
 //! * alle Zeichen werden klein geschrieben (Vergleich ohne Groß-/Kleinschreibung),
-//! * jede Folge von Leerraum wird zu genau einem Leerzeichen zusammengefasst.
+//! * jede Folge von Leerraum wird zu genau einem Leerzeichen zusammengefasst,
+//! * zerlegte Akzentbuchstaben („u" + U+0308) werden zum fertigen Zeichen
+//!   („ü") zusammengesetzt — für eine kleine Tabelle, siehe `compose`.
 //!
 //! ## Was das *nicht* leistet: Zeilenumbrüche
 //!
@@ -71,6 +73,10 @@ impl Normalized {
         let mut starts = Vec::with_capacity(input.len());
         let mut ends = Vec::with_capacity(input.len());
         let mut in_whitespace = false;
+        // Das zuletzt geschriebene Zeichen, falls es mit einem folgenden
+        // kombinierenden Akzent verschmolzen werden darf: Byte-Position in
+        // `text`, Byte-Start im Original, das Zeichen selbst.
+        let mut basis: Option<(usize, usize, char)> = None;
 
         for (idx, ch) in input.char_indices() {
             let char_end = idx + ch.len_utf8();
@@ -82,9 +88,39 @@ impl Normalized {
                     ends.push(char_end);
                 }
                 in_whitespace = true;
+                basis = None;
                 continue;
             }
             in_whitespace = false;
+            // Zerlegte Umlaute (NFD, „u" + U+0308) aus dem PDF mit dem
+            // vorhergehenden Buchstaben zusammensetzen. Manche Erzeuger
+            // schreiben Umlaute so, die Buchungsliste aber steht fast immer
+            // zusammengesetzt (NFC) da — ohne diesen Schritt fand „Jürgen
+            // Müller" den Namen im Dokument nicht. Das zusammengesetzte
+            // Zeichen deckt im Original Buchstabe *und* Akzent ab, damit die
+            // Schwärzung beide erfasst.
+            if let Some((pos, base_idx, base)) = basis {
+                if let Some(composed) = compose(base, ch) {
+                    text.truncate(pos);
+                    starts.truncate(pos);
+                    ends.truncate(pos);
+                    text.push(composed);
+                    while starts.len() < text.len() {
+                        starts.push(base_idx);
+                        ends.push(char_end);
+                    }
+                    basis = Some((pos, base_idx, composed));
+                    continue;
+                }
+            }
+            let pos = text.len();
+            let mut lower_iter = ch.to_lowercase();
+            // Nur ein Zeichen, das beim Kleinschreiben eins bleibt, kann
+            // Basis einer Zusammensetzung sein.
+            basis = match (lower_iter.next(), lower_iter.next()) {
+                (Some(l), None) => Some((pos, idx, l)),
+                _ => None,
+            };
             for lower in ch.to_lowercase() {
                 text.push(lower);
             }
@@ -110,6 +146,66 @@ impl Normalized {
         }
         Some((self.starts[start], self.ends[end - 1]))
     }
+}
+
+/// Setzt einen (kleinen) Buchstaben und einen kombinierenden Akzent zu einem
+/// Zeichen zusammen — eine bewusst kleine Teilmenge der Unicode-Komposition
+/// (NFC), beschränkt auf die Buchstaben, die in deutschen und
+/// westeuropäischen Namen vorkommen. Eine vollständige Tabelle hieße eine neue
+/// Abhängigkeit; was hier fehlt, bleibt einfach unverändert stehen und wird
+/// wie bisher Zeichen für Zeichen verglichen.
+fn compose(base: char, mark: char) -> Option<char> {
+    let composed = match (base, mark) {
+        // Trema / Umlaut
+        ('a', '\u{308}') => 'ä',
+        ('o', '\u{308}') => 'ö',
+        ('u', '\u{308}') => 'ü',
+        ('e', '\u{308}') => 'ë',
+        ('i', '\u{308}') => 'ï',
+        ('y', '\u{308}') => 'ÿ',
+        // Gravis
+        ('a', '\u{300}') => 'à',
+        ('e', '\u{300}') => 'è',
+        ('i', '\u{300}') => 'ì',
+        ('o', '\u{300}') => 'ò',
+        ('u', '\u{300}') => 'ù',
+        // Akut
+        ('a', '\u{301}') => 'á',
+        ('e', '\u{301}') => 'é',
+        ('i', '\u{301}') => 'í',
+        ('o', '\u{301}') => 'ó',
+        ('u', '\u{301}') => 'ú',
+        ('y', '\u{301}') => 'ý',
+        ('c', '\u{301}') => 'ć',
+        ('n', '\u{301}') => 'ń',
+        ('s', '\u{301}') => 'ś',
+        ('z', '\u{301}') => 'ź',
+        // Zirkumflex
+        ('a', '\u{302}') => 'â',
+        ('e', '\u{302}') => 'ê',
+        ('i', '\u{302}') => 'î',
+        ('o', '\u{302}') => 'ô',
+        ('u', '\u{302}') => 'û',
+        // Tilde
+        ('a', '\u{303}') => 'ã',
+        ('n', '\u{303}') => 'ñ',
+        ('o', '\u{303}') => 'õ',
+        // Ring
+        ('a', '\u{30A}') => 'å',
+        ('u', '\u{30A}') => 'ů',
+        // Hatschek
+        ('c', '\u{30C}') => 'č',
+        ('e', '\u{30C}') => 'ě',
+        ('n', '\u{30C}') => 'ň',
+        ('r', '\u{30C}') => 'ř',
+        ('s', '\u{30C}') => 'š',
+        ('z', '\u{30C}') => 'ž',
+        // Cedille
+        ('c', '\u{327}') => 'ç',
+        ('s', '\u{327}') => 'ş',
+        _ => return None,
+    };
+    Some(composed)
 }
 
 /// Normalisiert ein Suchmuster (Nadel).
@@ -156,6 +252,22 @@ mod tests {
         let pos = n.text.find(&needle).unwrap();
         let (s, e) = n.original_span(pos, pos + needle.len()).unwrap();
         assert_eq!(&original[s..e], "Straße");
+    }
+
+    #[test]
+    fn composes_decomposed_umlauts_and_maps_back_over_the_mark() {
+        let original = "Mu\u{308}ller";
+        let n = Normalized::new(original);
+        assert_eq!(n.text, "müller");
+        let (s, e) = n.original_span(0, "mü".len()).unwrap();
+        // „Mu" + U+0308: das „ü" deckt Buchstabe und Akzent ab.
+        assert_eq!(&original[s..e], "Mu\u{308}");
+        let (s, e) = n.original_span(0, n.text.len()).unwrap();
+        assert_eq!((s, e), (0, original.len()));
+        // Ein großer Buchstabe wird erst kleingeschrieben, dann verschmolzen.
+        assert_eq!(Normalized::new("U\u{308}BER").text, "über");
+        // Ein Akzent ohne passende Basis bleibt stehen.
+        assert_eq!(Normalized::new(" \u{308}x").text, " \u{308}x");
     }
 
     #[test]
