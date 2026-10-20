@@ -36,8 +36,8 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 Bereich: `git log v0.7.1..v0.7.2`.
 
-Sicherheitskorrekturen aus einem Experten-Review (PR #11) und zu Leck #26
-(PR #10), dazu Wartung der Lieferkette. **Wer 0.7.1 einsetzt, aktualisiert**
+Sicherheitskorrekturen aus zwei Review-Runden (PR #11, PR #12) und zu Leck
+#26 (PR #10), dazu Wartung der Lieferkette. **Wer 0.7.1 einsetzt, aktualisiert**
 — mehrere der Fälle unten ließen Geheimnisse in der Ausgabe stehen oder
 meldeten ohne Warnung Erfolg. Einstellungs- und Musterdateien gelten
 unverändert; `credit_card` erkennt nur noch gedruckte Formate (siehe
@@ -78,6 +78,29 @@ unverändert; `credit_card` erkennt nur noch gedruckte Formate (siehe
   abgelehnt; mit `--force` überschrieb vorher das zweite Ergebnis still das
   erste.
 
+* **⚠ Sicherheit: Seiten, die Betrachter zeigen, wurden nie gelesen**
+  (PR #12). Ein Blatt ohne brauchbares `/Type /Page` (fehlend, indirekt,
+  `/Pagex`) oder ein Seiten-Dictionary direkt in `/Kids` zeigen poppler,
+  pdf.js und mupdf an, lopdf übersprang es — Rückgabewert 0, die IBAN blieb
+  stehen. Der Seitenbaum wird jetzt beim Laden normalisiert.
+* **⚠ Sicherheit: Steuerzeichen oder unsichtbare Zeichen in einer IBAN**
+  (`\t`, C0/C1, DEL, U+00AD, Nullbreite) und ein `/Contents`-Teil, der
+  mitten in einer Zeichenkette endet, verhinderten die Erkennung, obwohl
+  Betrachter die IBAN am Stück kopieren (PR #12). Solche Zeichen werden vor
+  der Zeilenbildung verworfen, Teile ohne Trenner zusammengefügt; eine
+  Teilung mitten in einem Operator ist eine Deckungslücke (Rückgabewert 3).
+* **⚠ Sicherheit: Metadaten-Erlaubnislisten galten nur eine Ebene tief**
+  (PR #12). Unbekannte Schlüssel unter `/ViewerPreferences`, `/Extensions`,
+  `/Group`, `/Trans`, `/BoxColorInfo`, in Schrift-, ExtGState-, Shading-,
+  Bild- und OCG-Einträgen und an Annotationen blieben stehen. Jetzt Schemata
+  je Typ und je Annotationstyp, auch außerhalb von `/Annots`; `/CharProcs`
+  nie gesetzter Type3-Schriften werden geleert.
+* **⚠ Sicherheit: Die Oberfläche verschwieg Deckungslücken nach dem Export**
+  (PR #12): die Statuszeile zeigte die erste Warnung, meist die über
+  Rasterbilder. Lücken stehen jetzt vorn und heißen „NICHT GEPRÜFT:“.
+* `--check-leaks` liest ToUnicode-Ziele und `/Differences`-Glyphennamen als
+  Text und verkettet Zeichenketten über `/Contents`-Teile hinweg (PR #12).
+
 ### Dienstverweigerung
 
 * **Speichergrenzen umgangen:** riesiges `/Columns` (504 Byte → 3,8 GB),
@@ -85,6 +108,16 @@ unverändert; `credit_card` erkennt nur noch gedruckte Formate (siehe
   Inline-Bild-Flate (2 MB → 2,1 GB) liefen an `--max-decompressed-mb` vorbei.
   Die Vorprüfung liest jetzt `/DecodeParms`, jeder Bildfilter ist gedeckelt.
 * **Absturz** bei einem riesigen Index in einem `Indexed`-Farbraum.
+* **Verschlüsselte PDFs mit leerem Benutzerpasswort umgingen alle
+  Grenzen** für entpackte und geparste Bytes (131 kB → 5,4 GB, PR #12). Die
+  Prüfung nach dem Entschlüsseln gilt jetzt im gemeinsamen Ladepfad — CLI,
+  Oberfläche und `--check-leaks`; der Hinweis auf inkrementelle Revisionen
+  geht mit `--password` nicht mehr verloren.
+* Vorprüfung (PR #12): doppeltes `/DecodeParms` umging die
+  Prädiktor-Prüfung (570 Byte → 190 MB); `/W` über 8 im Xref-Strom brach den
+  Prozess ab; Objektnummern um 2³¹ ließen das Speichern 25–50 s laufen.
+* Die Vorschau der Oberfläche hat ein Rechenbudget (PR #12); eine Seite mit
+  1000 ganzseitigen Bildern blockiert den Render-Worker nicht mehr.
 
 ### Geändert
 
@@ -101,6 +134,11 @@ unverändert; `credit_card` erkennt nur noch gedruckte Formate (siehe
   PR #9); die Oberfläche verwirft ein Urteil über überschriebene Bytes damit
   vor dem Audit-Log statt danach (Zeitwächter `zm_b`, rund 5 µs statt bis zu
   22,6 ms).
+* Verhalten (PR #12): ein `/Contents`-Teil, der mitten in einem Wort endet
+  (gegen PDF 32000 7.8.2), ergibt Rückgabewert 3. Eine Vorschau mit mehr als
+  ~32 ganzseitigen Bildlagen oder ~1000 Clip-Masken je Seite wird als
+  unvollständig markiert. Ein Zwischenknoten ohne `/Type` gehört wieder zum
+  Seitenbaum (wird geschwärzt statt geleert).
 
 * **YAML liest jetzt `serde-saphyr` statt `serde_yaml`.** `serde_yaml` ist
   eingestellt, und darunter lag `unsafe-libyaml` — libyaml, maschinell nach
