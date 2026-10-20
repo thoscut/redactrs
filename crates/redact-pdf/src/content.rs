@@ -1631,6 +1631,12 @@ pub struct ScanResult {
     /// [`ScanResult::form_placements`], wurde nie gezeichnet und deshalb auch
     /// nie gelesen.
     pub declared_forms: BTreeMap<ObjectId, Vec<u8>>,
+    /// Die Erscheinungsströme (`/AP`, `/MK`-Symbole) der Annotationen, die
+    /// diese Seite gelesen hat. Ihre Textoperationen stehen in
+    /// [`ScanResult::shows`] unter [`StreamKey::Form`]; die Schwärzung sucht
+    /// darin den geschwärzten Text auch dann, wenn die Annotation selbst
+    /// außerhalb jedes Bereichs liegt (Aufgabe #26).
+    pub appearances: BTreeSet<ObjectId>,
     /// Befunde, die den Nutzer erreichen müssen — allen voran Fonts, deren
     /// Text sich nicht dekodieren lässt. Aus solchem Text kann die Analyse
     /// nichts erkennen; ohne Warnung hielte man die Datei für sauber.
@@ -1861,6 +1867,10 @@ impl ContentSink for ScanResult {
             .or_insert_with(|| name.to_vec());
     }
 
+    fn appearance(&mut self, id: ObjectId) {
+        self.appearances.insert(id);
+    }
+
     fn warn(&mut self, message: String) {
         if self.seen_warnings.insert(message.clone()) {
             self.warnings.push(message);
@@ -1988,6 +1998,9 @@ pub trait ContentSink {
     /// der Interpreter nie betritt — siehe
     /// [`crate::extract::PdfExtractor::extract_with_warnings`].
     fn declares_form(&mut self, _id: ObjectId, _name: &[u8]) {}
+    /// Der Erscheinungsstrom `id` einer Annotation wird gleich gelesen
+    /// (siehe [`ScanResult::appearances`]).
+    fn appearance(&mut self, _id: ObjectId) {}
     /// Ein Befund, der den Nutzer erreichen muss (siehe [`ScanResult::warnings`]).
     fn warn(&mut self, _message: String) {}
 }
@@ -3186,6 +3199,7 @@ fn scan_annotations(
             if !seen.insert(id) {
                 continue;
             }
+            sink.appearance(id);
             scan_appearance(doc, id, page_id, rect, page_resources, budget, sink);
         }
     }

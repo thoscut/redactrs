@@ -37,8 +37,8 @@ use redact_core::conflict::RectGrid;
 use redact_core::{Rect, RedactError, Redaction, Result};
 
 use crate::content::{
-    property_list_homes, property_list_objects, MarkedTextRecord, MirrorHome, ShowItem, ShowRecord,
-    StreamKey, MIRROR_KEYS,
+    property_list_homes, property_list_objects, MarkedTextRecord, MirrorHome, ScanResult, ShowItem,
+    ShowRecord, StreamKey, MIRROR_KEYS,
 };
 use crate::image::InlineTarget;
 use crate::matrix::Matrix;
@@ -518,6 +518,10 @@ impl PdfRedactor {
         // Die Rechtecke eines geteilten `/Annots`-Arrays, einmal gelesen —
         // siehe [`remove_annotations`].
         let mut annot_rects = AnnotRects::default();
+        // Der geschwärzte Text, nach dem in den Erscheinungsströmen **aller**
+        // Annotationen gesucht wird — auch auf Seiten ohne eigene Schwärzung
+        // (Aufgabe #26, siehe [`appearance_matches`]).
+        let secrets = AppearanceSecrets::new(redactions);
 
         for (page_index, page_id) in pages.iter().enumerate() {
             // Der Index in der **übergebenen** Liste wird mitgeführt: nur so
@@ -578,6 +582,17 @@ impl PdfRedactor {
                         form_marked.entry(id).or_default().push(held);
                     }
                 }
+            }
+            // Vor dem `continue`, aus demselben Grund: eine Annotation trägt
+            // den geschwärzten Text oft woanders hin als auf die Seite der
+            // Schwärzung. Ragt sie in keinen Bereich, wird sie unten nicht
+            // entfernt — ihr Erscheinungsstrom verliert dann die Zeichen, die
+            // den geschwärzten Text wiederholen (Aufgabe #26).
+            for (record, selection) in appearance_matches(&scan, &secrets) {
+                let StreamKey::Form(id) = record.stream else {
+                    continue;
+                };
+                merge_plan(form_plans.entry(id).or_default(), record, selection);
             }
             // Spiegel im Seitenstrom über einem Formular: ob sie zu leeren
             // sind, entscheidet sich erst, wenn alle Seiten gelesen sind.
@@ -1223,6 +1238,124 @@ fn hidden_flags(record: &ShowRecord, index: &RectIndex) -> Selection {
         }
     }
     selection
+}
+
+/// Der Text der Schwärzungen, die einen tragen — ohne Leerraum, je Text die
+/// Indizes der Schwärzungen, die ihn nennen.
+///
+/// Leerraum fällt auf beiden Seiten weg: ein Erscheinungsstrom setzt eine
+/// IBAN gern anders gruppiert als die Seite, und ein Wortabstand ist dort oft
+/// gar keine Glyphe, sondern ein Vorschub.
+struct AppearanceSecrets(Vec<(String, Vec<usize>)>);
+
+impl AppearanceSecrets {
+    fn new(redactions: &[Redaction]) -> Self {
+        let mut by_text: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (index, redaction) in redactions.iter().enumerate() {
+            let Some(text) = &redaction.region.text else {
+                continue;
+            };
+            let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+            if !squeezed.is_empty() {
+                by_text.entry(squeezed).or_default().push(index);
+            }
+        }
+        Self(by_text.into_iter().collect())
+    }
+}
+
+/// Die Zeichen in den Erscheinungsströmen der Seite, die den Text einer
+/// Schwärzung wiederholen — je Textoperation als [`Selection`].
+///
+/// Bis Aufgabe #26 wurde eine Annotation nur angefasst, wenn ihr `/Rect` in
+/// einen Schwärzungsbereich ragte; dann fiel sie als Ganzes
+/// ([`remove_annotations`]). Lag sie daneben, blieb ihr Erscheinungsstrom
+/// unverändert — eine `/FreeText`-Notiz „IBAN DE…“ am Seitenrand trug das
+/// Geheimnis weiter, das im Seitenstrom eben entfernt worden war. Gesucht wird
+/// deshalb nach dem **Text** der Schwärzung ([`Region::text`]), nicht nach
+/// ihrer Fläche. Eine Schwärzung ohne Text (eine manuelle Fläche) lässt sich
+/// so nicht wiederfinden; für sie gilt weiter nur die Fläche.
+///
+/// Gelesen wird der Strom in seiner Glyphenfolge über alle Textoperationen
+/// hinweg — ein Erzeuger darf „DE89 3704“ und „0044 0532 …“ in zwei `Tj`
+/// setzen. Getroffen wird je Zeichencode ([`code_groups`]), wie bei der
+/// Fläche. Formulare **innerhalb** eines Erscheinungsstroms werden nicht
+/// durchsucht.
+///
+/// [`Region::text`]: redact_core::Region::text
+fn appearance_matches<'a>(
+    scan: &'a ScanResult,
+    secrets: &AppearanceSecrets,
+) -> Vec<(&'a ShowRecord, Selection)> {
+    if secrets.0.is_empty() || scan.appearances.is_empty() {
+        return Vec::new();
+    }
+    // Je Erscheinungsstrom seine Textoperationen, in Stromreihenfolge.
+    let mut streams: BTreeMap<ObjectId, Vec<&ShowRecord>> = BTreeMap::new();
+    for record in &scan.shows {
+        if let StreamKey::Form(id) = record.stream {
+            if scan.appearances.contains(&id) {
+                streams.entry(id).or_default().push(record);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for records in streams.values() {
+        // Der Text ohne Leerraum, und je Byte darin die Herkunft:
+        // (Textoperation, Element).
+        let mut text = String::new();
+        let mut owners: Vec<(usize, usize)> = Vec::new();
+        for (r, record) in records.iter().enumerate() {
+            for (i, item) in record.items.iter().enumerate() {
+                let ShowItem::Glyph(glyph) = item else {
+                    continue;
+                };
+                for c in glyph.text.chars().filter(|c| !c.is_whitespace()) {
+                    text.push(c);
+                    owners.extend(std::iter::repeat_n((r, i), c.len_utf8()));
+                }
+            }
+        }
+        // Je Textoperation und Schwärzung die getroffenen Elemente.
+        let mut hits: BTreeMap<usize, BTreeMap<usize, BTreeSet<usize>>> = BTreeMap::new();
+        for (secret, indices) in &secrets.0 {
+            for (start, found) in text.match_indices(secret.as_str()) {
+                let owned: BTreeSet<(usize, usize)> =
+                    owners[start..start + found.len()].iter().copied().collect();
+                for (r, i) in owned {
+                    for index in indices {
+                        hits.entry(r)
+                            .or_default()
+                            .entry(*index)
+                            .or_default()
+                            .insert(i);
+                    }
+                }
+            }
+        }
+        for (r, per_redaction) in hits {
+            let record = records[r];
+            let groups: Vec<std::ops::Range<usize>> = code_groups(&record.items).collect();
+            let mut selection = Selection {
+                hidden: vec![false; record.items.len()],
+                per_redaction: BTreeMap::new(),
+            };
+            for (index, items) in per_redaction {
+                let runs = selection.per_redaction.entry(index).or_default();
+                for group in &groups {
+                    if items.range(group.clone()).next().is_none() {
+                        continue;
+                    }
+                    for flag in &mut selection.hidden[group.clone()] {
+                        *flag = true;
+                    }
+                    runs.push(group.start, group.end);
+                }
+            }
+            out.push((record, selection));
+        }
+    }
+    out
 }
 
 /// Schreibt die Zeichenzahlen je Schwärzung fort.
@@ -2778,13 +2911,12 @@ mod tests {
     }
 
     #[test]
-    fn a_non_overlapping_annotation_keeps_its_appearance_stream() {
-        // Gegenprobe und bewusste Grenze: diese Annotation liegt außerhalb
-        // jeder Schwärzung, bleibt also referenziert — der Erreichbarkeitslauf
-        // darf sie gerade *nicht* anfassen. Ihr `/AP` trägt das Geheimnis
-        // weiter. Das ist kein Fehler des Aufräumens, sondern eine Lücke der
-        // Analyse: der Extraktor liest Appearance-Streams nicht, deshalb
-        // entsteht für diese Stelle gar keine Schwärzung.
+    fn a_non_overlapping_annotation_keeps_its_appearance_stream_under_a_bare_area() {
+        // Bewusste Grenze: eine manuelle Fläche ohne Text sagt nicht, *was*
+        // geschwärzt wurde. Die Annotation liegt außerhalb, bleibt also
+        // referenziert — und ihr `/AP` lässt sich nicht nach dem geschwärzten
+        // Text durchsuchen, denn den kennt die Schwärzung nicht. Mit Text
+        // siehe [`a_non_overlapping_annotation_loses_the_redacted_text`].
         let mut f = fixture();
         f.set_content(&text_ops(&[
             "Kontoinhaber: Max Mustermann",
@@ -2795,6 +2927,104 @@ mod tests {
         let (report, out) = f.redact(&[whole_text_area()]);
         assert_eq!(report.removed_annotations, 0);
         assert_present(&out, SECRET, "/AP einer nicht überlappenden Annotation");
+    }
+
+    /// Dieselbe Fläche, nur mit dem Text, den die Analyse dort fand.
+    fn whole_text_area_naming_the_secret() -> Redaction {
+        let mut redaction = whole_text_area();
+        redaction.region.text = Some(format!("IBAN: {SECRET}"));
+        redaction
+    }
+
+    #[test]
+    fn a_non_overlapping_annotation_loses_the_redacted_text() {
+        // Aufgabe #26: die Annotation bleibt stehen, aber ihr
+        // Erscheinungsstrom verliert die Zeichen, die den Text der Schwärzung
+        // wiederholen — auch wenn er dort anders steht („Notiz: DE…“ statt
+        // „IBAN: DE…“), solange er den ganzen Text enthält. Hier nennt die
+        // Schwärzung nur die IBAN.
+        let mut f = fixture();
+        f.set_content(&text_ops(&[
+            "Kontoinhaber: Max Mustermann",
+            &format!("IBAN: {SECRET}"),
+        ]));
+        with_annotation(&mut f, false);
+        let mut redaction = whole_text_area();
+        redaction.region.text = Some(SECRET.to_string());
+
+        let (report, out) = f.redact(&[redaction]);
+        assert_eq!(report.removed_annotations, 0);
+        assert_no_leak(&out, SECRET, "/AP einer nicht überlappenden Annotation");
+        let secret_glyphs = SECRET.chars().filter(|c| !c.is_whitespace()).count();
+        assert!(
+            report.per_redaction[0] >= secret_glyphs * 2,
+            "die Zeichen im /AP zählen für die Schwärzung mit: {:?}",
+            report.per_redaction
+        );
+    }
+
+    #[test]
+    fn a_text_that_the_appearance_does_not_repeat_leaves_it_alone() {
+        // Gegenprobe: „IBAN: …“ steht im `/AP` nicht (dort heißt es
+        // „Notiz: …“), also bleibt der Strom unverändert. Gesucht wird der
+        // ganze Text der Schwärzung, kein Teil davon.
+        let mut f = fixture();
+        f.set_content(&text_ops(&[
+            "Kontoinhaber: Max Mustermann",
+            &format!("IBAN: {SECRET}"),
+        ]));
+        with_annotation(&mut f, false);
+
+        let (report, out) = f.redact(&[whole_text_area_naming_the_secret()]);
+        assert_eq!(report.removed_annotations, 0);
+        assert_present(&out, SECRET, "/AP ohne den Text der Schwärzung");
+    }
+
+    #[test]
+    fn an_annotation_on_another_page_loses_the_redacted_text() {
+        // Die Schwärzung steht auf Seite 1, die Notiz auf Seite 2 — einer
+        // Seite ohne eigene Schwärzung. Auch dort wird gesucht.
+        let mut f = fixture();
+        f.set_content(&text_ops(&[
+            "Kontoinhaber: Max Mustermann",
+            &format!("IBAN: {SECRET}"),
+        ]));
+        with_annotation(&mut f, false);
+        let annots = f
+            .doc
+            .get_dictionary_mut(f.page_id)
+            .unwrap()
+            .remove(b"Annots")
+            .expect("Annots gesetzt");
+        let pages_id = f
+            .doc
+            .get_dictionary(f.page_id)
+            .unwrap()
+            .get(b"Parent")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let content_id = f.doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+        let second = f.doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => f.resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "Annots" => annots,
+        });
+        let pages = f.doc.get_dictionary_mut(pages_id).unwrap();
+        pages.set(
+            "Kids",
+            vec![Object::Reference(f.page_id), Object::Reference(second)],
+        );
+        pages.set("Count", 2_i64);
+        let mut redaction = whole_text_area();
+        redaction.region.text = Some(SECRET.to_string());
+
+        let (report, out) = f.redact(&[redaction]);
+        assert_eq!(report.removed_annotations, 0);
+        assert_no_leak(&out, SECRET, "/AP auf einer Seite ohne Schwärzung");
     }
 
     #[test]

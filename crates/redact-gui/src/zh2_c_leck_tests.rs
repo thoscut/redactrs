@@ -16,7 +16,7 @@
 //! alte Prüfung die **neuen** Bytes lesen kann. Der Ausweg ist die dritte
 //! Stelle: nicht der Klick und nicht das abgeholte Ergebnis, sondern der
 //! Export-Thread selbst sagt, **dass er geschrieben hat**
-//! (`PendingExport::wrote`, gesetzt aus `ExportPlan::run_reporting` heraus
+//! (`PendingExport::wrote`, gesetzt aus `ExportPlan::run_signalling` heraus
 //! und **vor** dem `send`). [`RedactApp::poll_exports`] räumt daran die
 //! Urteile über die alten Bytes weg — und weil
 //! [`RedactApp::poll_export_checks`] `poll_exports` als erstes ruft, ist der
