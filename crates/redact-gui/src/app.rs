@@ -923,9 +923,11 @@ struct PendingExport {
     check: ExportCheckPlan,
     /// Die Kennung des laufenden Schreibvorgangs ([`writing_key`]).
     writing: PathBuf,
-    /// **Hat dieser Export geschrieben?** — gesetzt vom Export-Thread, sobald
-    /// die Ausgabedatei steht ([`crate::state::ExportPlan::run_reporting`]), und **bevor**
-    /// das Ergebnis in den Kanal geht.
+    /// **Hat dieser Export geschrieben?** — gesetzt auf dem Export-Thread,
+    /// sobald die Ausgabedatei steht: in [`redact_pipeline::apply`]
+    /// unmittelbar hinter dem `rename`
+    /// ([`crate::state::ExportPlan::run_signalling`]), also vor dem Audit-Log
+    /// und erst recht **bevor** das Ergebnis in den Kanal geht.
     ///
     /// Daran hängt der Schnitt, der ein Urteil über die **alten** Bytes dieser
     /// Datei wegwirft ([`RedactApp::poll_exports`]). Die Reihenfolge
@@ -1881,14 +1883,12 @@ impl RedactApp {
                     }
                     #[cfg(test)]
                     assert!(!force_panic, "Testhaken: der Export panikt");
-                    let (written, result) = plan.run_reporting();
-                    // **Die Fahne vor dem Ergebnis.** Ab hier trägt die Datei
-                    // neue Bytes, und ein Urteil über die alten ist
-                    // gegenstandslos — auch in dem Fenster, in dem das
+                    // **Die Fahne vor dem Ergebnis**, und zwar schon hinter
+                    // dem `rename`: ab dort trägt die Datei neue Bytes, und
+                    // ein Urteil über die alten ist gegenstandslos — auch
+                    // während das Audit-Log noch geschrieben wird und das
                     // Ergebnis dieses Exports noch nicht abzuholen ist.
-                    if written {
-                        wrote.store(true, Ordering::Release);
-                    }
+                    let result = plan.run_signalling(&wrote);
                     #[cfg(test)]
                     if let Some(gate) = &gate_after {
                         gate.arrive_and_wait();
@@ -1950,10 +1950,11 @@ impl RedactApp {
     /// als **erstes** ruft, liegt der Schnitt immer vor dem Abholen eines
     /// Urteils.
     ///
-    /// Was bleibt, ist eine Grenze, die diese Ebene nicht schließen kann: das
-    /// Fenster zwischen dem `rename` **in** [`redact_pipeline::apply`] und dem
-    /// Setzen der Fahne danach (dazwischen liegt nur das Audit-Log). Dafür
-    /// bräuchte es die Fahne innerhalb von `redact-pipeline`.
+    /// Die Fahne setzt [`redact_pipeline::apply`] selbst, unmittelbar hinter
+    /// dem `rename` der PDF-Datei. Bis 0.7.1 setzte sie der Export-Thread erst
+    /// nach der Rückkehr; im Fenster dazwischen lagen das Audit-Log und
+    /// `describe_blocked`, unter Last breiter als ein Bild
+    /// (`zm_b_fenster_nach_dem_rename`).
     pub fn poll_exports(&mut self) -> usize {
         // Der Schnitt, bevor irgendetwas abgeholt wird — auch für Exporte, die
         // geschrieben haben und deren Ergebnis noch unterwegs ist.

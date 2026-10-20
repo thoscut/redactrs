@@ -37,6 +37,7 @@ pub mod settings;
 pub mod testing;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lopdf::{Document, LoadOptions};
 use redact_booking::{BookingMatcher, CsvBookingLoader};
@@ -984,7 +985,16 @@ pub fn run(config: &Config) -> Result<Outcome> {
     };
 
     // 9./10./11./12. — derselbe Code, den die Oberfläche für ihren Export ruft.
-    apply(&mut doc, &redactions, &blocked, config, &mut outcome)?;
+    // Die Kommandozeile hat niemanden, der auf die Fahne wartet.
+    let written = AtomicBool::new(false);
+    apply(
+        &mut doc,
+        &redactions,
+        &blocked,
+        config,
+        &mut outcome,
+        &written,
+    )?;
     Ok(outcome)
 }
 
@@ -1002,12 +1012,33 @@ pub fn run(config: &Config) -> Result<Outcome> {
 /// `blocked` ist die maßgebliche Liste: [`Outcome::blocked`] wird daraus
 /// gesetzt, nicht damit verrechnet. Wer hier eine Liste übergibt, sagt damit,
 /// was dieser Lauf blockiert hat.
+///
+/// ## `written`: die Fahne unmittelbar hinter dem `rename`
+///
+/// `written` wird (mit `Release`) auf `true` gesetzt, **sobald die PDF-Datei
+/// steht** — direkt hinter dem `rename` in Schritt 11, vor dem Audit-Log und
+/// vor der Rückkehr. Ein anderer Thread, der die Fahne liest, sieht sie also
+/// so früh, wie ein anderer Leser die neuen Bytes sehen kann.
+///
+/// Gebraucht wird das von der Oberfläche: ein Urteil über die **alten** Bytes
+/// derselben Datei wird in dem Moment gegenstandslos, in dem die neuen da
+/// sind (`redact_gui::app::RedactApp::poll_exports`). Stand die Fahne erst
+/// hinter `apply`, lagen das Audit-Log und alles danach im Fenster — gemessen
+/// unter Last 22,6 ms auf dem Windows-Läufer, mehr als ein Bild
+/// (`zm_b_fenster_nach_dem_rename`).
+///
+/// Scheitert der Lauf **vor** dem `rename`, bleibt die Fahne `false`;
+/// scheitert erst das Audit-Log, ist sie `true`, obwohl `Err` zurückkommt —
+/// die Frage ist, ob die Datei steht, nicht, ob der ganze Lauf geglückt ist.
+/// Dieselbe Bedingung wie [`Outcome::output`], nur von außen lesbar, während
+/// der Lauf noch arbeitet.
 pub fn apply(
     doc: &mut Document,
     redactions: &[Redaction],
     blocked: &[BlockedRegion],
     config: &Config,
     outcome: &mut Outcome,
+    written: &AtomicBool,
 ) -> Result<()> {
     outcome.redactions = redactions.len();
     outcome.blocked = blocked.len();
@@ -1088,6 +1119,9 @@ pub fn apply(
 
     // 11. Ausgabe schreiben.
     PdfRenderer::with_options(output_options(config)).render(doc, &output)?;
+    // Das `rename` ist der letzte Schritt von `render`: ab hier tragen die
+    // neuen Bytes den Namen der Ausgabe. Die Fahne zuerst — siehe oben.
+    written.store(true, Ordering::Release);
     outcome.output = Some(output.display().to_string());
 
     // 12. Audit-Log.
