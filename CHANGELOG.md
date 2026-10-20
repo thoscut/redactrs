@@ -32,15 +32,16 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ---
 
-## 0.7.2 — 2026-10-19
+## 0.7.2 — 2026-10-20
 
 Bereich: `git log v0.7.1..v0.7.2`.
 
-Sicherheitskorrekturen aus einem Experten-Review (PR #11) und Wartung der
-Lieferkette. **Wer 0.7.1 einsetzt, aktualisiert** — mehrere der Fälle unten
-ließen Geheimnisse in der Ausgabe stehen oder meldeten ohne Warnung Erfolg.
-Einstellungs- und Musterdateien gelten unverändert; `credit_card` erkennt nur
-noch gedruckte Formate (siehe *Geändert*).
+Sicherheitskorrekturen aus einem Experten-Review (PR #11) und zu Leck #26
+(PR #10), dazu Wartung der Lieferkette. **Wer 0.7.1 einsetzt, aktualisiert**
+— mehrere der Fälle unten ließen Geheimnisse in der Ausgabe stehen oder
+meldeten ohne Warnung Erfolg. Einstellungs- und Musterdateien gelten
+unverändert; `credit_card` erkennt nur noch gedruckte Formate (siehe
+*Geändert*).
 
 ### Sicherheit
 
@@ -63,6 +64,15 @@ noch gedruckte Formate (siehe *Geändert*).
   obwohl der Text in der Datei stand: unlesbare Form-XObjects,
   Inline-Bilddaten oder Kommentare mit `(` vor einem geteilten `TJ`, sowie
   Namen und Dictionary-Schlüssel.
+* **⚠ Sicherheit: Erscheinungsströme von Annotationen außerhalb der
+  Schwärzung verlieren den geschwärzten Text** (#26, PR #10). Eine
+  Annotation, die in keinen Schwärzungsbereich ragt — etwa eine
+  `/FreeText`-Notiz am Seitenrand —, trug den Text samt `/AP` weiter. Jetzt
+  werden die Erscheinungsströme aller Annotationen auf jeder Seite nach dem
+  Text jeder Schwärzung durchsucht und die Zeichen entfernt; die Annotation
+  und ihr übriger Text bleiben stehen. Grenzen: eine manuelle Fläche ohne
+  Text lässt sich nicht wiederfinden, Formulare *innerhalb* eines
+  Erscheinungsstroms werden nicht durchsucht.
 * **⚠ Sicherheit: Stapel.** Zwei Eingaben mit derselben Ausgabe
   (Nicht-UTF-8-Namen, `a` und `a.pdf`) werden vor der ersten Datei
   abgelehnt; mit `--force` überschrieb vorher das zweite Ergebnis still das
@@ -86,6 +96,11 @@ noch gedruckte Formate (siehe *Geändert*).
 * Buchungsliste: Umlaute in zerlegter Form (NFD) treffen den Eintrag; der
   CSV-Kopf darf groß geschrieben sein.
 * `--check-leaks … | head` endet ohne Panic.
+* `redact_pipeline::apply` nimmt eine Fahne `written: &AtomicBool`, die
+  unmittelbar hinter dem Schreiben der Ausgabe gesetzt wird (API-Änderung,
+  PR #9); die Oberfläche verwirft ein Urteil über überschriebene Bytes damit
+  vor dem Audit-Log statt danach (Zeitwächter `zm_b`, rund 5 µs statt bis zu
+  22,6 ms).
 
 * **YAML liest jetzt `serde-saphyr` statt `serde_yaml`.** `serde_yaml` ist
   eingestellt, und darunter lag `unsafe-libyaml` — libyaml, maschinell nach
