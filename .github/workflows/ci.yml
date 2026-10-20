@@ -300,13 +300,27 @@ jobs:
       # lopdf 0.42 ist die Schwachstelle behoben - beide Stellen sind weg,
       # wie es der Kommentar vorgesehen hatte.
       #
-      # Bewusst ohne `--deny warnings`: `cargo audit` meldet aktuell zwei
-      # transitiv eingeschleppte, nicht mehr gepflegte Crates
-      # (RUSTSEC-2024-0436 paste 1.0.15, RUSTSEC-2026-0192 ttf-parser
-      # 0.25.1). Beides sind keine Schwachstellen, und beides koennen wir
-      # nicht selbst aufloesen - mit `--deny warnings` waere die CI nur
-      # dauerhaft rot. Die Meldungen erscheinen weiterhin im Protokoll.
-      # Echte Schwachstellen lassen `cargo audit` ohnehin fehlschlagen.
+      # Bewusst ohne `--deny warnings`: `cargo audit` meldet aktuell fuenf
+      # transitiv eingeschleppte, nicht mehr gepflegte Crates. Keines ist
+      # eine Schwachstelle, und keines koennen wir derzeit selbst aufloesen -
+      # mit `--deny warnings` waere die CI nur dauerhaft rot. Die Meldungen
+      # erscheinen weiterhin im Protokoll. Echte Schwachstellen lassen
+      # `cargo audit` ohnehin fehlschlagen.
+      #
+      #   * RUSTSEC-2024-0436 paste 1.0.15
+      #   * RUSTSEC-2026-0192 ttf-parser 0.25.1 (ueber lopdf; siehe
+      #     SECURITY.md: von redact-rs aus nicht erreichbar)
+      #   * RUSTSEC-2026-0370 zvariant, RUSTSEC-2026-0371 zbus_names,
+      #     RUSTSEC-2026-0372 zvariant_derive (seit 2026-10-16). Kommen ueber
+      #     rfd -> ashpd -> zbus 5 und nur in den Linux-Bau der Oberflaeche.
+      #     Die drei sind in zbus 6 aufgegangen; aufloesen laesst sich das
+      #     erst, wenn ashpd und danach rfd auf zbus 6 umstellen (Stand
+      #     2026-10-19: ashpd 0.13.13 und ashpd main auf zbus 5). Das
+      #     gtk3-Backend von rfd waere kein Ausweg - gtk-rs 0.18 ist selbst
+      #     eingestellt (RUSTSEC-2024-0412 ff.) und braeuchte libgtk-3.
+      #
+      # RUSTSEC-2024-0449 unsafe-libyaml stand bis 0.7.1 ebenfalls hier und
+      # ist mit dem Wechsel von serde_yaml auf serde-saphyr weg.
       - name: cargo audit
         run: cargo audit
 

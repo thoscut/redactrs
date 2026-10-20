@@ -1568,14 +1568,18 @@ Grafiktreiber — und stehen deshalb in keiner der beiden Tabellen.
 
 Zwei Nachbarn, die nicht in die Tabellen gehören, aber genannt sein sollen:
 
-* **`unsafe-libyaml` 0.2.11 (240 `unsafe`, transpiliertes C)** liegt unter
-  `serde_yaml` und liest Einstellungs- und Musterdatei; `serde_json` 1.0.151
-  (16) liest Review- und Regionsdateien. Nach dem Bedrohungsmodell sind das
-  alles vertrauenswürdige Eingaben — sie stehen deshalb nicht in der Tabelle.
-  Unter den Bibliotheken, die diese Dateien lesen, ist `unsafe-libyaml` mit
-  Abstand die größte `unsafe`-Fläche (`serde_yaml` selbst: 60, `serde_json`:
-  16, `csv`: 4). Wer Musterdateien aus fremder Hand einliest, verlässt das
-  Bedrohungsmodell an dieser Stelle.
+* **`serde-saphyr` 1.1.0** liest seit 0.7.2 Einstellungs- und Musterdatei
+  (über `redact_patterns::yaml`); `serde_json` 1.0.151 (16) liest Review-
+  und Regionsdateien. Nach dem Bedrohungsmodell sind das alles
+  vertrauenswürdige Eingaben — sie stehen deshalb nicht in der Tabelle.
+  `serde-saphyr` und sein Parser `granit-parser` sind
+  `#![forbid(unsafe_code)]`; `unsafe` bringt nur `arraydeque` 0.5.1 (72)
+  darunter mit. Bis 0.7.1 lag hier `unsafe-libyaml` 0.2.11 unter
+  `serde_yaml` — 240 `unsafe`, aus C transpiliert, nicht mehr gepflegt
+  (RUSTSEC-2024-0449) und mit Abstand die größte `unsafe`-Fläche unter den
+  Bibliotheken, die diese Dateien lesen. Wer Musterdateien aus fremder Hand
+  einliest, verlässt das Bedrohungsmodell trotzdem an dieser Stelle: die
+  Fläche ist kleiner, nicht null.
 * **`ttf-parser` 0.25.1** ist nicht mehr gepflegt (RUSTSEC-2026-0192) und
   liegt im Abhängigkeitsgraphen, ist aber ausschließlich über
   `lopdf::FontData::new` erreichbar, und redact-rs ruft das nirgends auf

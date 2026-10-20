@@ -69,6 +69,7 @@ use serde::{Deserialize, Serialize};
 mod builtin;
 mod matcher;
 mod validate;
+pub mod yaml;
 
 pub use builtin::{builtin_pattern_ids, builtin_patterns, MAX_KEYWORD_PREFIX};
 pub use matcher::{
