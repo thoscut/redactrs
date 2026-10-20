@@ -93,6 +93,9 @@ fn assert_no_leak(bytes: &[u8], what: &str) {
     );
 }
 
+/// Zurzeit ohne Kanarienvogel: alle hier belegten Lecks sind behoben. Bleibt
+/// stehen für das nächste.
+#[allow(dead_code)]
 #[track_caller]
 fn assert_still_leaking(bytes: &[u8], hint: &str) {
     assert!(
@@ -186,10 +189,11 @@ fn iban_inside_a_form_xobject_is_redacted_despite_an_inline_image() {
 // Wurzel gelöscht, nicht ihre Kinder. `lopdf::Document::save_to` schrieb
 // anschließend alles mit, was in `doc.objects` stand.
 //
-// Inzwischen werden unerreichbare Objekte vor dem Schreiben entfernt; die
-// folgenden Tests laufen deshalb wieder als Zusicherung. Offen bleibt der Fall,
-// in dem das Objekt **erreichbar** ist: eine Annotation außerhalb des
-// Schwärzungsbereichs behält ihren Appearance-Stream samt Geheimnis.
+// Inzwischen werden unerreichbare Objekte vor dem Schreiben entfernt, und
+// auch der Fall, in dem das Objekt **erreichbar** bleibt, ist behoben: eine
+// Annotation außerhalb des Schwärzungsbereichs bleibt stehen, ihr
+// Appearance-Stream verliert aber die Zeichen, die den geschwärzten Text
+// wiederholen. Die folgenden Tests laufen deshalb alle als Zusicherung.
 
 #[test]
 fn appearance_stream_of_a_removed_annotation_is_gone() {
@@ -200,11 +204,12 @@ fn appearance_stream_of_a_removed_annotation_is_gone() {
     assert_no_leak(&out, "/AP der entfernten Annotation");
 }
 
+/// Behoben (Aufgabe #26): die Annotation überlappt die Schwärzung nicht und
+/// bleibt deshalb stehen — ihr Appearance-Stream trug das Geheimnis trotzdem
+/// weiter. Jetzt sucht der Redaktor den Text der Schwärzung auch in den
+/// Erscheinungsströmen und entfernt ihn dort.
 #[test]
-#[ignore = "bekannter Leak, siehe Aufgabe #26"]
 fn appearance_stream_outside_the_redaction_is_also_cleaned() {
-    // Die Annotation überlappt die Schwärzung nicht und bleibt deshalb stehen —
-    // ihr Appearance-Stream trägt das Geheimnis trotzdem weiter.
     let pdf = common::annotation_appearance(SECRET, false);
     let runs = extract(&pdf);
     let redaction = redaction_for(&runs, SECRET).expect("IBAN auf der Seite gefunden");
@@ -212,13 +217,25 @@ fn appearance_stream_outside_the_redaction_is_also_cleaned() {
     assert_no_leak(&out, "/AP einer nicht überlappenden Annotation");
 }
 
+/// Gegenprobe zu #26: die Annotation bleibt stehen, nur ihr Geheimnis fällt.
+/// Der übrige Text der Notiz ist weiter lesbar — entfernt wird, was die
+/// Schwärzung nennt, nicht die ganze Annotation.
 #[test]
-fn canary_appearance_stream_outside_the_redaction_still_leaks() {
+fn annotation_outside_the_redaction_keeps_its_other_text() {
     let pdf = common::annotation_appearance(SECRET, false);
     let runs = extract(&pdf);
     let redaction = redaction_for(&runs, SECRET).expect("IBAN auf der Seite gefunden");
     let out = pipeline(&pdf, &[redaction]);
-    assert_still_leaking(&out, "/AP einer nicht überlappenden Annotation");
+    let text = extract(&out)
+        .iter()
+        .map(|r| r.text.clone())
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(
+        text.contains("Notiz:"),
+        "der übrige Text der Annotation fehlt: {text:?}"
+    );
+    assert!(!text.contains(SECRET), "Geheimnis noch lesbar: {text:?}");
 }
 
 #[test]

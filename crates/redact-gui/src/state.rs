@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use redact_core::{
@@ -874,45 +874,54 @@ impl ExportPlan {
     }
 
     /// Wie [`ExportPlan::run`], sagt aber zusätzlich, **ob die Ausgabedatei
-    /// entstanden ist**.
+    /// entstanden ist** — als Rückgabe, also erst, wenn der Lauf zu Ende ist.
     ///
-    /// Die Oberfläche braucht genau diese Auskunft und keine andere: das
-    /// Urteil einer laufenden Nachprüfung gehört zu den Bytes, die zum
-    /// Prüfzeitpunkt auf der Platte lagen, und es wird in dem Moment
-    /// gegenstandslos, in dem **neue** Bytes dieser Datei entstehen — nicht
-    /// schon, wenn jemand welche schreiben will. Siehe
-    /// [`crate::app::RedactApp::poll_exports`].
+    /// Die Auskunft ist die Fahne aus [`ExportPlan::run_signalling`]; wer sie
+    /// schon **während** des Laufs braucht (die Oberfläche auf ihrem
+    /// Export-Thread), nimmt den.
     ///
     /// **Die Fahne ist nicht `result.is_ok()`**, und das ist der Punkt:
     /// [`redact_pipeline::apply`] schreibt die PDF-Datei (Schritt 11) **vor**
     /// dem Audit-Log (Schritt 12). Scheitert das Log, kommt ein `Err` hinter
-    /// fertigen Bytes. Gelesen wird deshalb [`Outcome::output`] — das setzt
-    /// `apply` genau dann, wenn die Datei steht, und weil das Log über `&mut`
-    /// läuft, bleibt der Eintrag auch im Fehlerfall stehen.
+    /// fertigen Bytes — `(true, Err)`.
     ///
     /// Umgekehrt heißt `false` wirklich „kein Byte“: ein Symlink als Ziel, ein
     /// nicht beschreibbares Verzeichnis, eine volle Platte — alles das endet
     /// vor Schritt 11, und dann ist ein älteres Urteil über diese Datei
     /// weiterhin eines über die Bytes, die dort liegen.
-    pub fn run_reporting(mut self) -> (bool, Result<Outcome>) {
+    pub fn run_reporting(self) -> (bool, Result<Outcome>) {
+        let written = AtomicBool::new(false);
+        let result = self.run_signalling(&written);
+        (written.load(Ordering::Acquire), result)
+    }
+
+    /// Wie [`ExportPlan::run`], setzt aber `written`, **sobald die
+    /// Ausgabedatei steht** — unmittelbar hinter dem `rename`, noch in
+    /// [`redact_pipeline::apply`] und vor dem Audit-Log.
+    ///
+    /// Die Oberfläche braucht genau diese Auskunft und keine andere: das
+    /// Urteil einer laufenden Nachprüfung gehört zu den Bytes, die zum
+    /// Prüfzeitpunkt auf der Platte lagen, und es wird in dem Moment
+    /// gegenstandslos, in dem **neue** Bytes dieser Datei entstehen — nicht
+    /// schon, wenn jemand welche schreiben will, und nicht erst, wenn der Lauf
+    /// zurückkehrt. Siehe [`crate::app::RedactApp::poll_exports`].
+    ///
+    /// Bis 0.7.1 setzte die Oberfläche die Fahne selbst, **nach** der Rückkehr
+    /// von [`ExportPlan::run_reporting`]; im Fenster dazwischen lagen das
+    /// Audit-Log und [`redact_pipeline::describe_blocked`], und unter Last war
+    /// es breiter als ein Bild (`zm_b_fenster_nach_dem_rename`).
+    pub fn run_signalling(mut self, written: &AtomicBool) -> Result<Outcome> {
         let mut copy = (*self.document).clone();
-        let applied = redact_pipeline::apply(
+        redact_pipeline::apply(
             &mut copy,
             &self.redactions,
             &self.blocked,
             &self.config,
             &mut self.outcome,
-        );
-        // **Vor** dem `?`: die Frage ist, ob die Datei steht, nicht, ob der
-        // ganze Lauf geglückt ist.
-        let wrote = self.outcome.output.is_some();
-        match applied {
-            Ok(()) => {
-                self.outcome.blocked_details = redact_pipeline::describe_blocked(&self.blocked);
-                (wrote, Ok(self.outcome))
-            }
-            Err(e) => (wrote, Err(e)),
-        }
+            written,
+        )?;
+        self.outcome.blocked_details = redact_pipeline::describe_blocked(&self.blocked);
+        Ok(self.outcome)
     }
 }
 

@@ -1,5 +1,6 @@
 //! Gegenprüfung der Fix-Runde 8, Gebiet **Oberfläche** — Gegenprüfer B,
-//! Runde 9. Geprüft wird die eine Grenze, die `poll_exports` selbst nennt:
+//! Runde 9, umgebaut mit der Korrektur nach 0.7.1. Geprüft wird die eine
+//! Grenze, die `poll_exports` bis dahin selbst nannte:
 //!
 //! > Was bleibt, ist eine Grenze, die diese Ebene nicht schließen kann: das
 //! > Fenster zwischen dem `rename` **in** [`redact_pipeline::apply`] und dem
@@ -7,28 +8,30 @@
 //!
 //! Die Frage des Auftrags lautet: „Ein Urteil, dessen Datei inzwischen
 //! überschrieben wurde: wird es SICHER verworfen, oder gibt es ein
-//! Zeitfenster?" Das Zeitfenster ist zugegeben — **wie breit** es ist, steht
-//! nirgends, und „dazwischen liegt nur das Audit-Log" stimmt nicht ganz:
-//! die Fahne wird nicht in `run_reporting` gesetzt, sondern in
-//! `RedactApp::export_to`, **nachdem** `run_reporting` zurückgekehrt ist. Im
-//! Fenster liegen also
+//! Zeitfenster?"
+//!
+//! **Bis 0.7.1** setzte `RedactApp::export_to` die Fahne, **nachdem**
+//! `run_reporting` zurückgekehrt war. Im Fenster lagen
 //!
 //! 1. das Schreiben des Audit-Logs (Schritt 12 von `redact_pipeline::apply`),
 //! 2. `redact_pipeline::describe_blocked` über alle von der Negativliste
 //!    gedeckten Flächen (`ExportPlan::run_reporting`, hinter `apply`),
 //! 3. die Rückkehr über die Kanalgrenze.
 //!
+//! Gemessen war das 0,6–0,9 ms (Release) — auf dem geteilten Windows-Läufer
+//! aber auch 22,6 ms (CI-Lauf 127), mehr als ein Bild. Der Wächter in diesem
+//! Test riss, und beim Release 0.7.1 wurde er übergangen.
+//!
+//! **Jetzt** setzt `redact_pipeline::apply` die Fahne selbst, unmittelbar
+//! hinter dem `rename` der PDF-Datei (Schritt 11), und die Oberfläche reicht
+//! sie über `ExportPlan::run_signalling` hinein. Im Fenster liegt nur noch die
+//! Rückkehr aus `PdfRenderer::render` — das Audit-Log liegt **dahinter**.
+//!
 //! Gemessen wird ohne Innenansicht: ein Wächter-Thread pollt das Dateisystem
-//! und merkt sich, **wann die Ausgabedatei erscheint** (das `rename`); der
-//! Haupt-Thread merkt sich, **wann `run_reporting` zurückkehrt** (unmittelbar
-//! davor setzt die Oberfläche die Fahne). Der Abstand ist das Fenster.
-//!
-//! Der Maßstab ist damit das Dateisystem selbst und nicht der Bericht des
+//! und die Fahne und merkt sich, **wann die Ausgabedatei erscheint** (das
+//! `rename`) und **wann die Fahne steht**. Der Abstand ist das Fenster. Der
+//! Maßstab ist damit das Dateisystem selbst und nicht der Bericht des
 //! Programms.
-//!
-//! **Ergebnis vorweg:** gemessen ist das Fenster 0,6–0,9 ms breit (Release)
-//! und wächst nicht mit der Arbeit — die Zusage hält, und sie hat jetzt eine
-//! Zahl. Die Zusicherung bleibt als Wächter stehen.
 //!
 //! **Warum die Breite zählt:** in diesem Fenster liegen die neuen Bytes schon
 //! auf der Platte, `PendingExport::wrote` ist aber noch `false`. Zeichnet die
@@ -106,8 +109,8 @@ fn geladen(dir: &Path, bytes: &[u8], zeilen: usize) -> AppState {
     state
 }
 
-/// Exportiert und misst das Fenster zwischen „die Datei ist da" und
-/// „`run_reporting` ist zurück".
+/// Exportiert und misst das Fenster zwischen „die Datei ist da" und „die
+/// Fahne steht".
 ///
 /// Gibt `(Fenster, Gesamtdauer)` zurück. Findet der Wächter die Datei nie
 /// (der Lauf scheitert vor dem `rename`), gibt es kein Fenster — dann ist das
@@ -117,34 +120,49 @@ fn fenster_messen(
     out: &Path,
     audit: Option<&Path>,
 ) -> (Option<Duration>, Duration) {
+    let fahne = Arc::new(AtomicBool::new(false));
     let fertig = Arc::new(AtomicBool::new(false));
     let ziel = out.to_path_buf();
     let wache = {
+        let fahne = Arc::clone(&fahne);
         let fertig = Arc::clone(&fertig);
         std::thread::spawn(move || {
             // Eng pollen: das Fenster ist die Messgröße, die Auflösung darf
-            // es nicht überdecken.
-            while !fertig.load(Ordering::Acquire) {
-                if ziel.exists() {
-                    return Some(Instant::now());
+            // es nicht überdecken. Ein Thread für beides, damit kein zweiter
+            // Wächter dem Export den Kern wegnimmt.
+            let mut datei: Option<Instant> = None;
+            let mut gesetzt: Option<Instant> = None;
+            loop {
+                let ende = fertig.load(Ordering::Acquire);
+                if datei.is_none() && ziel.exists() {
+                    datei = Some(Instant::now());
+                }
+                if gesetzt.is_none() && fahne.load(Ordering::Acquire) {
+                    gesetzt = Some(Instant::now());
+                }
+                if ende || (datei.is_some() && gesetzt.is_some()) {
+                    return (datei, gesetzt);
                 }
                 std::hint::spin_loop();
             }
-            ziel.exists().then(Instant::now)
         })
     };
 
     let plan = state.plan_export(out, audit).expect("Plan");
     let t0 = Instant::now();
-    let (geschrieben, ergebnis) = plan.run_reporting();
+    let ergebnis = plan.run_signalling(&fahne);
     let zurueck = Instant::now();
     fertig.store(true, Ordering::Release);
-    assert!(geschrieben, "die Datei muss entstanden sein");
+    assert!(
+        fahne.load(Ordering::Acquire),
+        "die Datei muss entstanden sein"
+    );
     ergebnis.expect("der Lauf muss glücken");
 
-    let gesehen = wache.join().expect("Wächter");
+    let (datei, gesetzt) = wache.join().expect("Wächter");
+    let gesetzt = gesetzt.expect("die Fahne stand, also hat der Wächter sie gesehen");
     (
-        gesehen.map(|t| zurueck.saturating_duration_since(t)),
+        datei.map(|t| gesetzt.saturating_duration_since(t)),
         zurueck - t0,
     )
 }
@@ -153,28 +171,26 @@ fn fenster_messen(
 // Das Fenster gibt es — und es ist schmaler als ein Bild
 // ===========================================================================
 
-/// **HÄLT — mit einer Zahl statt eines Worts.** Das Fenster zwischen dem
-/// `rename` und dem Setzen von `PendingExport::wrote` gibt es wirklich, und
-/// es ist **schmaler als ein Bild**.
+/// **HÄLT — und jetzt aus dem richtigen Grund.** Das Fenster zwischen dem
+/// `rename` und dem Setzen von `PendingExport::wrote` ist **schmaler als ein
+/// Bild**, weil die Fahne dort steht, wo dieser Wächter sie hinhaben wollte:
+/// **in** `redact-pipeline`, unmittelbar hinter dem `rename` der PDF-Datei
+/// (Schritt 11), vor dem Audit-Log.
 ///
 /// Gemessen an einer Durchsicht, wie sie wirklich vorkommt: eine Seite mit
 /// 400 geschwärzten Zeilen, also ein Audit-Log in der Größenordnung, die
 /// `SECURITY.md` für eine Durchsicht von Hand nennt („von Hand geprüft werden
 /// Dutzende bis Hunderte").
 ///
-/// Gemessen (dieser Rechner, `--release`): 0,6–0,9 ms, und die Zahl wächst
-/// **nicht** mit der Zahl der Schwärzungen — das Audit-Log ist selbst
-/// gedeckelt (48 kB ab rund 200 Einträgen), und mehr liegt nicht im Fenster.
-/// Ohne Audit-Log sind es rund 40 µs. Ein Bild bei 60 Hz ist 16,7 ms; es
-/// passt also keines hinein. Der Versuch, das Fenster durch mehr Arbeit
-/// hinter dem `rename` aufzuziehen, ist **gescheitert**
-/// (`zm_b_mess_wie_das_fenster_waechst`).
+/// Vorher (Fahne hinter der Rückkehr von `run_reporting`): 0,6–0,9 ms auf
+/// einem freien Rechner, 22,6 ms auf dem geteilten Windows-Läufer. Jetzt liegt
+/// das Audit-Log nicht mehr im Fenster, und die Gegenprobe ohne Audit-Log
+/// ergibt dieselbe Größenordnung — das Fenster hängt nicht mehr an der Arbeit
+/// hinter dem `rename`.
 ///
-/// Die Zusicherung bleibt als **Wächter** stehen: wandert später Arbeit hinter
-/// das `rename` — ein zweites Log, eine Prüfsumme über die geschriebene Datei,
-/// ein `fsync` auf ein langsames Ziel —, wird dieser Lauf rot, und dann gehört
-/// die Fahne dorthin, wo sie hingehört: **in** `redact-pipeline`, unmittelbar
-/// hinter das `rename` der PDF-Datei (Schritt 11).
+/// Die Zusicherung bleibt als **Wächter** stehen: wandert Arbeit zwischen das
+/// `rename` und die Fahne — die Fahne zurück hinter das Audit-Log, ein
+/// `fsync` auf das Verzeichnis vor der Fahne —, wird dieser Lauf rot.
 ///
 /// Anmerkung zur Messung: gemessen wird von **außen** (das Dateisystem sagt,
 /// wann die Datei da ist). Das ist eine Obergrenze für die Sichtbarkeit des
@@ -211,12 +227,12 @@ fn zm_b_zwischen_rename_und_fahne_passt_ein_bild() {
         "Vorlage: 1 Seite, {zeilen} Schwärzungen, Audit-Log {} Byte",
         std::fs::metadata(&audit).map(|m| m.len()).unwrap_or(0)
     );
-    println!("run_reporting gesamt: {gesamt:?}");
-    println!("Fenster rename → Rückkehr (dort setzt export_to die Fahne): {fenster:?}");
+    println!("run_signalling gesamt: {gesamt:?}");
+    println!("Fenster rename → Fahne (gesetzt in redact_pipeline::apply): {fenster:?}");
     println!("Ein Bild bei 60 Hz: {EIN_BILD:?}");
 
-    // Die Gegenprobe: ohne Audit-Log ist das Fenster kleiner. Damit hängt die
-    // Zahl an der Sache und nicht am Messrauschen.
+    // Die Gegenprobe: ohne Audit-Log ist das Fenster nicht kleiner — das Log
+    // liegt hinter der Fahne, nicht mehr im Fenster.
     let out2 = dir.join("ohne-log.pdf");
     let (ohne, _) = fenster_messen(&state, &out2, None);
     println!("Fenster ohne Audit-Log: {ohne:?}");
@@ -226,9 +242,9 @@ fn zm_b_zwischen_rename_und_fahne_passt_ein_bild() {
         "zwischen dem rename und der Fahne liegen {fenster:?} — mehr als ein Bild ({EIN_BILD:?}). \
          In dieser Zeit stehen die neuen Bytes auf der Platte, `PendingExport::wrote` ist aber \
          noch false: `poll_exports` wirft das Urteil über die alten Bytes NICHT weg, und ein \
-         bereitliegendes Urteil kommt durch. Dann gehört die Fahne dorthin, wo sie hingehört: \
-         unmittelbar hinter das rename der PDF-Datei (in `redact-pipeline`, Schritt 11), nicht \
-         hinter das Audit-Log und nicht erst hinter die Rückkehr von `run_reporting`."
+         bereitliegendes Urteil kommt durch. Die Fahne gehört unmittelbar hinter das rename \
+         der PDF-Datei (`redact_pipeline::apply`, Schritt 11) — liegt dort wieder Arbeit \
+         dazwischen?"
     );
 
     std::fs::remove_dir_all(&dir).ok();
@@ -246,7 +262,7 @@ fn zm_b_mess_wie_das_fenster_waechst() {
         let audit = dir.join("audit.json");
         let (fenster, gesamt) = fenster_messen(&state, &out, Some(&audit));
         println!(
-            "{zeilen:4} Schwärzungen: Audit-Log {:7} Byte, run_reporting {gesamt:?}, \
+            "{zeilen:4} Schwärzungen: Audit-Log {:7} Byte, run_signalling {gesamt:?}, \
              Fenster {fenster:?}",
             std::fs::metadata(&audit).map(|m| m.len()).unwrap_or(0)
         );
