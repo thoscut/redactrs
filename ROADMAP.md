@@ -7,48 +7,51 @@ nicht leistet, steht ausführlich in der README unter
 [Was dieses Werkzeug nicht leistet](README.md#grenzen); diese Datei sagt nur,
 in welcher Reihenfolge davon etwas angegangen wird.
 
-Stand: 19.10.2026, veröffentlicht ist
+Stand: 20.10.2026, veröffentlicht ist
 [0.7.1](https://github.com/thoscut/redactrs/releases/tag/v0.7.1).
+
+## Seit 0.7.1 erledigt (in `main`, noch nicht veröffentlicht)
+
+* **Zeitwächter `zm_b` ursächlich behoben**
+  ([PR #9](https://github.com/thoscut/redactrs/pull/9)): die Export-Fahne
+  setzt `redact_pipeline::apply` direkt hinter dem `rename`, nicht mehr die
+  Oberfläche.
+* **Leck #26 behoben** ([PR #10](https://github.com/thoscut/redactrs/pull/10)):
+  der Erscheinungsstrom (`/AP`) einer Annotation außerhalb des
+  Schwärzungsbereichs wird nach dem geschwärzten Text durchsucht und
+  bereinigt. Damit sind alle vier früher dokumentierten Lecks behoben.
 
 ## In Arbeit
 
-### 0.7.2 — Abhängigkeiten aufräumen
+### 0.7.2 ([PR #8](https://github.com/thoscut/redactrs/pull/8))
 
+* Sicherheitskorrekturen aus dem Experten-Review
+  ([PR #11](https://github.com/thoscut/redactrs/pull/11): Lecks,
+  Speichergrenzen, Erkennung, Rückgabewert).
 * `serde_yaml` wird durch `serde-saphyr` ersetzt. Damit entfällt
   `unsafe-libyaml`, das `cargo audit` als nicht mehr gepflegt meldet.
 * Die übrigen Hinweise auf nicht mehr gepflegte Crates (`zvariant`,
   `zvariant_derive`, `zbus_names`) kommen nur indirekt über den Dateidialog
   (`rfd` → `ashpd` → `zbus`). Sie verschwinden erst mit einer `rfd`-Fassung,
-  die auf `zbus` 6 aufsetzt; die gibt es noch nicht. Bis dahin stehen sie als
-  bekannte Hinweise in der CI.
+  die auf `zbus` 6 aufsetzt; die gibt es noch nicht.
+
+### Security-Review Runde 2 ([PR #12](https://github.com/thoscut/redactrs/pull/12))
+
+* Verschlüsselung, Seitenbaum, Träger, Lesarten.
 
 ### Überarbeitete Oberfläche ([PR #6](https://github.com/thoscut/redactrs/pull/6))
 
 * Eigener Farbsatz, Ansichtsleiste über der Seite, Seitenleiste mit
   Zwischenüberschriften, Leerzustand mit Ablagefläche, größere Griffe,
-  sichtbarer Fokus. Die CI ist grün, der PR lässt sich konfliktfrei mergen.
+  sichtbarer Fokus.
 * Offen ist die Entscheidung, ob er so gemergt wird oder ob zuerst eine der
   drei alternativen Designrichtungen (Werkbank, Prüfprotokoll, Fokus) in ihn
   einfließt.
 
 ## Als Nächstes
 
-1. **Zeitwächter `zm_b` unter Windows ursächlich beheben.** Der Test
-   `zm_b_zwischen_rename_und_fahne_passt_ein_bild` misst das Fenster zwischen
-   dem `rename` der Ausgabedatei und dem Setzen der Fahne in der Oberfläche
-   und ist auf geteilten Windows-Läufern einmal über 16,7 ms gekommen. Die
-   Korrektur, die der Test selbst nennt: die Fahne **in** `redact-pipeline`
-   unmittelbar hinter dem `rename` setzen. Das ändert die API von `apply`, und
-   der Test wird umgebaut. Eigener PR, weil es die Sicherheitslogik berührt.
-2. **Bekanntes Leck: Erscheinungsströme außerhalb des Schwärzungsbereichs.**
-   Der `/AP` einer Annotation, die nicht in eine Schwärzung ragt, wird nicht
-   geprüft; ihr Text bleibt in der Datei. Festgehalten von
-   `appearance_stream_outside_the_redaction_is_also_cleaned` (Aufgabe #26,
-   `#[ignore]`) und dem Kanarienvogel in
-   `crates/redact-pdf/tests/known_leaks.rs`. Es ist das letzte der vier
-   früher dokumentierten Lecks.
-3. **Release 0.8** mit der neuen Oberfläche und, falls bis dahin fertig, den
-   beiden Punkten darüber.
+1. **Release 0.8** mit der neuen Oberfläche, den Korrekturen aus beiden
+   Review-Runden und den beiden erledigten Punkten oben.
 
 ## Später, nach Bedarf
 
