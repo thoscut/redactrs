@@ -78,6 +78,143 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ---
 
+## 0.7.2 — 2026-10-20
+
+Bereich: `git log v0.7.1..v0.7.2`.
+
+Sicherheitskorrekturen aus zwei Review-Runden (PR #11, PR #12) und zu Leck
+#26 (PR #10), dazu Wartung der Lieferkette. **Wer 0.7.1 einsetzt, aktualisiert**
+— mehrere der Fälle unten ließen Geheimnisse in der Ausgabe stehen oder
+meldeten ohne Warnung Erfolg. Einstellungs- und Musterdateien gelten
+unverändert; `credit_card` erkennt nur noch gedruckte Formate (siehe
+*Geändert*).
+
+### Sicherheit
+
+* **⚠ Sicherheit: Bilder mit PNG-Prädiktor wurden falsch dekodiert.** Bei 1,
+  2 oder 4 Bit je Komponente (etwa img2pdf-Scans) oder einem überzähligen
+  Byte fiel der Dekoder still auf die Rohzeilen zurück; die Schwärzung traf
+  die falschen Bytes, und ein Teil des Textes blieb im neu kodierten Bild
+  sichtbar. Ein Prädiktor, der sich nicht rückgängig machen lässt, macht das
+  Bild jetzt unlesbar (Ablehnung bzw. Warnung). TIFF-Prädiktor 2 wird
+  angewandt.
+* **⚠ Sicherheit: Negative Schriftgröße oder negatives `Tz`** ließ eine normal
+  aussehende Zeile rückwärts lesen; die IBAN wurde nicht erkannt,
+  Rückgabewert 0.
+* **⚠ Sicherheit: Treffer nur im `/ActualText`** schwärzten eine gleichmäßig
+  verteilte Box statt der echten Glyphen; Teile der IBAN blieben stehen.
+* **⚠ Sicherheit: Rückgabewert 0 trotz Deckungslücke.** Ein Objektname aus der
+  Datei konnte eine Ausnahme-Marke tragen und „NICHT GEPRÜFT“ als
+  gewöhnliche Warnung tarnen. Namen aus der Datei werden jetzt neutralisiert.
+* **⚠ Sicherheit: `--check-leaks` meldete in drei Fällen „nicht gefunden“**,
+  obwohl der Text in der Datei stand: unlesbare Form-XObjects,
+  Inline-Bilddaten oder Kommentare mit `(` vor einem geteilten `TJ`, sowie
+  Namen und Dictionary-Schlüssel.
+* **⚠ Sicherheit: Erscheinungsströme von Annotationen außerhalb der
+  Schwärzung verlieren den geschwärzten Text** (#26, PR #10). Eine
+  Annotation, die in keinen Schwärzungsbereich ragt — etwa eine
+  `/FreeText`-Notiz am Seitenrand —, trug den Text samt `/AP` weiter. Jetzt
+  werden die Erscheinungsströme aller Annotationen auf jeder Seite nach dem
+  Text jeder Schwärzung durchsucht und die Zeichen entfernt; die Annotation
+  und ihr übriger Text bleiben stehen. Grenzen: eine manuelle Fläche ohne
+  Text lässt sich nicht wiederfinden, Formulare *innerhalb* eines
+  Erscheinungsstroms werden nicht durchsucht.
+* **⚠ Sicherheit: Stapel.** Zwei Eingaben mit derselben Ausgabe
+  (Nicht-UTF-8-Namen, `a` und `a.pdf`) werden vor der ersten Datei
+  abgelehnt; mit `--force` überschrieb vorher das zweite Ergebnis still das
+  erste.
+
+* **⚠ Sicherheit: Seiten, die Betrachter zeigen, wurden nie gelesen**
+  (PR #12). Ein Blatt ohne brauchbares `/Type /Page` (fehlend, indirekt,
+  `/Pagex`) oder ein Seiten-Dictionary direkt in `/Kids` zeigen poppler,
+  pdf.js und mupdf an, lopdf übersprang es — Rückgabewert 0, die IBAN blieb
+  stehen. Der Seitenbaum wird jetzt beim Laden normalisiert.
+* **⚠ Sicherheit: Steuerzeichen oder unsichtbare Zeichen in einer IBAN**
+  (`\t`, C0/C1, DEL, U+00AD, Nullbreite) und ein `/Contents`-Teil, der
+  mitten in einer Zeichenkette endet, verhinderten die Erkennung, obwohl
+  Betrachter die IBAN am Stück kopieren (PR #12). Solche Zeichen werden vor
+  der Zeilenbildung verworfen, Teile ohne Trenner zusammengefügt; eine
+  Teilung mitten in einem Operator ist eine Deckungslücke (Rückgabewert 3).
+* **⚠ Sicherheit: Metadaten-Erlaubnislisten galten nur eine Ebene tief**
+  (PR #12). Unbekannte Schlüssel unter `/ViewerPreferences`, `/Extensions`,
+  `/Group`, `/Trans`, `/BoxColorInfo`, in Schrift-, ExtGState-, Shading-,
+  Bild- und OCG-Einträgen und an Annotationen blieben stehen. Jetzt Schemata
+  je Typ und je Annotationstyp, auch außerhalb von `/Annots`; `/CharProcs`
+  nie gesetzter Type3-Schriften werden geleert.
+* **⚠ Sicherheit: Die Oberfläche verschwieg Deckungslücken nach dem Export**
+  (PR #12): die Statuszeile zeigte die erste Warnung, meist die über
+  Rasterbilder. Lücken stehen jetzt vorn und heißen „NICHT GEPRÜFT:“.
+* `--check-leaks` liest ToUnicode-Ziele und `/Differences`-Glyphennamen als
+  Text und verkettet Zeichenketten über `/Contents`-Teile hinweg (PR #12).
+
+### Dienstverweigerung
+
+* **Speichergrenzen umgangen:** riesiges `/Columns` (504 Byte → 3,8 GB),
+  Bild-Flate mit abweichendem Rückfall, `/F` als Filter an Bild-XObjects und
+  Inline-Bild-Flate (2 MB → 2,1 GB) liefen an `--max-decompressed-mb` vorbei.
+  Die Vorprüfung liest jetzt `/DecodeParms`, jeder Bildfilter ist gedeckelt.
+* **Absturz** bei einem riesigen Index in einem `Indexed`-Farbraum.
+* **Verschlüsselte PDFs mit leerem Benutzerpasswort umgingen alle
+  Grenzen** für entpackte und geparste Bytes (131 kB → 5,4 GB, PR #12). Die
+  Prüfung nach dem Entschlüsseln gilt jetzt im gemeinsamen Ladepfad — CLI,
+  Oberfläche und `--check-leaks`; der Hinweis auf inkrementelle Revisionen
+  geht mit `--password` nicht mehr verloren.
+* Vorprüfung (PR #12): doppeltes `/DecodeParms` umging die
+  Prädiktor-Prüfung (570 Byte → 190 MB); `/W` über 8 im Xref-Strom brach den
+  Prozess ab; Objektnummern um 2³¹ ließen das Speichern 25–50 s laufen.
+* Die Vorschau der Oberfläche hat ein Rechenbudget (PR #12); eine Seite mit
+  1000 ganzseitigen Bildern blockiert den Render-Worker nicht mehr.
+
+### Geändert
+
+* Erkennung: IBAN mit geschütztem/schmalem Leerzeichen oder doppeltem
+  Leerzeichen, BLZ „370 400 44“, Steuer-ID „12 345 678 903“, „Kto.-Nr.“,
+  „Konto Nr.“ und „Identifikationsnummer“; eine Kreditkarte vor einer kurzen
+  Zahl geht nicht mehr verloren. **`credit_card` erkennt dafür nur noch die
+  gedruckten Formate** (am Stück, 4-4-4-4[-3], 4-6-5, 4-6-4).
+* Buchungsliste: Umlaute in zerlegter Form (NFD) treffen den Eintrag; der
+  CSV-Kopf darf groß geschrieben sein.
+* `--check-leaks … | head` endet ohne Panic.
+* `redact_pipeline::apply` nimmt eine Fahne `written: &AtomicBool`, die
+  unmittelbar hinter dem Schreiben der Ausgabe gesetzt wird (API-Änderung,
+  PR #9); die Oberfläche verwirft ein Urteil über überschriebene Bytes damit
+  vor dem Audit-Log statt danach (Zeitwächter `zm_b`, rund 5 µs statt bis zu
+  22,6 ms).
+* Verhalten (PR #12): ein `/Contents`-Teil, der mitten in einem Wort endet
+  (gegen PDF 32000 7.8.2), ergibt Rückgabewert 3. Eine Vorschau mit mehr als
+  ~32 ganzseitigen Bildlagen oder ~1000 Clip-Masken je Seite wird als
+  unvollständig markiert. Ein Zwischenknoten ohne `/Type` gehört wieder zum
+  Seitenbaum (wird geschwärzt statt geleert).
+
+* **YAML liest jetzt `serde-saphyr` statt `serde_yaml`.** `serde_yaml` ist
+  eingestellt, und darunter lag `unsafe-libyaml` — libyaml, maschinell nach
+  Rust übersetzt, 240-mal `unsafe`, ebenfalls nicht mehr gepflegt
+  (RUSTSEC-2024-0449, seit 2026-10-12 in der Advisory-Datenbank). Beide sind
+  aus dem Abhängigkeitsgraphen verschwunden. `serde-saphyr` und sein Parser
+  sind `#![forbid(unsafe_code)]`. Gelesen wird an einer Stelle,
+  `redact_patterns::yaml`, und so wie bisher: nur `true`/`false` sind
+  Wahrheitswerte (nicht `yes`/`on`), doppelte Schlüssel sind ein Fehler, `<<`
+  ist ein unbekannter Schlüssel, und keine Fehlermeldung zitiert einen
+  Ausschnitt der Datei. Ein Unterschied bleibt: ein Zahlenwert an einer
+  Stelle, die Text erwartet (`theme: 3`), wird als Text gelesen statt sofort
+  abgelehnt — er scheitert dann an der Prüfung des Werts.
+* Die Meldung „ein Wert hat die falsche Art“ der Einstellungsdatei erkennt
+  auch die Meldungen von `serde-saphyr` (Test
+  `a_value_of_the_wrong_kind_is_named_as_such`).
+
+### Bekannt
+
+* `cargo audit` meldet drei neue, nicht mehr gepflegte Crates im Linux-Bau
+  der Oberfläche: `zvariant`, `zvariant_derive` und `zbus_names`
+  (RUSTSEC-2026-0370 bis -0372, seit 2026-10-16). Sie sind in `zbus` 6
+  aufgegangen und kommen über `rfd` → `ashpd` → `zbus` 5. Keine
+  Schwachstelle; auflösen lässt es sich erst, wenn `ashpd` und `rfd` auf
+  `zbus` 6 umstellen. Das gtk3-Backend von `rfd` wäre kein Ausweg — `gtk-rs`
+  0.18 ist selbst eingestellt. Die Begründung steht im Job `supply-chain` in
+  `.github/workflows/ci.yml`.
+
+---
+
 ## 0.7.1 — 2026-10-16
 
 Bereich: `git log v0.7.0..v0.7.1`.

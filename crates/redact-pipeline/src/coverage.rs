@@ -45,6 +45,12 @@
 ///
 /// Die Textmarken sind bewusst kurz und stehen im *unveränderlichen* Teil der
 /// jeweiligen Meldung (nicht in einer Zahl, nicht in einem Objektnamen).
+///
+/// Jede Marke enthält ein gewöhnliches Leerzeichen. Darauf beruht, dass ein
+/// Name aus der Eingabedatei keine Marke in eine Lückenmeldung schmuggeln
+/// kann: `redact-pdf` setzt solche Namen nur über `redact_pdf::label` ein,
+/// und das macht aus jedem Leerraum ein geschütztes Leerzeichen. Der Test
+/// `jede_marke_enthaelt_ein_leerzeichen` hält die Voraussetzung fest.
 /// Der Test `every_known_warning_is_sorted_the_way_it_is_meant` unten hält sie
 /// gegen den Wortlaut, mit dem `redact-pdf` und [`crate::audit::Effects`] sie
 /// heute erzeugen; `redact-cli/tests/incomplete.rs` prüft einen Fall
@@ -607,6 +613,33 @@ mod tests {
         }
         // Gegenprobe: ohne Abschaltung gibt es die Meldung gar nicht.
         assert_eq!(crate::detection_notice(&crate::Config::default()), None);
+    }
+
+    /// Die Voraussetzung von `redact_pdf::label`: jede Marke enthält ein
+    /// gewöhnliches Leerzeichen, und keine ein geschütztes. Sonst passte eine
+    /// Marke in einen Namen aus der Eingabedatei.
+    #[test]
+    fn jede_marke_enthaelt_ein_leerzeichen() {
+        for (marke, _) in NOT_A_COVERAGE_GAP {
+            assert!(marke.contains(' '), "„{marke}“ ohne Leerzeichen");
+            assert!(!marke.contains('\u{a0}'), "„{marke}“ mit U+00A0");
+        }
+    }
+
+    /// Ein Name aus der Datei, der eine Marke wörtlich trägt, macht aus einer
+    /// Lückenmeldung keine Mitteilung (Experten-Review, Befund CLI-1: ein
+    /// XObject `/enthalten#20Rasterbilder` ohne `/Subtype` lief mit
+    /// Rückgabewert 0 durch, die IBAN darin blieb stehen).
+    #[test]
+    fn ein_name_aus_der_datei_versteckt_keine_luecke() {
+        for (marke, _) in NOT_A_COVERAGE_GAP {
+            let name = redact_pdf::label(marke.as_bytes());
+            let warnung = format!(
+                "XObject „{name}“ hat kein bekanntes /Subtype (weder /Form noch \
+                 /Image); sein Inhalt wurde nicht durchsucht."
+            );
+            assert!(is_coverage_gap(&warnung), "{warnung}");
+        }
     }
 
     /// Die Voreinstellung ist „Lücke“ — eine unbekannte Warnung darf nicht

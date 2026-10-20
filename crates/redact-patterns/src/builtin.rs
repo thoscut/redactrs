@@ -103,9 +103,13 @@ pub const MAX_KEYWORD_PREFIX: usize = 24;
 /// `\b` genügt bei reinen Ziffernfolgen nicht, weil eine Kontonummer sonst
 /// innerhalb einer längeren Ziffernkette oder innerhalb einer IBAN anschlagen
 /// würde. Deshalb wird durchgängig mit Look-around gearbeitet.
+///
+/// Das Argument ist eine Alternative von Schreibweisen — die geschlossene
+/// Form und die gedruckte Gruppierung („37040044" | „370 400 44"); der
+/// Look-around gilt für jede davon.
 macro_rules! ziffern {
-    ($n:expr) => {
-        concat!(r"(?<![0-9A-Za-z])[0-9]{", $n, r"}(?![0-9A-Za-z])")
+    ($formen:expr) => {
+        concat!(r"(?<![0-9A-Za-z])(?:", $formen, r")(?![0-9A-Za-z])")
     };
 }
 
@@ -131,9 +135,25 @@ macro_rules! ziffern {
 /// Die Begründung im Einzelnen steht an der Definition selbst.
 pub fn builtin_patterns() -> Vec<PatternDef> {
     vec![
+        // Zwischen den Ziffern sind bis zu zwei Trennzeichen erlaubt, und nicht
+        // nur das ASCII-Leerzeichen: Textsatz und Bank-PDFs setzen
+        // Vierergruppen gern mit geschütztem (U+00A0), schmalem geschütztem
+        // (U+202F) oder schmalem Leerzeichen (U+2009), und Blocksatz dehnt eine
+        // Lücke auf zwei Zeichen. Vorher fiel eine solche IBAN komplett durch.
+        //
+        // Als Trenner gilt **jeder** Leerraum (`\s`, in `fancy-regex` die
+        // Unicode-Eigenschaft `White_Space` — dieselbe Menge wie
+        // `char::is_whitespace`), nicht mehr eine Liste von vier Zeichen: ein
+        // Ziffernleerzeichen (U+2007), ein Halbgeviert (U+2002) oder ein
+        // Tabulator aus einer `/ToUnicode`-Tabelle trennt für den Leser genauso
+        // und ließ die IBAN vorher durchfallen. Der Validator streicht vor der
+        // Prüfsumme genau diese Menge. Die Obergrenze `{0,2}` hält den Aufwand
+        // je Ziffer konstant. (Unsichtbare Zeichen — Steuerzeichen, Breite
+        // null, weicher Trennstrich — nimmt schon die Textextraktion aus der
+        // Zeile, siehe `redact_pdf::extract`.)
         def(
             "iban_de",
-            r"(?<![0-9A-Za-z])DE[0-9]{2}(?: ?[0-9]){18}(?![0-9A-Za-z])",
+            r"(?<![0-9A-Za-z])DE[0-9]{2}(?:\s{0,2}[0-9]){18}(?![0-9A-Za-z])",
             "Deutsche IBAN (DE + 2 Prüfziffern + 18 Ziffern, optional gruppiert)",
             0.95,
             true,
@@ -141,7 +161,7 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
         ),
         def(
             "iban_intl",
-            r"(?<![0-9A-Za-z])[A-Z]{2}[0-9]{2}(?: ?[0-9A-Z]){11,30}(?![0-9A-Za-z])",
+            r"(?<![0-9A-Za-z])[A-Z]{2}[0-9]{2}(?:\s{0,2}[0-9A-Z]){11,30}(?![0-9A-Za-z])",
             "Internationale IBAN (standardmäßig aus, weil zu unspezifisch)",
             0.9,
             false,
@@ -196,9 +216,14 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
             // Korrektur zu #78 — siehe [`MAX_KEYWORD_PREFIX`]. Mit `*` an
             // dieser Stelle sprengte eine Zeile aus 1 600 Buchstaben das
             // Rückschritt-Budget und beendete den ganzen Lauf mit einem Fehler.
+            //
+            // „Nr." darf mit Bindestrich, Leerzeichen oder direkt anschließen,
+            // auch hinter der Abkürzung: „Kto.-Nr.:" und „Konto Nr." sind auf
+            // Auszügen und Formularen üblich und brachten vorher keinen
+            // Kontextbonus — die Kontonummer daneben blieb stehen.
             mit_kontext!(
-                r"(?i:[a-zäöüß]{0,24}konto(?:nummer|-?nr\.?)?|kto\.?)",
-                r"(?<![0-9A-Za-z])(?:[0-9]{4,10}(?:[ ][0-9]{2,6})+|[0-9]{6,10})(?![0-9A-Za-z])"
+                r"(?i:[a-zäöüß]{0,24}konto(?:nummer|[- ]?nr\.?)?|kto\.?(?:-?nr\.?)?)",
+                r"(?<![0-9A-Za-z])(?:[0-9]{4,10}(?:\s[0-9]{2,6})+|[0-9]{6,10})(?![0-9A-Za-z])"
             ),
             "Kontonummer (6–10 Ziffern nach einem Schlüsselwort wie „Kto.“)",
             0.85,
@@ -209,7 +234,14 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
         ),
         def_ctx(
             "blz",
-            mit_kontext!(r"(?i:blz|bankleitzahl)", ziffern!("8")),
+            // Neben der geschlossenen Form auch die gedruckte Gruppierung
+            // 3-3-2 („370 400 44"), wie sie auf Überweisungsträgern und älteren
+            // Auszügen steht. Sie ist an genau diese Aufteilung gebunden, damit
+            // nicht jede Ziffernfolge mit Lücken als BLZ durchgeht.
+            mit_kontext!(
+                r"(?i:blz|bankleitzahl)",
+                ziffern!(r"[0-9]{8}|[0-9]{3}\s[0-9]{3}\s[0-9]{2}")
+            ),
             "Bankleitzahl (8 Ziffern nach „BLZ“ oder „Bankleitzahl“)",
             0.8,
             // Bewusst niedriger als der entsprechende Wert von `konto_nr`:
@@ -245,7 +277,27 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
         ),
         def(
             "credit_card",
-            r"(?<![0-9A-Za-z])[0-9](?:[ -]?[0-9]){12,18}(?![0-9A-Za-z])",
+            // **Warum feste Gruppen statt „Trenner nach jeder Ziffer"?** Das
+            // alte `[0-9](?:[ -]?[0-9]){12,18}` war gierig und kannte keine
+            // Gruppengrenzen: in „Karte 4539 1488 0343 6467 12.03." fraß es den
+            // Tag „12" mit, die Luhn-Prüfung über 18 Ziffern scheiterte, und
+            // die Suche ging *hinter* dem Treffer weiter — die gültige Karte
+            // blieb ungeschwärzt. Eine Prüfsumme kann ein Regex nicht
+            // nachrechnen, also muss das Muster selbst wissen, wo eine Nummer
+            // endet. Deshalb nur die gedruckten Formate:
+            //
+            // * ungruppiert 13–19 Ziffern,
+            // * 4-4-4-4 (Visa, Mastercard, …), optional mit einem dreistelligen
+            //   fünften Block (19-stellige Maestro/UnionPay),
+            // * 4-6-5 (Amex, 15) und 4-6-4 (Diners, 14).
+            //
+            // Restrisiko: folgt einer 4-4-4-4-Karte eine *dreistellige* Zahl
+            // mit einfachem Trenner, wird sie als fünfter Block gelesen.
+            //
+            // Trenner ist hier wie bei Konto-Nr., BLZ und Steuer-ID jeder
+            // **einzelne** Leerraum (`\s`) — geschützt, schmal oder Tabulator —
+            // oder der Bindestrich; vorher nur das ASCII-Leerzeichen.
+            r"(?<![0-9A-Za-z])(?:[0-9]{13,19}|[0-9]{4}(?:[\s-][0-9]{4}){3}(?:[\s-][0-9]{3})?|[0-9]{4}[\s-][0-9]{6}[\s-][0-9]{4,5})(?![0-9A-Za-z])",
             "Kreditkartennummer (13–19 Ziffern, Luhn-geprüft)",
             0.9,
             true,
@@ -254,8 +306,13 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
         def_ctx(
             "steuer_id",
             mit_kontext!(
-                r"(?i:steuer-?(?:id|nr\.?|nummer|identifikationsnummer)|steuerliche[ ]+identifikationsnummer|id-?nr\.?)",
-                ziffern!("11")
+                // „Identifikationsnummer" allein ist die amtliche Bezeichnung
+                // auf Lohnsteuerbescheinigung und Bescheid; die USt-IdNr. hat
+                // ein anderes Format (DE + 9 Ziffern) und trifft hier nicht.
+                r"(?i:steuer-?(?:id|nr\.?|nummer|identifikationsnummer)|steuerliche[ ]+identifikationsnummer|identifikationsnummer|id-?nr\.?)",
+                // Neben der geschlossenen Form die amtlich gedruckte
+                // Gruppierung 2-3-3-3 („12 345 678 903").
+                ziffern!(r"[0-9]{11}|[0-9]{2}\s[0-9]{3}\s[0-9]{3}\s[0-9]{3}")
             ),
             "Steuerliche Identifikationsnummer (11 Ziffern nach „Steuer-ID“)",
             0.9,
@@ -523,8 +580,8 @@ mod tests {
                 "jede Wiederholung beginnt mit einem Punkt",
             ),
             (
-                r"(?:[ ][0-9]{2,6})+",
-                "jede Wiederholung beginnt mit einem Leerzeichen",
+                r"(?:\s[0-9]{2,6})+",
+                "jede Wiederholung beginnt mit einem Leerraumzeichen",
             ),
         ];
 

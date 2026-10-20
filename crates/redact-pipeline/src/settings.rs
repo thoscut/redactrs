@@ -21,10 +21,10 @@
 //!
 //! ## Warum YAML
 //!
-//! `serde_yaml` steht bereits im Abhängigkeitsbaum (`--patterns-config` liest
-//! YAML), es kommt also keine Abhängigkeit hinzu. Gegenüber JSON hat YAML für
-//! eine von Hand gepflegte Datei den entscheidenden Vorteil, Kommentare zu
-//! erlauben — und diese Datei wird von Hand gepflegt.
+//! YAML liest bereits `--patterns-config` ([`redact_patterns::yaml`]), es
+//! kommt also keine Abhängigkeit hinzu. Gegenüber JSON hat YAML für eine von
+//! Hand gepflegte Datei den entscheidenden Vorteil, Kommentare zu erlauben —
+//! und diese Datei wird von Hand gepflegt.
 //!
 //! ## Wo die Datei liegt
 //!
@@ -197,8 +197,8 @@ impl Settings {
     ///
     /// ## Warum die Meldung den Dateiinhalt nicht wiedergibt
     ///
-    /// `serde_yaml` schreibt in seine Fehlermeldung, woran es lag — und dazu
-    /// gehört der Text, der nicht gepasst hat. Bei einer Einstellungsdatei ist
+    /// `serde_yaml` (bis 0.7.1 der YAML-Leser) schrieb in seine Fehlermeldung,
+    /// woran es lag — und dazu gehört der Text, der nicht gepasst hat. Bei einer Einstellungsdatei ist
     /// das genau richtig. Nur ist nicht gesichert, dass hier eine
     /// Einstellungsdatei liegt: `REDACT_RS_CONFIG` zeigt auf einen beliebigen
     /// Pfad, und an der Vorgabestelle kann ein Symlink stehen. Zeigt einer der
@@ -225,14 +225,14 @@ impl Settings {
         if text.trim().is_empty() {
             return Ok(Self::default());
         }
-        let settings: Self = serde_yaml::from_str(text).map_err(describe_yaml_error)?;
+        let settings: Self = redact_patterns::yaml::from_str(text).map_err(describe_yaml_error)?;
         settings.validate()?;
         Ok(settings)
     }
 
     /// Prüft, was `serde` nicht prüfen kann.
     fn validate(&self) -> Result<()> {
-        // `padding: .nan` ist gültiges YAML, und `serde_yaml` macht daraus
+        // `padding: .nan` ist gültiges YAML, und der YAML-Leser macht daraus
         // klaglos ein `f64::NAN`. Siehe [`check_padding`].
         check_padding(self.padding)?;
         if !THEMES.contains(&self.theme.as_str()) {
@@ -331,8 +331,14 @@ pub fn check_padding(padding: f64) -> Result<()> {
     Ok(())
 }
 
-/// Baut aus einem `serde_yaml`-Fehler eine Meldung **ohne** Dateiinhalt.
-fn describe_yaml_error(error: serde_yaml::Error) -> RedactError {
+/// Baut aus einem Fehler des YAML-Lesers eine Meldung **ohne** Dateiinhalt.
+///
+/// Die Art wird am Anfang der Meldung erkannt. `unknown field`, `missing
+/// field` und `duplicate` stammen von `serde` bzw. sind bei `serde_yaml` und
+/// `serde-saphyr` gleich. Ein Wert falscher Art heißt bei `serde_yaml`
+/// `invalid type`/`invalid value`, bei `serde-saphyr` `invalid floating point`,
+/// `expected sequence start` und ähnlich — deshalb die Vorsilben.
+fn describe_yaml_error(error: redact_patterns::yaml::Error) -> RedactError {
     let raw = error.to_string();
     let kind = if raw.starts_with("unknown field") {
         "unbekannter Schlüssel"
@@ -340,7 +346,7 @@ fn describe_yaml_error(error: serde_yaml::Error) -> RedactError {
         "ein Schlüssel fehlt"
     } else if raw.starts_with("duplicate") {
         "ein Schlüssel steht doppelt"
-    } else if raw.starts_with("invalid type") || raw.starts_with("invalid value") {
+    } else if raw.starts_with("invalid ") || raw.starts_with("expected ") {
         "ein Wert hat die falsche Art"
     } else {
         "die Datei ist kein YAML dieser Form"
@@ -492,6 +498,23 @@ mod tests {
             .expect_err("unbekannter Schlüssel")
             .to_string();
         assert!(error.contains("unbekannter Schlüssel"), "{error}");
+    }
+
+    /// Ein Wert falscher Art heißt so — auch mit den Meldungen von
+    /// `serde-saphyr`, die anders anfangen als die von `serde_yaml`.
+    #[test]
+    fn a_value_of_the_wrong_kind_is_named_as_such() {
+        for text in [
+            "padding: abc\n",
+            "min_confidence: x\n",
+            "patterns: ja\n",
+            "[]\n",
+        ] {
+            let error = Settings::from_yaml(text)
+                .expect_err("Wert falscher Art")
+                .to_string();
+            assert!(error.contains("falsche Art"), "{text:?}: {error}");
+        }
     }
 
     // ------------------------------------------ Befund 7: fremder Inhalt

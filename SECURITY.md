@@ -276,7 +276,13 @@ läuft und an einer verschlüsselten Datei nur die Hälfte sehen kann:
   Nachgemessen an einer 44-MB-Dictionary-Bombe mit `/Encrypt` im Trailer — sie
   wird mit **und** ohne Passwort mit derselben Budgetmeldung abgelehnt.
 * **Nach** der Entschlüsselung läuft dieselbe Prüfung ein zweites Mal, jetzt auf
-  dem entschlüsselten Dokument (`redact_pipeline::check_limits_after_decryption`).
+  dem entschlüsselten Dokument (`redact_pdf::document::check_limits_after_decryption`,
+  aufgerufen aus `finish_decrypted`). Das gilt für **beide** Wege dorthin:
+  `--password` und das leere Benutzerpasswort, das `lopdf` beim Laden von sich
+  aus probiert. Bis Runde 2 lief die Prüfung nur auf dem ersten Weg; eine
+  131-kB-Datei mit leerem Benutzerpasswort (nur ein Eigentümerpasswort, der
+  übliche „Rechteschutz“) trieb den Lauf ohne `--password` auf 5,4 GB, ebenso
+  `--check-leaks`.
   Dazu wird das Dokument serialisiert — die Streams stehen darin als das, was
   sie sind: komprimiert, aber nicht mehr verschlüsselt. Es misst also
   derselbe Code mit denselben Grenzen und denselben Meldungen wie bei einer
@@ -1131,6 +1137,43 @@ lautet dann „nicht geprüft“, nicht „nicht gefunden“ (Rückgabewert 3, s
 README, „Prüfen, ob die Schwärzung gewirkt hat“). Seine gepackten Bytes
 durchsucht die Rohsicht trotzdem.
 
+### Prädiktoren und Bildfilter (Experten-Review, Oktober 2026)
+
+Drei Wege führten bis 0.7.1 an `--max-decompressed-mb` vorbei. Gemessen am
+Release-Binary mit `--max-decompressed-mb 16`:
+
+| Weg | Datei | vorher |
+|---|---|---|
+| `/DecodeParms << /Predictor 12 /Columns 2000000000 >>` am Seiteninhalt | 504 Byte | 3 821 MB, 8,3 s, Exit 1 |
+| Bild-Flate, dessen Rückfall auf rohes Deflate ab Byte 0 las (Vorprüfung ab Byte 2) | 1 MB | 1 100 MB, **Exit 0** |
+| Inline-Bild `BI … /F /Fl ID <Bombe> EI` | 2 MB | 2 131 MB, **Exit 0** |
+
+Was jetzt gilt:
+
+* **Die Vorprüfung liest `/DecodeParms`.** Eine Prädiktorzeile, die länger ist
+  als die entpackten Daten, wird gegen das Budget verbucht; ist sie absurd lang
+  (mehr als das Achtfache der Daten plus 64 KiB) oder läuft die Rechnung über,
+  wird die Datei abgelehnt. Das gilt auch für Objektströme, die `lopdf` schon
+  beim Laden entpackt.
+* **Der Prädiktor selbst legt nichts an, was länger ist als die Daten.** Die
+  Zeilenlänge ist `ceil(Colors × BPC × Columns / 8)` mit geprüfter
+  Arithmetik; vorher rechnete der Code mit mindestens 8 Bit je Komponente.
+* **Jeder Bildfilter ist gedeckelt**: Flate, LZW und RunLength entpacken beim
+  Schwärzen höchstens deklarierte Bildpunkte × 8 + 1 MiB, Inline-Bilder
+  eingeschlossen. Der Flate-Rückfall liest wie die Vorprüfung ab Byte 2.
+* **`/F` ist an einem Bild-XObject kein Filter**, sondern eine
+  Dateispezifikation; die Abkürzung gilt nur im Inline-Bild.
+* **Ein Prädiktor, der sich nicht rückgängig machen lässt** (ungültiger
+  PNG-Zeilenfilter, TIFF-Prädiktor 2 mit nicht unterstützter Bittiefe,
+  unbekannter `/Predictor` an einem Bild), macht das Bild unlesbar: der Lauf
+  lehnt ab bzw. warnt mit `--allow-undecodable-images`. Vorher fiel der Code
+  still auf die Rohzeilen zurück — das Bild wurde geschert gelesen, die
+  Schwärzung traf die falschen Bytes, und ein Teil des Geheimnisses blieb im
+  neu kodierten Bild sichtbar. TIFF-Prädiktor 2 wird jetzt angewandt.
+
+Belege: `crates/redact-pdf/tests/experten_review_grenzen.rs` (Spitzenspeicher
+über einen zählenden Allokator) und `experten_review_praediktor.rs`.
+
 ### Was die Zahl 62–100 nicht ist
 
 Sie ist der Preis des **`Operation`-Vektors**, nicht der Spitzenbedarf eines
@@ -1525,14 +1568,18 @@ Grafiktreiber — und stehen deshalb in keiner der beiden Tabellen.
 
 Zwei Nachbarn, die nicht in die Tabellen gehören, aber genannt sein sollen:
 
-* **`unsafe-libyaml` 0.2.11 (240 `unsafe`, transpiliertes C)** liegt unter
-  `serde_yaml` und liest Einstellungs- und Musterdatei; `serde_json` 1.0.151
-  (16) liest Review- und Regionsdateien. Nach dem Bedrohungsmodell sind das
-  alles vertrauenswürdige Eingaben — sie stehen deshalb nicht in der Tabelle.
-  Unter den Bibliotheken, die diese Dateien lesen, ist `unsafe-libyaml` mit
-  Abstand die größte `unsafe`-Fläche (`serde_yaml` selbst: 60, `serde_json`:
-  16, `csv`: 4). Wer Musterdateien aus fremder Hand einliest, verlässt das
-  Bedrohungsmodell an dieser Stelle.
+* **`serde-saphyr` 1.1.0** liest seit 0.7.2 Einstellungs- und Musterdatei
+  (über `redact_patterns::yaml`); `serde_json` 1.0.151 (16) liest Review-
+  und Regionsdateien. Nach dem Bedrohungsmodell sind das alles
+  vertrauenswürdige Eingaben — sie stehen deshalb nicht in der Tabelle.
+  `serde-saphyr` und sein Parser `granit-parser` sind
+  `#![forbid(unsafe_code)]`; `unsafe` bringt nur `arraydeque` 0.5.1 (72)
+  darunter mit. Bis 0.7.1 lag hier `unsafe-libyaml` 0.2.11 unter
+  `serde_yaml` — 240 `unsafe`, aus C transpiliert, nicht mehr gepflegt
+  (RUSTSEC-2024-0449) und mit Abstand die größte `unsafe`-Fläche unter den
+  Bibliotheken, die diese Dateien lesen. Wer Musterdateien aus fremder Hand
+  einliest, verlässt das Bedrohungsmodell trotzdem an dieser Stelle: die
+  Fläche ist kleiner, nicht null.
 * **`ttf-parser` 0.25.1** ist nicht mehr gepflegt (RUSTSEC-2026-0192) und
   liegt im Abhängigkeitsgraphen, ist aber ausschließlich über
   `lopdf::FontData::new` erreichbar, und redact-rs ruft das nirgends auf
@@ -1682,7 +1729,7 @@ Was heute gilt:
   | Grenze | Weg in der Oberfläche |
   |---|---|
   | `--max-input-mb` | `AppState::load_document` liest über `redact_pipeline::read_input(path, self.config.max_input_bytes)` statt über `std::fs::read` |
-  | `--max-decompressed-mb`, `--max-parsed-mb`, Tiefengrenze | `load_document` → `load_from_bytes_with_limits(bytes, &config.limits)`, und nach einer Entschlüsselung `check_limits_after_decryption` |
+  | `--max-decompressed-mb`, `--max-parsed-mb`, Tiefengrenze | `load_document` → `load_from_bytes_with_limits(bytes, &config.limits)`, und nach jeder Entschlüsselung (auch mit leerem Benutzerpasswort) `check_limits_after_decryption` |
   | `--max-image-mb` | über `config.max_decoded_image_bytes` im Export |
   | `--max-candidates` | `AppState::analyze` → `redact_pipeline::collect_regions_for` → `check_candidate_budget` |
   | Aufwandskonto und Glyphengrenze je Seite | im Interpreter, also unterhalb beider Programme |

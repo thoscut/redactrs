@@ -79,10 +79,18 @@ impl CsvBookingLoader {
             .trim(csv::Trim::All)
             .from_reader(data);
 
-        let headers = rdr
+        // Spaltennamen einmal klein schreiben und genau diese Fassung für
+        // Prüfung *und* Deserialisierung verwenden. Vorher prüfte
+        // `check_headers` ohne Rücksicht auf Groß-/Kleinschreibung, serde
+        // verlangte aber exakt `id`: eine Kopfzeile `ID,List_Type,Pattern`
+        // bestand die Prüfung und scheiterte dann an jeder Zeile mit
+        // „Spalte `id` ist leer".
+        let headers: csv::StringRecord = rdr
             .headers()
             .map_err(|e| RedactError::Booking(format!("Kopfzeile nicht lesbar: {e}")))?
-            .clone();
+            .iter()
+            .map(|h| h.trim().to_ascii_lowercase())
+            .collect();
         check_headers(&headers)?;
 
         let mut entries: Vec<BookingEntry> = Vec::new();

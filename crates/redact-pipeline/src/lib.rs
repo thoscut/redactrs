@@ -46,9 +46,12 @@ use redact_core::{
     RedactError, Redaction, Region, Result, ReviewFile, ReviewInput, TextRun, REVIEW_SUFFIX,
 };
 use redact_patterns::PatternMatcher;
+/// Liegt seit Runde 2 in `redact-pdf`, damit auch der Lader selbst (leeres
+/// Benutzerpasswort) und `--check-leaks` sie aufrufen; hier weiter erreichbar.
+pub use redact_pdf::document::check_limits_after_decryption;
 use redact_pdf::document::{
-    check_target, load_from_bytes_with_limits, prescan_pending, sane_page_boxes, save_to_bytes,
-    validate, write_file, Limits, SaneBox, WriteOptions,
+    check_target, finish_decrypted, load_from_bytes_with_limits, sane_page_boxes, write_file,
+    Limits, SaneBox, WriteOptions,
 };
 use redact_pdf::{PdfExtractor, PdfRedactor, PdfRenderer};
 
@@ -537,189 +540,15 @@ pub fn load_document(bytes: &[u8], config: &Config) -> Result<Document> {
         return Err(rejected);
     };
 
-    let doc = Document::load_mem_with_options(bytes, LoadOptions::with_password(password.reveal()))
-        .map_err(|_| RedactError::Pdf(WRONG_PASSWORD.to_string()))?;
-    validate(&doc)?;
-    check_limits_after_decryption(&doc, &config.limits)?;
+    let mut doc =
+        Document::load_mem_with_options(bytes, LoadOptions::with_password(password.reveal()))
+            .map_err(|_| RedactError::Pdf(WRONG_PASSWORD.to_string()))?;
+    // Dieselbe Nacharbeit wie beim leeren Benutzerpasswort, das
+    // `load_from_bytes_with_limits` selbst entschlüsselt: Revisionsmarke,
+    // Strukturprüfung, Budgets. Die Marke fehlte hier früher — die Warnung
+    // „mehrere Revisionen“ verschwand genau bei Eingaben mit `--password`.
+    finish_decrypted(bytes, &mut doc, &config.limits)?;
     Ok(doc)
-}
-
-/// Wendet die Budgets und die Tiefengrenze auf ein **entschlüsseltes**
-/// Dokument an.
-///
-/// ## Wie
-///
-/// Das entschlüsselte Dokument wird serialisiert und die Vorprüfung läuft über
-/// diese Bytes. Das ist keine Umständlichkeit, sondern der Punkt: die Streams
-/// stehen dort als das, was sie sind — komprimiert, aber nicht mehr
-/// verschlüsselt —, und damit misst hier **derselbe Code mit denselben Grenzen
-/// und denselben Meldungen** wie bei einer unverschlüsselten Datei. Eine
-/// zweite Buchhaltung neben [`redact_pdf::document::prescan`] wäre eine
-/// zweite Stelle, an der die Zahlen auseinanderlaufen könnten.
-///
-/// Teuer ist das nicht: serialisiert wird der komprimierte Zustand, für die
-/// gemessene Bombe rund 200 kB. Das Auspacken übernimmt die Vorprüfung, und
-/// die packt von vornherein nur bis zum Budget aus.
-///
-/// ## Wann es zu spät wäre
-///
-/// Erst *nach* dem Laden zu prüfen ist nur deshalb vertretbar, weil das Laden
-/// selbst billig ist: `lopdf` legt Streams als Rohbytes ab und packt sie nicht
-/// aus. Der teure Teil ist das, was danach kommt — die Zerlegung des
-/// Seiteninhalts in Operationen (rund 60 bis 100 Byte je Byte Stream **für den
-/// `Operation`-Vektor allein**; der Spitzenbedarf eines Laufs liegt höher,
-/// siehe `SECURITY.md`) — und der kommt erst nach dieser Prüfung.
-pub fn check_limits_after_decryption(doc: &Document, limits: &Limits) -> Result<()> {
-    // 1. Die bereits im Speicher stehenden Objekte, **ohne Waisen zu übergehen**.
-    //    Siehe [`check_expanded_objects`] — das ist die Hälfte, die
-    //    [`save_to_bytes`] nicht sieht.
-    check_expanded_objects(doc, limits)?;
-
-    // 2. Die serialisierte Datei, damit auch Streams (Content-Bomben) am selben
-    //    Budget gemessen werden — die stehen im Speicher noch komprimiert und
-    //    fallen unter Schritt 1 nicht auf.
-    let bytes = save_to_bytes(doc)?;
-    prescan_pending(&bytes, limits)
-        .and_then(|pending| pending.finish(doc))
-        .map_err(|e| match e {
-            // Der Zusatz sagt, welcher der beiden Durchgänge angeschlagen hat —
-            // die Datei sah von außen harmlos aus, und das gehört in die Meldung.
-            //
-            // Bewusst „entschlüsselt“ und nicht „verschlüsselt“: [`password_required`]
-            // sucht nach letzterem, und die Oberfläche fragte sonst wieder nach
-            // einem Passwort, das längst gepasst hat.
-            RedactError::Pdf(msg) => RedactError::Pdf(format!("entschlüsselt gilt weiter: {msg}")),
-            other => other,
-        })
-}
-
-/// Prüft die **schon entpackten** Objekte im Speicher gegen `max_parsed_bytes`.
-///
-/// ## Warum diese zweite Prüfung nötig ist — gemessen
-///
-/// [`check_limits_after_decryption`] serialisierte bisher nur über
-/// [`save_to_bytes`] und ließ [`prescan`] über die Bytes laufen. Das hat eine
-/// Lücke, und die ist ausgemessen: `save_to_bytes` ruft `prune_unreachable`,
-/// **bevor** es serialisiert. Ein Objekt, das nur über die Querverweistabelle
-/// erreichbar ist und von keinem anderen Objekt referenziert wird — eine
-/// **Waise** —, fliegt dabei heraus und wird nie gemessen.
-///
-/// Eine Dictionary-Bombe in einem verschlüsselten Objekt-Stream nutzt genau
-/// das aus. Die Vorprüfung der Rohbytes ([`load_from_bytes_with_limits`]) sieht
-/// den Objekt-Stream nur als RC4-Rauschen und kann ihn nicht auspacken.
-/// `Document::load_mem_with_options` entschlüsselt ihn dann und expandiert den
-/// darin steckenden Riesen-Dict in `document.objects` — **vor** dieser Prüfung.
-///
-/// Gemessen (Release): eine 4,7-MB-Datei mit einem einzigen Dictionary aus zwei
-/// Millionen Einträgen, als Waise gebaut, trieb VmHWM auf **+824 MB** und lief
-/// mit dem Vorgabebudget von 16 MB **fehlerfrei durch** — `save_to_bytes` warf
-/// die Waise weg, `prescan` sah nichts. Dieselbe Bombe *erreichbar* gebaut wurde
-/// bei genau demselben Budget abgelehnt. Der Unterschied war allein die
-/// Erreichbarkeit, und die entscheidet ein Angreifer. Die committete, kleine
-/// Fassung samt Nachweis steht in `redact-pipeline/tests/z7_objstm_bombe.rs` und
-/// `redact-pipeline/src/testdata/bombe_objstm_verschluesselt.pdf`.
-///
-/// ## Was hier gemessen wird
-///
-/// Die **serialisierte Syntaxgröße** aller Objekte — der einzelne Dict-Eintrag
-/// mit denselben paar Byte, mit denen ihn `prescan` im Datei-Rumpf zählt, und
-/// gegen dasselbe Budget. So bekommt ein erreichbares und ein verwaistes Objekt
-/// dieselbe Antwort, und ein gewöhnliches verschlüsseltes Dokument (dessen
-/// Objekte zusammen weit unter dem Budget liegen) läuft weiter durch.
-///
-/// **Streams zählen hier nur mit ihrem Dictionary.** Ihr Inhalt steht im
-/// Speicher noch komprimiert; ihn misst Schritt 2 über `prescan`, das ihn
-/// auspackt. Hier ihn aufzublasen hieße, die Bombe zum Messen erst scharf zu
-/// machen.
-///
-/// ## Was diese Prüfung **nicht** heilt
-///
-/// Der Spitzenspeicher entsteht **in** `load_mem_with_options`, also bevor eine
-/// einzige Zeile hier läuft — die 824 MB oben sind schon belegt, wenn diese
-/// Funktion beginnt. `lopdf` bietet keinen Haken, um das Auspacken eines
-/// verschlüsselten Objekt-Streams zu begrenzen, und der Inhalt lässt sich vor
-/// dem Entschlüsseln nicht sehen. Was diese Prüfung leistet: die Datei wird
-/// **abgelehnt statt angenommen**, und zwar bevor die Analyse (Extraktion,
-/// Konfliktauflösung, Schwärzung) auf demselben Riesen-Dict noch einmal
-/// Speicher darauflegt — und bevor `save_to_bytes` ihn für eine *erreichbare*
-/// Bombe ein zweites Mal klont. Der Rest ist eine Grenze von `lopdf`, nicht von
-/// dieser Stelle; sie ist hier benannt, damit niemand sie für geschlossen hält.
-fn check_expanded_objects(doc: &Document, limits: &Limits) -> Result<()> {
-    let budget = limits.max_parsed_bytes;
-    let mut total: u64 = 0;
-    // Ein ausdrücklicher Arbeitsstapel statt Rekursion: eine tief verschachtelte
-    // Struktur soll die Prüfung nicht ihrerseits über den Stack kippen. `lopdf`
-    // deckelt die Tiefe zwar bei 100, aber diese Prüfung verlässt sich nicht auf
-    // fremde Grenzen.
-    let mut stack: Vec<&lopdf::Object> = doc.objects.values().collect();
-    while let Some(obj) = stack.pop() {
-        total = total.saturating_add(object_syntax_bytes(obj, &mut stack));
-        if total > budget {
-            return Err(RedactError::Pdf(format!(
-                "entschlüsselt gilt weiter: die entpackten Objekte überschreiten \
-                 das Budget von {} MB. Nach dem Entschlüsseln stehen sie als \
-                 `lopdf::Object` im Speicher — je Dictionary-Eintrag 200 bis 270 \
-                 Byte, unabhängig davon, wie kurz er geschrieben ist. Ein \
-                 verschlüsselter Objekt-Stream lässt sich vorher nicht auspacken; \
-                 deshalb wird hier gemessen. Ein wirklich so großes Dokument \
-                 lässt sich mit --max-parsed-mb durchlassen.",
-                budget / (1024 * 1024)
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// Die serialisierte Syntaxgröße **dieses einen** Objekts (ohne seine Kinder);
-/// Kinder werden auf `stack` gelegt, damit die Prüfung früh abbrechen kann.
-///
-/// Die Zahlen sind Näherungen an das, was `lopdf` schreiben würde — es kommt
-/// nicht auf das einzelne Byte an, sondern darauf, dass eine Bombe aus vielen
-/// Einträgen die Größenordnung ihrer Serialisierung erreicht (gemessen: rund 12
-/// Byte je Eintrag, hier `1 + Schlüssellänge + 1 + Wert`).
-fn object_syntax_bytes<'a>(obj: &'a lopdf::Object, stack: &mut Vec<&'a lopdf::Object>) -> u64 {
-    use lopdf::Object::*;
-    match obj {
-        Null => 4,
-        Boolean(_) => 5,
-        Integer(i) => integer_digits(*i),
-        Real(_) => 12,
-        Name(v) => 1 + v.len() as u64,
-        String(v, _) => 2 + v.len() as u64,
-        Reference(_) => 8,
-        Array(items) => {
-            for it in items {
-                stack.push(it);
-            }
-            2 + items.len() as u64
-        }
-        Dictionary(dict) => {
-            let mut own = 4u64;
-            for (k, v) in dict.iter() {
-                own += 2 + k.len() as u64;
-                stack.push(v);
-            }
-            own
-        }
-        Stream(s) => {
-            // Nur das Dictionary — der Inhalt steht komprimiert da und wird von
-            // `prescan` gemessen.
-            let mut own = 4u64;
-            for (k, v) in s.dict.iter() {
-                own += 2 + k.len() as u64;
-                stack.push(v);
-            }
-            own
-        }
-    }
-}
-
-/// Stellenzahl einer ganzen Zahl in Dezimalschreibweise (mit Vorzeichen).
-fn integer_digits(i: i64) -> u64 {
-    if i == 0 {
-        return 1;
-    }
-    (i < 0) as u64 + i.unsigned_abs().ilog10() as u64 + 1
 }
 
 /// Liest die Eingabedatei — mit einer Obergrenze **vor** dem ersten Byte.

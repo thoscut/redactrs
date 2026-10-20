@@ -1631,6 +1631,12 @@ pub struct ScanResult {
     /// [`ScanResult::form_placements`], wurde nie gezeichnet und deshalb auch
     /// nie gelesen.
     pub declared_forms: BTreeMap<ObjectId, Vec<u8>>,
+    /// Die Erscheinungsströme (`/AP`, `/MK`-Symbole) der Annotationen, die
+    /// diese Seite gelesen hat. Ihre Textoperationen stehen in
+    /// [`ScanResult::shows`] unter [`StreamKey::Form`]; die Schwärzung sucht
+    /// darin den geschwärzten Text auch dann, wenn die Annotation selbst
+    /// außerhalb jedes Bereichs liegt (Aufgabe #26).
+    pub appearances: BTreeSet<ObjectId>,
     /// Befunde, die den Nutzer erreichen müssen — allen voran Fonts, deren
     /// Text sich nicht dekodieren lässt. Aus solchem Text kann die Analyse
     /// nichts erkennen; ohne Warnung hielte man die Datei für sauber.
@@ -1861,6 +1867,10 @@ impl ContentSink for ScanResult {
             .or_insert_with(|| name.to_vec());
     }
 
+    fn appearance(&mut self, id: ObjectId) {
+        self.appearances.insert(id);
+    }
+
     fn warn(&mut self, message: String) {
         if self.seen_warnings.insert(message.clone()) {
             self.warnings.push(message);
@@ -1988,6 +1998,9 @@ pub trait ContentSink {
     /// der Interpreter nie betritt — siehe
     /// [`crate::extract::PdfExtractor::extract_with_warnings`].
     fn declares_form(&mut self, _id: ObjectId, _name: &[u8]) {}
+    /// Der Erscheinungsstrom `id` einer Annotation wird gleich gelesen
+    /// (siehe [`ScanResult::appearances`]).
+    fn appearance(&mut self, _id: ObjectId) {}
     /// Ein Befund, der den Nutzer erreichen muss (siehe [`ScanResult::warnings`]).
     fn warn(&mut self, _message: String) {}
 }
@@ -2140,11 +2153,17 @@ impl ColorSpace {
             ColorSpace::Lab => Rgb::gray((get(0) / 100.0).clamp(0.0, 1.0)),
             ColorSpace::Indexed { base, lookup } => {
                 let n = base.components();
-                let index = get(0).max(0.0) as usize;
-                let start = index * n;
-                if start + n > lookup.len() {
+                let entries = lookup.len().checked_div(n).unwrap_or(0);
+                if entries == 0 {
                     return Rgb::BLACK;
                 }
+                // Der Index stammt ungeprüft aus der Datei (`1e20 sc`): `as usize`
+                // sättigt, das anschließende `index * n` liefe über (Panik im
+                // Debug-Build, Slice-Panik im Release). Wie in PDF 32000-1,
+                // 8.6.6.3 wird auf den letzten gültigen Eintrag (`hival`)
+                // begrenzt — dann gibt es keine Multiplikation mit Überlauf mehr.
+                let index = (get(0).max(0.0) as usize).min(entries - 1);
+                let start = index * n;
                 let comps: Vec<f64> = lookup[start..start + n]
                     .iter()
                     .map(|b| *b as f64 / 255.0)
@@ -2257,6 +2276,15 @@ impl ColorSpace {
                         _ => None,
                     })
                     .unwrap_or_default();
+                // Die Palette endet bei `hival` (höchstens 255); was dahinter
+                // steht, ist kein Eintrag. Gekürzt wird hier, damit `to_rgb`
+                // einen zu großen Index auf `hival` begrenzt und nicht auf
+                // irgendein Byte hinter der Palette.
+                let mut lookup = lookup;
+                if let Some(hival) = items.get(2).and_then(as_f64) {
+                    let entries = hival.clamp(0.0, 255.0) as usize + 1;
+                    lookup.truncate(entries.saturating_mul(base.components()));
+                }
                 ColorSpace::Indexed {
                     base: Box::new(base),
                     lookup,
@@ -2319,7 +2347,10 @@ pub(crate) fn scan_page_with(
     }
     // Über [`crate::filters`], nicht `Document::get_page_content`: der eigene
     // Dekoder kennt `ASCIIHexDecode` und `RunLengthDecode`, `lopdf` nicht.
-    let content_data = crate::filters::page_content(doc, page_id);
+    let crate::filters::PageContent {
+        data: content_data,
+        split_tokens,
+    } = crate::filters::page_content_checked(doc, page_id);
     // Nicht `lopdf::content::Content::decode`: dessen Parser kennt kein
     // `BI … ID … EI`. Die Binärdaten hinter dem `ID` bringen ihn aus dem Tritt,
     // der Rest des Streams geht verloren — Text hinter einem Inline-Bild wäre
@@ -2362,6 +2393,19 @@ pub(crate) fn scan_page_with(
 
     let resources = page_resources(doc, page_id);
     let mut result = ScanResult::default();
+    // Eine `/Contents`-Grenze mitten in einem Wort (`… T` | `j ET`): pdf.js
+    // verbindet die Teile und zeichnet, poppler und mupdf trennen sie. Gelesen
+    // wurde die getrennte Fassung, siehe [`crate::filters::page_content_checked`].
+    if split_tokens > 0 {
+        result.warn(format!(
+            "Der Seiteninhalt ist auf mehrere Teilströme (/Contents) verteilt, und an \
+             {split_tokens} Grenze(n) liegt die Teilung mitten in einem Wort des \
+             Inhalts. Betrachter lesen eine solche Stelle verschieden: pdf.js setzt die \
+             Teile ohne Trenner zusammen, poppler und mupdf trennen sie. Gelesen wurde \
+             die getrennte Fassung; was die zusammengesetzte zeigt, wurde nicht \
+             durchsucht und kann deshalb nicht geschwärzt worden sein."
+        ));
+    }
     let mut budget = Budget::default();
     budget.credit(None, &operations);
     scan_with_budget(
@@ -2486,9 +2530,9 @@ impl FontDecodeStats {
                 continue;
             }
             let name = if base_font.is_empty() {
-                String::from_utf8_lossy(resource).into_owned()
+                crate::label(resource)
             } else {
-                base_font.clone()
+                crate::label_text(base_font)
             };
             out.push(format!(
                 "Font „{name}“ hat kein /ToUnicode; sein Text lässt sich nicht \
@@ -2501,9 +2545,9 @@ impl FontDecodeStats {
                 continue;
             }
             let name = if base_font.is_empty() {
-                String::from_utf8_lossy(resource).into_owned()
+                crate::label(resource)
             } else {
-                base_font.clone()
+                crate::label_text(base_font)
             };
             out.push(format!(
                 "Font „{name}“ hat ein /ToUnicode, das {} verschiedene Zeichencodes auf \
@@ -2512,7 +2556,7 @@ impl FontDecodeStats {
                  /ToUnicode behauptet. Muster können darin nicht erkannt werden — diese \
                  Seite wurde möglicherweise nicht vollständig geschwärzt.",
                 mapping.codes.len(),
-                mapping.text
+                crate::label_text(&mapping.text)
             ));
         }
         out
@@ -3171,6 +3215,7 @@ fn scan_annotations(
             if !seen.insert(id) {
                 continue;
             }
+            sink.appearance(id);
             scan_appearance(doc, id, page_id, rect, page_resources, budget, sink);
         }
     }
@@ -4574,7 +4619,7 @@ fn scan_operations(
                                  verschachtelt; ab dort wurde nicht weitergelesen. Text in \
                                  den tieferen Ebenen wurde nicht durchsucht und kann \
                                  deshalb nicht geschwärzt worden sein.",
-                                String::from_utf8_lossy(name)
+                                crate::label(name)
                             ));
                             continue;
                         }
@@ -4882,7 +4927,7 @@ fn load_xobject(
     name: &[u8],
     budget: &mut Budget,
 ) -> XObjectEntry {
-    let label = String::from_utf8_lossy(name).into_owned();
+    let label = crate::label(name);
     let entry = resources
         .and_then(|r| r.get(b"XObject").ok())
         .and_then(|o| doc.dereference(o).ok())
@@ -4984,7 +5029,7 @@ fn scan_tiling_pattern(
     budget: &mut Budget,
     sink: &mut dyn ContentSink,
 ) {
-    let label = String::from_utf8_lossy(name).into_owned();
+    let label = crate::label(name);
     let entry = resources
         .and_then(|r| r.get(b"Pattern").ok())
         .and_then(|o| doc.dereference(o).ok())
@@ -5180,7 +5225,7 @@ fn warn_about_text_in_charprocs(
         return;
     };
 
-    let label = String::from_utf8_lossy(font_name).into_owned();
+    let label = crate::label(font_name);
     let mut with_text: Vec<String> = Vec::new();
     let mut unreadable = 0usize;
     for (name, value) in procs.iter() {
@@ -5217,7 +5262,7 @@ fn warn_about_text_in_charprocs(
             }
         }
         if sets_text {
-            with_text.push(String::from_utf8_lossy(name).into_owned());
+            with_text.push(crate::label(name));
         }
     }
 
@@ -5325,6 +5370,7 @@ fn show_text(
                     let origin = trm.apply(0.0, 0.0);
                     let baseline = baseline_of(
                         &text_to_user,
+                        ts.font_size * ts.h_scale,
                         displacement,
                         (font.ascent - font.descent) * ts.font_size,
                         space_width * ts.font_size * ts.h_scale,
@@ -5426,13 +5472,28 @@ fn raw_code_bytes(_source: &[u8], _font: &FontInfo, code: u32, nbytes: usize) ->
 /// `text_to_user` ist `Tm × CTM`, bildet also den Textraum ab. Die
 /// Schreibrichtung ist das Bild der Textraum-x-Achse, die Zeilenhöhe wird
 /// senkrecht dazu gemessen — nur so bleibt beides bei gedrehtem Text richtig.
+///
+/// `glyph_x_scale` ist `Tfs · Th`, der x-Faktor der Glyphe im Textraum. Ist
+/// er negativ (`-10 Tf` oder `-100 Tz`), zeigen Glyphenbild *und* Vorschub
+/// entgegen der Textraum-x-Achse; zusammen mit einer gespiegelten Textmatrix
+/// ergibt das ganz gewöhnlichen Text von links nach rechts, so wie ihn jeder
+/// Betrachter zeigt. Die Schreibrichtung muss deshalb aus `Trm` kommen, nicht
+/// aus `Tm × CTM` allein — sonst wird die Zeile rückwärts gelesen, die IBAN
+/// nicht gefunden und nicht geschwärzt. Das Vorzeichen wandert dazu aus der
+/// Richtung in Vorschub und Leerzeichenbreite: beide sind entlang der
+/// korrigierten Richtung wieder positiv. Ein negativer `Tc` bei positiver
+/// Schrift behält dagegen sein Vorzeichen, er schiebt ja wirklich zurück.
 fn baseline_of(
     text_to_user: &Matrix,
+    glyph_x_scale: f64,
     displacement: f64,
     em_height: f64,
     space_width: f64,
 ) -> Baseline {
-    let along = (text_to_user.a, text_to_user.b);
+    let sign = if glyph_x_scale < 0.0 { -1.0 } else { 1.0 };
+    let along = (text_to_user.a * sign, text_to_user.b * sign);
+    let displacement = displacement * sign;
+    let space_width = space_width * sign;
     let scale_x = along.0.hypot(along.1);
     let scale_y = text_to_user.c.hypot(text_to_user.d);
     if scale_x < 1e-12 {

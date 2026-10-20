@@ -571,13 +571,13 @@ danebensteht. Genau dieselbe Tabelle liefert `redact-rs --list-patterns`.
 | `iban_de` | Deutsche IBAN (DE + 2 Prüfziffern + 18 Ziffern), mod-97-geprüft | 0.95 | – | **an** |
 | `iban_intl` | Internationale IBAN (zu unspezifisch) | 0.90 | – | aus |
 | `glaeubiger_id` | SEPA-Gläubiger-ID (Creditor Identifier), mod-97-geprüft | 0.95 | – | **an** |
-| `konto_nr` | Kontonummer (6–10 Ziffern nach „Kto.“ o. ä.) | 0.85 | 0.30 | **an** |
-| `blz` | Bankleitzahl (8 Ziffern nach „BLZ“/„Bankleitzahl“) | 0.80 | 0.25 | **an** |
+| `konto_nr` | Kontonummer (6–10 Ziffern nach „Kto.“, „Kto.-Nr.“, „Konto Nr.“ o. ä.) | 0.85 | 0.30 | **an** |
+| `blz` | Bankleitzahl (8 Ziffern, auch als „370 400 44“, nach „BLZ“/„Bankleitzahl“) | 0.80 | 0.25 | **an** |
 | `bic` | BIC/SWIFT mit Länderkennung-Prüfung | 0.80 | – | **an** |
 | `amount_eur` | Geldbetrag in Euro | 0.70 | – | aus |
 | `date_de` | Datum TT.MM.JJJJ | 0.60 | – | aus |
-| `credit_card` | Kreditkartennummer (13–19 Ziffern), Luhn-geprüft | 0.90 | – | **an** |
-| `steuer_id` | Steuerliche Identifikationsnummer (11 Ziffern nach „Steuer-ID“) | 0.90 | 0.25 | **an** |
+| `credit_card` | Kreditkartennummer (13–19 Ziffern am Stück, 4-4-4-4[-3], 4-6-5 oder 4-6-4), Luhn-geprüft | 0.90 | – | **an** |
+| `steuer_id` | Steuerliche Identifikationsnummer (11 Ziffern, auch als „12 345 678 903“, nach „Steuer-ID“/„Identifikationsnummer“) | 0.90 | 0.25 | **an** |
 | `email` | E-Mail-Adresse | 0.90 | – | **an** |
 | `phone_de` | Deutsche Telefonnummer | 0.85 | 0.35 | **an** |
 
@@ -745,7 +745,8 @@ Regeln:
   Nutzerentscheidung wird nicht automatisch verworfen.
 * Der Vergleich ignoriert Groß-/Kleinschreibung und die *Menge* an Leerraum —
   eine IBAN wird also auch gefunden, wenn im PDF mehrere Leerzeichen zwischen
-  den Blöcken stehen.
+  den Blöcken stehen. Ein Umlaut, den das PDF als Grundbuchstabe plus
+  Akzentzeichen liefert („u“ + U+0308), gilt als derselbe Buchstabe wie „ü“.
 * **Leerraum wird zusammengefasst, nicht entfernt.** Der Eintrag
   `DE89 3704 0044 0532 0130 00` trifft *nicht* auf `DE89370400440532013000` im
   PDF (nachgemessen: `Textzeilen: 1, Treffer gesamt: 0`). Wer beide
@@ -1620,14 +1621,18 @@ nicht steht, ist deshalb nicht automatisch abgedeckt.
 
 ### Bekannte Lecks in der Schwärzung
 
-Von den vier Lecks, die hier früher standen, sind **drei behoben**. Übrig ist
-eines:
+Die vier Lecks, die hier früher standen, sind **alle behoben**; zuletzt
+dieses:
 
 * **Erscheinungsströme außerhalb des Schwärzungsbereichs.** Annotationen, die
-  in einen Schwärzungsbereich ragen, werden entfernt. Der Erscheinungsstrom
-  (`/AP`) einer Annotation, die *nicht* hineinragt, wird nicht geprüft — ihr
-  Text bleibt in der Datei. **[Testfall]**
-  (`appearance_stream_outside_the_redaction_is_also_cleaned`, Aufgabe #26)
+  in einen Schwärzungsbereich ragen, werden wie bisher entfernt. Ragt eine
+  Annotation *nicht* hinein, bleibt sie stehen, aber ihr Erscheinungsstrom
+  (`/AP`) wird nach dem Text jeder Schwärzung durchsucht — auf allen Seiten,
+  Leerraum zählt dabei nicht mit. Die Zeichen, die ihn wiederholen, werden
+  entfernt; der übrige Text der Annotation bleibt lesbar. Grenze: eine
+  manuelle Fläche ohne Text sagt nicht, *was* geschwärzt wurde, und lässt sich
+  deshalb nicht wiederfinden; Formulare *innerhalb* eines Erscheinungsstroms
+  werden nicht durchsucht. (Aufgabe #26)
 
 Dazu diese Grenzen, für die es keinen Testfall gibt:
 
@@ -1638,23 +1643,20 @@ Dazu diese Grenzen, für die es keinen Testfall gibt:
   also nicht auf Inhalte geprüft, sondern samt Inhalt gelöscht.
 * **Type3-Fonts** liefern kein Fontprogramm und werden nur genähert behandelt.
 
-Der eine offene Testfall steht in `crates/redact-pdf/tests/known_leaks.rs`
-und trägt ein `#[ignore]` mit Aufgabennummer, damit die Suite grün bleibt und
-der Defekt trotzdem dokumentiert ist. Nachstellen (im Quellbaum — im
-Release-Archiv liegt kein Quelltext):
+Die Testfälle stehen in `crates/redact-pdf/tests/known_leaks.rs`. Solange ein
+Leck offen ist, trägt sein Test ein `#[ignore]` mit Aufgabennummer, damit die
+Suite grün bleibt und der Defekt trotzdem dokumentiert ist; ein
+**Kanarienvogel** ohne `#[ignore]` wird rot, sobald das Leck verschwindet.
+Zurzeit ist keiner davon nötig. Nachstellen (im Quellbaum — im Release-Archiv
+liegt kein Quelltext):
 
 ```bash
-cargo test -p redact-pdf --no-default-features -- --ignored
-# 0 passed; 1 failed  →  das Leck besteht weiterhin
+cargo test -p redact-pdf --no-default-features --test known_leaks
+# 13 passed; 0 failed; 0 ignored
 ```
 
-Solange dieser Test fehlschlägt, besteht das Leck. Schlägt er plötzlich *nicht*
-mehr fehl, ist es behoben und das `#[ignore]` kann weg. Dafür sorgt zusätzlich
-ein **Kanarienvogel** (`canary_appearance_stream_outside_the_redaction_still_leaks`),
-der ohne `#[ignore]` läuft und rot wird, sobald das Leck verschwindet.
-
 **Behoben** (die Tests laufen jetzt ohne `#[ignore]` und sind grün — insgesamt
-12 bestandene Tests in `known_leaks.rs`):
+13 bestandene Tests in `known_leaks.rs`):
 
 | früheres Leck | Test |
 |---|---|
@@ -1662,6 +1664,7 @@ der ohne `#[ignore]` läuft und rot wird, sobald das Leck verschwindet.
 | Formularfeld-Werte (`/V`) bleiben stehen | `form_field_value_is_redacted_too` |
 | verwaiste Objekte werden mitgeschrieben | `objects_unpacked_from_an_object_stream_are_not_carried_over` |
 | inkrementelle Vorversionen bleiben erhalten | `incremental_history_is_dropped_when_the_file_is_rewritten` |
+| Erscheinungsstrom (`/AP`) einer Annotation außerhalb der Schwärzung trägt den Text weiter | `appearance_stream_outside_the_redaction_is_also_cleaned`, `annotation_outside_the_redaction_keeps_its_other_text` |
 | `/ActualText` eines Struktur-Elements spiegelt den geschwärzten Text | `struct_elem_actual_text_does_not_mirror_the_redacted_text` |
 | **Textspiegel im Seiteninhalt** (`/ActualText`, `/Alt`, `/E` an einem Marked-Content-Abschnitt) überleben die Schwärzung | 9 Fälle in `crates/redact-pdf/tests/marked_content.rs` — siehe unten |
 
@@ -2182,10 +2185,11 @@ unter [Was dieses Werkzeug nicht leistet](#grenzen).
   | Katalog | `/OpenAction` und `/AA` — Aktionen, die beim Öffnen bzw. bei Ereignissen laufen und `/S /JavaScript` sein dürfen |
   | Katalog | `/OCProperties` — die Verwaltung optionaler Inhalte („Ebenen“) |
   | Katalog | `/Outlines` — die Lesezeichen; jeder `/Title` ist frei wählbarer Text („Kontoauszug DE89 …“) |
-  | Katalog, jeder Knoten des Seitenbaums, jede Seite | **jeder Schlüssel, der nicht auf der Erlaubnisliste steht** — am Katalog bleiben nur `/Type`, `/Version`, `/Extensions`, `/Pages`, `/PageLabels`, `/OutputIntents`, `/ViewerPreferences`, `/PageLayout`, `/PageMode`, `/Lang`, `/NeedsRendering`, `/AF`; an der Seite Aufbau, Seitenrahmen, Inhalt und Darstellung. Was fällt, auch ohne dass es jemand beim Namen kennt: `/SpiderInfo` (Web Capture: abgerufene Adresse, gesendete Formulardaten), `/Legal`, `/Requirements`. `/PageLabels` und `/OutputIntents` (auch an der Seite) verlieren ihre Texte; und in **jedem Ressourcenverzeichnis** (`/Resources` an Seite, Seitenbaum, Formular, Erscheinungsbild) jeder Schlüssel, der keine der acht Ressourcenarten ist — die Einträge unter `/Properties` bleiben |
+  | Katalog, jeder Knoten des Seitenbaums, jede Seite | **jeder Schlüssel, der nicht auf der Erlaubnisliste steht** — am Katalog bleiben nur `/Type`, `/Version`, `/Extensions`, `/Pages`, `/PageLabels`, `/OutputIntents`, `/ViewerPreferences`, `/PageLayout`, `/PageMode`, `/Lang`, `/NeedsRendering`, `/AF`; an der Seite Aufbau, Seitenrahmen, Inhalt und Darstellung. Was fällt, auch ohne dass es jemand beim Namen kennt: `/SpiderInfo` (Web Capture: abgerufene Adresse, gesendete Formulardaten), `/Legal`, `/Requirements`. `/PageLabels` und `/OutputIntents` (auch an der Seite) verlieren ihre Texte; und in **jedem Ressourcenverzeichnis** (`/Resources` an Seite, Seitenbaum, Formular, Erscheinungsbild) jeder Schlüssel, der keine der acht Ressourcenarten ist — die Eigenschaftslisten unter `/Properties` bleiben |
+  | jedes Objekt **unter** einem erlaubten Schlüssel | jeder Schlüssel, den die Norm an seiner Art nicht kennt: unter `/ViewerPreferences`, `/Extensions` (dort fällt auch `/URL`), in einem `/PageLabels`-Eintrag, unter `/Group`, `/Trans` und `/BoxColorInfo`; an Schrift, Schriftbeschreibung (dort fallen auch `/CharSet` und `/Style`), Kodierung, Grafikzustand, Softmaske, Funktion, Shading, Muster, Bild- und Formular-XObject (dort fallen auch `/ID`, `/Measure`, `/PtData`), `/OCG` und `/OCMD`. Was zeichnet, steht in der Norm und bleibt. Eine Type3-Schrift, die kein Inhaltsstrom setzt, verliert ihre Glyphprozeduren (`/CharProcs`) |
   | jede Seite | `/Metadata`, `/PieceInfo`, `/StructParents`, `/AA` |
   | jede Seite | Annotationen vom Typ `/FileAttachment` — ein Dateianhang klebt nicht nur im `/Names`-Baum |
-  | jede verbliebene Annotation **und alles, was sie erreichbar hält** (`/Popup`, `/Parent`-Kette, `/Kids`, `/IRT`) | die Aktionen `/A`, `/AA`, `/PA` und ein benanntes `/Dest` (ein ausdrückliches Ziel bleibt, auch hinter einem Verweis — ein Verweis im Feld muss auf eine Seite führen); die Klartexte `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`, `/OverlayText`, `/NM`, `/DS` und die `/MK`-Beschriftungen; `/M`, `/CreationDate`, `/State`, `/StateModel` und `/Lang`, wenn sie kein Datum, kein Zustand der Norm oder keine Sprachangabe sind; dazu die Beiwerk-Dictionaries `/Movie`, `/Measure`, `/RichMediaContent`, `/RichMediaSettings`, die externen Daten `/ExData` und die 3D-Einheiten `/3DU` als Ganzes (Filmdateiname, Maßangaben, eingebettete Medien-Dateien auch unter den Einstellungen; Preis: ein Film und eine Vermessung sind danach nur noch Bild) und `/Alt`/`/ActualText` an jedem erreichten Dictionary. **Nicht** `/DA` (benannte Lücke, siehe `SECURITY.md`) — was eine Annotation *zeichnet* (`/AP`), geht wie Seitentext durch die Schwärzung |
+  | jede verbliebene Annotation — auch eine, die keine Seite in `/Annots` führt, sondern irgendein anderer Schlüssel hält — **und alles, was sie erreichbar hält** (`/Popup`, `/Parent`-Kette, `/Kids`, `/IRT`) | die Aktionen `/A`, `/AA`, `/PA` und ein benanntes `/Dest` (ein ausdrückliches Ziel bleibt, auch hinter einem Verweis — ein Verweis im Feld muss auf eine Seite führen); die Klartexte `/Contents`, `/RC`, `/T`, `/Subj`, `/TU`, `/TM`, `/Opt`, `/OverlayText`, `/NM`, `/DS` und die `/MK`-Beschriftungen; `/M`, `/CreationDate`, `/State`, `/StateModel` und `/Lang`, wenn sie kein Datum, kein Zustand der Norm oder keine Sprachangabe sind; dazu die Beiwerk-Dictionaries `/Movie`, `/Measure`, `/RichMediaContent`, `/RichMediaSettings`, die externen Daten `/ExData` und die 3D-Einheiten `/3DU` als Ganzes (Filmdateiname, Maßangaben, eingebettete Medien-Dateien auch unter den Einstellungen; Preis: ein Film und eine Vermessung sind danach nur noch Bild) und `/Alt`/`/ActualText` an jedem erreichten Dictionary; dahinter jeder Schlüssel, den die Norm am Untertyp der Annotation nicht kennt. **Nicht** `/DA` (benannte Lücke, siehe `SECURITY.md`) — was eine Annotation *zeichnet* (`/AP`), geht wie Seitentext durch die Schwärzung |
 
   Preis: benannte Sprünge, Lesezeichen und Verweise ins Netz funktionieren
   danach nicht mehr, und aus einem Formular wird ein totes Blatt Papier. Das ist die sichere Richtung.
@@ -2312,7 +2316,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo build -p redact-cli --no-default-features       # ohne GUI
-cargo test -p redact-pdf -- --ignored                 # die bekannten Lecks
+cargo test -p redact-pdf -- --ignored                 # Messungen und benannte Lücken
 ./scripts/build-windows.sh                            # Windows-Binary (mingw)
 cargo run --release -p redact-pdf --example gen10 -- gross.pdf 10
 ```

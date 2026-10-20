@@ -46,10 +46,13 @@
 //! * **Der LZW-Dekoder** selbst ist `weezl`, dieselbe Bibliothek mit
 //!   denselben Einstellungen wie bei `lopdf` (`Msb`, 9 Bit, `EarlyChange`
 //!   aus `/DecodeParms`); nur der Ausgabepuffer ist hier begrenzt.
-//! * **Der PNG-Prädiktor** ist `lopdf::filters::png::decode_frame`; gelesen
-//!   werden `/Predictor`, `/Columns`, `/Colors`, `/BitsPerComponent` mit den
-//!   Vorgaben von `lopdf`, damit beide dasselbe Ergebnis liefern
-//!   (`ein_praediktor_liest_sich_wie_bei_lopdf`).
+//! * **Der Prädiktor** liest `/Predictor`, `/Columns`, `/Colors`,
+//!   `/BitsPerComponent` mit den Vorgaben von `lopdf`; bei 8 Bit und
+//!   vollständigen Zeilen liefert er dasselbe wie `lopdf`
+//!   (`ein_praediktor_liest_sich_wie_bei_lopdf`). Zurückgerechnet wird aber
+//!   hier ([`undo_predictor`]) und nicht mehr mit `decode_frame`: dessen
+//!   Zeilenlänge stimmt unter 8 Bit nicht, und den TIFF-Prädiktor 2 kennt
+//!   `lopdf` gar nicht — beides ließ Filterbytes als Inhalt stehen.
 //! * **Bildfilter** (`DCTDecode`, `JPXDecode`, `CCITTFaxDecode`, `JBIG2Decode`)
 //!   sind hier ein Fehler wie bei `lopdf`. Sie stehen nie an einem
 //!   Seiteninhalt; Bilder liest [`crate::image`] mit eigenem Weg.
@@ -317,25 +320,275 @@ pub(crate) fn filter_names(doc: &Document, dict: &Dictionary) -> Option<Vec<Vec<
 }
 
 /// Der Seiteninhalt — alle `/Contents`-Ströme in Reihenfolge, je durch
-/// [`decoded_content`], mit Zeilenumbruch dazwischen.
+/// [`decoded_content`], an den Grenzen verbunden wie in [`PageContent`]
+/// beschrieben.
 ///
 /// Die Kopie von `lopdf::Document::get_page_content`, nur mit diesem Dekoder.
 /// Wie dort bleiben die Rohbytes stehen, wenn ein Strom sich nicht auspacken
 /// lässt: sie enthalten dann keine Operationen, und [`crate::content::scan_page`]
 /// lehnt die Seite deshalb ab, statt sie still als leer zu lesen.
 pub fn page_content(doc: &Document, page_id: ObjectId) -> Vec<u8> {
-    let mut content = Vec::new();
-    for id in doc.get_page_contents(page_id) {
-        let Ok(stream) = doc.get_object(id).and_then(Object::as_stream) else {
+    page_content_checked(doc, page_id).data
+}
+
+/// Der Seiteninhalt aus [`page_content`], dazu die Grenzen, an denen die
+/// Teilströme **mitten in einem Wort** aneinanderstoßen.
+///
+/// # Wie die Teilströme verbunden werden
+///
+/// PDF 32000-1, 7.8.2: die Teilströme eines `/Contents`-Felds sind *ein*
+/// Inhalt, geteilt werden darf nur zwischen zwei lexikalischen Wörtern. Früher
+/// stand hier stets ein `\n` zwischen zwei Teilen. Das ist richtig, solange
+/// sich der Erzeuger an die Regel hält — und falsch, wenn nicht:
+///
+/// * **Grenze in einer Zeichenkette** (`(IBAN DE89 37` | `04 0044 … 00) Tj`).
+///   poppler, pdf.js und mupdf zeigen die IBAN am Stück; das eingeschobene
+///   `\n` landete *in* der Zeichenkette, zerriss sie, und kein Muster fand
+///   sie — Treffer 0, Rückgabewert 0, die IBAN stand in der Ausgabe. Jetzt
+///   wird dort **ohne** Trenner verbunden, wie es alle drei Betrachter tun.
+///   Die Schwärzung schreibt die Seite ohnehin als einen Strom neu, die
+///   verbundene Zeichenkette bleibt also gültig.
+/// * **Grenze in einem Wort** (`(…) T` | `j ET`). Hier sind sich die
+///   Betrachter *nicht* einig: pdf.js verbindet ohne Trenner und zeichnet die
+///   IBAN mit `Tj`, poppler und mupdf trennen und sehen die unbekannten
+///   Operatoren `T` und `j`. Welche Lesart gilt, entscheidet der Betrachter
+///   des Empfängers. Gelesen wird weiter getrennt (mit `\n`), aber die Stelle
+///   wird gezählt ([`PageContent::split_tokens`]) und vom Interpreter als
+///   Deckungslücke gemeldet: für die andere Lesart kann die Analyse nicht
+///   einstehen.
+///
+/// Im Leerraum, im Kommentar, in einer Hex-Zeichenkette (dort zählt Leerraum
+/// nicht) und hinter einem Trennzeichen ändert das `\n` nichts an der
+/// Lesart und bleibt wie bisher.
+pub fn page_content_checked(doc: &Document, page_id: ObjectId) -> PageContent {
+    let parts: Vec<Vec<u8>> = doc
+        .get_page_contents(page_id)
+        .into_iter()
+        .filter_map(|id| doc.get_object(id).and_then(Object::as_stream).ok())
+        .map(|stream| decoded_content(doc, stream).unwrap_or_else(|| stream.content.clone()))
+        .collect();
+    join_parts(parts.iter().map(Vec::as_slice))
+}
+
+/// Verbindet die Teilströme wie in [`page_content_checked`] beschrieben.
+fn join_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> PageContent {
+    let mut out = PageContent::default();
+    let mut lexer = SeamLexer::default();
+    for part in parts {
+        // Ein leerer Teil verschiebt keine Grenze: die nächste liegt dann
+        // zwischen dem vorigen und dem folgenden Teil.
+        let Some(&first) = part.first() else {
             continue;
         };
-        match decoded_content(doc, stream) {
-            Some(data) => content.extend_from_slice(&data),
-            None => content.extend_from_slice(&stream.content),
+        if !out.data.is_empty() {
+            match lexer.seam(first) {
+                Seam::Join => {}
+                seam => {
+                    if seam == Seam::SplitToken {
+                        out.split_tokens += 1;
+                    }
+                    out.data.push(b'\n');
+                    lexer.feed(b'\n');
+                }
+            }
         }
-        content.push(b'\n');
+        for &b in part {
+            lexer.feed(b);
+        }
+        out.data.extend_from_slice(part);
     }
-    content
+    // Der Abschluss wie bisher: hinter dem letzten Teil ein Zeilenende.
+    if !out.data.is_empty() {
+        out.data.push(b'\n');
+    }
+    out
+}
+
+/// Ergebnis von [`page_content_checked`].
+#[derive(Debug, Default, Clone)]
+pub struct PageContent {
+    /// Der verbundene Seiteninhalt.
+    pub data: Vec<u8>,
+    /// An wie vielen Grenzen zwei Teilströme mitten in einem Wort
+    /// aneinanderstoßen — Stellen, die Betrachter verschieden lesen.
+    pub split_tokens: usize,
+}
+
+/// Wie die Grenze zwischen zwei Teilströmen zu verbinden ist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seam {
+    /// Ohne Trenner — die Grenze liegt in einer Zeichenkette.
+    Join,
+    /// Mit `\n`, und die Lesart hängt am Betrachter.
+    SplitToken,
+    /// Mit `\n`, und es ist gleich, ob einer dasteht.
+    Separate,
+}
+
+/// Wo der Leser im Inhalt gerade steht — so viel Syntax, wie die Frage
+/// „liegt die Grenze in einem Wort?“ braucht, und nicht mehr.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum LexState {
+    /// Zwischen Wörtern oder in einem gewöhnlichen Wort.
+    #[default]
+    Normal,
+    /// In einer Zeichenkette `( … )`, mit Klammertiefe und offenem `\`.
+    Literal { depth: usize, escaped: bool },
+    /// Gleich hinter einem `<` — Hex-Zeichenkette oder `<<`.
+    AfterLt,
+    /// In einer Hex-Zeichenkette `< … >`.
+    Hex,
+    /// In einem Kommentar bis zum Zeilenende.
+    Comment,
+    /// In den Binärdaten eines Inline-Bilds hinter `ID`, bis `EI`.
+    InlineData,
+}
+
+/// Ein Leser über den verbundenen Inhalt, Byte für Byte, damit die Frage an
+/// jeder Grenze nur kostet, was dazugekommen ist — und nicht den ganzen
+/// Inhalt davor noch einmal (eine Seite mit zehntausend Teilen wäre sonst
+/// quadratisch).
+///
+/// Die Binärdaten eines Inline-Bilds überspringt er, damit eine `(` darin
+/// keine Zeichenkette eröffnet. Ende ist wie in [`crate::ops`] ein `EI`
+/// zwischen Leerraum und Leerraum/Trennzeichen.
+#[derive(Debug, Default)]
+struct SeamLexer {
+    state: LexState,
+    /// Länge des laufenden Worts (0: zwischen Wörtern). Ein `/` zählt mit:
+    /// `/F` | `1` ist genauso geteilt wie `T` | `j`.
+    token_len: usize,
+    /// Die letzten beiden Bytes des laufenden Worts — für `ID`.
+    token_tail: [u8; 2],
+    /// Die letzten drei Bytes in den Bilddaten — für `␣EI`.
+    window: [u8; 3],
+}
+
+impl SeamLexer {
+    fn seam(&self, next: u8) -> Seam {
+        match self.state {
+            LexState::Literal { .. } => Seam::Join,
+            LexState::Normal if self.token_len > 0 && is_regular(next) => Seam::SplitToken,
+            // `<` | `<`: aus `<<` würde `<` und eine Hex-Zeichenkette.
+            LexState::AfterLt if next == b'<' => Seam::SplitToken,
+            _ => Seam::Separate,
+        }
+    }
+
+    fn feed(&mut self, b: u8) {
+        match self.state {
+            LexState::Literal { depth, escaped } => {
+                self.state = if escaped {
+                    LexState::Literal {
+                        depth,
+                        escaped: false,
+                    }
+                } else {
+                    match b {
+                        b'\\' => LexState::Literal {
+                            depth,
+                            escaped: true,
+                        },
+                        b'(' => LexState::Literal {
+                            depth: depth + 1,
+                            escaped: false,
+                        },
+                        b')' if depth <= 1 => LexState::Normal,
+                        b')' => LexState::Literal {
+                            depth: depth - 1,
+                            escaped: false,
+                        },
+                        _ => LexState::Literal { depth, escaped },
+                    }
+                };
+            }
+            LexState::Hex => {
+                if b == b'>' {
+                    self.state = LexState::Normal;
+                }
+            }
+            LexState::Comment => {
+                if b == b'\n' || b == b'\r' {
+                    self.state = LexState::Normal;
+                }
+            }
+            LexState::InlineData => {
+                let ends = (is_whitespace(b) || is_delimiter(b))
+                    && is_whitespace(self.window[0])
+                    && self.window[1..] == *b"EI";
+                self.window = [self.window[1], self.window[2], b];
+                if ends {
+                    self.state = LexState::Normal;
+                    self.token_len = 0;
+                    self.normal(b);
+                }
+            }
+            LexState::AfterLt => {
+                if b == b'<' {
+                    // `<<` — ein Trennzeichen wie `[`.
+                    self.state = LexState::Normal;
+                } else {
+                    self.state = LexState::Hex;
+                    self.feed(b);
+                }
+            }
+            LexState::Normal => self.normal(b),
+        }
+    }
+
+    fn normal(&mut self, b: u8) {
+        if is_regular(b) {
+            if self.token_len == 0 {
+                self.token_tail = [0, 0];
+            }
+            self.token_len += 1;
+            self.token_tail = [self.token_tail[1], b];
+            return;
+        }
+        // Ein Wort endet. War es `ID`, folgen Binärdaten — das eine
+        // Leerraumzeichen dahinter gehört noch zum Operator.
+        let was_id = self.token_len == 2 && self.token_tail == *b"ID";
+        self.token_len = 0;
+        if was_id && is_whitespace(b) {
+            self.state = LexState::InlineData;
+            self.window = [0, 0, b];
+            return;
+        }
+        match b {
+            b'(' => {
+                self.state = LexState::Literal {
+                    depth: 1,
+                    escaped: false,
+                }
+            }
+            b'<' => self.state = LexState::AfterLt,
+            b'%' => self.state = LexState::Comment,
+            // Ein Name beginnt; was unmittelbar folgt, gehört zu ihm.
+            b'/' => {
+                self.token_len = 1;
+                self.token_tail = [0, b'/'];
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Leerraum nach PDF 32000-1, Tabelle 1.
+fn is_whitespace(b: u8) -> bool {
+    matches!(b, 0x00 | 0x09 | 0x0a | 0x0c | 0x0d | 0x20)
+}
+
+/// Trennzeichen nach PDF 32000-1, Tabelle 2.
+fn is_delimiter(b: u8) -> bool {
+    matches!(
+        b,
+        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+    )
+}
+
+/// Ein gewöhnliches Zeichen — Teil eines Worts.
+fn is_regular(b: u8) -> bool {
+    !is_whitespace(b) && !is_delimiter(b)
 }
 
 /// Ein einzelner Filter mit seinem `/DecodeParms`-Eintrag. `Ok(None)` für
@@ -398,10 +651,12 @@ fn decode_parms(doc: &Document, dict: &Dictionary, index: usize) -> Option<Dicti
     Some(resolved)
 }
 
-/// Entfernt den PNG-Prädiktor — genau wie `lopdf::Stream::decompress_predictor`:
-/// `/Predictor` 10–15 mit `/Columns`, `/Colors`, `/BitsPerComponent` (Vorgaben
-/// 1, 1, 8); alles andere lässt die Daten unverändert. `None`, wenn der
-/// Zeilendekoder die Daten ablehnt — bei `lopdf` ist das derselbe Fehler.
+/// Entfernt den Prädiktor hinter Flate oder LZW — `/Predictor` 2 (TIFF) und
+/// 10–15 (PNG) mit `/Columns`, `/Colors`, `/BitsPerComponent` (Vorgaben 1, 1,
+/// 8). Jeder andere `/Predictor`-Wert lässt die Daten unverändert, wie bei
+/// `lopdf`. `None`, wenn sich die Daten nicht ehrlich zurückrechnen lassen
+/// (siehe [`undo_predictor`]): dann bleibt die Kette hier stehen, statt
+/// Filterbytes als Inhalt weiterzureichen.
 fn png_predictor(data: Vec<u8>, parms: Option<&Dictionary>) -> Option<Vec<u8>> {
     let Some(parms) = parms else {
         return Some(data);
@@ -413,13 +668,226 @@ fn png_predictor(data: Vec<u8>, parms: Option<&Dictionary>) -> Option<Vec<u8>> {
             .and_then(|o| o.as_i64().ok())
             .unwrap_or(default)
     };
-    if !(10..=15).contains(&int(b"Predictor", 1)) {
+    let predictor = int(b"Predictor", 1);
+    if predictor != 2 && !(10..=15).contains(&predictor) {
         return Some(data);
     }
-    let columns = int(b"Columns", 1).max(1) as usize;
-    let colors = int(b"Colors", 1).max(1) as usize;
-    let bits = int(b"BitsPerComponent", 8).max(8) as usize;
-    lopdf::filters::png::decode_frame(&data, colors * bits / 8, columns).ok()
+    let params = PredictorParams {
+        predictor,
+        colors: int(b"Colors", 1),
+        bits: int(b"BitsPerComponent", 8),
+        columns: int(b"Columns", 1),
+    };
+    undo_predictor(data, &params).ok()
+}
+
+/// Die Prädiktorparameter aus `/DecodeParms`, bereits aufgelöst — aber
+/// ungeprüft: was davon unbrauchbar ist, entscheidet [`undo_predictor`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PredictorParams {
+    pub predictor: i64,
+    pub colors: i64,
+    pub bits: i64,
+    pub columns: i64,
+}
+
+/// Warum ein Prädiktor sich nicht zurückrechnen ließ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PredictorError {
+    /// `/Predictor` ist weder 1, 2 noch 10–15.
+    Unknown(i64),
+    /// `/Colors`, `/BitsPerComponent` oder `/Columns` ergeben keine Zeile.
+    Parameters,
+    /// TIFF-Prädiktor mit einer Bittiefe, die wir nicht zurückrechnen.
+    TiffBits(i64),
+    /// Eine PNG-Zeile beginnt mit einem Filterbyte jenseits von 0–4.
+    RowFilter(u8),
+}
+
+impl std::fmt::Display for PredictorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown(p) => write!(f, "unbekannter /Predictor {p}"),
+            Self::Parameters => write!(f, "unbrauchbare Prädiktorparameter"),
+            Self::TiffBits(b) => write!(f, "TIFF-Prädiktor bei {b} Bit je Komponente"),
+            Self::RowFilter(k) => write!(f, "ungültiger PNG-Zeilenfilter {k}"),
+        }
+    }
+}
+
+/// Rechnet einen Prädiktor zurück (PDF 32000-1, 7.4.4.4) — für Bilder
+/// ([`crate::ops`]) und Seiteninhalte gleichermaßen.
+///
+/// # Warum nicht `lopdf::filters::png::decode_frame`
+///
+/// Bis zur Expertenprüfung lief der PNG-Prädiktor über `decode_frame`, mit
+/// der Zeilenlänge `Columns * Colors * max(BPC, 8) / 8`. Bei 1, 2 oder 4 Bit
+/// je Komponente ist eine Zeile aber `ceil(Columns * Colors * BPC / 8)` Byte
+/// lang — `decode_frame` lehnte **jedes** solche Bild ab (bitonale Scans aus
+/// `img2pdf` sind genau das), und der Aufrufer nahm die Rohdaten **samt
+/// Filterbytes** als Abtastwerte. Das Bild wurde geschert gelesen, die Zone
+/// schwärzte die falschen Bytes, und ein Teil des Geheimnisses stand im neu
+/// kodierten Bild — ohne Warnung. Dazu kommt: `decode_frame` scheitert an
+/// einem einzigen überzähligen Byte hinter der letzten Zeile, und sein
+/// Average-Filter rechnet `left + above / 2` statt `(left + above) / 2`.
+///
+/// # Was hier gilt
+///
+/// * Zeilenlänge `ceil(Colors * BPC * Columns / 8)`, Bytes je Bildpunkt
+///   `max(1, ceil(Colors * BPC / 8))` — wie bei pdf.js und MuPDF.
+/// * Eine **unvollständige letzte Zeile** wird so weit zurückgerechnet, wie
+///   sie reicht (wie MuPDF); ein einzelnes Restbyte ohne Daten dahinter fällt
+///   weg. Fehlen dem Bild dadurch Abtastwerte, merkt das der Leser dahinter
+///   („Abtastwerte unvollständig“) — erfunden wird nichts.
+/// * Ein unbekanntes Zeilenfilterbyte ist ein **Fehler**, kein „nimm die
+///   Rohdaten“: Rohdaten mit Filterbytes sind keine Abtastwerte, und eine
+///   Schwärzung auf falsch gelesenen Bytes ist schlimmer als eine Ablehnung.
+/// * Der TIFF-Prädiktor 2 (waagerechte Differenzen je Komponente) bei 1, 2,
+///   4, 8 und 16 Bit; die Zeile beginnt jeweils neu.
+pub(crate) fn undo_predictor(
+    data: Vec<u8>,
+    params: &PredictorParams,
+) -> Result<Vec<u8>, PredictorError> {
+    let predictor = params.predictor;
+    if predictor <= 1 {
+        return Ok(data);
+    }
+    if predictor != 2 && !(10..=15).contains(&predictor) {
+        return Err(PredictorError::Unknown(predictor));
+    }
+    // Negative oder fehlende Werte gelten wie bei `lopdf` als Vorgabe 1;
+    // eine Bittiefe jenseits von 16 kennt PDF nicht.
+    let colors = usize::try_from(params.colors.max(1)).map_err(|_| PredictorError::Parameters)?;
+    let columns = usize::try_from(params.columns.max(1)).map_err(|_| PredictorError::Parameters)?;
+    if !(1..=16).contains(&params.bits) {
+        return Err(PredictorError::Parameters);
+    }
+    let bits = params.bits as usize;
+    let bits_per_pixel = colors.checked_mul(bits).ok_or(PredictorError::Parameters)?;
+    let row_bytes = bits_per_pixel
+        .checked_mul(columns)
+        .ok_or(PredictorError::Parameters)?
+        .div_ceil(8);
+    // Eine Zeile, die länger ist als die ganze Eingabe, ist höchstens eine
+    // unvollständige erste Zeile — mehr Platz braucht niemand, und
+    // `/Columns 2147483647` reserviert so keinen Speicher.
+    let row_bytes = row_bytes.min(data.len());
+    if predictor == 2 {
+        return undo_tiff(data, colors, bits, row_bytes);
+    }
+    undo_png(&data, bits_per_pixel.div_ceil(8).max(1), row_bytes)
+}
+
+fn undo_png(data: &[u8], bpp: usize, row_bytes: usize) -> Result<Vec<u8>, PredictorError> {
+    let mut out: Vec<u8> = Vec::with_capacity(data.len());
+    let mut previous: Option<usize> = None;
+    for chunk in data.chunks(row_bytes + 1) {
+        let (&kind, row) = chunk.split_first().expect("chunks liefert nie leer");
+        if row.is_empty() {
+            // Ein Restbyte ohne Zeile dahinter (oft ein Zeilenumbruch vor
+            // `endstream`): Betrachter übergehen es, also auch wir.
+            break;
+        }
+        if kind > 4 {
+            return Err(PredictorError::RowFilter(kind));
+        }
+        let start = out.len();
+        out.extend_from_slice(row);
+        for i in 0..row.len() {
+            let left = if i >= bpp { out[start + i - bpp] } else { 0 };
+            let above = previous.map_or(0, |p| out[p + i]);
+            let upper_left = match previous {
+                Some(p) if i >= bpp => out[p + i - bpp],
+                _ => 0,
+            };
+            let predicted = match kind {
+                0 => 0,
+                1 => left,
+                2 => above,
+                3 => ((u16::from(left) + u16::from(above)) / 2) as u8,
+                _ => paeth(left, above, upper_left),
+            };
+            out[start + i] = out[start + i].wrapping_add(predicted);
+        }
+        previous = Some(start);
+    }
+    Ok(out)
+}
+
+fn paeth(left: u8, above: u8, upper_left: u8) -> u8 {
+    let estimate = i16::from(left) + i16::from(above) - i16::from(upper_left);
+    let to_left = (estimate - i16::from(left)).abs();
+    let to_above = (estimate - i16::from(above)).abs();
+    let to_upper_left = (estimate - i16::from(upper_left)).abs();
+    if to_left <= to_above && to_left <= to_upper_left {
+        left
+    } else if to_above <= to_upper_left {
+        above
+    } else {
+        upper_left
+    }
+}
+
+/// TIFF-Prädiktor 2: jede Komponente ist die Differenz zur gleichen
+/// Komponente des Bildpunkts links davon, modulo `2^BPC`.
+///
+/// Bis zur Expertenprüfung reichte [`crate::ops`] die Daten hier unverändert
+/// durch — die Differenzen galten als Abtastwerte, das Bild war ein anderes
+/// als im Betrachter, und die Schwärzung traf nicht, was dort zu sehen ist.
+fn undo_tiff(
+    mut data: Vec<u8>,
+    colors: usize,
+    bits: usize,
+    row_bytes: usize,
+) -> Result<Vec<u8>, PredictorError> {
+    if row_bytes == 0 {
+        return Ok(data);
+    }
+    for row in data.chunks_mut(row_bytes) {
+        match bits {
+            8 => {
+                for i in colors..row.len() {
+                    row[i] = row[i].wrapping_add(row[i - colors]);
+                }
+            }
+            16 => {
+                let step = 2 * colors;
+                let mut i = step;
+                while i + 1 < row.len() {
+                    let left = u16::from_be_bytes([row[i - step], row[i + 1 - step]]);
+                    let own = u16::from_be_bytes([row[i], row[i + 1]]);
+                    row[i..i + 2].copy_from_slice(&own.wrapping_add(left).to_be_bytes());
+                    i += 2;
+                }
+            }
+            1 | 2 | 4 => {
+                let mask = (1u8 << bits) - 1;
+                let components = row.len() * 8 / bits;
+                for k in colors..components {
+                    let left = sub_sample(row, k - colors, bits);
+                    let own = sub_sample(row, k, bits);
+                    set_sub_sample(row, k, bits, own.wrapping_add(left) & mask);
+                }
+            }
+            other => return Err(PredictorError::TiffBits(other as i64)),
+        }
+    }
+    Ok(data)
+}
+
+/// Die `index`-te Komponente einer Zeile mit `bits` < 8, höchstwertige Bits
+/// zuerst (PDF 32000-1, 8.9.3).
+fn sub_sample(row: &[u8], index: usize, bits: usize) -> u8 {
+    let bit = index * bits;
+    let shift = 8 - bits - bit % 8;
+    (row[bit / 8] >> shift) & ((1u8 << bits) - 1)
+}
+
+fn set_sub_sample(row: &mut [u8], index: usize, bits: usize, value: u8) {
+    let bit = index * bits;
+    let shift = 8 - bits - bit % 8;
+    let mask = ((1u8 << bits) - 1) << shift;
+    row[bit / 8] = (row[bit / 8] & !mask) | (value << shift);
 }
 
 /// Liest höchstens `limit` Byte; ein Byte mehr heißt [`Oversize`].
@@ -600,7 +1068,7 @@ fn ascii85_group(group: &[u8; 5]) -> [u8; 4] {
 /// `RunLengthDecode` (PDF 32000-1, 7.4.5): Länge `0..=127` heißt „die nächsten
 /// `n+1` Bytes wörtlich“, `129..=255` heißt „das nächste Byte `257-n`-mal“,
 /// `128` ist das Ende. Höchstens `limit` Byte (ein Lauf verhundertachtundzwanzigfacht).
-fn run_length_decode_within(data: &[u8], limit: usize) -> Result<Vec<u8>, Oversize> {
+pub(crate) fn run_length_decode_within(data: &[u8], limit: usize) -> Result<Vec<u8>, Oversize> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < data.len() {
@@ -638,6 +1106,62 @@ mod tests {
     use lopdf::dictionary;
 
     const PLAIN: &[u8] = b"BT /F1 10 Tf 72 700 Td (IBAN: DE89 3704 0044 0532 0130 00) Tj ET";
+
+    /// Teilströme verbinden und dazu die Zahl der Wortteilungen.
+    fn join(parts: &[&[u8]]) -> (Vec<u8>, usize) {
+        let joined = join_parts(parts.iter().copied());
+        (joined.data, joined.split_tokens)
+    }
+
+    /// Eine Grenze in einer Zeichenkette wird ohne Trenner verbunden — so
+    /// zeigen es poppler, pdf.js und mupdf. Mit `\n` dazwischen war die IBAN
+    /// zerrissen und wurde nicht gefunden.
+    #[test]
+    fn seam_inside_a_literal_string_joins_without_separator() {
+        let (data, split) = join(&[b"BT (IBAN DE89 37", b"04 0044) Tj ET"]);
+        assert_eq!(data, b"BT (IBAN DE89 3704 0044) Tj ET\n");
+        assert_eq!(split, 0);
+        // Verschachtelte Klammern und ein `\` direkt vor der Grenze.
+        let (data, _) = join(&[b"(a (b) \\", b") c) Tj"]);
+        assert_eq!(data, b"(a (b) \\) c) Tj\n");
+        // Hinter der geschlossenen Zeichenkette wieder wie bisher.
+        let (data, split) = join(&[b"(a) Tj", b"ET"]);
+        assert_eq!((data.as_slice(), split), (&b"(a) Tj\nET\n"[..], 1));
+    }
+
+    /// Eine Grenze mitten in einem Wort wird gezählt; getrennt wird wie
+    /// bisher. Zwischen Wörtern, hinter Trennzeichen, im Kommentar und in
+    /// einer Hex-Zeichenkette ist sie keine Teilung.
+    #[test]
+    fn seam_inside_a_token_is_counted() {
+        assert_eq!(join(&[b"(x) T", b"j ET"]), (b"(x) T\nj ET\n".to_vec(), 1));
+        assert_eq!(join(&[b"/F", b"1 10 Tf"]).1, 1);
+        assert_eq!(join(&[b"72 7", b"00 Td"]).1, 1);
+        assert_eq!(join(&[b"<", b"</A 1>> BDC"]).1, 1);
+        for parts in [
+            &[&b"(x) Tj "[..], b"ET"][..],
+            &[b"(x) Tj", b" ET"],
+            &[b"[(x)", b"(y)] TJ"],
+            &[b"/F1", b"/F2"],
+            &[b"% Kommentar", b"Tj"],
+            &[b"<4142", b"43> Tj"],
+            &[b"q", b"", b" Q"],
+        ] {
+            assert_eq!(join(parts).1, 0, "{parts:?}");
+        }
+    }
+
+    /// Die Binärdaten eines Inline-Bilds öffnen keine Zeichenkette: eine `(`
+    /// darin darf die nächste Grenze nicht zu „in einer Zeichenkette“ machen.
+    #[test]
+    fn inline_image_data_is_skipped() {
+        let (data, split) = join(&[b"BI /W 1 /H 1 /BPC 8 /CS /G ID (\xff EI Q", b"BT"]);
+        assert_eq!(data, b"BI /W 1 /H 1 /BPC 8 /CS /G ID (\xff EI Q\nBT\n");
+        assert_eq!(split, 1);
+        let (data, split) = join(&[b"BI /W 1 ID ( EI", b" (a) Tj"]);
+        assert_eq!(data, b"BI /W 1 ID ( EI\n (a) Tj\n");
+        assert_eq!(split, 0);
+    }
 
     /// [`is_decodable_filter`] nennt genau die Namen, die [`decode_one`]
     /// auspackt — sonst sagte das Orakel „die Kette läuft durch“ über eine,

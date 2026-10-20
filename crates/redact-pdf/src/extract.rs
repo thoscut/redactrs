@@ -233,9 +233,11 @@ impl PdfExtractor {
     fn build_lines(page: usize, items: Vec<(usize, GlyphItem)>) -> Vec<TextRun> {
         // Codes ohne Textzuordnung fliegen raus, Ersatzzeichen bleiben erhalten:
         // sie halten die Position und verhindern falsche Zusammenschreibung.
+        // Ebenso fliegen Glyphen raus, die nichts zeigen ([`is_invisible`]) —
+        // ihre Lücke bleibt über die Geometrie erhalten, siehe dort.
         let items: Vec<(usize, GlyphItem)> = items
             .into_iter()
-            .filter(|(_, g)| !g.text.is_empty())
+            .filter(|(_, g)| !g.text.is_empty() && !is_invisible(g))
             .collect();
         if items.is_empty() {
             return Vec::new();
@@ -390,6 +392,55 @@ impl PdfExtractor {
     }
 }
 
+/// Ein Zeichen, das ein Betrachter weder zeichnet noch als Trenner kopiert:
+/// C0/C1-Steuerzeichen und `DEL`, der weiche Trennstrich (U+00AD), die
+/// Breite-null-Zeichen (U+200B–U+200D, U+2060), die Richtungsmarken
+/// (U+200E, U+200F) und U+FEFF.
+fn is_invisible_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}'
+        )
+}
+
+/// Trägt diese Glyphe nur ein unsichtbares Zeichen — eines, das die Zeile
+/// nicht unterbrechen darf?
+///
+/// **Warum.** `(DE8937040044053\t2013000) Tj` in Helvetica/WinAnsi: für den
+/// Code 9 gibt es keine Glyphe, poppler und pdf.js zeigen und kopieren
+/// `DE89370400440532013000` am Stück (die Lücke ist ≈ 2,7 pt). Hier dagegen
+/// stand an der Stelle ein Ersatzzeichen (der Code ist in der Kodierung nicht
+/// belegt) oder ein `\t` aus einer `/ToUnicode`-Tabelle, und kein Muster
+/// fand die IBAN — Treffer 0, Rückgabewert 0. Dasselbe gilt für `\000`, `\n`,
+/// `\037`, für Breite-null-Zeichen und für den weichen Trennstrich: ein
+/// einziges solches Zeichen genügte, um jede Kennung unsichtbar zu machen.
+///
+/// **Wie.** Die Glyphe verlässt die Zeile *vor* dem Zusammensetzen, genau wie
+/// ein Code ohne Text. Damit bleibt die Zuordnung Zeichen ↔ Glyphe für alle
+/// übrigen Zeichen exakt. Die Lücke, die sie hinterlässt, misst
+/// [`PdfExtractor::assemble_line`] wie jede andere: ist sie breit genug, wird
+/// daraus ein Leerzeichen (das die Muster als Trenner kennen), sonst stoßen
+/// die Nachbarn aneinander. Geschwärzt wird sie trotzdem: der Kasten eines
+/// Treffers reicht von seiner ersten bis zu seiner letzten Glyphe und deckt
+/// die unsichtbare dazwischen mit.
+///
+/// **Das Ersatzzeichen** zählt nur dann als unsichtbar, wenn es aus einem
+/// *einzelnen* Byte unter 0x20 (oder 0x7F) stammt — also aus einem
+/// C0-Code einer einfachen Schrift, den keine Standardkodierung belegt.
+/// Jedes andere Ersatzzeichen steht für eine Glyphe, die vielleicht etwas
+/// zeigt, und behält wie bisher seinen Platz. Liegt in einer Schrift ohne
+/// Kodierung auf einem solchen Code doch eine sichtbare Glyphe, schreibt das
+/// Weglassen zwei Nachbarn zusammen: das kann einen Treffer *mehr* ergeben,
+/// nie einen weniger — die sichere Richtung.
+fn is_invisible(g: &GlyphItem) -> bool {
+    if g.text.chars().all(is_invisible_char) {
+        return true;
+    }
+    g.text.chars().eq([crate::encoding::REPLACEMENT])
+        && matches!(g.bytes.as_slice(), [b] if *b < 0x20 || *b == 0x7F)
+}
+
 impl PdfExtractor {
     /// Extrahiert die Textzeilen des ganzen Dokuments.
     ///
@@ -542,7 +593,7 @@ fn mirror_runs(doc: &Document, page: usize, scan: &ScanResult) -> (Vec<TextRun>,
                      etwas anderes als die Glyphen darunter ({} Zeichen im Spiegel, {} in den \
                      Glyphen). Welche der beiden Fassungen ein Betrachter zeigt oder kopiert, \
                      kann das Werkzeug nicht wissen.{}",
-                    String::from_utf8_lossy(key),
+                    crate::label(key),
                     page + 1,
                     folded.chars().count(),
                     beneath.chars().count(),
@@ -556,7 +607,7 @@ fn mirror_runs(doc: &Document, page: usize, scan: &ScanResult) -> (Vec<TextRun>,
                 ));
             }
             if let Some(rect) = rect {
-                runs.push(spread(page, &text, rect));
+                runs.push(spread(page, &text, &glyphs, rect));
             }
         }
     }
@@ -598,27 +649,33 @@ fn fold<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
     out
 }
 
-/// Verteilt einen Text gleichmäßig über einen Kasten — Zeichen für Zeichen,
-/// in Schreibrichtung von links nach rechts.
+/// Legt den Spiegeltext auf die Glyphen, die er ersetzt.
 ///
-/// Die Kästen sind erfunden; sie liegen aber alle **im** Kasten der Glyphen,
-/// die der Spiegel ersetzt. Ein Treffer darin berührt deshalb immer echte
-/// Glyphen, und die Schwärzung nimmt den Spiegel mit.
-fn spread(page: usize, text: &str, rect: Rect) -> TextRun {
+/// Hat der Spiegel **genau so viele Zeichen** wie Glyphen darunter stehen,
+/// bekommt jedes Zeichen den Kasten seiner Glyphe — Zeichen `i` ersetzt dann
+/// Glyphe `i`, wie bei jedem gewöhnlichen `/ActualText` über unlesbaren
+/// Codes. Ein Treffer im Spiegel trifft so genau die Glyphen des Geheimnisses
+/// und nicht die Nachbarn.
+///
+/// Sonst ist die Zuordnung unbekannt, und jedes Zeichen bekommt den **ganzen**
+/// Kasten des Abschnitts. Früher wurde der Kasten stattdessen gleichmäßig
+/// aufgeteilt: steht vor der IBAN schmaler Text (`iiiiiiiiii: DE89 …`),
+/// liegen ihre echten Glyphen links vom erfundenen Teilkasten und blieben
+/// nach der Schwärzung stehen. Den ganzen Abschnitt zu schwärzen nimmt zu
+/// viel weg statt zu wenig — die sichere Richtung, und der Lauf meldet die
+/// Abweichung des Spiegels ohnehin als Deckungslücke.
+fn spread(page: usize, text: &str, beneath: &[&GlyphItem], rect: Rect) -> TextRun {
     let chars: Vec<char> = text
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    let step = rect.width() / chars.len().max(1) as f64;
+    let one_to_one = chars.len() == beneath.len();
     let glyphs = chars
         .into_iter()
         .enumerate()
-        .map(|(i, ch)| {
-            let x0 = rect.ll.x + step * i as f64;
-            Glyph {
-                ch,
-                rect: Rect::new(x0, rect.ll.y, x0 + step, rect.ur.y),
-            }
+        .map(|(i, ch)| Glyph {
+            ch,
+            rect: if one_to_one { beneath[i].rect } else { rect },
         })
         .collect();
     TextRun::new(page, glyphs)
@@ -682,7 +739,7 @@ fn unplaced_form_warnings(
                 "Das Form-XObject „{}“ (Objekt {} {}) steht in den Ressourcen, wird aber \
                  nirgends gezeichnet; sein Text wurde nicht durchsucht und kann deshalb \
                  nicht geschwärzt worden sein.",
-                String::from_utf8_lossy(name),
+                crate::label(name),
                 id.0,
                 id.1
             )

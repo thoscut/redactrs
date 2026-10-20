@@ -39,6 +39,17 @@
 //! 6. innerhalb von Streams zusätzlich die **Verkettung aller
 //!    Zeichenketten-Literale** — damit wird Text auch dann gefunden, wenn er
 //!    per `TJ` in Bruchstücke zerlegt ist,
+//!
+//!    Zu Sicht 2 und 3 gehört außerdem eine Lesart als **CMap**: die Ziele
+//!    aller `bfchar`/`bfrange`-Zuordnungen, UTF-16BE dekodiert und in
+//!    Code-Reihenfolge zu einem Text gereiht ([`cmap_destinations`]); zu
+//!    Sicht 5 die Glyphennamen eines `/Differences`-Arrays, über die
+//!    AGL-Tabelle als Text gelesen ([`differences_text`]). Eine
+//!    `/ToUnicode`-Zuordnung in **unbenutzten** Codes, die die IBAN
+//!    buchstabiert, zeigt kein Betrachter an — aber jeder, der die Schrift
+//!    ausliest, kann sie lesen. Bis Runde 2 kam so eine Datei als „nicht
+//!    gefunden“ zurück: die Zielwerte stehen als `<0044>`, `<0045>` … je in
+//!    eigenen Hex-Klammern und trafen keine Bytesicht,
 //! 7. **jede Seite, wie der eigene Schriftdekoder sie liest**: Glyphencodes
 //!    über `/ToUnicode`, `/Differences` und Standardkodierungen in Zeichen
 //!    übersetzt, zu Zeilen gesetzt ([`scan_decoded_text`]).
@@ -603,7 +614,10 @@ pub fn leaks_many_within(
         Err(e) => Err(format!("die Vorprüfung des Laders lehnt die Datei ab: {e}")),
     };
     match doc {
-        Ok(doc) => {
+        Ok(mut doc) => {
+            // Dieselben Seiten wie der Schwärzungslauf und der Betrachter:
+            // ein Blatt ohne `/Type /Page` fehlte sonst in Sicht 7.
+            crate::document::normalize_page_tree(&mut doc);
             // Was der Lader anders las, als es in den Rohbytes steht, haben
             // die Sichten 3–7 nicht gesehen (Register #98).
             let (mut streams, covered) = misread_streams(pdf_bytes, &raw_streams, &doc);
@@ -627,6 +641,7 @@ pub fn leaks_many_within(
             places += budget.places();
             unchecked.extend(budget.into_unchecked());
             if skipped == 0 {
+                scan_joined_contents(&doc, &mut probe);
                 let gaps = scan_decoded_text(&doc, &mut probe);
                 places += gaps.len();
                 push_capped(
@@ -634,7 +649,7 @@ pub fn leaks_many_within(
                     gaps.into_iter()
                         .map(|gap| format!("Sicht 7 (Schriftdekoder): {gap}"))
                         .collect(),
-                    "Seiten",
+                    "Stellen",
                 );
             } else {
                 // Eine ganze Sicht, die nicht lief: eine Stelle mehr, auch
@@ -1483,7 +1498,7 @@ fn decode_raw_chain(
     let decoded = (applied > 0).then(|| {
         let mut label = names[..applied]
             .iter()
-            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .map(|name| crate::label(name))
             .collect::<Vec<_>>()
             .join("+");
         if stream.dict.has(b"DecodeParms") {
@@ -1894,7 +1909,7 @@ fn walk(
             };
             scan_string(raw, site, how, probe);
         }
-        Object::Name(name) => scan_raw_bytes(name, site, "Name", probe),
+        Object::Name(name) => scan_name(name, site, "Name", probe),
         Object::Array(items) => {
             for (i, item) in items.iter().enumerate() {
                 walk(
@@ -1931,11 +1946,30 @@ fn walk_dict(
     }
     let path = site.text;
     for (key, value) in dict.iter() {
+        let key_bytes = key;
         let key = String::from_utf8_lossy(key);
+        let key_site = format!("{path}/{key}");
+        // Auch der Schlüssel ist Inhalt: ein Name darf jedes Byte tragen
+        // (`#20` für ein Leerzeichen), und ein Erzeuger kann dort ablegen,
+        // was er will — der Betrachter zeigt ihn nicht, `strings` schon.
+        scan_name(key_bytes, site.with_text(&key_site), "Schlüssel", probe);
+        if key_bytes.as_slice() == b"Differences" {
+            if let Object::Array(items) = value {
+                let text = differences_text(items);
+                if !text.is_empty() {
+                    scan_text(
+                        &text,
+                        site.with_text(&key_site),
+                        "Glyphennamen als Text",
+                        probe,
+                    );
+                }
+            }
+        }
         walk(
             doc,
             value,
-            site.with_text(&format!("{path}/{key}")),
+            site.with_text(&key_site),
             probe,
             budget,
             depth + 1,
@@ -2080,7 +2114,7 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
     let chain = |names: &[Vec<u8>]| {
         names
             .iter()
-            .map(|f| String::from_utf8_lossy(f))
+            .map(|f| crate::label(f))
             .collect::<Vec<_>>()
             .join("+")
     };
@@ -2091,7 +2125,7 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
             let rest = if names[applied].is_empty() {
                 "ein Glied ohne Filternamen".to_string()
             } else {
-                format!("/{} unbekannt", String::from_utf8_lossy(&names[applied]))
+                format!("/{} unbekannt", crate::label(&names[applied]))
             };
             Some((
                 format!(
@@ -2120,6 +2154,22 @@ fn decode_stream(doc: &Document, stream: &Stream, room: usize) -> Result<Decoded
 fn scan_blob(blob: &[u8], site: Site<'_>, probe: &mut Probe) {
     scan_raw_bytes(blob, site, "Inhalt", probe);
 
+    // Derselbe Block als CMap gelesen — nur, wo er wie eine aussieht.
+    if let Some(text) = cmap_destinations(blob) {
+        scan_text(
+            &text,
+            site,
+            "CMap-Ziele (bfchar/bfrange) in Code-Reihenfolge",
+            probe,
+        );
+    }
+
+    scan_concat(blob, site, probe);
+}
+
+/// Sicht 6 über einen Datenblock: die Verkettung aller Zeichenketten-Literale
+/// darin, als PDFDocEncoding und — wo es etwas ändert — als WinAnsi.
+fn scan_concat(blob: &[u8], site: Site<'_>, probe: &mut Probe) {
     // Verkettung und Leerraum-Fassung hängen allein am Datenblock: einmal
     // bilden, dann von jedem Suchbegriff benutzen.
     let (joined, win_ansi) = concat_pdf_strings_both(blob);
@@ -2155,8 +2205,218 @@ fn scan_blob(blob: &[u8], site: Site<'_>, probe: &mut Probe) {
     }
 }
 
+/// Höchstzahl der Zeichen, die [`cmap_destinations`] aus einem Block reiht.
+///
+/// Ein `bfrange` mit einem einzelnen Ziel zählt hoch — `<0000> <FFFF>
+/// <0041>` sind 65 536 Zeichen aus 20 Byte. Ein Zwei-Byte-Coderaum hat nicht
+/// mehr Codes als das; was darüber hinausgeht, ist keine Schrift mehr.
+const MAX_CMAP_CHARS: usize = 1 << 17;
+
+/// Die Ziele aller `bfchar`- und `bfrange`-Zuordnungen eines Blocks als ein
+/// Text, nach Quellcode sortiert. `None`, wenn der Block keine CMap ist.
+///
+/// ## Warum Code-Reihenfolge
+///
+/// Wer eine IBAN in einer `/ToUnicode` versteckt, legt sie auf
+/// aufeinanderfolgende Codes — als ein `bfrange` mit Array-Ziel oder als
+/// Reihe von `bfchar`. Gelesen wird sie, indem man die Codes der Reihe nach
+/// übersetzt; genau das tut diese Sicht. Die Dateireihenfolge ist für ein
+/// `bfrange` dieselbe, für verstreute `bfchar` nicht unbedingt.
+///
+/// ## Was das an Fehlalarmen kostet
+///
+/// Die CMap einer gewöhnlichen Schrift ergibt in Code-Reihenfolge ihr
+/// Alphabet (`!"#$%…0123…ABC…`) oder — bei einer Teilmengen-Schrift, deren
+/// Codes in der Reihenfolge des ersten Auftretens vergeben wurden — die
+/// **ersten Vorkommen** der Zeichen des Dokuments. Eine IBAN mit
+/// wiederholten Ziffern entsteht daraus nicht; trifft sie trotzdem, trägt
+/// die Schrift die Folge wirklich, und das ist ein Fund, kein Fehlalarm.
+///
+/// Ein Ziel ist UTF-16BE (PDF 32000-1, 9.10.3); ungerade Längen und
+/// Surrogathälften ohne Partner werden ersetzt, nicht verworfen.
+fn cmap_destinations(blob: &[u8]) -> Option<String> {
+    let start = memmem::find(blob, b"beginbf")?;
+    let mut map: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    let mut chars = 0usize;
+    let mut tokens = CmapTokens { blob, pos: start };
+    // `None` = außerhalb eines Abschnitts, sonst `true` für bfrange.
+    let mut section: Option<bool> = None;
+    'outer: while let Some(tok) = tokens.next() {
+        match tok {
+            CmapToken::Word(b"beginbfchar") => section = Some(false),
+            CmapToken::Word(b"beginbfrange") => section = Some(true),
+            CmapToken::Word(w) if w.starts_with(b"end") => section = None,
+            CmapToken::Hex(src) if section == Some(false) => {
+                let Some(CmapToken::Hex(dst)) = tokens.next() else {
+                    continue;
+                };
+                let text = utf16be(&dst);
+                chars += text.chars().count();
+                map.insert(code_value(&src), text);
+            }
+            CmapToken::Hex(lo) if section == Some(true) => {
+                let Some(CmapToken::Hex(hi)) = tokens.next() else {
+                    continue;
+                };
+                let (lo, hi) = (code_value(&lo), code_value(&hi));
+                match tokens.next() {
+                    Some(CmapToken::Hex(dst)) => {
+                        // Ein Ziel, das hochzählt: das letzte Byte wächst mit.
+                        let mut units: Vec<u16> = dst
+                            .chunks(2)
+                            .map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]))
+                            .collect();
+                        for code in lo..=hi.max(lo) {
+                            if chars >= MAX_CMAP_CHARS {
+                                break 'outer;
+                            }
+                            let text = String::from_utf16_lossy(&units);
+                            chars += text.chars().count();
+                            map.insert(code, text);
+                            if let Some(last) = units.last_mut() {
+                                *last = last.wrapping_add(1);
+                            }
+                        }
+                    }
+                    Some(CmapToken::Open) => {
+                        let mut code = lo;
+                        while let Some(CmapToken::Hex(dst)) = tokens.next() {
+                            let text = utf16be(&dst);
+                            chars += text.chars().count();
+                            map.insert(code, text);
+                            code = code.saturating_add(1);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        if chars >= MAX_CMAP_CHARS {
+            break;
+        }
+    }
+    if map.is_empty() {
+        return None;
+    }
+    Some(map.into_values().collect())
+}
+
+/// Der Zahlenwert eines Quellcodes (höchstens vier Byte zählen).
+fn code_value(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .rev()
+        .take(4)
+        .rev()
+        .fold(0u32, |acc, &b| (acc << 8) | u32::from(b))
+}
+
+fn utf16be(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .chunks(2)
+        .map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]))
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+/// Ein Wort einer CMap, so weit [`cmap_destinations`] es braucht.
+enum CmapToken<'a> {
+    /// `<…>`, schon in Bytes übersetzt.
+    Hex(Vec<u8>),
+    /// `[` — ein `bfrange` mit Array-Ziel beginnt.
+    Open,
+    /// Alles andere: Schlüsselwörter, Zahlen, Namen, `]`.
+    Word(&'a [u8]),
+}
+
+struct CmapTokens<'a> {
+    blob: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> CmapTokens<'a> {
+    fn next(&mut self) -> Option<CmapToken<'a>> {
+        let blob = self.blob;
+        while self.pos < blob.len() && blob[self.pos].is_ascii_whitespace() {
+            self.pos += 1;
+        }
+        let first = *blob.get(self.pos)?;
+        match first {
+            b'<' => {
+                let end =
+                    memchr::memchr(b'>', &blob[self.pos..]).map_or(blob.len(), |e| self.pos + e);
+                let digits: Vec<u8> = blob[self.pos + 1..end]
+                    .iter()
+                    .copied()
+                    .filter(u8::is_ascii_hexdigit)
+                    .collect();
+                self.pos = (end + 1).min(blob.len());
+                let hex = digits
+                    .chunks(2)
+                    .map(|c| {
+                        let hi = (c[0] as char).to_digit(16).unwrap_or(0) as u8;
+                        let lo = c
+                            .get(1)
+                            .map_or(0, |d| (*d as char).to_digit(16).unwrap_or(0) as u8);
+                        (hi << 4) | lo
+                    })
+                    .collect();
+                Some(CmapToken::Hex(hex))
+            }
+            b'[' => {
+                self.pos += 1;
+                Some(CmapToken::Open)
+            }
+            b']' => {
+                self.pos += 1;
+                Some(CmapToken::Word(b"]"))
+            }
+            _ => {
+                let start = self.pos;
+                self.pos += 1;
+                while self.pos < blob.len()
+                    && !blob[self.pos].is_ascii_whitespace()
+                    && !matches!(blob[self.pos], b'<' | b'[' | b']')
+                {
+                    self.pos += 1;
+                }
+                Some(CmapToken::Word(&blob[start..self.pos]))
+            }
+        }
+    }
+}
+
+/// Die Glyphennamen eines `/Differences`-Arrays als Text, in Array-Reihenfolge
+/// (das ist die Code-Reihenfolge: jede Zahl setzt den Code, jeder Name
+/// danach belegt den nächsten). Unbekannte Namen fallen weg — `/g17` sagt
+/// nichts über ein Zeichen.
+fn differences_text(items: &[Object]) -> String {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Object::Name(name) => std::str::from_utf8(name)
+                .ok()
+                .and_then(crate::glyphnames::glyph_name_to_text),
+            _ => None,
+        })
+        .collect()
+}
+
 fn scan_raw_bytes(hay: &[u8], site: Site<'_>, how: &str, probe: &mut Probe) {
     probe.scan_bytes(hay, 4, site, how);
+}
+
+/// Name-Objekt (als Wert oder als Schlüssel): roh **und** als Text.
+///
+/// Roh allein reichte nicht. Der Lader hat `#xx` schon aufgelöst, aber der
+/// Bytevergleich kennt keine Fassung ohne Leerraum: `/DE89370400440532013000`
+/// traf den Begriff „DE89 3704 0044 0532 0130 00“ nicht, dieselben Ziffern
+/// als Zeichenkette dagegen schon. Als Text gelesen gilt für einen Namen
+/// dieselbe Regel wie für jede Zeichenkette.
+fn scan_name(name: &[u8], site: Site<'_>, how: &str, probe: &mut Probe) {
+    scan_text(&String::from_utf8_lossy(name), site, how, probe);
+    scan_raw_bytes(name, site, how, probe);
 }
 
 /// Zeichenketten-Objekt: sowohl dekodiert (PDFDocEncoding **oder** UTF-16BE)
@@ -2223,13 +2483,25 @@ fn scan_text(text: &str, site: Site<'_>, how: &str, probe: &mut Probe) {
 /// ist der benannte blinde Fleck aus dem Modulkopf. Eine zweite Zeile dafür
 /// machte aus jeder solchen Datei einen Befund mehr, und aus der Zusage
 /// „Bildfilter am Kettenende: keine Meldung“ (`SECURITY.md`) eine falsche.
+///
+/// Dazu je Warnung des Interpreters, die selbst sagt, dass ein Teil des
+/// Inhalts nicht gelesen wurde, eine Zeile ([`decoder_coverage_gap`]).
 fn scan_decoded_text(doc: &Document, probe: &mut Probe) -> Vec<String> {
-    let (runs, _, gaps) = PdfExtractor::new().extract_lenient_with_gaps(doc);
-    let gaps = gaps
+    let (runs, warnings, gaps) = PdfExtractor::new().extract_lenient_with_gaps(doc);
+    // Jede Seitenlücke steht auch unter den Warnungen; sie zählt einmal.
+    let page_gaps: Vec<&str> = gaps.iter().map(|(_, gap)| gap.as_str()).collect();
+    let mut lines: Vec<String> = warnings
+        .iter()
+        .filter(|w| !page_gaps.contains(&w.as_str()))
+        .filter(|w| decoder_coverage_gap(doc, w))
+        .cloned()
+        .collect();
+    let mut gaps: Vec<String> = gaps
         .into_iter()
         .filter(|(page_id, _)| !page_content_undecodable(doc, *page_id))
         .map(|(_, gap)| gap)
         .collect();
+    gaps.append(&mut lines);
     // Die Zeilen kommen seitenweise sortiert; je Seite ein Text.
     for page_runs in runs.chunk_by(|a, b| a.page == b.page) {
         let text: String = page_runs
@@ -2248,6 +2520,132 @@ fn scan_decoded_text(doc: &Document, probe: &mut Probe) -> Vec<String> {
         );
     }
     gaps
+}
+
+/// Sicht 6 über den **ganzen** Seiteninhalt einer Seite, deren `/Contents`
+/// ein Feld aus mehreren Strömen ist.
+///
+/// Die Teilströme sind für jeden Betrachter ein einziger Inhalt (PDF
+/// 32000-1, 7.8.2): eine Zeichenkette darf in einem Teil beginnen und im
+/// nächsten enden. Sicht 6 las bis Runde 2 nur je Strom — `(IBAN DE89 37`
+/// im einen, `04 0044 0532 0130 00) Tj` im anderen ergab zweimal ein
+/// Bruchstück und „nicht gefunden“, obwohl poppler, pdf.js und mupdf die
+/// IBAN am Stück zeigen. Hier läuft die Verkettung deshalb zusätzlich über
+/// [`filters::page_content`], denselben Seiteninhalt, den der Interpreter
+/// liest. Eine Seite mit nur einem Strom hat Sicht 6 schon gesehen.
+///
+/// Läuft nur, wenn die Objektsicht jeden Strom im Budget entpacken konnte
+/// (wie Sicht 7): `page_content` entpackt ohne eigene Grenze.
+fn scan_joined_contents(doc: &Document, probe: &mut Probe) {
+    for (number, page_id) in doc.get_pages() {
+        if doc.get_page_contents(page_id).len() < 2 {
+            continue;
+        }
+        let content = filters::page_content(doc, page_id);
+        scan_concat(
+            &content,
+            Site::new(
+                &format!("Seite {number} <Inhalt, alle /Contents-Teile verbunden>"),
+                LeakView::StringConcat,
+            ),
+            probe,
+        );
+    }
+}
+
+/// Sagt diese Warnung des Interpreters, dass ein Teil des Inhalts **nicht
+/// gelesen** wurde — ein Form-XObject, ein Erscheinungsstrom, eine
+/// Maskengruppe, ein Kachelmuster, eine Type3-Glyphprozedur?
+///
+/// Bis hierher verwarf diese Sicht alle Warnungen außer der ganzen
+/// abgelehnten Seite. Ein Form-XObject, das sich nicht zerlegen ließ, fehlte
+/// dann stumm: `--check-leaks` meldete „nicht gefunden“, obwohl der
+/// Schriftdekoder dort nichts gelesen hatte — und Glyphencodes einer
+/// Teilmengen-Schrift findet keine der Bytesichten. Gemeint sind die
+/// Meldungen, die das selbst sagen („nicht durchsucht“, „nicht
+/// weitergelesen“); Hinweise wie „kein /ToUnicode“ sind keine Lücke dieser
+/// Sicht, sondern ein Urteil über den Text, den sie gelesen hat.
+///
+/// Zwei Fälle bleiben draußen, weil sie schon anders benannt sind:
+/// - ein Form-XObject, das **nirgends gezeichnet** wird: es steht nicht auf
+///   dem Papier, und das ist die einzige Aussage dieser Sicht; seinen Strom
+///   lesen die Bytesichten wie jeden anderen. Eine Zeile dafür machte aus
+///   jeder Datei mit geteilten Ressourcen einen Befund.
+/// - ein Form-XObject, das sich nicht dekodieren ließ, **weil** seine Kette
+///   ein Glied trägt, das hier niemand auspackt: wie bei
+///   [`page_content_undecodable`] nennt die Objektsicht einen unbekannten
+///   Filter selbst, und Text hinter einem Bildfilter ist der benannte blinde
+///   Fleck aus dem Modulkopf.
+fn decoder_coverage_gap(doc: &Document, warning: &str) -> bool {
+    if !(warning.contains("nicht durchsucht") || warning.contains("nicht weitergelesen")) {
+        return false;
+    }
+    if warning.contains("wird aber nirgends gezeichnet")
+        || warning.contains("werden aber nirgends gezeichnet")
+    {
+        return false;
+    }
+    if let Some(rest) = warning.strip_prefix("Form-XObject „") {
+        if let Some((label, tail)) = rest.split_once('“') {
+            if tail.starts_with(" ließ sich nicht dekodieren") && forms_undecodable(doc, label) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Trägt **jedes** Form-XObject, das unter dem Ressourcennamen `label`
+/// eingetragen ist, eine Kette mit einem Glied, das hier niemand auspackt?
+///
+/// Die Warnung nennt nur den Namen, nicht das Objekt; gesucht wird deshalb
+/// in jedem `/XObject`-Verzeichnis des Dokuments. Ein einziger Eintrag mit
+/// lesbarer Kette — dessen Dekodieren also an etwas anderem scheiterte —
+/// genügt, damit die Zeile bleibt.
+fn forms_undecodable(doc: &Document, label: &str) -> bool {
+    let mut seen = false;
+    let mut all = true;
+    let mut visit = |resources: &Dictionary| {
+        let Some(xobjects) = resources
+            .get(b"XObject")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+        else {
+            return;
+        };
+        for (name, entry) in xobjects.iter() {
+            if crate::label(name) != label {
+                continue;
+            }
+            let Ok(stream) = doc.dereference(entry).and_then(|(_, o)| o.as_stream()) else {
+                continue;
+            };
+            seen = true;
+            all &= filters::filter_names(doc, &stream.dict)
+                .unwrap_or_default()
+                .iter()
+                .any(|name| !filters::is_decodable_filter(name));
+        }
+    };
+    for object in doc.objects.values() {
+        let dict = match object {
+            Object::Dictionary(dict) => dict,
+            Object::Stream(stream) => &stream.dict,
+            _ => continue,
+        };
+        if let Some(resources) = dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+        {
+            visit(resources);
+        }
+        // Ein `/Resources`-Verzeichnis als eigenes Objekt.
+        visit(dict);
+    }
+    seen && all
 }
 
 /// Steht **jeder** Inhaltsstrom der Seite hinter einer Kette, die hier nicht
@@ -2306,7 +2704,10 @@ fn misread_streams(
     raw: &[((u32, u16), usize)],
     doc: &Document,
 ) -> (Vec<String>, Option<BTreeSet<usize>>) {
-    if doc.is_encrypted() {
+    // `was_encrypted`, nicht `is_encrypted`: bei leerem Benutzerpasswort hat
+    // der Lader entschlüsselt und `/Encrypt` entfernt — `is_encrypted` sagt
+    // dann „nein“, und jeder Strom sähe verlesen aus.
+    if doc.was_encrypted() || doc.is_encrypted() {
         return (Vec::new(), None);
     }
     let mut covered = BTreeSet::new();
@@ -2433,13 +2834,13 @@ fn chain_gap(names: &[Vec<u8>], applied: usize) -> Option<String> {
                 format!(
                     "/{} ist ein Bildfilter und wird nicht dekodiert, aber die Kette \
                      geht dahinter weiter",
-                    String::from_utf8_lossy(name)
+                    crate::label(name)
                 )
             });
         }
         Some(format!(
             "/{} ist hier kein bekannter Filter",
-            String::from_utf8_lossy(name)
+            crate::label(name)
         ))
     });
     match grund.flatten() {
@@ -2597,6 +2998,36 @@ fn concat_pdf_strings_both(blob: &[u8]) -> (String, Option<String>) {
                 let (bytes, next) = read_hex_string(blob, i + 1);
                 push(&bytes);
                 i = next;
+            }
+            // Ein Kommentar ist keine Syntax: ein `(` darin öffnete sonst
+            // eine Zeichenkette, die erst an der nächsten `)` endet — und
+            // verschluckte dabei die Bruchstücke des folgenden `TJ`.
+            b'%' => {
+                while i < blob.len() && blob[i] != b'\n' && blob[i] != b'\r' {
+                    i += 1;
+                }
+            }
+            // Ein Name ist ein Wort für sich — auch `/BI`, ein gewöhnliches
+            // Marked-Content-Tag. `keyword_at` gilt hinter `/` als
+            // abgegrenzt; ohne diesen Sprung startete `/BI BMC` den
+            // Bildsprung unten, und bis zum nächsten `EI` (oder `( EI)`)
+            // fiel jedes Bruchstück aus der Verkettung (Runde 2).
+            b'/' => {
+                i += 1;
+                while i < blob.len()
+                    && !blob[i].is_ascii_whitespace()
+                    && blob[i] != 0
+                    && !b"()<>[]{}/%".contains(&blob[i])
+                {
+                    i += 1;
+                }
+            }
+            // Zwischen `ID` und `EI` stehen rohe Bilddaten. Ein `(` oder `<`
+            // darin ist ein Pixelwert, kein Zeichenkettenanfang; ohne diesen
+            // Sprung fraß die vermeintliche Zeichenkette die echte IBAN
+            // dahinter, und Sicht 6 fand sie nicht mehr.
+            b'B' if crate::document::keyword_at(blob, i, b"BI") => {
+                i = crate::document::skip_inline_image(blob, i);
             }
             _ => i += 1,
         }
