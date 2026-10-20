@@ -17,6 +17,10 @@
 //! * Die Zeichenschleife läuft **pro Operation** in `catch_unwind`. Ein kaputter
 //!   Pfad, ein unlesbarer Font oder ein defektes Bild kostet genau diese eine
 //!   Operation — der Rest der Seite wird trotzdem gezeichnet.
+//! * Die Zeichenschleife hat ein Arbeitsbudget in Seitenflächen
+//!   (`PAINT_BUDGET_PAGES`). Eine Seite, die sich tausendfach selbst übermalt,
+//!   wird danach abgebrochen und als `degraded` gemeldet, statt den einzigen
+//!   Render-Worker der Oberfläche stundenlang zu belegen.
 //! * Entartete MediaBoxen (null, negativ, NaN, absurd groß) werden auf A4
 //!   zurückgesetzt, es gibt nie ein Bild der Größe 0.
 //!
@@ -83,6 +87,52 @@ const MAX_CLIP_MASK_BYTES: usize = 64 * 1024 * 1024;
 /// Unterhalb dieser Gerätebreite wird ein Strich zur Haarlinie.
 const HAIRLINE_BELOW: f64 = 0.85;
 
+/// Arbeitsbudget des Malers, in „Seiten“: so oft darf die Seite rechnerisch
+/// vollständig mit einer Farbe gefüllt werden, bevor er aufhört.
+///
+/// **Warum überhaupt.** Die Dauer des Malens wächst mit der bemalten Fläche,
+/// nicht mit der Dateigröße. Ein 32 × 32-Bild, auf die ganze Seite skaliert
+/// und tausendfach mit `Do` gezeichnet, steckt in 9,6 kB und kostete gemessen
+/// 32 s bei 1000 px Breite; die Operationsdecke von einer Million in
+/// `redact_pdf::content` hätte Stunden erlaubt. Die Oberfläche hat genau
+/// einen Render-Worker — die Vorschau dieser und jeder danach geöffneten
+/// Datei wäre ausgeblieben.
+///
+/// **Warum Fläche und nicht Zeit.** Eine Zeitgrenze hinge an der Maschine und
+/// an Debug oder Release; dieselbe Datei sähe mal ganz, mal halb aus. Die
+/// Fläche ist deterministisch: gezählt wird der Begrenzungsrahmen jeder
+/// Operation in Gerätepixeln, auf das Bild beschnitten. Damit kostet eine
+/// Vollseitenfläche genau eine Seite, gleich wie groß die Vorschau ist.
+///
+/// **Warum 512.** Gemessen (Release, 800 px Breite) kostet eine
+/// Vollseitenfläche rund 1,5 ms; 512 davon sind also knapp eine Sekunde, und
+/// das ist auch der schlimmste Fall für Bilder ([`IMAGE_COST_FACTOR`]) und
+/// Clip-Masken ([`CLIP_MASK_COST_PAGES`]). Gewöhnliche Seiten liegen um
+/// Größenordnungen darunter: das Korpus in `redact-render/tests` kommt
+/// ungewichtet auf höchstens rund drei Seiten, auch mit Bildgewicht auf
+/// unter fünfzig; selbst die 2-MB-Leistungsbremse daraus (45 000 Rechtecke)
+/// braucht keine zwanzig.
+const PAINT_BUDGET_PAGES: f64 = 512.0;
+
+/// Wie viel teurer ein Bildpixel ist als ein Pixel einer Farbfläche.
+///
+/// Bilder werden bilinear und mit beliebiger Transformation abgetastet;
+/// gemessen kostet ein Vollseitenbild rund 20 ms gegen 1,5 ms für eine
+/// Vollseitenfläche. Mit 16 erlaubt das Budget 32 Vollseitenbilder — mehr
+/// Ebenen hat kein Scan und keine Folie, und 20 sind in
+/// `tests/r2_malbudget.rs` als Gegenprobe festgehalten.
+const IMAGE_COST_FACTOR: f64 = 16.0;
+
+/// Was der Bau einer Clip-Maske dem Budget kostet, in Seiten.
+///
+/// Eine Maske ist immer bildgroß und wird ganz beschrieben, auch für einen
+/// winzigen Pfad; gemessen rund 0,5 ms bei 800 px, also etwa ein Drittel
+/// einer Vollseitenfläche. Ohne diesen Posten liefen 300 000 verschiedene
+/// Clips (innerhalb der Operationsdecke) in Minuten, ohne je eine nennenswerte
+/// Fläche zu bemalen. Eine halbe Seite je Maske erlaubt rund tausend
+/// Maskenbauten je Seite.
+const CLIP_MASK_COST_PAGES: f64 = 0.5;
+
 // ---------------------------------------------------------------------------
 // Optionen und Ergebnis
 // ---------------------------------------------------------------------------
@@ -144,8 +194,11 @@ pub struct RenderedPage {
     pub warnings: Vec<String>,
     /// Wie viele Zeichenoperationen tatsächlich gezeichnet wurden.
     pub drawn_ops: usize,
-    /// `true`, wenn nur der Notnagel-Pfad lief — das Bild zeigt dann bloß den
-    /// Hintergrund.
+    /// `true`, wenn das Bild nicht die ganze Seite zeigt: entweder lief nur
+    /// der Notnagel-Pfad (das Bild zeigt bloß den Hintergrund), oder der Maler
+    /// hat sein Arbeitsbudget (`PAINT_BUDGET_PAGES` in diesem Modul)
+    /// aufgebraucht und vorzeitig aufgehört. In beiden Fällen steht der Grund
+    /// in `warnings`.
     pub degraded: bool,
 }
 
@@ -274,13 +327,20 @@ impl PageRenderer {
                     warnings: Warnings::default(),
                     drawn: 0,
                     draw_text: opts.draw_text,
+                    budget: PAINT_BUDGET_PAGES * page_area(&geo),
+                    spent: 0.0,
+                    exhausted: false,
                 };
                 painter.run();
-                (painter.drawn, painter.warnings)
+                (painter.drawn, painter.warnings, painter.exhausted)
             }));
             match outcome {
-                Ok((drawn, notes)) => {
+                Ok((drawn, notes, exhausted)) => {
                     drawn_ops = drawn;
+                    // Ein abgebrochenes Bild ist unvollständig: die Oberfläche
+                    // legt dann die schematische Vorschau darüber, statt eine
+                    // halbe Seite als ganze auszugeben.
+                    degraded |= exhausted;
                     for note in notes.into_list() {
                         warnings.push(note);
                     }
@@ -646,6 +706,13 @@ struct Painter<'a> {
     warnings: Warnings,
     drawn: usize,
     draw_text: bool,
+    /// Arbeitsbudget in Gerätepixeln, siehe [`PAINT_BUDGET_PAGES`].
+    budget: f64,
+    /// Bisher verbrauchte Fläche.
+    spent: f64,
+    /// `true`, sobald eine Operation das Budget überschritten hätte — dann
+    /// wird nichts mehr gemalt.
+    exhausted: bool,
 }
 
 impl Painter<'_> {
@@ -654,11 +721,16 @@ impl Painter<'_> {
         // gegen die `&mut self`-Ausleihe im Rumpf steht.
         let page = self.page;
         let mut panics = 0usize;
-        for op in &page.ops {
+        let mut stopped_at = None;
+        for (at, op) in page.ops.iter().enumerate() {
             match catch_unwind(AssertUnwindSafe(|| self.draw_op(op))) {
                 Ok(true) => self.drawn += 1,
                 Ok(false) => {}
                 Err(_) => panics += 1,
+            }
+            if self.exhausted {
+                stopped_at = Some(at);
+                break;
             }
         }
         if panics > 0 {
@@ -666,6 +738,47 @@ impl Painter<'_> {
                 "{panics} Zeichenoperation(en) übersprungen: Panik abgefangen"
             ));
         }
+        if let Some(at) = stopped_at {
+            let total = page.ops.len();
+            self.warn(format!(
+                "Vorschau unvollständig: Zeichenaufwand der Seite über der \
+                 Grenze, nach {at} von {total} Zeichenoperationen abgebrochen"
+            ));
+        }
+    }
+
+    /// Bucht die Fläche eines Gerätepixel-Rahmens, mal `weight`, auf das
+    /// Budget.
+    ///
+    /// `false` heißt: das Budget reicht nicht mehr, die Operation wird nicht
+    /// gemalt und der Maler hört auf. Der Rahmen wird auf das Bild
+    /// beschnitten — was außerhalb liegt, kostet tiny-skia nichts, und eine
+    /// riesige Koordinate soll das Budget nicht mit einem Schlag leeren.
+    fn charge(&mut self, left: f32, top: f32, right: f32, bottom: f32, weight: f64) -> bool {
+        let w = f64::from(self.geo.width);
+        let h = f64::from(self.geo.height);
+        let span = |lo: f32, hi: f32, max: f64| {
+            let (lo, hi) = (f64::from(lo), f64::from(hi));
+            if lo.is_nan() || hi.is_nan() {
+                // Unbekannte Ausdehnung: vorsichtig als ganze Kante zählen.
+                return max;
+            }
+            (hi.min(max) - lo.max(0.0)).max(0.0)
+        };
+        self.charge_area(span(left, right, w) * span(top, bottom, h) * weight)
+    }
+
+    /// Bucht eine bereits berechnete Fläche (in Gerätepixeln).
+    fn charge_area(&mut self, area: f64) -> bool {
+        if self.exhausted {
+            return false;
+        }
+        if self.spent + area > self.budget {
+            self.exhausted = true;
+            return false;
+        }
+        self.spent += area;
+        true
     }
 
     fn warn(&mut self, text: String) {
@@ -739,7 +852,27 @@ impl Painter<'_> {
             return false;
         };
         let stroke_style = stroke.map(|s| self.stroke_style(s));
+        // Strich ragt über den Pfad hinaus: halbe Breite mal Gehrungsgrenze,
+        // mindestens ein Pixel für Haarlinien und Kantenglättung.
+        let outset = stroke_style
+            .as_ref()
+            .map(|sk| sk.width * sk.miter_limit / 2.0 + 1.0)
+            .unwrap_or(1.0);
+        let b = path.bounds();
+        if !self.charge(
+            b.left() - outset,
+            b.top() - outset,
+            b.right() + outset,
+            b.bottom() + outset,
+            1.0,
+        ) {
+            return false;
+        }
         self.prepare_clip(clip);
+        if self.exhausted {
+            // Ohne die Maske würde unbeschnitten gemalt — lieber gar nicht.
+            return false;
+        }
         let mask = clip_mask(&self.clips, clip);
         let mut painted = false;
 
@@ -899,7 +1032,15 @@ impl Painter<'_> {
         let Some(path) = outline_path(&outline, &total) else {
             return false;
         };
+        let b = path.bounds();
+        if !self.charge(b.left(), b.top(), b.right(), b.bottom(), 1.0) {
+            return false;
+        }
         self.prepare_clip(clip);
+        if self.exhausted {
+            // Ohne die Maske würde unbeschnitten gemalt — lieber gar nicht.
+            return false;
+        }
         let mask = clip_mask(&self.clips, clip);
         let paint = solid_paint(fill, fill_alpha);
         self.pixmap.fill_path(
@@ -950,9 +1091,33 @@ impl Painter<'_> {
         if !ts.is_valid() {
             return false;
         }
+        // Begrenzungsrahmen der vier Bildecken im Gerät, mit dem Bildgewicht
+        // gebucht — siehe [`IMAGE_COST_FACTOR`].
+        let corners = [(0.0, 0.0), (iw, 0.0), (0.0, ih), (iw, ih)].map(|(x, y)| total.apply(x, y));
+        let (mut left, mut top) = (f64::INFINITY, f64::INFINITY);
+        let (mut right, mut bottom) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for p in corners {
+            left = left.min(p.x);
+            top = top.min(p.y);
+            right = right.max(p.x);
+            bottom = bottom.max(p.y);
+        }
+        if !self.charge(
+            left as f32,
+            top as f32,
+            right as f32,
+            bottom as f32,
+            IMAGE_COST_FACTOR,
+        ) {
+            return false;
+        }
 
         self.ensure_image(index);
         self.prepare_clip(clip);
+        if self.exhausted {
+            // Ohne die Maske würde unbeschnitten gemalt — lieber gar nicht.
+            return false;
+        }
         let paint = PixmapPaint {
             opacity: alpha.clamp(0.0, 1.0),
             blend_mode: tiny_skia::BlendMode::SourceOver,
@@ -996,6 +1161,13 @@ impl Painter<'_> {
             }
             return;
         }
+        // Der Maskenbau bemalt nichts Sichtbares, nullt aber eine bildgroße
+        // Fläche — siehe [`CLIP_MASK_COST_PAGES`]. Reicht das Budget nicht,
+        // hört der Maler ohnehin gleich auf; die Operation, die die Maske
+        // bräuchte, wird dann nicht mehr gemalt.
+        if !self.charge_area(CLIP_MASK_COST_PAGES * page_area(self.geo)) {
+            return;
+        }
         let segments = self.page.clips.get(at).map(Vec::as_slice).unwrap_or(&[]);
         let built = build_mask(segments, self.geo);
         if built.is_none() {
@@ -1017,6 +1189,11 @@ fn clip_mask(clips: &[(usize, Option<Mask>)], clip: Option<ClipRef>) -> Option<&
         .iter()
         .find(|(i, _)| *i == at)
         .and_then(|(_, mask)| mask.as_ref())
+}
+
+/// Fläche des Bildes in Gerätepixeln — die Einheit des Arbeitsbudgets.
+fn page_area(geo: &Geometry) -> f64 {
+    f64::from(geo.width) * f64::from(geo.height)
 }
 
 /// Wie viele Clip-Masken bei dieser Bildgröße unter [`MAX_CLIP_MASK_BYTES`]

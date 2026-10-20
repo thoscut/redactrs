@@ -233,9 +233,11 @@ impl PdfExtractor {
     fn build_lines(page: usize, items: Vec<(usize, GlyphItem)>) -> Vec<TextRun> {
         // Codes ohne Textzuordnung fliegen raus, Ersatzzeichen bleiben erhalten:
         // sie halten die Position und verhindern falsche Zusammenschreibung.
+        // Ebenso fliegen Glyphen raus, die nichts zeigen ([`is_invisible`]) —
+        // ihre Lücke bleibt über die Geometrie erhalten, siehe dort.
         let items: Vec<(usize, GlyphItem)> = items
             .into_iter()
-            .filter(|(_, g)| !g.text.is_empty())
+            .filter(|(_, g)| !g.text.is_empty() && !is_invisible(g))
             .collect();
         if items.is_empty() {
             return Vec::new();
@@ -388,6 +390,55 @@ impl PdfExtractor {
 
         Some(TextRun::new(page, glyphs))
     }
+}
+
+/// Ein Zeichen, das ein Betrachter weder zeichnet noch als Trenner kopiert:
+/// C0/C1-Steuerzeichen und `DEL`, der weiche Trennstrich (U+00AD), die
+/// Breite-null-Zeichen (U+200B–U+200D, U+2060), die Richtungsmarken
+/// (U+200E, U+200F) und U+FEFF.
+fn is_invisible_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}'
+        )
+}
+
+/// Trägt diese Glyphe nur ein unsichtbares Zeichen — eines, das die Zeile
+/// nicht unterbrechen darf?
+///
+/// **Warum.** `(DE8937040044053\t2013000) Tj` in Helvetica/WinAnsi: für den
+/// Code 9 gibt es keine Glyphe, poppler und pdf.js zeigen und kopieren
+/// `DE89370400440532013000` am Stück (die Lücke ist ≈ 2,7 pt). Hier dagegen
+/// stand an der Stelle ein Ersatzzeichen (der Code ist in der Kodierung nicht
+/// belegt) oder ein `\t` aus einer `/ToUnicode`-Tabelle, und kein Muster
+/// fand die IBAN — Treffer 0, Rückgabewert 0. Dasselbe gilt für `\000`, `\n`,
+/// `\037`, für Breite-null-Zeichen und für den weichen Trennstrich: ein
+/// einziges solches Zeichen genügte, um jede Kennung unsichtbar zu machen.
+///
+/// **Wie.** Die Glyphe verlässt die Zeile *vor* dem Zusammensetzen, genau wie
+/// ein Code ohne Text. Damit bleibt die Zuordnung Zeichen ↔ Glyphe für alle
+/// übrigen Zeichen exakt. Die Lücke, die sie hinterlässt, misst
+/// [`PdfExtractor::assemble_line`] wie jede andere: ist sie breit genug, wird
+/// daraus ein Leerzeichen (das die Muster als Trenner kennen), sonst stoßen
+/// die Nachbarn aneinander. Geschwärzt wird sie trotzdem: der Kasten eines
+/// Treffers reicht von seiner ersten bis zu seiner letzten Glyphe und deckt
+/// die unsichtbare dazwischen mit.
+///
+/// **Das Ersatzzeichen** zählt nur dann als unsichtbar, wenn es aus einem
+/// *einzelnen* Byte unter 0x20 (oder 0x7F) stammt — also aus einem
+/// C0-Code einer einfachen Schrift, den keine Standardkodierung belegt.
+/// Jedes andere Ersatzzeichen steht für eine Glyphe, die vielleicht etwas
+/// zeigt, und behält wie bisher seinen Platz. Liegt in einer Schrift ohne
+/// Kodierung auf einem solchen Code doch eine sichtbare Glyphe, schreibt das
+/// Weglassen zwei Nachbarn zusammen: das kann einen Treffer *mehr* ergeben,
+/// nie einen weniger — die sichere Richtung.
+fn is_invisible(g: &GlyphItem) -> bool {
+    if g.text.chars().all(is_invisible_char) {
+        return true;
+    }
+    g.text.chars().eq([crate::encoding::REPLACEMENT])
+        && matches!(g.bytes.as_slice(), [b] if *b < 0x20 || *b == 0x7F)
 }
 
 impl PdfExtractor {

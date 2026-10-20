@@ -276,7 +276,13 @@ läuft und an einer verschlüsselten Datei nur die Hälfte sehen kann:
   Nachgemessen an einer 44-MB-Dictionary-Bombe mit `/Encrypt` im Trailer — sie
   wird mit **und** ohne Passwort mit derselben Budgetmeldung abgelehnt.
 * **Nach** der Entschlüsselung läuft dieselbe Prüfung ein zweites Mal, jetzt auf
-  dem entschlüsselten Dokument (`redact_pipeline::check_limits_after_decryption`).
+  dem entschlüsselten Dokument (`redact_pdf::document::check_limits_after_decryption`,
+  aufgerufen aus `finish_decrypted`). Das gilt für **beide** Wege dorthin:
+  `--password` und das leere Benutzerpasswort, das `lopdf` beim Laden von sich
+  aus probiert. Bis Runde 2 lief die Prüfung nur auf dem ersten Weg; eine
+  131-kB-Datei mit leerem Benutzerpasswort (nur ein Eigentümerpasswort, der
+  übliche „Rechteschutz“) trieb den Lauf ohne `--password` auf 5,4 GB, ebenso
+  `--check-leaks`.
   Dazu wird das Dokument serialisiert — die Streams stehen darin als das, was
   sie sind: komprimiert, aber nicht mehr verschlüsselt. Es misst also
   derselbe Code mit denselben Grenzen und denselben Meldungen wie bei einer
@@ -1723,7 +1729,7 @@ Was heute gilt:
   | Grenze | Weg in der Oberfläche |
   |---|---|
   | `--max-input-mb` | `AppState::load_document` liest über `redact_pipeline::read_input(path, self.config.max_input_bytes)` statt über `std::fs::read` |
-  | `--max-decompressed-mb`, `--max-parsed-mb`, Tiefengrenze | `load_document` → `load_from_bytes_with_limits(bytes, &config.limits)`, und nach einer Entschlüsselung `check_limits_after_decryption` |
+  | `--max-decompressed-mb`, `--max-parsed-mb`, Tiefengrenze | `load_document` → `load_from_bytes_with_limits(bytes, &config.limits)`, und nach jeder Entschlüsselung (auch mit leerem Benutzerpasswort) `check_limits_after_decryption` |
   | `--max-image-mb` | über `config.max_decoded_image_bytes` im Export |
   | `--max-candidates` | `AppState::analyze` → `redact_pipeline::collect_regions_for` → `check_candidate_budget` |
   | Aufwandskonto und Glyphengrenze je Seite | im Interpreter, also unterhalb beider Programme |
