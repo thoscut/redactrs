@@ -639,11 +639,9 @@ struct Placement {
 impl Placement {
     fn label(&self, page_index: usize) -> String {
         match &self.target {
-            Target::XObject { name, .. } => format!(
-                "Bild /{} auf Seite {}",
-                String::from_utf8_lossy(name),
-                page_index + 1
-            ),
+            Target::XObject { name, .. } => {
+                format!("Bild /{} auf Seite {}", crate::label(name), page_index + 1)
+            }
             Target::Inline { .. } => format!("Inline-Bild auf Seite {}", page_index + 1),
         }
     }
@@ -731,7 +729,7 @@ impl ContentSink for Collector<'_> {
         let target = match event.inline {
             Some((dict, data)) => Target::Inline {
                 is_mask: dict_flag(dict, b"ImageMask", b"IM"),
-                filters: filter_label(dict),
+                filters: filter_label(dict, true),
                 pixels: declared_pixels(cx.doc, dict),
                 dict: dict.clone(),
                 data: self.touches_a_zone(&event.ctm).then(|| data.to_vec()),
@@ -747,7 +745,7 @@ impl ContentSink for Collector<'_> {
                     id,
                     name: name.to_vec(),
                     is_mask: dict_flag(&dict, b"ImageMask", b"IM"),
-                    filters: filter_label(&dict),
+                    filters: filter_label(&dict, false),
                     pixels: declared_pixels(cx.doc, &dict),
                 }
             }
@@ -858,16 +856,25 @@ fn dict_flag(dict: &Dictionary, long: &[u8], short: &[u8]) -> bool {
 }
 
 /// Die Filterkette als Text — nur für Fehlermeldungen.
-fn filter_label(dict: &Dictionary) -> String {
-    let Ok(filter) = dict.get(b"Filter").or_else(|_| dict.get(b"F")) else {
+///
+/// `/F` ist nur an einem Inline-Bild der Kurzname von `/Filter`; an einem
+/// Bild-XObject ist es eine Dateispezifikation, und der Dekoder
+/// ([`crate::ops::decode_image`]) liest es dort nicht als Filter. Die Meldung
+/// nennt dieselbe Kette, die dekodiert wurde.
+fn filter_label(dict: &Dictionary, inline: bool) -> String {
+    let entry = match dict.get(b"Filter") {
+        Err(_) if inline => dict.get(b"F"),
+        other => other,
+    };
+    let Ok(filter) = entry else {
         return "ohne Filter".to_string();
     };
     let names: Vec<String> = match filter {
-        Object::Name(name) => vec![String::from_utf8_lossy(name).into_owned()],
+        Object::Name(name) => vec![crate::label(name)],
         Object::Array(items) => items
             .iter()
             .filter_map(|o| o.as_name().ok())
-            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .map(crate::label)
             .collect(),
         _ => Vec::new(),
     };
@@ -1085,7 +1092,7 @@ enum Shown {
 fn label_names(targets: &BTreeSet<(StreamKey, Vec<u8>)>) -> String {
     let mut namen: Vec<String> = targets
         .iter()
-        .map(|(_, n)| format!("/{}", String::from_utf8_lossy(n)))
+        .map(|(_, n)| format!("/{}", crate::label(n)))
         .collect();
     namen.sort();
     namen.dedup();
@@ -1481,7 +1488,7 @@ fn decode_placement(doc: &Document, placement: &Placement) -> (RasterImage, Opti
                     Some("Rohdaten des Inline-Bildes nicht mitgeführt".into()),
                 );
             };
-            crate::ops::decode_image(doc, resources, dict, data, placement.fill)
+            crate::ops::decode_inline_image(doc, resources, dict, data, placement.fill)
         }
         Target::XObject { name, .. } => {
             let Some(stream) = image_stream(doc, resources, name) else {

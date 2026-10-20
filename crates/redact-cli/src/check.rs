@@ -62,6 +62,7 @@
 //! nicht nachprüfen. Diese Ausgabe gehört behandelt wie das Original.
 
 use std::io::Read;
+use std::io::Write;
 use std::process::ExitCode;
 
 use redact_core::{safe_path, safe_text, RedactError, Result, MAX_CHECK_NEEDLES};
@@ -277,9 +278,27 @@ fn read_stdin_needles() -> Result<Vec<String>> {
 /// und der Ort stünde dort doppelt — er steht im Satz schon. Wer ihn als
 /// **Daten** braucht, ruft das Orakel selbst auf; so macht es die Oberfläche.
 fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -> Result<ExitCode> {
+    // Eine geschlossene Pipe (`--check-leaks … | head`) ist kein Absturz:
+    // `println!` brach dort mit Rückgabewert 101 ab, und ein Skript las
+    // daraus weder „gefunden“ noch „nicht gefunden“. Das Urteil hängt an der
+    // Datei, nicht daran, ob jemand die Ausgabe zu Ende liest — es bleibt der
+    // Rückgabewert, nur der Rest der Ausgabe entfällt.
+    let mut out = PipeSafe::new(std::io::stdout().lock());
+    let code = write_report(&mut out, cli, path, bytes, needles)?;
+    out.flush()?;
+    Ok(code)
+}
+
+fn write_report(
+    out: &mut impl Write,
+    cli: &Cli,
+    path: &std::path::Path,
+    bytes: &[u8],
+    needles: &[String],
+) -> Result<ExitCode> {
     let name = safe_path(path);
     if !cli.quiet {
-        println!("Geprüft: {name} ({} Byte)", bytes.len());
+        writeln!(out, "Geprüft: {name} ({} Byte)", bytes.len())?;
     }
 
     // Ein Durchgang durch die Datei für alle Begriffe: das Entpacken der
@@ -298,19 +317,20 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
     for (needle, hits) in needles.iter().zip(check.findings) {
         if hits.is_empty() {
             if !cli.quiet {
-                println!("  nicht gefunden: {}", safe_text(needle));
+                writeln!(out, "  nicht gefunden: {}", safe_text(needle))?;
             }
         } else {
             leaking += 1;
             // Auch bei `--quiet`: ein Fund ist die Nachricht, wegen der dieser
             // Schalter existiert. Stumm bliebe nur der Rückgabewert.
-            println!(
+            writeln!(
+                out,
                 "  GEFUNDEN ({} Fundstelle(n)): {}",
                 hits.len(),
                 safe_text(needle)
-            );
+            )?;
             for hit in &hits {
-                println!("      {}", safe_text(hit));
+                writeln!(out, "      {}", safe_text(hit))?;
             }
         }
     }
@@ -328,11 +348,11 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
     // Gegenprüfung 6).
     let unchecked = check.unchecked_places;
     for stelle in &check.unchecked {
-        println!("  NICHT GEPRÜFT: {}", safe_text(stelle));
+        writeln!(out, "  NICHT GEPRÜFT: {}", safe_text(stelle))?;
     }
 
     if leaking > 0 {
-        println!();
+        writeln!(out)?;
         // Ein einzelner Begriff bekommt einen eigenen Satz: „1 von 1
         // Suchbegriffen stehen“ ist weder Zahl noch Deutsch.
         let befund = match needles.len() {
@@ -340,13 +360,14 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
             n if leaking == 1 => format!("1 von {n} Suchbegriffen steht"),
             n => format!("{leaking} von {n} Suchbegriffen stehen"),
         };
-        println!(
+        writeln!(
+            out,
             "Ergebnis: {befund} noch in der Datei. Diese Datei ist nicht geschwärzt — sie darf \
              so nicht weitergegeben werden. (Rückgabewert {}.)",
             crate::EXIT_INCOMPLETE
-        );
+        )?;
         if unchecked > 0 {
-            println!("{}", unvollstaendig(unchecked));
+            writeln!(out, "{}", unvollstaendig(unchecked))?;
         }
         return Ok(ExitCode::from(crate::EXIT_INCOMPLETE));
     }
@@ -355,24 +376,77 @@ fn report(cli: &Cli, path: &std::path::Path, bytes: &[u8], needles: &[String]) -
     // das `--check-leaks … && versenden` schreibt, verschickte sonst eine
     // Datei, deren größter Strom nie durchsucht wurde.
     if unchecked > 0 {
-        println!();
-        println!(
+        writeln!(out)?;
+        writeln!(
+            out,
             "{} (Rückgabewert {}.)",
             unvollstaendig(unchecked),
             crate::EXIT_INCOMPLETE
-        );
+        )?;
         return Ok(ExitCode::from(crate::EXIT_INCOMPLETE));
     }
 
     if !cli.quiet {
-        println!();
+        writeln!(out)?;
         match needles.len() {
-            1 => println!("Ergebnis: der Suchbegriff steht nicht mehr in der Datei."),
-            n => println!("Ergebnis: keiner der {n} Suchbegriffe steht noch in der Datei."),
+            1 => writeln!(
+                out,
+                "Ergebnis: der Suchbegriff steht nicht mehr in der Datei."
+            )?,
+            n => writeln!(
+                out,
+                "Ergebnis: keiner der {n} Suchbegriffe steht noch in der Datei."
+            )?,
         }
-        println!("{NO_CLEAN_BILL}");
+        writeln!(out, "{NO_CLEAN_BILL}")?;
     }
     Ok(ExitCode::from(crate::EXIT_OK))
+}
+
+/// Ein Schreiber, der eine geschlossene Pipe als Ende der Ausgabe nimmt,
+/// nicht als Fehler: ab dem ersten `BrokenPipe` wird alles Weitere still
+/// verworfen. Jeder andere Schreibfehler (volle Platte bei `> datei`) bleibt
+/// einer — dort fehlt die Ausgabe, ohne dass der Leser es wollte.
+struct PipeSafe<W> {
+    inner: W,
+    closed: bool,
+}
+
+impl<W: Write> PipeSafe<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            closed: false,
+        }
+    }
+
+    fn absorb(&mut self, result: std::io::Result<()>) -> std::io::Result<()> {
+        match result {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                self.closed = true;
+                Ok(())
+            }
+            other => other,
+        }
+    }
+}
+
+impl<W: Write> Write for PipeSafe<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.closed {
+            return Ok(buf.len());
+        }
+        let result = self.inner.write_all(buf);
+        self.absorb(result).map(|()| buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        let result = self.inner.flush();
+        self.absorb(result)
+    }
 }
 
 /// Der Satz, der bei nicht geprüften Stellen an das Ergebnis tritt — mit
@@ -410,6 +484,48 @@ fn unvollstaendig(unchecked: usize) -> String {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    /// Ein Schreiber, dessen Leser gegangen ist.
+    struct GeschlossenePipe;
+
+    impl Write for GeschlossenePipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    /// Ein Schreiber, dessen Platte voll ist.
+    struct VollePlatte;
+
+    impl Write for VollePlatte {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("kein Platz"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `--check-leaks … | head`: eine geschlossene Pipe beendet die Ausgabe
+    /// still, statt mit `println!` abzustürzen (Rückgabewert 101).
+    #[test]
+    fn eine_geschlossene_pipe_ist_kein_fehler() {
+        let mut out = PipeSafe::new(GeschlossenePipe);
+        assert!(writeln!(out, "Geprüft").is_ok());
+        assert!(writeln!(out, "noch eine Zeile").is_ok());
+        assert!(out.flush().is_ok());
+        assert!(out.closed);
+    }
+
+    /// Jeder andere Schreibfehler bleibt einer.
+    #[test]
+    fn ein_anderer_schreibfehler_bleibt_ein_fehler() {
+        let mut out = PipeSafe::new(VollePlatte);
+        assert!(writeln!(out, "Geprüft").is_err());
+    }
 
     /// Der Satz nennt die Zahl und sagt, wie man weiterkommt.
     #[test]

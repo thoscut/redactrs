@@ -773,6 +773,9 @@ impl Prescan<'_> {
         let work = decoded
             .as_ref()
             .map_or(size, |(_, _, work)| (*work).max(size));
+        // Dazu, was `lopdf` für den PNG-Prädiktor belegt, wenn es diesen
+        // Strom beim Laden selbst auspackt (Objekt-Streams).
+        let work = work.saturating_add(lopdf_predictor_rows(dict, filters, data.len())?);
         self.charge(payload.len() as u64, work, if binary { 0 } else { size })?;
         if !whole {
             return Ok(());
@@ -1084,6 +1087,79 @@ fn is_decodable(filter: &[u8]) -> bool {
 fn is_flate(filter: &[u8]) -> bool {
     matches!(filter, b"FlateDecode" | b"Fl")
 }
+
+/// Was `lopdf` für den PNG-Prädiktor dieses Stroms **über** die entpackten
+/// Bytes hinaus belegt — 0, wenn es nichts ist.
+///
+/// `lopdf` packt Objekt-Streams beim Laden selbst aus
+/// (`Stream::decompress_predictor`), und sein Zeilendekoder reserviert zwei
+/// Zeilen von `max(1, Columns) * (max(1, Colors) * max(8, BPC) / 8)` Byte,
+/// **bevor** er eine Zeile liest. `/Columns` gehört dem Angreifer: eine
+/// 504-Byte-Datei mit `/Columns 2000000000` belegte 3,8 GB, an jedem Budget
+/// vorbei, denn die Vorprüfung las `/DecodeParms` nicht (Expertenprüfung).
+///
+/// Eine echte Zeile ist nie länger als die entpackten Daten; was darüber
+/// liegt, wird hier zweifach verbucht. Weil `lopdf` jede Bittiefe unter 8 als
+/// 8 rechnet, kann seine Zeile bei einem gültigen Strom aus einer einzigen
+/// Zeile bis zum Achtfachen der Daten reichen; was auch darüber hinausgeht,
+/// ist keine Zeile mehr, sondern eine Speicheranforderung, und die Datei wird
+/// abgelehnt — das Budget allein hielte `/Columns 100000000` (200 MB) unter
+/// der Vorgabe von 1 GiB nicht auf. Ebenso, wenn schon die Rechnung überläuft
+/// (bei `lopdf` in einem Debug-Build eine Panik).
+///
+/// Welche Ströme `lopdf` beim Laden auspackt, ist am Dictionary nicht sicher
+/// zu sehen (ein Querverweis vom Typ 2 macht jeden Strom zum Objekt-Stream,
+/// mit oder ohne `/Type /ObjStm`); geprüft wird deshalb jeder.
+///
+/// Gelesen wird wie bei `lopdf`: nur ein direktes Dictionary, nur ganze
+/// Zahlen, kein Verweis.
+fn lopdf_predictor_rows(dict: &[u8], filters: &[Vec<u8>], decoded: usize) -> Result<u64> {
+    if !filters
+        .iter()
+        .any(|f| matches!(f.as_slice(), b"FlateDecode" | b"LZWDecode"))
+    {
+        return Ok(0);
+    }
+    let Some(Object::Dictionary(parms)) = raw_dict_entry(dict, b"DecodeParms") else {
+        return Ok(0);
+    };
+    let int = |key: &[u8], default: i64| {
+        parms
+            .get(key)
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+            .unwrap_or(default)
+    };
+    if !(10..=15).contains(&int(b"Predictor", 1)) {
+        return Ok(0);
+    }
+    let columns = int(b"Columns", 1).max(1) as u64;
+    let colors = int(b"Colors", 1).max(1) as u64;
+    let bits = int(b"BitsPerComponent", 8).max(8) as u64;
+    let row = colors
+        .checked_mul(bits)
+        .filter(|&b| usize::try_from(b).is_ok())
+        .map(|b| b / 8)
+        .and_then(|bpp| bpp.checked_mul(columns));
+    let decoded = decoded as u64;
+    match row {
+        Some(row) if row <= decoded => Ok(0),
+        Some(row) if row <= decoded.saturating_mul(8).saturating_add(PREDICTOR_SLACK) => {
+            Ok(row.saturating_mul(2))
+        }
+        _ => Err(RedactError::Pdf(format!(
+            "ein Stream nennt in /DecodeParms eine Prädiktorzeile von {} Byte, \
+             entpackt hat er aber nur {decoded} Byte. Beim Laden würde dafür \
+             Speicher in dieser Größe belegt — die Datei wird abgelehnt.",
+            row.map_or_else(|| "mehr als 2^64".to_string(), |r| r.to_string())
+        ))),
+    }
+}
+
+/// Spielraum über dem Achtfachen der Daten, bevor eine Prädiktorzeile als
+/// Speicheranforderung gilt (siehe [`lopdf_predictor_rows`]): 64 KiB, so viel
+/// belegt `lopdf` dafür ohnehin nebenbei.
+const PREDICTOR_SLACK: u64 = 64 * 1024;
 
 /// Die Filterkette aus den Rohbytes eines Stream-Dictionaries — **so
 /// gelesen, wie `lopdf` sie liest.**
@@ -1486,7 +1562,7 @@ pub(crate) fn is_delimiter(b: u8) -> bool {
 }
 
 /// Steht an `i` das Schlüsselwort `kw`, sauber abgegrenzt?
-fn keyword_at(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
+pub(crate) fn keyword_at(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
     if !bytes[i..].starts_with(kw) {
         return false;
     }
@@ -1539,7 +1615,7 @@ fn skip_hex_string(bytes: &[u8], mut i: usize) -> usize {
 }
 
 /// Überspringt ein eingebettetes Bild (`BI … ID <Rohdaten> EI`).
-fn skip_inline_image(bytes: &[u8], i: usize) -> usize {
+pub(crate) fn skip_inline_image(bytes: &[u8], i: usize) -> usize {
     let Some(id) = (i..bytes.len()).find(|&p| keyword_at(bytes, p, b"ID")) else {
         return i + 2;
     };

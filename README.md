@@ -570,13 +570,13 @@ danebensteht. Genau dieselbe Tabelle liefert `redact-rs --list-patterns`.
 | `iban_de` | Deutsche IBAN (DE + 2 Prüfziffern + 18 Ziffern), mod-97-geprüft | 0.95 | – | **an** |
 | `iban_intl` | Internationale IBAN (zu unspezifisch) | 0.90 | – | aus |
 | `glaeubiger_id` | SEPA-Gläubiger-ID (Creditor Identifier), mod-97-geprüft | 0.95 | – | **an** |
-| `konto_nr` | Kontonummer (6–10 Ziffern nach „Kto.“ o. ä.) | 0.85 | 0.30 | **an** |
-| `blz` | Bankleitzahl (8 Ziffern nach „BLZ“/„Bankleitzahl“) | 0.80 | 0.25 | **an** |
+| `konto_nr` | Kontonummer (6–10 Ziffern nach „Kto.“, „Kto.-Nr.“, „Konto Nr.“ o. ä.) | 0.85 | 0.30 | **an** |
+| `blz` | Bankleitzahl (8 Ziffern, auch als „370 400 44“, nach „BLZ“/„Bankleitzahl“) | 0.80 | 0.25 | **an** |
 | `bic` | BIC/SWIFT mit Länderkennung-Prüfung | 0.80 | – | **an** |
 | `amount_eur` | Geldbetrag in Euro | 0.70 | – | aus |
 | `date_de` | Datum TT.MM.JJJJ | 0.60 | – | aus |
-| `credit_card` | Kreditkartennummer (13–19 Ziffern), Luhn-geprüft | 0.90 | – | **an** |
-| `steuer_id` | Steuerliche Identifikationsnummer (11 Ziffern nach „Steuer-ID“) | 0.90 | 0.25 | **an** |
+| `credit_card` | Kreditkartennummer (13–19 Ziffern am Stück, 4-4-4-4[-3], 4-6-5 oder 4-6-4), Luhn-geprüft | 0.90 | – | **an** |
+| `steuer_id` | Steuerliche Identifikationsnummer (11 Ziffern, auch als „12 345 678 903“, nach „Steuer-ID“/„Identifikationsnummer“) | 0.90 | 0.25 | **an** |
 | `email` | E-Mail-Adresse | 0.90 | – | **an** |
 | `phone_de` | Deutsche Telefonnummer | 0.85 | 0.35 | **an** |
 
@@ -744,7 +744,8 @@ Regeln:
   Nutzerentscheidung wird nicht automatisch verworfen.
 * Der Vergleich ignoriert Groß-/Kleinschreibung und die *Menge* an Leerraum —
   eine IBAN wird also auch gefunden, wenn im PDF mehrere Leerzeichen zwischen
-  den Blöcken stehen.
+  den Blöcken stehen. Ein Umlaut, den das PDF als Grundbuchstabe plus
+  Akzentzeichen liefert („u“ + U+0308), gilt als derselbe Buchstabe wie „ü“.
 * **Leerraum wird zusammengefasst, nicht entfernt.** Der Eintrag
   `DE89 3704 0044 0532 0130 00` trifft *nicht* auf `DE89370400440532013000` im
   PDF (nachgemessen: `Textzeilen: 1, Treffer gesamt: 0`). Wer beide

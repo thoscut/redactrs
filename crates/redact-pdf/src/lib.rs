@@ -56,3 +56,40 @@ pub use ops::{
     Rgb, Stroke,
 };
 pub use redact::{PdfRedactor, RedactionReport};
+
+/// Ein Name oder Text **aus der Eingabedatei**, so aufbereitet, dass er in
+/// einer Meldung stehen darf.
+///
+/// # Warum
+///
+/// Ob eine Warnung eine Deckungslücke ist (Rückgabewert 3, „NICHT GEPRÜFT“)
+/// oder bloß eine Mitteilung, entscheidet
+/// `redact_pipeline::coverage::is_coverage_gap` an festen Textmarken wie
+/// „enthalten Rasterbilder“. Die Namen in der Meldung — XObject, Font,
+/// Filter, Feldname — stammen aber aus der Datei, und die ist nicht
+/// vertrauenswürdig: ein XObject `/enthalten#20Rasterbilder` ohne `/Subtype`
+/// trug die Marke in seine eigene Lückenmeldung hinein. Die Datei lief mit
+/// Rückgabewert 0 durch, die IBAN darin stand unverändert in der Ausgabe
+/// (Experten-Review, Befund CLI-1).
+///
+/// Jede Marke enthält ein gewöhnliches Leerzeichen (der Test
+/// `jede_marke_enthaelt_ein_leerzeichen` in `redact-pipeline` hält das fest).
+/// Hier wird deshalb jeder Leerraum und jedes Steuerzeichen zu einem
+/// geschützten Leerzeichen (U+00A0): am Bildschirm sieht der Name gleich aus,
+/// aber keine Marke passt mehr hinein.
+pub fn label(bytes: &[u8]) -> String {
+    label_text(&String::from_utf8_lossy(bytes))
+}
+
+/// [`label`] für Text, der schon dekodiert ist (etwa ein Feldname `/T`).
+pub fn label_text(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_whitespace() || c.is_control() {
+                '\u{a0}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}

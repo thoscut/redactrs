@@ -111,18 +111,23 @@ pub fn output_path_with_suffix(input: &Path, suffix: &str) -> PathBuf {
     };
     let suffix = suffix.as_str();
 
-    let stem = input
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "dokument".to_string());
-
-    let mut name = format!("{stem}{suffix}");
+    // Stamm und Endung bleiben `OsStr` und gehen nicht durch
+    // `to_string_lossy`: unter Unix darf ein Dateiname beliebige Bytes
+    // enthalten, und verlustbehaftet umgewandelt würden aus `\xff.pdf` und
+    // `\xfe.pdf` beide `\u{FFFD}_geschwaerzt.pdf`. Im Stapel mit `--force`
+    // überschrieb das zweite Ergebnis dann das erste, bei Rückgabewert 0
+    // (Experten-Review, Befund CLI-2).
+    let mut name = std::ffi::OsString::new();
+    match input.file_stem().filter(|s| !s.is_empty()) {
+        Some(stem) => name.push(stem),
+        None => name.push("dokument"),
+    }
+    name.push(suffix);
     if let Some(ext) = input.extension() {
-        name.push('.');
-        name.push_str(&ext.to_string_lossy());
+        name.push(".");
+        name.push(ext);
     } else {
-        name.push_str(".pdf");
+        name.push(".pdf");
     }
 
     match input.parent() {
@@ -186,6 +191,20 @@ mod tests {
     fn empty_suffix_falls_back_to_default() {
         let out = output_path_with_suffix(Path::new("/daten/a.pdf"), "   ");
         assert_eq!(out, PathBuf::from("/daten/a_geschwaerzt.pdf"));
+    }
+
+    /// Zwei Namen, die sich nur in Bytes unterscheiden, die kein UTF-8 sind,
+    /// ergeben zwei verschiedene Ausgaben.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_names_stay_apart() {
+        use std::os::unix::ffi::OsStrExt;
+        let a =
+            output_path_with_suffix(Path::new(std::ffi::OsStr::from_bytes(b"/d/\xff.pdf")), "_g");
+        let b =
+            output_path_with_suffix(Path::new(std::ffi::OsStr::from_bytes(b"/d/\xfe.pdf")), "_g");
+        assert_ne!(a, b);
+        assert_eq!(a.as_os_str().as_bytes(), b"/d/\xff_g.pdf");
     }
 
     #[test]

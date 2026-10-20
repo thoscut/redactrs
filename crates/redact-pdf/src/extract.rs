@@ -542,7 +542,7 @@ fn mirror_runs(doc: &Document, page: usize, scan: &ScanResult) -> (Vec<TextRun>,
                      etwas anderes als die Glyphen darunter ({} Zeichen im Spiegel, {} in den \
                      Glyphen). Welche der beiden Fassungen ein Betrachter zeigt oder kopiert, \
                      kann das Werkzeug nicht wissen.{}",
-                    String::from_utf8_lossy(key),
+                    crate::label(key),
                     page + 1,
                     folded.chars().count(),
                     beneath.chars().count(),
@@ -556,7 +556,7 @@ fn mirror_runs(doc: &Document, page: usize, scan: &ScanResult) -> (Vec<TextRun>,
                 ));
             }
             if let Some(rect) = rect {
-                runs.push(spread(page, &text, rect));
+                runs.push(spread(page, &text, &glyphs, rect));
             }
         }
     }
@@ -598,27 +598,33 @@ fn fold<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
     out
 }
 
-/// Verteilt einen Text gleichmäßig über einen Kasten — Zeichen für Zeichen,
-/// in Schreibrichtung von links nach rechts.
+/// Legt den Spiegeltext auf die Glyphen, die er ersetzt.
 ///
-/// Die Kästen sind erfunden; sie liegen aber alle **im** Kasten der Glyphen,
-/// die der Spiegel ersetzt. Ein Treffer darin berührt deshalb immer echte
-/// Glyphen, und die Schwärzung nimmt den Spiegel mit.
-fn spread(page: usize, text: &str, rect: Rect) -> TextRun {
+/// Hat der Spiegel **genau so viele Zeichen** wie Glyphen darunter stehen,
+/// bekommt jedes Zeichen den Kasten seiner Glyphe — Zeichen `i` ersetzt dann
+/// Glyphe `i`, wie bei jedem gewöhnlichen `/ActualText` über unlesbaren
+/// Codes. Ein Treffer im Spiegel trifft so genau die Glyphen des Geheimnisses
+/// und nicht die Nachbarn.
+///
+/// Sonst ist die Zuordnung unbekannt, und jedes Zeichen bekommt den **ganzen**
+/// Kasten des Abschnitts. Früher wurde der Kasten stattdessen gleichmäßig
+/// aufgeteilt: steht vor der IBAN schmaler Text (`iiiiiiiiii: DE89 …`),
+/// liegen ihre echten Glyphen links vom erfundenen Teilkasten und blieben
+/// nach der Schwärzung stehen. Den ganzen Abschnitt zu schwärzen nimmt zu
+/// viel weg statt zu wenig — die sichere Richtung, und der Lauf meldet die
+/// Abweichung des Spiegels ohnehin als Deckungslücke.
+fn spread(page: usize, text: &str, beneath: &[&GlyphItem], rect: Rect) -> TextRun {
     let chars: Vec<char> = text
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    let step = rect.width() / chars.len().max(1) as f64;
+    let one_to_one = chars.len() == beneath.len();
     let glyphs = chars
         .into_iter()
         .enumerate()
-        .map(|(i, ch)| {
-            let x0 = rect.ll.x + step * i as f64;
-            Glyph {
-                ch,
-                rect: Rect::new(x0, rect.ll.y, x0 + step, rect.ur.y),
-            }
+        .map(|(i, ch)| Glyph {
+            ch,
+            rect: if one_to_one { beneath[i].rect } else { rect },
         })
         .collect();
     TextRun::new(page, glyphs)
@@ -682,7 +688,7 @@ fn unplaced_form_warnings(
                 "Das Form-XObject „{}“ (Objekt {} {}) steht in den Ressourcen, wird aber \
                  nirgends gezeichnet; sein Text wurde nicht durchsucht und kann deshalb \
                  nicht geschwärzt worden sein.",
-                String::from_utf8_lossy(name),
+                crate::label(name),
                 id.0,
                 id.1
             )
