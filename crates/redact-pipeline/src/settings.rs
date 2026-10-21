@@ -58,19 +58,23 @@ pub const SETTINGS_ENV: &str = "REDACT_RS_CONFIG";
 /// Erlaubte Werte für [`Settings::theme`].
 pub const THEMES: [&str; 2] = ["hell", "dunkel"];
 
+/// Erlaubte Werte für [`Settings::layout`].
+pub const LAYOUTS: [&str; 2] = ["werkbank", "fokus"];
+
 /// Die Schlüssel, die [`Settings`] kennt — für die Fehlermeldung.
 ///
 /// Sie stehen hier von Hand, weil `serde` sie zwar in seiner eigenen Meldung
 /// aufzählt, diese Meldung aber nicht benutzt wird (siehe
 /// [`Settings::from_yaml`]). Der Test `the_listed_keys_are_the_real_ones`
 /// misst nach, dass die Liste stimmt.
-pub const KEYS: [&str; 6] = [
+pub const KEYS: [&str; 7] = [
     "output_suffix",
     "patterns",
     "disabled_patterns",
     "min_confidence",
     "padding",
     "theme",
+    "layout",
 ];
 
 /// Obergrenze für die Einstellungsdatei.
@@ -124,6 +128,8 @@ pub struct Settings {
     pub padding: f64,
     /// Thema der Oberfläche: `hell` oder `dunkel`.
     pub theme: String,
+    /// Arbeitsansicht der Oberfläche: `werkbank` oder `fokus`.
+    pub layout: String,
 }
 
 impl Default for Settings {
@@ -135,6 +141,7 @@ impl Default for Settings {
             min_confidence: None,
             padding: crate::DEFAULT_PADDING,
             theme: THEMES[0].to_string(),
+            layout: LAYOUTS[0].to_string(),
         }
     }
 }
@@ -233,6 +240,13 @@ impl Settings {
                 "unbekanntes Thema „{}“ — erlaubt sind {}",
                 redact_core::safe_text(&self.theme),
                 THEMES.join(" und ")
+            )));
+        }
+        if !LAYOUTS.contains(&self.layout.as_str()) {
+            return Err(RedactError::Config(format!(
+                "unbekannte Ansicht „{}“ — erlaubt sind {}",
+                redact_core::safe_text(&self.layout),
+                LAYOUTS.join(" und ")
             )));
         }
         // Ein Namenszusatz mit Pfadanteilen ist kein Zusatz, sondern ein
@@ -605,10 +619,22 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_layout_is_refused_with_the_allowed_values() {
+        let error = Settings::from_yaml("layout: kachel\n")
+            .expect_err("unbekannte Ansicht muss auffallen")
+            .to_string();
+        assert!(error.contains("kachel"), "{error}");
+        assert!(
+            error.contains("werkbank") && error.contains("fokus"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn every_field_can_be_set() {
         let settings = Settings::from_yaml(
             "output_suffix: _anonym\npatterns: [iban_de, bic]\ndisabled_patterns: [bic]\n\
-             min_confidence: 0.25\npadding: 2.0\ntheme: dunkel\n",
+             min_confidence: 0.25\npadding: 2.0\ntheme: dunkel\nlayout: fokus\n",
         )
         .unwrap();
         assert_eq!(settings.output_suffix, "_anonym");
@@ -617,6 +643,7 @@ mod tests {
         assert_eq!(settings.min_confidence, Some(0.25));
         assert_eq!(settings.padding, 2.0);
         assert_eq!(settings.theme, "dunkel");
+        assert_eq!(settings.layout, "fokus");
     }
 
     /// Die Datei benennt der Nutzer, wenn etwas darin nicht stimmt.

@@ -521,6 +521,7 @@ impl Cli {
             max_candidates: self.max_candidates,
             password: self.password(),
             theme: settings.theme.clone(),
+            layout: settings.layout.clone(),
         }
     }
 
@@ -855,6 +856,7 @@ mod tests {
             min_confidence: Some(0.25),
             padding: 7.5,
             theme: "dunkel".into(),
+            layout: "fokus".into(),
         }
     }
 
@@ -881,6 +883,7 @@ mod tests {
         assert_eq!(config.patterns, vec!["bic"]);
         assert_eq!(config.disabled_patterns, vec!["date_de"]);
         assert_eq!(config.theme, "dunkel");
+        assert_eq!(config.layout, "fokus");
     }
 
     /// Und die Kommandozeile schlägt die Datei — jeder Wert einzeln.
