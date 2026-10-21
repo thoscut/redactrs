@@ -7,49 +7,24 @@ nicht leistet, steht ausführlich in der README unter
 [Was dieses Werkzeug nicht leistet](README.md#grenzen); diese Datei sagt nur,
 in welcher Reihenfolge davon etwas angegangen wird.
 
-Stand: 20.10.2026, veröffentlicht ist
-[0.7.1](https://github.com/thoscut/redactrs/releases/tag/v0.7.1).
-
-## Seit 0.7.1 erledigt (in `main`, noch nicht veröffentlicht)
-
-* **Zeitwächter `zm_b` ursächlich behoben**
-  ([PR #9](https://github.com/thoscut/redactrs/pull/9)): die Export-Fahne
-  setzt `redact_pipeline::apply` direkt hinter dem `rename`, nicht mehr die
-  Oberfläche.
-* **Leck #26 behoben** ([PR #10](https://github.com/thoscut/redactrs/pull/10)):
-  der Erscheinungsstrom (`/AP`) einer Annotation außerhalb des
-  Schwärzungsbereichs wird nach dem geschwärzten Text durchsucht und
-  bereinigt. Damit sind alle vier früher dokumentierten Lecks behoben.
-* **Experten-Review** ([PR #11](https://github.com/thoscut/redactrs/pull/11)):
-  Lecks, Speichergrenzen, Erkennung und Rückgabewert.
-* **Security-Review Runde 2**
-  ([PR #12](https://github.com/thoscut/redactrs/pull/12)): Verschlüsselung,
-  Seitenbaum, Träger, Lesarten.
+Stand: 21.10.2026, veröffentlicht ist
+[0.7.2](https://github.com/thoscut/redactrs/releases/tag/v0.7.2).
 
 ## In Arbeit
 
-### 0.7.2 ([PR #8](https://github.com/thoscut/redactrs/pull/8))
+### 0.8.0
 
-* Veröffentlicht die Korrekturen, die seit 0.7.1 in `main` liegen.
-* `serde_yaml` wird durch `serde-saphyr` ersetzt. Damit entfällt
-  `unsafe-libyaml`, das `cargo audit` als nicht mehr gepflegt meldet.
-* Die übrigen Hinweise auf nicht mehr gepflegte Crates (`zvariant`,
+* Veröffentlicht die überarbeitete Oberfläche
+  ([PR #6](https://github.com/thoscut/redactrs/pull/6)): eigener Farbsatz,
+  Ansichten „Werkbank“ und „Fokus“ (Schlüssel `layout`), Barrierefreiheit.
+  Einzelheiten im [`CHANGELOG.md`](CHANGELOG.md).
+
+## Bekannt, wartet auf andere
+
+* Die Hinweise von `cargo audit` auf nicht mehr gepflegte Crates (`zvariant`,
   `zvariant_derive`, `zbus_names`) kommen nur indirekt über den Dateidialog
   (`rfd` → `ashpd` → `zbus`). Sie verschwinden erst mit einer `rfd`-Fassung,
   die auf `zbus` 6 aufsetzt; die gibt es noch nicht.
-
-### Überarbeitete Oberfläche ([PR #6](https://github.com/thoscut/redactrs/pull/6))
-
-* Eigener Farbsatz, Ansichtsleiste über der Seite, Seitenleiste mit
-  Zwischenüberschriften, Leerzustand mit Ablagefläche, größere Griffe,
-  sichtbarer Fokus.
-* Offen ist die Entscheidung, ob er so gemergt wird oder ob zuerst eine der
-  drei alternativen Designrichtungen (Werkbank, Prüfprotokoll, Fokus) in ihn
-  einfließt.
-
-## Als Nächstes
-
-1. **Release 0.8** mit der neuen Oberfläche.
 
 ## Später, nach Bedarf
 
