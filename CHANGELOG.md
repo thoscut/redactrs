@@ -32,7 +32,15 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ---
 
-## Unveröffentlicht
+## 0.8.0 — 2026-10-21
+
+Bereich: `git log v0.7.2..v0.8.0`.
+
+Die überarbeitete Oberfläche (PR #6): eigener Farbsatz, zwei Arbeitsansichten
+und bessere Barrierefreiheit. Schwärzung, Erkennung und Prüfung sind
+gegenüber 0.7.2 unverändert, ebenso Befehlszeile und Tastenbelegung.
+Einstellungs- und Musterdateien gelten weiter; neu ist nur der optionale
+Schlüssel `layout`.
 
 ### Neu
 
