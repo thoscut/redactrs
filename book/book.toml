@@ -1,0 +1,25 @@
+# mdBook-Konfiguration der Doku. Gebaut wird nicht aus diesem Verzeichnis,
+# sondern über scripts/build-doku.sh: das Skript stellt README, SECURITY,
+# CHANGELOG, docs/ usw. in ihrer Verzeichnislage aus dem Repository
+# zusammen, damit jeder relative Verweis der Markdown-Dateien (`../SECURITY.md`,
+# `docs/pruefen.md`) auch im gebauten Buch auf eine Seite zeigt.
+
+[book]
+title = "redact-rs"
+language = "de"
+src = "src"
+
+[build]
+build-dir = "html"
+# Fehlt eine Datei aus SUMMARY.md, soll der Bau scheitern, statt eine leere
+# Seite anzulegen.
+create-missing = false
+# Ohne den `index`-Präprozessor bleibt README.md als README.html stehen, und
+# die Verweise der übrigen Seiten auf `../README.md` treffen sie.
+use-default-preprocessors = false
+
+[output.html]
+git-repository-url = "https://github.com/thoscut/redactrs"
+# Das Buch liegt auch im Release-Archiv und muss dort ohne Netz lesbar
+# sein: kein MathJax von einem CDN (die Schriften bringt mdBook selbst mit).
+mathjax-support = false

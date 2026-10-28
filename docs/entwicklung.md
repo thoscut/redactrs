@@ -12,6 +12,26 @@ cargo test -p redact-pdf -- --ignored                 # Messungen und benannte L
 cargo run --release -p redact-pdf --example gen10 -- gross.pdf 10
 ```
 
+### Die Doku als Buch bauen
+
+Die Markdown-Dateien — `README.md`, `SECURITY.md`, `CHANGELOG.md` und alles
+unter `docs/` — werden mit [mdBook](https://rust-lang.github.io/mdBook/) zu
+einem HTML-Buch gebaut. Inhaltsverzeichnis und Einstellungen stehen in
+`book/SUMMARY.md` und `book/book.toml`; eine neue Seite gehört in beide Welten,
+also auch in `SUMMARY.md`.
+
+```bash
+cargo install --locked mdbook@0.5.4      # dieselbe Fassung wie in der CI
+./scripts/build-doku.sh                  # erzeugt target/doku/index.html
+python3 scripts/check-doku.py            # prüft jeden Verweis im Buch
+```
+
+`build-doku.sh` stellt die Quelle in derselben Verzeichnislage zusammen, in
+der sie im Repository liegt, damit jeder relative Verweis auch im Buch
+trifft. `check-doku.py` liest das gebaute HTML und meldet jede fehlende Datei
+und jeden fehlenden Anker. Die CI tut beides im Job `doku`; der Release legt
+das Buch als `doku/` in jedes Archiv.
+
 ### Die Belege in `docs/` neu erzeugen
 
 Die Bilder ganz oben in der README sind keine Bildschirmfotos, sondern Ausgaben dieses

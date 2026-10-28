@@ -128,6 +128,10 @@ Wie man das feststellt, steht unter
 | [Architektur und Stand der Umsetzung](docs/architektur.md) | Crates, Ablauf, Abweichungen vom Konzept, Akzeptanzkriterien |
 | [Entwicklung und Release](docs/entwicklung.md) | Tests, Belege neu erzeugen, Release bauen |
 
+Dieselbe Doku liegt als HTML-Buch mit Suche in jedem Release-Archiv
+(`doku/index.html`); selbst bauen mit `./scripts/build-doku.sh` (mdBook,
+[Einzelheiten](docs/entwicklung.md#die-doku-als-buch-bauen)).
+
 Daneben: [`SECURITY.md`](SECURITY.md) — Bedrohungsmodell, Grenzen für
 Eingabedateien, Messungen. [`CHANGELOG.md`](CHANGELOG.md) — was sich zwischen
 zwei Fassungen geändert hat. [`CONTRIBUTING.md`](CONTRIBUTING.md) — Mitarbeit.

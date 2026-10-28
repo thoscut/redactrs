@@ -41,6 +41,10 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
   unverändertem Wortlaut unter `docs/` (Übersicht in der README unter
   „Dokumentation“). Jedes Release-Archiv enthält dafür jetzt alle `docs/*.md`,
   damit die Verweise auch ohne Netzzugang tragen.
+* **Die Doku gibt es als HTML-Buch.** `scripts/build-doku.sh` baut sie mit
+  mdBook, die CI prüft dabei jeden Verweis (`scripts/check-doku.py`), und
+  jedes Release-Archiv enthält das Buch unter `doku/` (Einstieg
+  `doku/index.html`, ohne Netzzugang lesbar).
 
 ---
 
