@@ -73,7 +73,7 @@
 //!    weiter gehört einer anderen Anweisung und rettet nichts. Die Anweisung
 //!    wird über die Klammerbilanz geschnitten, damit ein `match … { Ok(…) =>
 //!    …, Err(e) => … };` ganz dazugehört — das ist der Weg, den
-//!    `belege.rs::die_zahl_der_pruefungen_steht_im_readme` für `python3`
+//!    `belege.rs::die_zahl_der_pruefungen_steht_in_der_doku` für `python3`
 //!    richtig geht.
 //! 2. **Kommentare sind wirklich ausgenommen**, auch `/* … */` über mehrere
 //!    Zeilen. Vorher fiel nur die Zeile weg, die mit `//` *begann*.

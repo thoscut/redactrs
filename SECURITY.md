@@ -1134,7 +1134,7 @@ zur Größenordnung genannt.
 
 Ein Strom über dem Restbudget wird übersprungen und **benannt** — die Antwort
 lautet dann „nicht geprüft“, nicht „nicht gefunden“ (Rückgabewert 3, siehe
-README, „Prüfen, ob die Schwärzung gewirkt hat“). Seine gepackten Bytes
+`docs/pruefen.md`, „Prüfen, ob die Schwärzung gewirkt hat“). Seine gepackten Bytes
 durchsucht die Rohsicht trotzdem.
 
 ### Prädiktoren und Bildfilter (Experten-Review, Oktober 2026)
@@ -1832,7 +1832,7 @@ Das lässt eine benannte Lücke: der **`/Alt` eines Bildes**. Ein
 Standardform der Barrierefreiheit und kein Befund. Steht in der Beschreibung
 aber, was auf dem Bild zu lesen ist, überlebt sie die Pixel-Schwärzung des
 Bildes: die Analyse liest den `/Alt` eines Bildes so wenig wie dessen Pixel —
-derselbe blinde Fleck wie bei gescannten Seiten (README, „Gescannte
+derselbe blinde Fleck wie bei gescannten Seiten (`docs/grenzen.md`, „Gescannte
 Dokumente“). `--check-leaks` sieht ihn: der Text steht als Klartext im
 Seitenstrom, und die Rohsichten der Nachprüfung lesen den Strom, nicht die
 Struktur.
@@ -1869,7 +1869,7 @@ beide Richtungen: `zf_q1_luecken` und
 ### `/DA` an Annotationen bleibt stehen
 
 Die Klartexte einer Annotation und alles, was sie erreichbar hält, werden mit
-den Metadaten entfernt (README, Tabelle unter „Sicherheit“). **Eine benannte
+den Metadaten entfernt (`docs/zusicherungen.md`, Tabelle unter „Metadaten und Restdaten“). **Eine benannte
 Lücke bleibt:** `/DA` (Default Appearance) an FreeText/Widgets bleibt stehen —
 Pflichtschlüssel und Operatorfolge, kein Menschentext; eine IBAN als
 Schriftname in `/DA` überlebt. `--check-leaks` sieht sie: `/DA` ist eine
@@ -1995,7 +1995,7 @@ Nachtrag: `strings` ist dafür nur die schnelle Vorstufe und darf nicht als
 Entwarnung gelesen werden — ein Flate-komprimierter Objektstrom (`/ObjStm`) ist
 für eine reine Rohbyte-Suche unsichtbar, ebenso eine Zeichenkette in UTF-16BE
 oder als Hex-String. `pdftotext` taugt erst recht nicht als Nachweis; die
-Messung dazu steht im README unter „Prüfen, ob die Schwärzung gewirkt hat“.
+Messung dazu steht in `docs/pruefen.md` unter „Prüfen, ob die Schwärzung gewirkt hat“.
 Verbindlich ist `redact_pdf::leaks` — und **genau die** Funktion steckt hinter
 `--check-leaks` und (als `leaks_many`, dieselben Sichten) hinter der
 Nachprüfung der Oberfläche. Wer keine

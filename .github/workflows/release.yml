@@ -528,7 +528,7 @@ jobs:
             fi
             cp "target/${TARGET}/release/${GUI_BIN}" staging/
           fi
-          # SECURITY.md gehoert dazu: die README verweist neunmal darauf
+          # SECURITY.md gehoert dazu: README und docs/ verweisen vielfach darauf
           # (Grenzen, Bedrohungsmodell, Schreibpfad). Wer nur das Archiv hat,
           # lief bisher in tote Verweise. CHANGELOG.md aus demselben Grund:
           # wer eine aeltere Fassung ersetzt, muss ohne Netzzugang sehen
@@ -536,9 +536,10 @@ jobs:
           for f in README.md SECURITY.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE LICENSE; do
             if [ -f "$f" ]; then cp "$f" staging/; fi
           done
-          # Der vollstaendige Pruefverlauf zu 0.7.0, auf den CHANGELOG.md
-          # verweist - sonst liefe der Verweis im Archiv ins Leere.
-          for f in docs/pruefverlauf-*.md; do
+          # Die Doku unter docs/: die README verweist fuer alle Einzelheiten
+          # dorthin, CHANGELOG.md auf den Pruefverlauf zu 0.7.0 - sonst
+          # liefen diese Verweise im Archiv ins Leere.
+          for f in docs/*.md; do
             if [ -f "$f" ]; then mkdir -p staging/docs && cp "$f" staging/docs/; fi
           done
           # SIL Open Font License 1.1. Die egui-Standardschriften

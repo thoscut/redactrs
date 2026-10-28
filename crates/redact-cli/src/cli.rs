@@ -796,25 +796,25 @@ mod tests {
             "das Zitat besteht fast nur aus „…“ — geprüft wurden {geprueft} Zeilen"
         );
 
-        let readme = glatt(&lies("README.md"));
+        let readme = glatt(&[lies("docs/kommandozeile.md"), lies("docs/pruefen.md")].join("\n"));
         assert!(
             readme.contains("endet **auch ohne Fund** mit `3`, wenn es eine Stelle nicht lesen"),
-            "README nennt den dritten Fall nicht im Fließtext"
+            "docs/kommandozeile.md nennt den dritten Fall nicht im Fließtext"
         );
         assert!(
             readme.contains(
                 "**oder** eine Stelle konnte nicht geprüft werden \
-                 (fünf Gründe, siehe [`SECURITY.md`](SECURITY.md)), \
+                 (fünf Gründe, siehe [`SECURITY.md`](../SECURITY.md)), \
                  auch ohne einen einzigen Fund."
             ),
-            "die README-Tabelle nennt den dritten Fall nicht"
+            "die Rückgabewert-Tabelle der Doku nennt den dritten Fall nicht"
         );
         assert!(
             readme.contains(
                 "| `0` | Keiner der Begriffe steht noch in der Datei — \
                  **und** jede Stelle konnte geprüft werden."
             ),
-            "die README-Tabelle verspricht `0` ohne die Bedingung"
+            "docs/pruefen.md verspricht `0` ohne die Bedingung"
         );
     }
 

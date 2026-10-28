@@ -93,6 +93,6 @@ body:
         Datei verschwunden ist, beantwortet in diesem Projekt genau ein
         Maßstab: `redact-rs <datei> --check-leaks "<text>"` (dahinter steckt
         `redact_pdf::leaks`). `pdftotext | grep` und `strings` geben
-        nachweislich falsche Entwarnung — die Messung dazu steht im README
+        nachweislich falsche Entwarnung — die Messung dazu steht in docs/pruefen.md
         unter „Prüfen, ob die Schwärzung gewirkt hat“. Ein Bericht, der sich
         auf `pdftotext` stützt, wird zuerst darauf hin nachgemessen.
