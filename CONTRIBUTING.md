@@ -15,7 +15,7 @@ in [`SECURITY.md`](SECURITY.md) unter „Einen Fund melden“ — privat, nicht 
 
 Rust **1.88** oder neuer (`rust-version` in `Cargo.toml`; der Job `msrv` in
 `.github/workflows/ci.yml` misst das nach, statt es zu behaupten). Gebaut wird
-mit der in [`rust-toolchain.toml`](rust-toolchain.toml) festgenagelten
+mit der in [`rust-toolchain.toml`](https://github.com/thoscut/redactrs/blob/main/rust-toolchain.toml) festgenagelten
 Toolchain — `rustup` zieht sie beim ersten `cargo`-Aufruf im Verzeichnis
 selbst, es ist nichts einzustellen.
 
@@ -45,7 +45,7 @@ Wer nur an der Kommandozeile oder an `redact-pdf` arbeitet, braucht davon
 nichts: ohne die Oberfläche hat der Abhängigkeitsgraph keine C-Anteile. Beleg
 ist der musl-Build des Release-Workflows — er baut
 `-p redact-cli --no-default-features` statisch und installiert dafür kein
-einziges Systempaket (Begründung in [`.cargo/config.toml`](.cargo/config.toml)).
+einziges Systempaket (Begründung in [`.cargo/config.toml`](https://github.com/thoscut/redactrs/blob/main/.cargo/config.toml)).
 
 ## Das Gate
 
@@ -110,7 +110,7 @@ cargo build --release --locked --target x86_64-unknown-linux-musl \
     -p redact-cli --no-default-features
 ```
 
-`cargo deny` liest [`deny.toml`](deny.toml); Ziele und Features stehen dort und
+`cargo deny` liest [`deny.toml`](https://github.com/thoscut/redactrs/blob/main/deny.toml); Ziele und Features stehen dort und
 nicht im Workflow, damit ein lokaler Lauf dasselbe prüft. Die Version ist
 festgelegt (`cargo install --locked cargo-deny@0.20.2`), weil sich das
 Konfigurationsschema zwischen den Reihen ändert.
@@ -203,7 +203,7 @@ Decke fällt.
 
 Ob eine Zeichenkette wirklich aus einer Datei verschwunden ist, beantwortet
 in diesem Projekt **eine** Funktion:
-[`redact_pdf::leaks`](crates/redact-pdf/src/audit_bytes.rs). Hinter dem
+[`redact_pdf::leaks`](https://github.com/thoscut/redactrs/blob/main/crates/redact-pdf/src/audit_bytes.rs). Hinter dem
 Schalter `redact-rs <datei> --check-leaks "<text>"` steckt dieselbe Funktion,
 und hinter der Nachprüfung der Oberfläche ebenfalls.
 
@@ -300,7 +300,7 @@ einverstanden.
 Die mitgelieferten Schriften in `crates/redact-render/assets/fonts/` fallen
 **nicht** darunter: sie sind aus den Liberation Fonts abgeleitet und stehen
 unter der **SIL Open Font License 1.1**
-([`crates/redact-render/assets/fonts/LICENSE-OFL.txt`](crates/redact-render/assets/fonts/LICENSE-OFL.txt)).
+([`crates/redact-render/assets/fonts/LICENSE-OFL.txt`](https://github.com/thoscut/redactrs/blob/main/crates/redact-render/assets/fonts/LICENSE-OFL.txt)).
 Klausel 3 der OFL verlangt, dass eine geänderte Fassung keinen Reserved Font
 Name trägt — deshalb heißen sie hier „Redact Sans“, „Redact Serif“ und
 „Redact Mono“. Wer sie austauscht oder ergänzt, hält diese Klausel ein und

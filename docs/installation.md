@@ -30,6 +30,9 @@ Dazu liegt in **jedem** der drei Archive (nachgesehen in
 * die `README.md`, die Doku unter `docs/` (alle `*.md`) und
   [`SECURITY.md`](../SECURITY.md) — sonst liefen die Verweise in beiden
   Richtungen ins Leere,
+* dieselbe Doku als **HTML-Buch** im Verzeichnis `doku/` — Einstieg
+  `doku/index.html`, mit Suche und ohne Netzzugang lesbar (gebaut mit
+  mdBook, siehe [Entwicklung](entwicklung.md#die-doku-als-buch-bauen)),
 * [`CHANGELOG.md`](../CHANGELOG.md) — wer eine ältere Fassung ersetzt, muss ohne
   Netzzugang sehen können, welche Lecks dazwischen geschlossen wurden. Seit
   v0.4.0 packt der Release-Job ihn mit; die v0.3.0-Archive enthalten ihn noch

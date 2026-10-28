@@ -394,3 +394,56 @@ jobs:
           path: ${{ runner.temp }}/belege
           if-no-files-found: warn
           retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # Die Doku als Buch (mdBook): baut sie und prueft jeden Verweis darin.
+  #
+  # Die Markdown-Dateien verweisen relativ aufeinander. Auf GitHub faellt ein
+  # toter Verweis erst beim Klicken auf; im Buch schreibt mdBook einen
+  # Verweis auf eine .md-Datei, die nicht in book/SUMMARY.md steht, still zu
+  # einer .html-Datei um, die es nicht gibt. check-doku.py prueft deshalb
+  # das gebaute HTML: jede Datei und jeder Anker muss da sein.
+  # -------------------------------------------------------------------------
+  doku:
+    name: Doku (mdBook)
+    needs: toolchain
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Rust-Toolchain installieren
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master @ 2026-07-16
+        with:
+          toolchain: ${{ needs.toolchain.outputs.channel }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: doku
+
+      # Feste Version, aus demselben Grund wie bei cargo-deny: sonst aendert
+      # sich mit jedem Lauf, was gebaut wird. Dieselbe Zeile steht in
+      # release.yml und in scripts/build-doku.sh.
+      - name: mdBook installieren
+        run: |
+          set -euo pipefail
+          cargo install --locked mdbook@0.5.4
+          mdbook --version
+
+      - name: Buch bauen
+        run: ./scripts/build-doku.sh "$RUNNER_TEMP/doku"
+
+      - name: Verweise im Buch pruefen
+        run: python3 scripts/check-doku.py "$RUNNER_TEMP/doku"
+
+      - name: Gebautes Buch als Artefakt anhaengen
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: doku-html
+          path: ${{ runner.temp }}/doku
+          if-no-files-found: warn
+          retention-days: 7

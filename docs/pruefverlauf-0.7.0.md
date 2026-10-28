@@ -452,7 +452,7 @@ steht“). Fünf Prüfer, nur Schwärzung, je ein Gebiet: Bild, Metadaten, Spieg
 über Formular, Orakel und Filterkette, Decken.
 
 **Die erste Frage: nein.** Alle acht Zeilen der Spur A in
-[`PRUEFLISTE.md`](PRUEFLISTE.md) sind mit eigenen Läufen grün — nicht durch
+[`PRUEFLISTE.md`](../PRUEFLISTE.md) sind mit eigenen Läufen grün — nicht durch
 Lesen der Belegdateien, sondern mit neuem Material am ehrlichen Orakel. Keine
 Klasse, die schon auf der Liste stand, tritt noch auf.
 
@@ -902,7 +902,7 @@ die Platte.
   Doku —, und die konvergieren verschieden; die Runde 9 hatte alle drei in
   einem Commit. Jetzt sind es drei Spuren, und nur die Schwärzung zählt gegen
   das Ende. Das Ende selbst ist keine Abwesenheitsbehauptung mehr („nichts
-  gefunden“), sondern eine Checkliste: [`PRUEFLISTE.md`](PRUEFLISTE.md) nennt
+  gefunden“), sondern eine Checkliste: [`PRUEFLISTE.md`](../PRUEFLISTE.md) nennt
   jede Fehlerklasse, die in dieser Schleife aufgetreten ist, mit der Runde
   ihres ersten Auftretens und den Belegdateien, die sie festhalten;
   `zn_c_probenliste` prüft, dass es jede genannte Datei gibt. Die Bedingung,
