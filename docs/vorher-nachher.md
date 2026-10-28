@@ -93,8 +93,8 @@ in den Bildern und keine schlecht gewählte Demo: es gibt kein eingebautes
 Muster für Namen und keine Named-Entity-Erkennung. Kontoinhaber, Empfänger,
 Arbeitgeber und Verwendungszwecke bleiben stehen, solange sie nicht über die
 Buchungsliste, eine manuelle Region (`--manual-regions`) oder die Oberfläche
-erfasst werden. Die README sagt das unter
-„[Was dieses Werkzeug nicht leistet → Erkennung](../README.md#erkennung)“ mit
+erfasst werden. Die Doku sagt das unter
+„[Was dieses Werkzeug nicht leistet → Erkennung](grenzen.md#erkennung)“ mit
 allen Einzelheiten.
 
 Der Beleg zeigt es absichtlich mit. Ein Vorher/Nachher-Bild, das nur die
@@ -108,8 +108,8 @@ In `pruefung.txt` steht als Letztes eine Gegenprobe mit `pdftotext … | grep �
 — und die meldet an genau dieser Datei „kein Treffer“, während der Name noch
 darin steht. Sie steht dort als **Warnung**, nicht als Beweis. Warum sie nicht
 taugt — grep prüft eine Zeichenkette, `pdftotext` sieht nur Seitentext und
-weder Objektströme noch Altrevisionen — erklärt die README unter
-„[`pdftotext … | grep …` taugt dafür nicht](../README.md#pruefen)“.
+weder Objektströme noch Altrevisionen — erklärt die Doku unter
+„[`pdftotext … | grep …` taugt dafür nicht](pruefen.md#pdftotext---grep--taugt-dafür-nicht)“.
 
 ## Bewegt: die Schwärzung, wie sie entsteht
 

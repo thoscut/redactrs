@@ -700,7 +700,7 @@ mod tests {
         // dem ersten abgelehnten Begriff — und der Satz im Abschnitt zur
         // Oberfläche („Nachprüfung nach dem Export“), der dieselbe Decke
         // nennt. Gegenprüfung g4: der stand ungebunden daneben.
-        let readme = lies("README.md");
+        let readme = [lies("docs/pruefen.md"), lies("docs/oberflaeche.md")].join("\n");
         for satz in [
             format!("**Höchstens {formatiert} Begriffe je Aufruf.**"),
             format!(
@@ -714,7 +714,10 @@ mod tests {
             format!("mit {formatiert} Zeilen läuft derselbe Aufruf durch"),
             format!("Gesucht werden höchstens {formatiert} Begriffe je Nachprüfung"),
         ] {
-            assert!(readme.contains(&satz), "README.md ohne „{satz}“");
+            assert!(
+                readme.contains(&satz),
+                "docs/pruefen.md bzw. docs/oberflaeche.md ohne „{satz}“"
+            );
         }
 
         // SECURITY.md: die Zeile in der Grenzentabelle.

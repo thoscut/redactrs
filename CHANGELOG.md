@@ -32,6 +32,18 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ---
 
+## Unveröffentlicht
+
+### Geändert
+
+* **Die README ist verschlankt.** Sie nennt nur noch Kurzbeschreibung,
+  Installation, Schnellstart und die Verweise; alle Einzelheiten stehen mit
+  unverändertem Wortlaut unter `docs/` (Übersicht in der README unter
+  „Dokumentation“). Jedes Release-Archiv enthält dafür jetzt alle `docs/*.md`,
+  damit die Verweise auch ohne Netzzugang tragen.
+
+---
+
 ## 0.8.0 — 2026-10-21
 
 Bereich: `git log v0.7.2..v0.8.0`.

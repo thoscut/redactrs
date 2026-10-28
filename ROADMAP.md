@@ -3,8 +3,8 @@
 Was als Nächstes kommt, was gerade läuft und was bewusst später kommt. Die
 Liste ist ein Arbeitsstand, keine Zusage: was erledigt ist, wandert ins
 [`CHANGELOG.md`](CHANGELOG.md) und fliegt hier raus. Was das Werkzeug heute
-nicht leistet, steht ausführlich in der README unter
-[Was dieses Werkzeug nicht leistet](README.md#grenzen); diese Datei sagt nur,
+nicht leistet, steht ausführlich unter
+[Was dieses Werkzeug nicht leistet](docs/grenzen.md); diese Datei sagt nur,
 in welcher Reihenfolge davon etwas angegangen wird.
 
 Stand: 21.10.2026, veröffentlicht ist
@@ -28,7 +28,7 @@ Stand: 21.10.2026, veröffentlicht ist
 
 ## Später, nach Bedarf
 
-Aus der Liste der Grenzen in der README. Jeder Punkt ist ein eigenes
+Aus der Liste der Grenzen in `docs/grenzen.md`. Jeder Punkt ist ein eigenes
 Vorhaben; welcher zuerst kommt, hängt davon ab, welche Dokumente in der
 Praxis daran scheitern.
 

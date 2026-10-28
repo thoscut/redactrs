@@ -220,7 +220,7 @@ Das ist keine Vorsichtsregel, sondern ein gemessener Fall. An einer 767 Byte
 großen Datei mit einer IBAN in einem Flate-komprimierten Objektstrom
 (`/ObjStm`) geben `pdftotext`, `strings` **und** `grep` auf der Rohdatei
 übereinstimmend Entwarnung — `redact-rs --check-leaks` findet dieselbe IBAN an
-zehn Stellen. Die vollständige Messung steht im README unter „Prüfen, ob die
+zehn Stellen. Die vollständige Messung steht in [`docs/pruefen.md`](docs/pruefen.md) unter „Prüfen, ob die
 Schwärzung gewirkt hat“, der Fall als Test im Baum
 (`a_secret_in_a_compressed_object_stream_is_found` in
 `crates/redact-cli/tests/check_leaks.rs`).

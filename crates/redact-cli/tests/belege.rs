@@ -289,13 +289,14 @@ fn pruefung_txt_stammt_von_dieser_fassung() {
     );
 }
 
-/// Die Zahl der Prüfungen aus `scripts/check-preview.py` steht in der README —
+/// Die Zahl der Prüfungen aus `scripts/check-preview.py` steht in der Doku
+/// (`docs/entwicklung.md`, bis zur Verschlankung der README in dieser) —
 /// und zwar die, die das Skript wirklich druckt.
 ///
 /// Gegenprüfung E5 der Fix-Runde 5: die README nannte „36 Prüfungen“, das
 /// Skript meldete 54. Eine abgeschriebene Zahl veraltet still. Jetzt liest
 /// dieser Test die letzte Zeile des Skriptlaufs (`Alle N Pruefungen
-/// bestanden.`) und verlangt genau dieses `N` im Satz der README.
+/// bestanden.`) und verlangt genau dieses `N` im Satz der Doku.
 ///
 /// Ohne `python3` im Pfad ist hier nichts zu prüfen — der Test sagt das und
 /// endet grün; im Gate läuft `python3 scripts/check-preview.py docs` ohnehin
@@ -304,7 +305,7 @@ fn pruefung_txt_stammt_von_dieser_fassung() {
 /// Mutation (nachgewiesen): „54 Prüfungen“ in der README auf „55“ gesetzt →
 /// dieser Test rot.
 #[test]
-fn die_zahl_der_pruefungen_steht_im_readme() {
+fn die_zahl_der_pruefungen_steht_in_der_doku() {
     let wurzel = repo_root();
     let out = match Command::new("python3")
         .arg(wurzel.join("scripts/check-preview.py"))
@@ -337,11 +338,12 @@ fn die_zahl_der_pruefungen_steht_im_readme() {
         })
         .unwrap_or_else(|| panic!("check-preview.py meldet keine Zahl:\n{text}"));
 
-    let readme = lf(&std::fs::read_to_string(wurzel.join("README.md")).expect("README.md lesbar"));
+    let doku = lf(&std::fs::read_to_string(wurzel.join("docs/entwicklung.md"))
+        .expect("docs/entwicklung.md lesbar"));
     let satz = format!("# prüft sie ({gemeldet} Prüfungen");
     assert!(
-        readme.contains(&satz),
-        "README.md nennt nicht „{satz}…)“ — check-preview.py meldet {gemeldet} Prüfungen"
+        doku.contains(&satz),
+        "docs/entwicklung.md nennt nicht „{satz}…)“ — check-preview.py meldet {gemeldet} Prüfungen"
     );
 }
 
@@ -1104,7 +1106,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
 
     // --- Kosten des Automaten -------------------------------------------
     satz(
-        "README.md",
+        "docs/pruefen.md",
         format!(
             "nachgemessen an einer 64-MiB-Datei: {} s für einen, {} s für 1 000, \
              Verhältnis {}",
@@ -1123,7 +1125,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "README.md",
+        "docs/pruefen.md",
         format!(
             "nachgemessen {} MB für 1 000 Begriffe (bis zu {} Muster",
             m::AUTOMAT_1K_MB,
@@ -1138,7 +1140,7 @@ fn messsaetze() -> Vec<(&'static str, String)> {
         ),
     );
     satz(
-        "README.md",
+        "docs/pruefen.md",
         format!(
             "{} MB für 10 000, {} MB für 100 000 und **{} MB** für eine Million — \
              dazu {} s allein für seinen Bau",
@@ -2631,14 +2633,15 @@ fn die_abgeleiteten_zahlen_stimmen() {
         3 => "drei",
         n => panic!("MAX_NAMED_PLACES ist jetzt {n} — die Doku sagt „drei“"),
     };
-    let readme = glatt(&lf(
-        &std::fs::read_to_string(repo_root().join("README.md")).expect("README.md lesbar")
-    ));
+    let readme = glatt(&lf(&std::fs::read_to_string(
+        repo_root().join("docs/oberflaeche.md"),
+    )
+    .expect("docs/oberflaeche.md lesbar")));
     assert!(
         readme.contains(&format!(
             "und nennt **bis zu {als_wort} davon** beim Namen samt Grund"
         )),
-        "die README verspricht mehr, als `MAX_NAMED_PLACES` hält"
+        "docs/oberflaeche.md verspricht mehr, als `MAX_NAMED_PLACES` hält"
     );
     let security = glatt(&lf(&std::fs::read_to_string(
         repo_root().join("SECURITY.md"),
@@ -3992,13 +3995,14 @@ fn in_neun_byte_kodierungen_wird_gesucht_und_so_steht_es_in_der_doku() {
         "die neun Kodierungen heißen anders als in `BYTE_KODIERUNGEN_ASCII_ERWARTET`"
     );
 
-    // Der Hilfetext und die README nennen dieselbe Zahl und alle vier
+    // Der Hilfetext und die Doku nennen dieselbe Zahl und alle vier
     // Kodierungsfamilien — UTF-16LE eingeschlossen.
     let help = glatt(&stdout(&run_in(&repo_root(), &["--help"])));
-    let readme = glatt(&lf(
-        &std::fs::read_to_string(repo_root().join("README.md")).expect("README.md lesbar")
-    ));
-    for (wo, text) in [("--help", &help), ("README.md", &readme)] {
+    let readme = glatt(&lf(&std::fs::read_to_string(
+        repo_root().join("docs/pruefen.md"),
+    )
+    .expect("docs/pruefen.md lesbar")));
+    for (wo, text) in [("--help", &help), ("docs/pruefen.md", &readme)] {
         assert!(
             text.contains(
                 "**bis zu neun Byte-Kodierungen**: UTF-8/ASCII, Latin-1/PDFDoc, UTF-16BE und \
@@ -4120,13 +4124,18 @@ fn die_gruende_fuer_nicht_geprueft_stehen_in_security_md() {
             "SECURITY.md nennt zu „{name}“ nicht den Wortlaut „{wortlaut}“"
         );
     }
-    let readme = glatt(&lf(
-        &std::fs::read_to_string(repo_root().join("README.md")).expect("README lesbar")
-    ));
+    // Der Abschnitt zu den Rückgabewerten steht in `docs/kommandozeile.md`,
+    // die Tabelle zu `--check-leaks` in `docs/pruefen.md`.
+    let readme = glatt(&lf(&["docs/kommandozeile.md", "docs/pruefen.md"]
+        .map(|datei| {
+            std::fs::read_to_string(repo_root().join(datei))
+                .unwrap_or_else(|e| panic!("{datei} nicht lesbar: {e}"))
+        })
+        .join("\n")));
     assert!(
         security.contains("Sieben Gründe gibt es dafür")
             || readme.contains("Sieben Gründe gibt es dafür"),
-        "die README nennt die Zahl der Gründe nicht"
+        "die Doku nennt die Zahl der Gründe nicht"
     );
     // Und die Rückgabewert-Tabelle nennt dieselbe Zahl: sie war bis zur
     // Fix-Runde 7 an nichts gebunden.
@@ -4135,7 +4144,7 @@ fn die_gruende_fuer_nicht_geprueft_stehen_in_security_md() {
             "(`NICHT GEPRÜFT: …`, {} mögliche Gründe, siehe unten)",
             zahlwort(GRUENDE.len())
         )),
-        "die Rückgabewert-Tabelle der README nennt nicht {} mögliche Gründe",
+        "die Rückgabewert-Tabelle in docs/pruefen.md nennt nicht {} mögliche Gründe",
         GRUENDE.len()
     );
 }
