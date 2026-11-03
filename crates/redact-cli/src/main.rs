@@ -11,6 +11,7 @@ mod check;
 mod cli;
 mod dumpable;
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -131,7 +132,8 @@ fn dispatch(cli: &Cli) -> Result<ExitCode> {
             &redact_pdf::testing::demo_statement(),
             &redact_pdf::document::WriteOptions::new().force(cli.force),
         )?;
-        println!("Beispiel-PDF geschrieben: {}", path.display());
+        let mut out = stdout();
+        writeln!(out, "Beispiel-PDF geschrieben: {}", path.display())?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -172,13 +174,13 @@ fn dispatch(cli: &Cli) -> Result<ExitCode> {
     if let [input] = inputs.as_slice() {
         let outcome = redact_pipeline::run(&cli.config_for(&settings, input))?;
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            writeln!(stdout(), "{}", serde_json::to_string_pretty(&outcome)?)?;
         } else if cli.quiet {
             // `--quiet` nimmt die Zusammenfassung weg, nicht den Vorbehalt.
             // Siehe [`report_warnings`].
             report_warnings(&outcome, true);
         } else {
-            report(&outcome);
+            report(&outcome)?;
         }
         // Eine Datei, die nur teilweise durchsucht werden konnte, ist kein
         // Fehler — sie ist aber auch kein „alles gut“. Siehe [`EXIT_INCOMPLETE`].
@@ -186,6 +188,20 @@ fn dispatch(cli: &Cli) -> Result<ExitCode> {
     }
 
     batch::run(cli, &settings, &inputs)
+}
+
+/// stdout für alles, was dieses Programm dorthin schreibt.
+///
+/// `println!` stürzt bei einem Schreibfehler ab: `redact-rs --list-patterns |
+/// head -1` endete mit einer Panik und Rückgabewert 101, `redact-rs a.pdf >
+/// /dev/full` ebenso — nachdem die Ausgabedatei längst geschrieben war. 101
+/// steht in keiner Tabelle der Rückgabewerte. Über diesen Schreiber endet
+/// eine geschlossene Pipe die Ausgabe still (der Leser wollte nicht mehr),
+/// und jeder andere Schreibfehler wird ein gewöhnlicher IO-Fehler mit
+/// Rückgabewert 1 — dieselbe Regel wie bei `--check-leaks`
+/// ([`check::PipeSafe`]).
+fn stdout() -> check::PipeSafe<std::io::StdoutLock<'static>> {
+    check::PipeSafe::new(std::io::stdout().lock())
 }
 
 /// Der Rückgabewert eines gelungenen Laufs: 0 oder [`EXIT_INCOMPLETE`].
@@ -202,12 +218,13 @@ pub fn exit_code_for(outcome: &Outcome) -> ExitCode {
 /// Jeder Text, der aus der Datei stammt — Pfade, blockierte Treffer,
 /// Warnungen —, geht durch [`safe_text`]: ein Dateiname darf Steuerzeichen
 /// enthalten, und roh ausgegeben steuern die das Terminal statt dazustehen.
-fn report(outcome: &Outcome) {
-    println!("Eingabe:            {}", safe_text(&outcome.input));
-    println!("Seiten:             {}", outcome.pages);
+fn report(outcome: &Outcome) -> Result<()> {
+    let mut out = stdout();
+    writeln!(out, "Eingabe:            {}", safe_text(&outcome.input))?;
+    writeln!(out, "Seiten:             {}", outcome.pages)?;
     if outcome.text_runs > 0 {
-        println!("Textzeilen:         {}", outcome.text_runs);
-        println!("Treffer gesamt:     {}", outcome.candidates);
+        writeln!(out, "Textzeilen:         {}", outcome.text_runs)?;
+        writeln!(out, "Treffer gesamt:     {}", outcome.candidates)?;
     }
     // Die Ansage über abgeschaltete Erkennung steht unten bei den Warnungen —
     // sie gehört aber **neben die Trefferzahl**: „Treffer gesamt: 0“ liest sich
@@ -223,24 +240,28 @@ fn report(outcome: &Outcome) {
         .iter()
         .find(|w| w.starts_with(redact_pipeline::DETECTION_NOTICE))
     {
-        println!("{}", safe_text(notice));
+        writeln!(out, "{}", safe_text(notice))?;
     }
     if outcome.blocked > 0 {
-        println!("Durch Negativliste blockiert: {}", outcome.blocked);
+        writeln!(out, "Durch Negativliste blockiert: {}", outcome.blocked)?;
         for detail in &outcome.blocked_details {
-            println!("  - {}", safe_text(detail));
+            writeln!(out, "  - {}", safe_text(detail))?;
         }
     }
     match &outcome.review_out {
         Some(path) => {
-            println!("Review geschrieben: {}", safe_text(path));
-            println!();
-            println!("Datei prüfen, `enabled` anpassen und dann anwenden mit:");
-            println!(
+            writeln!(out, "Review geschrieben: {}", safe_text(path))?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "Datei prüfen, `enabled` anpassen und dann anwenden mit:"
+            )?;
+            writeln!(
+                out,
                 "  redact-rs {} --apply-review {}",
                 safe_text(&outcome.input),
                 safe_text(path)
-            );
+            )?;
         }
         None => {
             // Absicht und Ergebnis werden getrennt ausgewiesen. „Schwärzungen“
@@ -249,36 +270,40 @@ fn report(outcome: &Outcome) {
             // vorhandenen Seite, eine, von der `--padding` nichts übrig lässt,
             // und eine, die kein Zeichen getroffen hat, sind drei verschiedene
             // Befunde — und keiner davon ist eine ausgeführte Schwärzung.
-            println!("Schwärzungen:       {}", outcome.redactions);
+            writeln!(out, "Schwärzungen:       {}", outcome.redactions)?;
             let unproven = outcome.covered_redactions
                 + outcome.degenerate_redactions
                 + outcome.missing_page_redactions
                 + outcome.off_page_redactions;
             if unproven > 0 {
-                println!(
+                writeln!(
+                    out,
                     "  davon wirksam:      {} (Zeichen entfernt)",
                     outcome.effective_redactions
-                );
+                )?;
             }
             if outcome.covered_redactions > 0 {
-                println!(
+                writeln!(
+                    out,
                     "  davon ohne Textfund: {} (Deck-Rechteck gezeichnet, kein Zeichen \
                      entfernt — richtig über Grafik, falsch bei danebenliegenden \
                      Koordinaten)",
                     outcome.covered_redactions
-                );
+                )?;
             }
             if outcome.degenerate_redactions > 0 {
-                println!(
+                writeln!(
+                    out,
                     "  davon wirkungslos:  {} (leeres Rechteck nach --padding)",
                     outcome.degenerate_redactions
-                );
+                )?;
             }
             if outcome.missing_page_redactions > 0 {
-                println!(
+                writeln!(
+                    out,
                     "  davon wirkungslos:  {} (Seite gibt es in diesem Dokument nicht)",
                     outcome.missing_page_redactions
-                );
+                )?;
             }
             // Dieselben Worte wie die Kopfzeile der Oberfläche („n neben der
             // Seite“), und an derselben Stelle wie ihr Nachbar darüber: die
@@ -287,24 +312,30 @@ fn report(outcome: &Outcome) {
             // mit — also unter „Deck-Rechteck gezeichnet“, was neben dem Blatt
             // nicht stimmt.
             if outcome.off_page_redactions > 0 {
-                println!(
+                writeln!(
+                    out,
                     "  davon wirkungslos:  {} (Rechteck liegt neben der Seite)",
                     outcome.off_page_redactions
-                );
+                )?;
             }
-            println!("Entfernte Zeichen:  {}", outcome.removed_glyphs);
-            println!("Deck-Rechtecke:     {}", outcome.drawn_rects);
+            writeln!(out, "Entfernte Zeichen:  {}", outcome.removed_glyphs)?;
+            writeln!(out, "Deck-Rechtecke:     {}", outcome.drawn_rects)?;
             if outcome.removed_annotations > 0 {
-                println!("Entfernte Annotationen: {}", outcome.removed_annotations);
+                writeln!(
+                    out,
+                    "Entfernte Annotationen: {}",
+                    outcome.removed_annotations
+                )?;
                 // Die Zahl allein verschweigt, was verlorengegangen ist: mit
                 // der Annotation verschwindet ein Formularfeld samt seinem
                 // sichtbaren Text. Der Name geht durch `safe_text`, weil er
                 // aus der fremden Datei stammt.
                 for detail in &outcome.removed_annotation_details {
-                    println!(
+                    writeln!(
+                        out,
                         "  - {} (samt allen Erscheinungszustaenden)",
                         redact_core::safe_text(detail)
-                    );
+                    )?;
                 }
             }
             // Ein überschriebenes Bild gehört gemeldet: die Bildpunkte
@@ -319,29 +350,32 @@ fn report(outcome: &Outcome) {
             // Warnung daneben sagt es genauso; eine Zusammenfassung, die mehr
             // behauptet als die Warnung, ist die falsche von beiden.
             if outcome.redacted_images > 0 {
-                println!(
+                writeln!(
+                    out,
                     "Überschriebene Bilder: {} (neu kodiert: außerhalb der \
                      Schwärzung verlustfrei, Datei meist größer)",
                     outcome.redacted_images
-                );
+                )?;
             }
             if outcome.metadata_removed.is_empty() {
-                println!("Metadaten:          nichts zu entfernen");
+                writeln!(out, "Metadaten:          nichts zu entfernen")?;
             } else {
-                println!(
+                writeln!(
+                    out,
                     "Metadaten entfernt: {}",
                     safe_text(&outcome.metadata_removed.join(", "))
-                );
+                )?;
             }
             if let Some(path) = &outcome.output {
-                println!("Ausgabe:            {}", safe_text(path));
+                writeln!(out, "Ausgabe:            {}", safe_text(path))?;
             }
             if let Some(path) = &outcome.audit_log {
-                println!("Audit-Log:          {}", safe_text(path));
+                writeln!(out, "Audit-Log:          {}", safe_text(path))?;
             }
         }
     }
     report_warnings(outcome, false);
+    Ok(())
 }
 
 /// Die Warnungen eines Laufs nach stderr.
@@ -405,11 +439,13 @@ fn report_warnings(outcome: &Outcome, nur_lücken: bool) {
 
 fn list_patterns() -> Result<()> {
     let min = redact_patterns::DEFAULT_MIN_CONFIDENCE;
-    println!("Eingebaute Patterns:\n");
-    println!(
+    let mut out = stdout();
+    writeln!(out, "Eingebaute Patterns:\n")?;
+    writeln!(
+        out,
         "  [an/aus] {:<14} {:<8} {:<8} Beschreibung",
         "id", "mit Kt.", "ohne"
-    );
+    )?;
     for def in redact_patterns::builtin_patterns() {
         let state = if def.enabled { "an " } else { "aus" };
         // Zwei Spalten, weil dasselbe Pattern je nach Umfeld unterschiedlich
@@ -420,15 +456,17 @@ fn list_patterns() -> Result<()> {
             Some(value) => format!("{value:.2}"),
             None => "-".to_string(),
         };
-        println!(
+        writeln!(
+            out,
             "  [{state}]    {:<14} {:<8} {:<8} {}",
             def.id,
             format!("{:.2}", def.confidence),
             weak,
             def.description
-        );
+        )?;
     }
-    println!(
+    writeln!(
+        out,
         "\nAuswahl mit --patterns id1,id2 — standardmäßig ausgeschaltete Patterns\n\
          lassen sich so gezielt einschalten. Umgekehrt nimmt --disable-pattern id\n\
          ein einzelnes Muster aus dem Lauf und lässt die übrigen laufen;\n\
@@ -439,7 +477,7 @@ fn list_patterns() -> Result<()> {
          ist {min:.2}. Ein Pattern, dessen Spalte „ohne“ darunter liegt, findet\n\
          also nichts, solange kein Schlüsselwort danebensteht — mit\n\
          `--min-confidence 0.25` kommen auch diese Verdachtsfälle durch."
-    );
+    )?;
     Ok(())
 }
 

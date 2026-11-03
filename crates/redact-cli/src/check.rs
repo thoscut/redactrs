@@ -407,13 +407,13 @@ fn write_report(
 /// nicht als Fehler: ab dem ersten `BrokenPipe` wird alles Weitere still
 /// verworfen. Jeder andere Schreibfehler (volle Platte bei `> datei`) bleibt
 /// einer — dort fehlt die Ausgabe, ohne dass der Leser es wollte.
-struct PipeSafe<W> {
+pub(crate) struct PipeSafe<W> {
     inner: W,
     closed: bool,
 }
 
 impl<W: Write> PipeSafe<W> {
-    fn new(inner: W) -> Self {
+    pub(crate) fn new(inner: W) -> Self {
         Self {
             inner,
             closed: false,

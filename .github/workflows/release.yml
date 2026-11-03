@@ -136,6 +136,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # persist-credentials bleibt hier bewusst an (Vorgabe): der Schritt
+          # "Commit muss auf dem Default-Branch liegen" ruft `git fetch origin`
+          # auf, und in einem privaten Repository braucht das das Token. Der
+          # Job hat nur `contents: read` und baut nichts; ueberall sonst steht
+          # `persist-credentials: false`.
           ref: ${{ inputs.ref || inputs.tag || github.ref }}
           # Fuer die Abstammungspruefung im naechsten Schritt wird die
           # Vorgeschichte gebraucht, nicht nur der Kopf.
@@ -358,6 +363,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Kein Token in .git/config: kein Schritt braucht git mit Rechten.
+          persist-credentials: false
           ref: ${{ needs.verify.outputs.sha }}
 
       - name: Rust-Toolchain installieren
@@ -441,6 +448,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Kein Token in .git/config: kein Schritt braucht git mit Rechten.
+          persist-credentials: false
           ref: ${{ needs.verify.outputs.sha }}
 
       # Nur der glibc-Build enthaelt die GUI (eframe/egui mit glow, x11,
@@ -718,6 +727,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Kein Token in .git/config: kein Schritt braucht git mit Rechten.
+          persist-credentials: false
           ref: ${{ needs.verify.outputs.sha }}
 
       - name: Build-Artefakte herunterladen

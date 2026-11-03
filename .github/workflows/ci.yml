@@ -52,6 +52,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Kein Token in .git/config: kein Schritt braucht git mit Rechten.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
 
       - name: Rust-Channel aus rust-toolchain.toml lesen
@@ -80,6 +82,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Kein Token in .git/config: kein Schritt braucht git mit Rechten.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
 
       # eframe/egui (glow + x11 + wayland) brauchen unter Linux ein paar
@@ -137,6 +141,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Kein Token in .git/config: kein Schritt braucht git mit Rechten.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
 
       - name: Rust-Toolchain installieren
@@ -208,6 +214,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Kein Token in .git/config: kein Schritt braucht git mit Rechten.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
 
       - name: Rust-Toolchain installieren (zum Auslesen der Metadaten)
@@ -262,6 +270,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Kein Token in .git/config: kein Schritt braucht git mit Rechten.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
 
       - name: Rust-Toolchain installieren
@@ -359,6 +369,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Kein Token in .git/config: kein Schritt braucht git mit Rechten.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
 
       - name: Rust-Toolchain installieren
@@ -412,6 +424,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Kein Token in .git/config: kein Schritt braucht git mit Rechten.
+          persist-credentials: false
           ref: ${{ inputs.ref }}
 
       - name: Rust-Toolchain installieren
