@@ -287,10 +287,22 @@ pub fn padding_text(padding: f64) -> String {
     if padding == 0.0 {
         return "Polsterung: keine — geschwärzt wird genau das Rechteck.".to_string();
     }
-    format!(
-        "Polsterung: {padding:+.1} pt rundum — der schwarze Balken wird auf jeder \
-         Seite so viel größer als das Rechteck."
-    )
+    // Für jede Schwärzungsart, nicht nur den schwarzen Balken: Weiß und
+    // Ersetzen benutzen dasselbe gepolsterte Rechteck
+    // (`redact_pdf::PdfRedactor::with_padding`). „Auf jeder Seite“ ließ
+    // außerdem an PDF-Seiten denken.
+    if padding > 0.0 {
+        format!(
+            "Polsterung: {padding:+.1} pt — die Schwärzung reicht an jeder Kante \
+             {padding:.1} pt über das Rechteck hinaus."
+        )
+    } else {
+        format!(
+            "Polsterung: {padding:+.1} pt — die Schwärzung bleibt an jeder Kante \
+             {:.1} pt innerhalb des Rechtecks.",
+            -padding
+        )
+    }
 }
 
 /// Die Polsterung als Zeile unter der Legende.
@@ -563,7 +575,9 @@ pub(crate) fn hit_row(
                 // Wird geschwärzt: normal.
                 HitOutcome::Redacted => {}
                 // Schützt Text — kein Durchstreichen, das hieße „gestrichen“.
-                HitOutcome::Protecting => text = text.color(dot_color(color)),
+                HitOutcome::Protecting => {
+                    text = text.color(crate::theme::Theme::of(ui.visuals()).region_text(color))
+                }
                 // Verworfen bzw. abgewählt: gedämpft und durchgestrichen.
                 HitOutcome::Disabled
                 | HitOutcome::Blocked

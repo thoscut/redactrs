@@ -4,7 +4,7 @@
 #   cargo deny check advisories licenses bans sources
 #
 # Lokal identisch:
-#   cargo install --locked cargo-deny
+#   cargo install --locked cargo-deny@0.20.2
 #   cargo deny check
 #
 # Hinweis zur Schema-Version: diese Datei ist fuer cargo-deny 0.20.x

@@ -576,11 +576,20 @@ fn trim_range(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
 /// `None` bedeutet: Treffer verwerfen. Sonst die Konfidenz — abgesenkt, wenn
 /// das Pattern einen Kontext erwartet, der nicht gegriffen hat, und angehoben,
 /// wenn eine Prüfsumme bestanden wurde.
+///
+/// **Ein fehlender Kontext wird nicht angehoben.** Vorher hob eine bestandene
+/// Prüfung *jeden* Treffer auf [`VALIDATED_CONFIDENCE`], auch einen ohne
+/// Kontext — `confidence_without_context` war bei einem Muster mit Validator
+/// damit wirkungslos. Für die BIC, deren Prüfung jedes Großbuchstabenwort mit
+/// einem Ländercode an Stelle 5–6 besteht, hieß das: `KREDITKARTE` mit 0.99.
+/// Ein Validator kann einen Treffer verwerfen, aber nicht den fehlenden
+/// Kontext ersetzen.
 fn check(def: &PatternDef, text: &str, has_context: bool) -> Option<f32> {
-    let confidence = match def.confidence_without_context {
-        Some(weak) if !has_context => weak,
-        _ => def.confidence,
+    let weak = match def.confidence_without_context {
+        Some(weak) if !has_context => Some(weak),
+        _ => None,
     };
+    let confidence = weak.unwrap_or(def.confidence);
     let ok = match def.validator {
         None => return Some(confidence),
         Some(Validator::Iban) => validate_iban(text),
@@ -590,6 +599,9 @@ fn check(def: &PatternDef, text: &str, has_context: bool) -> Option<f32> {
     };
     if !ok {
         return None;
+    }
+    if weak.is_some() {
+        return Some(confidence);
     }
     Some(confidence.max(VALIDATED_CONFIDENCE))
 }

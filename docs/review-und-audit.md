@@ -57,46 +57,60 @@ es nennt keine Herkunft und behauptet auch keine.
 
 ## Audit-Log
 
+Ein echter Lauf mit 0.8.0 — der Demo-Kontoauszug (`--write-demo`) mit
+[`examples/booking_list.csv`](../examples/booking_list.csv):
+`redact-rs kontoauszug.pdf -o geschwaerzt.pdf --booking-list
+examples/booking_list.csv --audit-log audit.json`. Gekürzt sind nur die
+Prüfsummen und die Liste `redactions` (von acht Einträgen steht der erste da);
+die Koordinaten sind auf eine Stelle gerundet.
+
 ```json
 {
-  "timestamp": "2026-08-01T09:04:22Z",
-  "tool": { "name": "redact-rs", "version": "0.3.0" },
-  "input":  { "path": "kontoauszug.pdf", "sha256": "466c0af4…" },
-  "output": { "path": "geschwaerzt.pdf", "sha256": "c2c54724…" },
+  "timestamp": "2026-11-03T09:22:53Z",
+  "tool": { "name": "redact-rs", "version": "0.8.0" },
+  "input":  { "path": "kontoauszug.pdf", "sha256": "9ccba449…" },
+  "output": { "path": "geschwaerzt.pdf", "sha256": "5ca87765…" },
   "redactions": [
     {
       "page": 0,
       "rect":           { "ll": { "x": 100.9, "y": 732.8 }, "ur": { "x": 239.9, "y": 742.5 } },
       "effective_rect": { "ll": { "x":  99.9, "y": 731.8 }, "ur": { "x": 240.9, "y": 743.5 } },
       "effect": "applied",
-      "removed_glyphs": 22,
+      "removed_glyphs": 28,
       "action": "blackout",
       "reason": "booking: b002 (positive)",
       "source": "booking_list"
     }
   ],
-  "blocked_by_negative_list": [
-    { "page": 1, "pattern": "Max Mustermann", "booking_id": "b003" }
-  ],
+  "blocked_by_negative_list": [],
   "metadata_stripped": true,
   "metadata": {
     "info": true, "xmp": false, "piece_info": 0, "struct_tree": false,
     "names": 0, "embedded_files": 0, "javascript": 0,
-    "acroform": true, "xfa": true,
-    "field_values": 2, "file_attachments": 1, "open_action": true,
-    "additional_actions": 2, "optional_content": true,
-    "summary": ["/Info-Dictionary", "Formulardefinition (/AcroForm)", "…"]
+    "acroform": false, "xfa": false,
+    "field_values": 0, "file_attachments": 0, "open_action": false,
+    "additional_actions": 0, "optional_content": false,
+    "outlines_removed": 0, "annotation_actions_removed": 0,
+    "annotation_texts_cleared": 0, "optional_content_names_cleared": 0,
+    "summary": ["/Info-Dictionary"]
   },
   "effect": {
-    "padding": 1.0, "pages": 2, "requested": 4,
-    "applied": 4, "covered": 0, "degenerate": 0, "missing_page": 0,
+    "padding": 1.0, "pages": 2, "requested": 8,
+    "applied": 8, "covered": 0, "degenerate": 0, "missing_page": 0,
     "off_page": 0,
-    "removed_glyphs": 66, "drawn_rects": 4, "removed_annotations": 0,
+    "removed_glyphs": 134, "drawn_rects": 8, "removed_annotations": 0,
     "redacted_images": 0, "copied_images": 0
   },
   "patterns": { "all_disabled": false, "disabled": [] }
 }
 ```
+
+`blocked_by_negative_list` ist hier leer: `Max Mustermann` (b005) steht auf
+der Negativliste, überdeckt aber keinen Kandidaten. Blockiert ein Eintrag
+einen Treffer, steht dort je Fall
+`{ "page": …, "pattern": "Max Mustermann", "booking_id": "b005" }`. Fällt eine
+Warnung an — etwa ein abgeschaltetes Muster —, kommt das Feld `warnings`
+(Liste von Sätzen) hinzu.
 
 `rect` ist das gefundene Rechteck, `effective_rect` dasselbe zuzüglich
 `--padding`. `metadata` ist der **gemessene** Bericht darüber, was tatsächlich

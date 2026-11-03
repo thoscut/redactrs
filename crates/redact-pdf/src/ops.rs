@@ -1880,6 +1880,97 @@ pub fn decode_content_checked(data: &[u8]) -> DecodedContent {
 /// Operationen vor dem Bruch sollen erhalten bleiben, aber der Bruch selbst
 /// muss aktenkundig werden.
 fn decode_chunk(chunk: &[u8], out: &mut DecodedContent) {
+    // `d0`/`d1` (Type3-Glyphmetrik) vorab umbenennen, siehe
+    // [`type3_metric_operators_for_lopdf`]; danach zurück.
+    if let Some(renamed) = type3_metric_operators_for_lopdf(chunk) {
+        let start = out.operations.len();
+        decode_chunk_lopdf(&renamed, chunk.len(), out);
+        for op in &mut out.operations[start..] {
+            if op.operator == D0_PLACEHOLDER {
+                op.operator = "d0".to_string();
+            } else if op.operator == D1_PLACEHOLDER {
+                op.operator = "d1".to_string();
+            }
+        }
+        return;
+    }
+    decode_chunk_lopdf(chunk, chunk.len(), out);
+}
+
+/// Platzhalter für `d0`/`d1`, die lopdf als Operator liest: nur Buchstaben.
+const D0_PLACEHOLDER: &str = "redactrsTypeDreiDNull";
+const D1_PLACEHOLDER: &str = "redactrsTypeDreiDEins";
+
+/// Benennt die Operatoren `d0` und `d1` um, **außerhalb** von Zeichenketten
+/// und Kommentaren — `None`, wenn keiner vorkommt.
+///
+/// lopdf liest als Operator nur Buchstaben (und `*'"`). Aus `d1` wurden so
+/// der Operator `d` und ein Operand `1` für den nächsten Operator. Eine
+/// Glyphprozedur, die nur `485 0 0 0 0 0 d1` enthält (das Leerzeichen einer
+/// Type3-Schrift, wie Chrome sie schreibt), endete mit einem Operanden ohne
+/// Operator: `decode_strict` scheiterte, die Prozedur galt als „nicht
+/// vollständig lesbar“, und jedes mit Chrome gedruckte PDF bekam
+/// NICHT GEPRÜFT und Rückgabewert 3. Steht hinter `d1` noch etwas, ging das
+/// zwar durch, aber mit falschen Operanden (`d` mit sechs, der nächste
+/// Operator mit einem zu viel).
+fn type3_metric_operators_for_lopdf(chunk: &[u8]) -> Option<Vec<u8>> {
+    let is_delimiter = |b: u8| is_pdf_whitespace(b) || b"()<>[]{}/%".contains(&b);
+    let mut out: Option<Vec<u8>> = None;
+    let mut copied = 0usize;
+    let mut i = 0usize;
+    while i < chunk.len() {
+        match chunk[i] {
+            b'(' => {
+                i = skip_literal_string(chunk, i).min(chunk.len());
+                continue;
+            }
+            b'<' if chunk.get(i + 1) == Some(&b'<') => {
+                i += 2;
+                continue;
+            }
+            b'<' => {
+                while i < chunk.len() && chunk[i] != b'>' {
+                    i += 1;
+                }
+            }
+            b'%' => {
+                while i < chunk.len() && chunk[i] != b'\n' && chunk[i] != b'\r' {
+                    i += 1;
+                }
+            }
+            // Davor Leerraum oder eine schließende Klammer — nicht `/`: `/d1`
+            // ist ein Name.
+            b'd' if (i == 0
+                || is_pdf_whitespace(chunk[i - 1])
+                || b")]>}".contains(&chunk[i - 1]))
+                && matches!(chunk.get(i + 1), Some(b'0' | b'1'))
+                && chunk.get(i + 2).is_none_or(|b| is_delimiter(*b)) =>
+            {
+                let buf = out.get_or_insert_with(|| Vec::with_capacity(chunk.len() + 32));
+                buf.extend_from_slice(&chunk[copied..i]);
+                buf.push(b' ');
+                buf.extend_from_slice(if chunk[i + 1] == b'0' {
+                    D0_PLACEHOLDER.as_bytes()
+                } else {
+                    D1_PLACEHOLDER.as_bytes()
+                });
+                buf.push(b' ');
+                i += 2;
+                copied = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let mut buf = out?;
+    buf.extend_from_slice(&chunk[copied..]);
+    Some(buf)
+}
+
+/// Zerlegt ein Teilstück mit lopdf; `reported_len` ist die Länge, die ein
+/// Bruch meldet (die des Originals, nicht die eines umgeschriebenen Puffers).
+fn decode_chunk_lopdf(chunk: &[u8], reported_len: usize, out: &mut DecodedContent) {
     if let Ok(content) = Content::decode_strict(chunk) {
         out.operations.extend(content.operations);
         return;
@@ -1903,7 +1994,7 @@ fn decode_chunk(chunk: &[u8], out: &mut DecodedContent) {
     if let Ok(content) = Content::decode(&tidied) {
         out.operations.extend(content.operations);
     }
-    out.truncated.push(chunk.len());
+    out.truncated.push(reported_len);
 }
 
 /// Schreibt Kommentare und den Leerraum, den lopdf nicht kennt, so um, dass
@@ -3124,6 +3215,40 @@ mod tests {
             .truncated
             .is_empty());
         assert!(decode_content_checked(b"q Q\x0c").truncated.is_empty());
+    }
+
+    /// `d0`/`d1` sind Operatoren, kein `d` mit Operand — auch am Ende einer
+    /// Glyphprozedur, die sonst nichts zeichnet (Chrome, Leerzeichen).
+    #[test]
+    fn type3_metric_operators_are_whole_operators() {
+        let decoded = decode_content_checked(b"485 0 0 0 0 0 d1\n\n");
+        assert!(decoded.truncated.is_empty());
+        assert_eq!(decoded.operations.len(), 1);
+        assert_eq!(decoded.operations[0].operator, "d1");
+        assert_eq!(decoded.operations[0].operands.len(), 6);
+
+        let decoded = decode_content_checked(b"500 0 d0 0 0 m 1 1 l S");
+        assert!(decoded.truncated.is_empty());
+        let ops: Vec<(&str, usize)> = decoded
+            .operations
+            .iter()
+            .map(|o| (o.operator.as_str(), o.operands.len()))
+            .collect();
+        assert_eq!(ops, [("d0", 2), ("m", 2), ("l", 2), ("S", 0)]);
+
+        // Zeichenketten, Namen und Kommentare bleiben unberührt.
+        let decoded = decode_content_checked(b"BT /d1 1 Tf (d1 d0) Tj <d1> Tj ET % d1\n");
+        assert!(decoded.truncated.is_empty());
+        let ops: Vec<&str> = decoded
+            .operations
+            .iter()
+            .map(|o| o.operator.as_str())
+            .collect();
+        assert_eq!(ops, ["BT", "Tf", "Tj", "Tj", "ET"]);
+        assert_eq!(
+            decoded.operations[2].operands[0],
+            Object::String(b"d1 d0".to_vec(), StringFormat::Literal)
+        );
     }
 
     // -----------------------------------------------------------------

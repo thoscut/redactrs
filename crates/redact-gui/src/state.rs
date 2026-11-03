@@ -140,6 +140,21 @@ pub fn new_region_hint(page: usize) -> String {
     )
 }
 
+/// Die Ansage, dass Pfade aus der Kommandozeile beim Dokumentwechsel
+/// verworfen wurden — sie galten dem vorigen Dokument.
+pub fn options_dropped_notice(options: &[&str]) -> String {
+    let (verb, rest) = if options.len() == 1 {
+        ("galt", "wird")
+    } else {
+        ("galten", "werden")
+    };
+    format!(
+        "Anderes Dokument geöffnet: {} {verb} dem vorigen und {rest} hier nicht \
+         angewendet",
+        options.join(", ")
+    )
+}
+
 /// Warnung zu einer Seite, deren MediaBox unbrauchbar war.
 ///
 /// Ohne sie sähe die geheilte Seite aus wie jede andere — und was das Fenster
@@ -225,12 +240,23 @@ impl RegionColor {
     /// sind. Das Grün lag mit 2,90:1 ebenfalls darunter. Beide sind jetzt
     /// dunkler; alle vier Töne erreichen gegen weißes Blatt, hellen und dunklen
     /// Bereichshintergrund mindestens 3:1 (siehe Test unten).
+    ///
+    /// Seit 0.8.1 zählen dazu auch die **Auswahl- und die Hover-Fläche** einer
+    /// Trefferzeile, auf denen das Zeichen der Trefferart liegt. Vorher
+    /// fehlten sie in [`crate::theme::Theme::backgrounds`]; gemessen kamen
+    /// Grün, Orange und Rot auf der dunklen Auswahlzeile auf 2,30, 2,33 und
+    /// 2,61:1, das Blau auf der hellen auf 2,92:1. Blau ist deshalb eine Spur
+    /// dunkler, Grün und Orange eine Spur heller, die dunkle Auswahlfläche
+    /// dunkler.
+    ///
+    /// **Für Schrift sind diese Töne zu schwach** (4,5:1 nach WCAG 1.4.3) —
+    /// dafür gibt es [`crate::theme::Theme::region_text`].
     pub fn rgb(self) -> (u8, u8, u8) {
         match self {
-            RegionColor::AutoPattern => (60, 130, 246),
-            RegionColor::AutoBookingPos => (21, 128, 61),
+            RegionColor::AutoPattern => (50, 118, 234),
+            RegionColor::AutoBookingPos => (24, 140, 68),
             RegionColor::AutoBookingNeg => (220, 60, 60),
-            RegionColor::Manual => (176, 88, 0),
+            RegionColor::Manual => (190, 96, 0),
         }
     }
 
@@ -1726,6 +1752,55 @@ impl AppState {
     /// nicht sieht. Wer das nicht erfährt, hält eine Datei mit „0 Treffer“ für
     /// sauber — die Oberfläche hat diese Warnungen bisher weggeworfen.
     pub fn load_bytes(&mut self, bytes: &[u8], path: Option<PathBuf>) -> Result<()> {
+        // Ein Passwort galt dem Dokument, für das es eingegeben (oder mit
+        // `--password` genannt) wurde. Ein **anderes** Dokument öffnete sonst
+        // ohne Rückfrage mit dem Passwort des vorigen, und das Passwort blieb
+        // für den Rest der Sitzung im Speicher. Verworfen wird vor dem Laden;
+        // [`AppState::unlock`] lädt über [`AppState::load_bytes_with`] und
+        // behält das gerade eingegebene.
+        if self.is_switching_to(path.as_deref()) {
+            self.config.password = None;
+        }
+        self.load_bytes_with(bytes, path)
+    }
+
+    /// Wird mit `path` ein anderes Dokument geöffnet als das geladene?
+    fn is_switching_to(&self, path: Option<&Path>) -> bool {
+        self.pdf_path.is_some() && self.pdf_path.as_deref() != path
+    }
+
+    /// Verwirft, was auf der Kommandozeile für **ein** Dokument genannt wurde,
+    /// und gibt die Schalter zurück, die gesetzt waren.
+    ///
+    /// `-o` war das Vorbild (Befund aus 0.7.0); `--audit-log`, `--review-out`,
+    /// `--manual-regions` und `--apply-review` blieben dagegen stehen. Gemessen:
+    /// der Export des zweiten Dokuments **überschrieb das Audit-Log des
+    /// ersten** (`force: true`), der Review-Dialog schlug dessen Dateinamen
+    /// vor, eine Regionsliste des ersten legte Rechtecke ins zweite, und eine
+    /// Review-Datei hinter `--manual-regions` ließ jede Analyse des zweiten
+    /// scheitern.
+    fn forget_per_document_options(&mut self) -> Vec<&'static str> {
+        let mut dropped = Vec::new();
+        if self.config.output.take().is_some() {
+            dropped.push("-o");
+        }
+        if self.config.audit_log.take().is_some() {
+            dropped.push("--audit-log");
+        }
+        if self.config.review_out.take().is_some() {
+            dropped.push("--review-out");
+        }
+        if self.config.manual_regions.take().is_some() {
+            dropped.push("--manual-regions");
+        }
+        if self.config.apply_review.take().is_some() {
+            dropped.push("--apply-review");
+        }
+        dropped
+    }
+
+    /// Wie [`AppState::load_bytes`], aber ohne das Passwort anzurühren.
+    fn load_bytes_with(&mut self, bytes: &[u8], path: Option<PathBuf>) -> Result<()> {
         // `load_document` statt `load_from_bytes_with_limits`: **dieselbe**
         // Ladefunktion wie in `redact_pipeline::run`, damit ein Passwort aus
         // `Config` hier genauso wirkt wie auf der Kommandozeile.
@@ -1778,10 +1853,16 @@ impl AppState {
         // Namenszusatz blieb dabei wirkungslos. Für das erste geöffnete
         // Dokument — das aus der Kommandozeile oder das erste aus dem Dialog —
         // gilt er weiter, ebenso beim erneuten Öffnen derselben Datei.
-        let switching = self.pdf_path.is_some() && self.pdf_path.as_deref() != path.as_deref();
-        if switching {
-            self.config.output = None;
-        }
+        //
+        // Dasselbe gilt für alle Pfade, die einem Dokument gehören — siehe
+        // [`AppState::forget_per_document_options`]. Verworfen wird erst
+        // **nach** dem geglückten Laden: scheitert das zweite Dokument, bleibt
+        // das erste samt seinen Pfaden stehen.
+        let dropped = if self.is_switching_to(path.as_deref()) {
+            self.forget_per_document_options()
+        } else {
+            Vec::new()
+        };
         self.config.input = path.clone().unwrap_or_default();
         self.pdf_path = path;
         self.current_page = 0;
@@ -1793,6 +1874,10 @@ impl AppState {
         self.end_edit_sessions();
         self.extract_warnings = warnings.clone();
         self.warnings = warnings;
+        // Keine Lücke der Abdeckung, also nicht in `extract_warnings`.
+        if !dropped.is_empty() {
+            self.warnings.push(options_dropped_notice(&dropped));
+        }
         // Der Verlauf gehörte zum vorigen Dokument.
         self.history.clear();
         self.status = format!(
@@ -1831,7 +1916,7 @@ impl AppState {
             ));
         };
         self.config.password = Some(Secret::new(password));
-        let result = self.load_bytes(&pending.bytes, pending.path);
+        let result = self.load_bytes_with(&pending.bytes, pending.path);
         if result.is_err() {
             self.config.password = None;
         }

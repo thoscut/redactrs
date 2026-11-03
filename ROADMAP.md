@@ -7,17 +7,13 @@ nicht leistet, steht ausführlich unter
 [Was dieses Werkzeug nicht leistet](docs/grenzen.md); diese Datei sagt nur,
 in welcher Reihenfolge davon etwas angegangen wird.
 
-Stand: 21.10.2026, veröffentlicht ist
-[0.7.2](https://github.com/thoscut/redactrs/releases/tag/v0.7.2).
+Stand: 03.11.2026, veröffentlicht ist
+[0.8.0](https://github.com/thoscut/redactrs/releases/tag/v0.8.0).
 
 ## In Arbeit
 
-### 0.8.0
-
-* Veröffentlicht die überarbeitete Oberfläche
-  ([PR #6](https://github.com/thoscut/redactrs/pull/6)): eigener Farbsatz,
-  Ansichten „Werkbank“ und „Fokus“ (Schlüssel `layout`), Barrierefreiheit.
-  Einzelheiten im [`CHANGELOG.md`](CHANGELOG.md).
+* Die Doku als HTML-Buch (mdBook) in jedem Release-Archiv — steht im
+  [`CHANGELOG.md`](CHANGELOG.md) unter „Unveröffentlicht“.
 
 ## Bekannt, wartet auf andere
 

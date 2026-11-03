@@ -34,17 +34,221 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ## Unveröffentlicht
 
+### Sicherheit
+
+* **⚠ Sicherheit: Klartext unterhalb der Arten mit Schema überstand den
+  Lauf.** Seit der Prüfrunde 2 behalten Schrift, Grafikzustand, Bild,
+  Formular … nur die Schlüssel ihrer Normtabelle — was **darunter** ohne
+  eigenes Schema hing, behielt jeden Schlüssel. Ein Kommentar am ICC-Profil
+  eines Farbraums, ein `/HalftoneName` unter `/HT`, eine Notiz unter dem
+  `/BS` einer Annotation standen nach der Schwärzung in der Ausgabe;
+  Rückgabewert 0, „Metadaten: nichts zu entfernen“, und `--check-leaks`
+  fand sie. Behoben: eigene Schemata für ICC-Profile, CIE-Farbräume, die
+  Attribute eines `/DeviceN` (die Stellen eines Farbraumfelds werden
+  einzeln zugeordnet), Halbtöne (Typ 1, 5, 6, 10, 16; `/HalftoneName` fällt),
+  `/BS`, `/BE`, `/MK`, `/AP` samt Zustandsverzeichnis (nur Ströme bleiben),
+  die Ströme von `/FontFile*`, `/ToUnicode` und Type0-CMaps sowie die
+  Einträge in `/Alternates` eines Bildes. Was fällt, steht im Bericht als
+  Beiwerk. Ein Erscheinungsstrom ohne `/Subtype` gilt jetzt als Formular und
+  verliert, was das Formularschema nicht kennt. Beleg
+  `crates/redact-pdf/tests/zq_b_beiwerk_ohne_schema.rs`.
+* **⚠ Sicherheit: Die Schrift eines `/ExtGState` wurde übergangen.** `gs`
+  mit `/Font [ref size]` setzt die Schrift wie ein `Tf` (PDF 32000-1,
+  Tabelle 58); Poppler wertet das aus, der Interpreter dekodierte mit der
+  Schrift des letzten `Tf` weiter. Stand die IBAN in der Schrift des `gs`,
+  zeigte der Betrachter sie, die Analyse las andere Zeichen: „Treffer 0“,
+  Rückgabewert 0, und `--check-leaks` meldete „nicht gefunden“, weil es
+  dieselbe Sicht liest. Beleg: `crates/redact-pdf/tests/zq_a_extgstate_schrift.rs`.
+* **⚠ Sicherheit: Type0-Schriften mit gemischten Codelängen** (eingebettete
+  `/Encoding`-CMap mit ein- und zweibytigen Bereichen) wurden zweibytig
+  zerlegt; mit einem `/ToUnicode` daneben blieb das ohne Warnung, die IBAN
+  wurde nicht erkannt, Rückgabewert 0. Die Codes werden jetzt nach dem
+  Codespace zerlegt (9.7.6.2). Eine vordefinierte CMap außer `Identity-H/V`
+  und `Uni…-UCS2/UTF16-…` (etwa `90ms-RKSJ-H`), deren Zerlegung das
+  Werkzeug nicht kennt, ist jetzt eine Deckungslücke (NICHT GEPRÜFT,
+  Rückgabewert 3), sobald mit ihr Text gesetzt wird. Beleg:
+  `crates/redact-pdf/tests/zq_a_gemischter_codespace.rs`.
+* **⚠ Sicherheit: Die eingebaute Kodierung eines eingebetteten
+  Type1-Programms wurde ignoriert.** Ohne `/Encoding` (oder bei
+  `/Differences` ohne `/BaseEncoding`) gilt die Kodierung des Fontprogramms;
+  angenommen wurde WinAnsi. Poppler extrahierte die IBAN, die Analyse nicht —
+  Rückgabewert 0, auch `--check-leaks` sah nichts. Die Tabelle aus dem
+  Klartextteil von `/FontFile` gilt jetzt. Ein CFF-Programm
+  (`/FontFile3 /Subtype /Type1C`) mit eigener Kodierung wird nicht
+  nachgebaut und ist ohne `/ToUnicode` eine Deckungslücke; Standard-14-Schriften,
+  Programme mit Standardkodierung und eingebettete TrueType-Schriften bleiben
+  unverändert. Beleg: `crates/redact-pdf/tests/zq_a_eingebaute_kodierung.rs`.
+* **⚠ Sicherheit — Rücktaste im Zoomfeld löschte das ausgewählte Rechteck.**
+  Das eintippbare Zahlenfeld des Zoomreglers galt der Tastatursperre nicht als
+  Textfeld: Rücktaste oder Entf beim Korrigieren der Zoomzahl löschten das
+  ausgewählte Schwärzungsrechteck, die Pfeiltasten verschoben es. Als
+  Textfeld zählt jetzt jedes fokussierte egui-Textfeld, nicht nur die drei
+  benannten. Auf der fokussierten Schiene des Reglers zoomt ein Pfeil nur
+  noch, statt zusätzlich das Rechteck zu schieben oder zu blättern.
+* **⚠ Sicherheit — der Export eines zweiten Dokuments überschrieb das
+  Audit-Log des ersten.** Beim Öffnen eines anderen Dokuments verwarf die
+  Oberfläche nur `-o`. `--audit-log` galt weiter, und weil der Export ohne
+  zweite Rückfrage schreibt, stand danach im Log des ersten Dokuments das
+  zweite. Ebenso blieben `--review-out` (Vorschlag mit dem Namen des ersten),
+  `--manual-regions` (Rechtecke des ersten im zweiten, bzw. bei einer
+  Review-Datei: jede Analyse des zweiten scheiterte), `--apply-review` und
+  das Passwort des ersten Dokuments (ein anderes verschlüsseltes Dokument
+  öffnete ohne Rückfrage). All das gilt jetzt nur dem Dokument, für das es
+  genannt wurde; beim Wechsel steht in der Statuszeile, was verworfen wurde.
+* **⚠ Sicherheit: Ein geschütztes Leerzeichen hinter dem Schlüsselwort
+  verhinderte die Erkennung.** Zwischen „Steuer-ID:“, „BLZ:“, „Kto.-Nr.:“
+  oder „Telefon:“ und dem Wert galten nur Leerzeichen und Tabulator; mit
+  U+00A0 oder U+202F dahinter (wie es Textsatz hinter einen Doppelpunkt
+  setzt) griff der Kontext nicht, der Treffer fiel unter die Schwelle.
+  Gemessen: `Treffer gesamt: 0`, Rückgabewert 0, alle Werte in der Ausgabe.
+  Jetzt zählt jeder Leerraum (Leerzeichen und Tabulator wie bisher
+  beliebig viele, anderer bis zu vier Zeichen;
+  `redact-cli/tests/zq_c_erkennung_am_binary.rs`,
+  `redact-patterns/tests/zq_c_erkennung_schreibweisen.rs`).
+* **⚠ Sicherheit: Ligaturen als Codepunkt verbargen Schlüsselwort und
+  Buchungslisten-Eintrag.** Bildet `/ToUnicode` einen Code auf U+FB01 („ﬁ“)
+  ab, stand „Identiﬁkationsnummer“ bzw. „Max ﬁscher“ in der Zeile — die
+  Steuer-ID und der Eintrag „Max Fischer“ trafen nicht, Rückgabewert 0. Der
+  Extraktor zerlegt U+FB00–U+FB06 jetzt beim Zeilenbau in ihre Buchstaben,
+  jeden mit dem Kasten der ganzen Ligatur; die Schwärzung trifft damit den
+  ganzen Code. Die Buchungsliste behandelt Ligaturen auch in ihren Einträgen
+  und in jedem anderen Text als ihre Buchstaben.
+
 ### Geändert
 
+* **`bic` braucht Kontext.** Acht oder elf Großbuchstaben mit einem
+  Ländercode an Stelle 5–6 bestanden die Prüfung und wurden mit 0.99
+  geschwärzt — gemessen an „PRIVATKONTO“, „KREDITKARTE“, „MUENCHEN“,
+  „DUESSELDORF“. Als Kontext zählt jetzt ein Schlüsselwort („BIC“, „SWIFT“,
+  „BIC/SWIFT“, „SWIFT-Code“) oder eine Ziffer bzw. die Endung `XXX` in der
+  BIC selbst; ohne beides 0.30, also unter der Schwelle. **Eine BIC nur aus
+  Buchstaben ohne Schlüsselwort davor (`DEUTDEFF`) wird nicht mehr
+  geschwärzt.**
+* **Eine bestandene Prüfsumme hebt einen Treffer ohne Kontext nicht mehr auf
+  0.99.** `confidence_without_context` war bei einem Muster mit Validator
+  bisher wirkungslos; das betrifft auch eigene Muster aus
+  `--patterns-config`, die beides setzen.
+* `REDACT_RS_CONFIG` auf einen nicht vorhandenen Pfad beendet den Lauf
+  (siehe *Behoben*). Wer die Variable bisher so benutzte, um die
+  Einstellungsdatei abzuschalten, setzt sie leer.
 * **Die README ist verschlankt.** Sie nennt nur noch Kurzbeschreibung,
   Installation, Schnellstart und die Verweise; alle Einzelheiten stehen mit
   unverändertem Wortlaut unter `docs/` (Übersicht in der README unter
-  „Dokumentation“). Jedes Release-Archiv enthält dafür jetzt alle `docs/*.md`,
-  damit die Verweise auch ohne Netzzugang tragen.
+  „Dokumentation“).
+* **Das Release-Archiv ist vollständiger.** Es enthält jetzt das ganze
+  Verzeichnis `docs/` — auch die Belege `*.png`, `*.gif` und `*.txt`, auf die
+  README und `docs/vorher-nachher.md` verweisen — sowie `CONTRIBUTING.md`,
+  `ROADMAP.md` und `PRUEFLISTE.md`. Bis 0.8.0 lagen von `docs/` nur die
+  `*.md` bei, und diese Verweise zeigten im Archiv ins Leere.
 * **Die Doku gibt es als HTML-Buch.** `scripts/build-doku.sh` baut sie mit
   mdBook, die CI prüft dabei jeden Verweis (`scripts/check-doku.py`), und
   jedes Release-Archiv enthält das Buch unter `doku/` (Einstieg
   `doku/index.html`, ohne Netzzugang lesbar).
+* **`redact-rs --help` zeigt keinen Entwicklertext mehr.** Bei `--gui`,
+  `--replace-with` und `--padding` standen Begründungen für Entwickler und
+  Rustdoc-Verweise (`[redact_core::DEFAULT_REPLACEMENT]`) im Hilfetext. Die
+  Liste der Einstellungen im Hilfetext nennt jetzt auch die Ansicht
+  (`layout`), und der Abschnitt zu Rückgabewert 3 verweist für alle sieben
+  Gründe von „NICHT GEPRÜFT“ auf die Doku.
+* **Farben der Oberfläche.** Blau, Grün und Orange der Trefferarten sind eine
+  Spur verschoben, die Auswahlzeile im dunklen Thema ist dunkler. Der Grund
+  steht unter *Behoben*.
+* **`--force` behält engere Rechte des Ziels.** Die neue Datei entstand immer
+  mit 0644 und ersetzte die alte samt ihrem Modus: aus einem mit `chmod 600`
+  geschützten Ergebnis wurde nach dem nächsten Lauf wieder ein für alle
+  lesbares. Jetzt bekommt sie unter Unix höchstens die Rechte der alten Datei
+  (und nie mehr als die Vorgabe 0644 bzw. 0600 für Review-Datei und
+  Audit-Log).
+* In den Workflows hält `actions/checkout` das Token nicht mehr in der
+  git-Konfiguration fest (`persist-credentials: false`); nur die
+  Versionsprüfung des Releases, die `git fetch` braucht, behält es.
+
+### Behoben
+
+* **Mit Chrome gedruckte PDFs werden nicht mehr als „nicht geprüft“
+  abgelehnt.** Chrome schreibt das Leerzeichen seiner Type3-Schriften als
+  Glyphprozedur, die nur `d1` enthält. Der Inhaltsparser (lopdf) liest als
+  Operator nur Buchstaben und machte aus `d1` den Operator `d` mit einem
+  übrig bleibenden Operanden; die Prozedur galt als nicht vollständig lesbar,
+  und jede solche Datei endete mit NICHT GEPRÜFT und Rückgabewert 3. `d0` und
+  `d1` werden jetzt als ganze Operatoren gelesen (außerhalb von
+  Zeichenketten, Namen und Kommentaren); eine wirklich abgeschnittene
+  Glyphprozedur bleibt gemeldet. Beleg:
+  `crates/redact-pdf/tests/zq_a_type3_glyphmetrik.rs`.
+* **Kontrast.** Schrift in Trefferfarbe (eine schützende Zeile der
+  Negativliste) erreichte 3,78–4,12:1 statt 4,5:1, auf der dunklen
+  Auswahlzeile 2,61:1; die gedämpfte Schrift der ausgewählten Zeile im dunklen
+  Thema 3,68:1, die Trefferzeichen dort bis hinunter auf 2,30:1. Schrift
+  bekommt eigene Töne je Thema, und die Kontrastprüfung rechnet die Auswahl-
+  und die Hover-Fläche der Trefferliste jetzt mit.
+* Der Hinweis zur Polsterung sprach vom „schwarzen Balken … auf jeder Seite“;
+  die Polsterung gilt für jede Schwärzungsart und an jeder Kante.
+* **Dienstverweigerung über die Buchungsliste.** Zwei Wachstumsformen, die
+  nicht linear waren, gemessen am Release-Binary:
+  * *Quadratisch in der Zeilenlänge:* jede Fundstelle zählte ihr Rechteck ab
+    der ersten Glyphe der Zeile. Ein `Tj` mit 40 000 IBANs, also eine
+    Eingabedatei von 2 899 Byte, lief mit einem einzigen Eintrag 128 s. Jetzt
+    nutzt die Buchungsliste den Glyphenzeiger, den die Muster schon hatten:
+    7,8 s, so viel wie dieselben Treffer über die eingebauten Muster.
+  * *Einträge × Text:* jeder Eintrag durchsuchte jede Zeile für sich.
+    2 000 Seiten mit 16 000 Einträgen ohne Treffer kosteten 89 s mehr als
+    ohne Liste. Jetzt liest ein Aho-Corasick-Automat über alle Einträge jede
+    Zeile einmal, und die Liste kostet 1,5 s.
+
+  Die Treffer bleiben dieselben, auch in derselben Reihenfolge: zuerst die
+  Negativliste, je Liste in Dateireihenfolge, je Eintrag überlappungsfrei und
+  mit derselben Kontextprüfung. Das hält ein Vergleich gegen die alte Suche
+  über 3 000 Zufallsfälle fest. Die Messreihen stehen in
+  `redact-booking/tests/zq_d_skalierung.rs`.
+* Erkennung: „Konto-Nummer“/„Konto Nummer“ als Schlüsselwort von
+  `konto_nr`; Telefonnummern als „+49 (0)30 …“ und „(030) …“; IBAN klein
+  geschrieben (`de89 …`), mit Leerzeichen hinter dem Ländercode
+  (`DE 89 …`) oder direkt vor Buchstaben (`…0130 00EUR`); Gläubiger-ID
+  klein geschrieben. Vorher jeweils `Treffer gesamt: 0`.
+* **Ein ausdrücklich gesetztes `REDACT_RS_CONFIG` auf eine fehlende oder
+  unlesbare Datei ist ein Fehler** (Rückgabewert 2) statt still der
+  Vorgaben. Leer gesetzt (`REDACT_RS_CONFIG=`) heißt es „keine
+  Einstellungsdatei“. Auch an der Vorgabestelle wird ein Zugriffsfehler
+  gemeldet statt als „nicht vorhanden“ übergangen.
+* **⚠ Datenverlust: im Stapel überschrieb ein Ergebnis eine andere
+  Eingabe.** `redact-rs x.pdf x_geschwaerzt.pdf --force`, wobei
+  `x_geschwaerzt.pdf` ein eigenes Original ist: die erste Datei schrieb ihr
+  Ergebnis auf die zweite, bevor die an der Reihe war, die Zusammenfassung
+  zählte zwei Erfolge, Rückgabewert 0 — das Original war weg. Jetzt wird ein
+  solcher Stapel vor der ersten Datei mit Rückgabewert 2 abgelehnt, auch mit
+  `--force`; verglichen wird über die Dateiidentität, `./` oder `dir/..`
+  kommen nicht vorbei.
+* **Kein Absturz mehr bei einem Schreibfehler auf stdout.** `redact-rs
+  --list-patterns | head -1` und `redact-rs a.pdf > /dev/full` endeten mit
+  einer Panik und Rückgabewert 101. Eine geschlossene Pipe beendet die Ausgabe
+  jetzt still, jeder andere Schreibfehler ist ein IO-Fehler mit Rückgabewert 1
+  — wie bei `--check-leaks` schon bisher.
+* **Die CI ist wieder grün.** `async-executor` 1.14.0 und `clipboard-win` 5.4.1
+  wurden auf crates.io zurückgezogen, `cargo deny` brach deshalb ab; gezielt
+  angehoben auf 1.14.1 bzw. 5.4.3, sonst ändert sich in `Cargo.lock` nichts.
+  `cargo update` wählt künftig nur Fassungen, die zur zugesagten Rust-Version
+  1.88 passen (`.cargo/config.toml`).
+* `scripts/make-preview.sh` verschluckt einen Fehler von redact-rs nicht mehr.
+
+### Doku
+
+* Korrigiert, was der Code nicht mehr hielt: `ROADMAP.md` nannte 0.7.2 als
+  veröffentlicht und 0.8.0 als „in Arbeit“; `docs/kommandozeile.md` sprach
+  von fünf statt sieben Gründen für `NICHT GEPRÜFT`, ließ `layout` bei den
+  Einstellungen aus, nannte für macOS kein `$XDG_CONFIG_HOME` und behauptete
+  eine mit `--list-patterns` wörtlich gleiche Mustertabelle; die
+  Rückgabewerte haben einen eigenen Anker. `docs/oberflaeche.md`: Esc, Entf,
+  Bild auf/ab, Pos1 und Ende wirken auch mit Strg; ohne Auswahl blättern nur
+  ← und →; die Trefferliste steht rechts. Das Audit-Log-Beispiel in
+  `docs/review-und-audit.md` stammt jetzt aus einem echten Lauf mit 0.8.0
+  (vorher Fassung 0.3.0 mit Feldern späterer Fassungen). `CONTRIBUTING.md`
+  nannte „36 Prüfungen“ für `check-preview.py` (es sind 54) und verweist
+  jetzt auf `docs/entwicklung.md`.
+* Zwei Tests liefen nicht im Gate, obwohl ihr Befund längst geschlossen war
+  (`zo_d6_tiff_praediktor_stilles_leck`, TIFF-Prädiktor 2 im Orakel, und
+  `gedrehtes_bild_behaelt_seinen_ersatztext_an_der_leeren_huellenecke`):
+  `#[ignore]` mit dem Grund „offener Befund“ bzw. „absichtlich rot“, aber
+  grün. Ein Rückfall wäre unbemerkt geblieben; beide laufen jetzt mit.
 
 ---
 

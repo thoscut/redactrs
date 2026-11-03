@@ -28,9 +28,9 @@ fn run_with(settings: Option<&Path>, args: &[&str]) -> Output {
     let mut command = Command::new(bin());
     command.args(args).env_remove("REDACT_RS_PASSWORD");
     match settings {
-        // Ein Pfad, den es nicht gibt: so bleibt eine Einstellungsdatei des
-        // Systems außen vor und der Lauf zeigt die reinen Vorgaben.
-        None => command.env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml"),
+        // Leer gesetzt heißt „keine Einstellungsdatei“: so bleibt eine Datei
+        // des Systems außen vor und der Lauf zeigt die reinen Vorgaben.
+        None => command.env("REDACT_RS_CONFIG", ""),
         Some(path) => command.env("REDACT_RS_CONFIG", path),
     };
     command.output().expect("Binary startbar")
@@ -185,15 +185,34 @@ fn a_broken_settings_file_stops_the_run_with_a_message() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Eine fehlende Datei ist kein Fehler — es gilt dann die Vorgabe.
+/// Eine **ausdrücklich genannte**, aber fehlende Datei ist ein Fehler.
+///
+/// Vorher galten still die Vorgaben: ein Tippfehler in `REDACT_RS_CONFIG`
+/// ließ jede Einstellung wirkungslos, Rückgabewert 0. Wer den Pfad nennt,
+/// meint eine Datei — der Lauf endet mit 2 und schreibt nichts.
 #[test]
-fn a_missing_settings_file_is_not_an_error() {
+fn a_missing_settings_file_named_by_the_variable_is_an_error() {
     let dir = workdir("missing");
     let input = demo(&dir);
     let out = run_with(
         Some(&dir.join("gibt-es-nicht.yaml")),
         &[input.to_str().unwrap(), "--patterns", "iban_de"],
     );
+    assert_eq!(out.status.code(), Some(2), "Konfigurationsfehler ⇒ 2");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("gibt-es-nicht.yaml"), "{stderr}");
+    assert!(stderr.contains("REDACT_RS_CONFIG"), "{stderr}");
+    assert!(!dir.join("kontoauszug_geschwaerzt.pdf").exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Leer gesetzt heißt die Variable „keine Einstellungsdatei“ — es gilt die
+/// Vorgabe, auch wenn an der Vorgabestelle eine Datei läge.
+#[test]
+fn an_empty_variable_means_no_settings_file() {
+    let dir = workdir("leer");
+    let input = demo(&dir);
+    let out = run_with(None, &[input.to_str().unwrap(), "--patterns", "iban_de"]);
     succeeds(&out);
     assert!(dir.join("kontoauszug_geschwaerzt.pdf").exists());
     std::fs::remove_dir_all(&dir).ok();

@@ -515,30 +515,30 @@ fn material_schreiben() {
 // Die Hülle ist nicht die Fläche
 // ---------------------------------------------------------------------------
 
-/// **Der Befund.** Ein um 45° gedrehtes Bild — eine Abbildung, ein Stempel, ein
-/// schräg gesetztes Logo. Seine **Hülle** (das achsenparallele Rechteck über
-/// alle vier Ecken) ist doppelt so groß wie seine Fläche; in den vier Ecken der
-/// Hülle liegt gar kein Bild, und dort steht in einem gewöhnlichen Dokument
-/// Text.
+/// **Der Befund (geschlossen).** Ein um 45° gedrehtes Bild — eine Abbildung,
+/// ein Stempel, ein schräg gesetztes Logo. Seine **Hülle** (das
+/// achsenparallele Rechteck über alle vier Ecken) ist doppelt so groß wie seine
+/// Fläche; in den vier Ecken der Hülle liegt gar kein Bild, und dort steht in
+/// einem gewöhnlichen Dokument Text.
 ///
 /// Wird dieser Text geschwärzt, dann gilt für `crate::image` richtigerweise:
 /// kein Bildpunkt wird getroffen (`covers` prüft die Ecken der Pixelzelle),
 /// das Bild wird nicht angefasst, `redacted_images` bleibt 0 und es gibt keine
-/// Warnung. Die neue Vorauswahl in `redact.rs` fragt aber nur die **Hülle** —
-/// und nimmt dem unversehrten Bild darauf `/Alt` weg und dem `/Figure`-Abschnitt
+/// Warnung. Die Vorauswahl in `redact.rs` fragte aber nur die **Hülle** —
+/// und nahm dem unversehrten Bild darauf `/Alt` weg und dem `/Figure`-Abschnitt
 /// darüber seinen Spiegel.
 ///
-/// Das ist der falsche Alarm: Barrierefreiheit weg, kein Pixel gewonnen, keine
+/// Das war der falsche Alarm: Barrierefreiheit weg, kein Pixel gewonnen, keine
 /// Warnung, und der Bericht sagt „Überschriebene Bilder: 0“ neben
 /// „Ersatztexte: 2".
 ///
-/// **Lauf:** `cargo test -p redact-pdf --test zi_b_falschalarm_bild -- --ignored
-/// gedrehtes_bild_verliert`. `#[ignore]` nach Hausbrauch (vgl.
-/// `zi_a_ort_gegenprobe.rs`), damit ein offener Befund das Gate nicht rot
-/// färbt — der Befund steht im Bericht.
+/// Geschlossen mit 0.7.0 (CHANGELOG: „Bei einem gedrehten Bild nahm eine
+/// Schwärzung in den Ecken seiner Hülle einem unversehrten Bild den
+/// Ersatztext“). Der Test war bis hierher `#[ignore]` mit dem Grund „offener
+/// Befund“, obwohl er grün war — ein Rückfall wäre unbemerkt geblieben. Jetzt
+/// läuft er im Gate mit.
 #[test]
-#[ignore = "offener Befund: die Hülle eines gedrehten Bildes ist nicht seine Fläche — /Alt und Spiegel fallen, obwohl kein Bildpunkt fällt"]
-fn gedrehtes_bild_verliert_seinen_ersatztext_an_der_leeren_huellenecke() {
+fn gedrehtes_bild_behaelt_seinen_ersatztext_an_der_leeren_huellenecke() {
     let mut doc = Document::with_version("1.5");
     let mut gedreht = bild(32, 32);
     gedreht.dict.set("Alt", Object::string_literal(LOGO));

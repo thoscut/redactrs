@@ -407,13 +407,13 @@ fn write_report(
 /// nicht als Fehler: ab dem ersten `BrokenPipe` wird alles Weitere still
 /// verworfen. Jeder andere Schreibfehler (volle Platte bei `> datei`) bleibt
 /// einer — dort fehlt die Ausgabe, ohne dass der Leser es wollte.
-struct PipeSafe<W> {
+pub(crate) struct PipeSafe<W> {
     inner: W,
     closed: bool,
 }
 
 impl<W: Write> PipeSafe<W> {
-    fn new(inner: W) -> Self {
+    pub(crate) fn new(inner: W) -> Self {
         Self {
             inner,
             closed: false,
@@ -461,7 +461,7 @@ impl<W: Write> Write for PipeSafe<W> {
 /// Fix-Runde 6 (Meldung von Agent A): der Schalter hilft auch dort nicht, wo
 /// die Filterkette an einem **unbekannten Filternamen** stehen blieb. Wer die
 /// Ursachen aufzählt, zählt sie vollständig auf — sonst schickt der Satz an
-/// zwei von drei Stellen an den falschen Schalter. Alle fünf Gründe stehen in
+/// zwei von drei Stellen an den falschen Schalter. Alle sieben Gründe stehen in
 /// `SECURITY.md`.
 ///
 /// Fix-Runde 7 (Befund R2-B): die Zahl ist die der **Stellen**

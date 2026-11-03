@@ -2489,6 +2489,9 @@ fn take_unlisted(dict: &mut Dictionary, keep: &[&[u8]], into: &mut Tally) {
 // Objekt unberührt — lieber ein fremder Schlüssel als eine Seite, der ein
 // Schlüssel fehlt, den die andere Verwendung braucht.
 
+/// Bestimmt aus einem Feld das Schema je Stelle (siehe [`Shape::items`]).
+type ItemShapes = fn(&[Object]) -> Vec<Option<&'static Shape>>;
+
 /// Ein Dictionary-Schema: welche Schlüssel bleiben, und welche Werte selbst
 /// wieder ein Schema haben.
 struct Shape {
@@ -2502,9 +2505,79 @@ struct Shape {
     nested: &'static [(&'static [u8], &'static Shape)],
     /// Bei einem Verzeichnis (`keep: None`): das Schema **jedes** Werts.
     each: Option<&'static Shape>,
+    /// Bei einem **Feld**: das Schema je Stelle, aus dem Feld selbst
+    /// bestimmt. Ein Farbraum ist ein Feld, dessen erstes Glied sagt, was an
+    /// den übrigen Stellen steht (`[/ICCBased 7 0 R]`, `[/DeviceN … attrs]`).
+    /// `None`: jedes Glied bekommt dasselbe Schema wie das Feld.
+    items: Option<ItemShapes>,
+    /// Wählt am Dictionary selbst das genauere Schema (`/HalftoneType 5`
+    /// gegen 1; ein Erscheinungseintrag, der ein Strom ist, gegen ein
+    /// Verzeichnis von Zuständen). `None`: das Schema gilt, wie es ist.
+    select: Option<fn(&Dictionary, bool) -> &'static Shape>,
+    /// Bei einem Verzeichnis mit frei gewählten Schlüsseln: welche **Art**
+    /// Wert dort stehen darf. Ein anderer fällt — die Schlüssel lassen sich
+    /// nicht aufzählen, die Werte schon (Zustände eines `/AP` sind Ströme,
+    /// die Farbmittel eines Halbtons vom Typ 5 sind Halbtöne).
+    values: Option<Values>,
+}
+
+/// Welche Werte ein Verzeichnis mit frei gewählten Schlüsseln tragen darf.
+#[derive(Clone, Copy)]
+enum Values {
+    /// Nur Ströme (als Verweis — direkt kann ein Strom nicht stehen).
+    Streams,
+    /// Nur Dictionaries oder Ströme — außer unter den genannten Schlüsseln,
+    /// deren Werte das Schema selbst kennt.
+    Containers(&'static [&'static [u8]]),
 }
 
 impl Shape {
+    /// Die Vorgaben der Felder, die die meisten Schemata nicht brauchen.
+    const PLAIN: Shape = Shape {
+        keep: None,
+        nested: &[],
+        each: None,
+        items: None,
+        select: None,
+        values: None,
+    };
+
+    /// Das genauere Schema für dieses Dictionary, wo das Schema eines wählt.
+    fn refine(&'static self, dict: &Dictionary, is_stream: bool) -> &'static Shape {
+        match self.select {
+            Some(select) => select(dict, is_stream),
+            None => self,
+        }
+    }
+
+    /// Das Schema je Glied eines Felds, das unter `shape` steht.
+    fn item_shapes(shape: Option<&'static Shape>, items: &[Object]) -> Vec<Option<&'static Shape>> {
+        match shape.and_then(|shape| shape.items) {
+            Some(per_item) => {
+                let mut shapes = per_item(items);
+                shapes.resize(items.len(), None);
+                shapes
+            }
+            None => vec![shape; items.len()],
+        }
+    }
+
+    /// Darf `value` unter `key` in einem Verzeichnis mit diesem Schema
+    /// stehen? `kinds` nennt je Objekt-Id, ob dort ein Strom (`true`) oder
+    /// ein Dictionary (`false`) steht.
+    fn admits(&self, key: &[u8], value: &Object, kinds: &BTreeMap<ObjectId, bool>) -> bool {
+        let kind = match value {
+            Object::Stream(_) => Some(true),
+            Object::Dictionary(_) => Some(false),
+            Object::Reference(id) => kinds.get(id).copied(),
+            _ => None,
+        };
+        match self.values {
+            None => true,
+            Some(Values::Streams) => kind == Some(true),
+            Some(Values::Containers(exempt)) => kind.is_some() || exempt.contains(&key),
+        }
+    }
     fn allows(&self, key: &[u8]) -> bool {
         self.keep
             .is_none_or(|groups| groups.iter().any(|group| group.contains(&key)))
@@ -2548,6 +2621,7 @@ static FOREIGN_SHAPE: Shape = Shape {
     keep: None,
     nested: &[],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Die Schlüssel jedes Stroms (Tabelle 5). Ohne sie ließe sich kein Strom
@@ -2587,6 +2661,7 @@ static VIEWER_PREFERENCES_SHAPE: Shape = Shape {
     ]]),
     nested: &[],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// `/Extensions` (7.12): ein Verzeichnis je Entwicklerpräfix — die Präfixe
@@ -2595,6 +2670,7 @@ static EXTENSIONS_SHAPE: Shape = Shape {
     keep: None,
     nested: &[],
     each: Some(&DEVELOPER_EXTENSIONS_SHAPE),
+    ..Shape::PLAIN
 };
 
 /// Eine Entwicklererweiterung (Tabelle 49). `/URL` und `/ExtensionRevision`
@@ -2605,6 +2681,7 @@ static DEVELOPER_EXTENSIONS_SHAPE: Shape = Shape {
     keep: Some(&[&[b"Type", b"BaseVersion", b"ExtensionLevel"]]),
     nested: &[],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Der Katalog selbst ist schon beschränkt ([`CATALOG_KEEP`]); hier stehen
@@ -2617,6 +2694,7 @@ static CATALOG_SHAPE: Shape = Shape {
         (b"Extensions", &EXTENSIONS_SHAPE),
     ],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Die Seite ist schon beschränkt ([`PAGE_KEEP`]); hier stehen die Schemata
@@ -2629,14 +2707,16 @@ static PAGE_SHAPE: Shape = Shape {
         (b"BoxColorInfo", &BOX_COLOR_INFO_SHAPE),
     ],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Eine Transparenzgruppe (8.11.5.1, Tabellen 94 und 145) — an Seite und
 /// Formular.
 static GROUP_SHAPE: Shape = Shape {
     keep: Some(&[&[b"Type", b"S", b"CS", b"I", b"K"]]),
-    nested: &[],
+    nested: &[(b"CS", &COLOUR_SPACE_SHAPE)],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Ein Seitenübergang (12.4.4.1).
@@ -2644,6 +2724,7 @@ static TRANSITION_SHAPE: Shape = Shape {
     keep: Some(&[&[b"Type", b"S", b"D", b"Dm", b"M", b"Di", b"SS", b"B"]]),
     nested: &[],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// `/BoxColorInfo` (14.11.2.2): je Seitenrahmen ein Stil.
@@ -2656,6 +2737,7 @@ static BOX_COLOR_INFO_SHAPE: Shape = Shape {
         (b"ArtBox", &BOX_STYLE_SHAPE),
     ],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Der Stil eines Seitenrahmens (14.11.2.2).
@@ -2663,6 +2745,7 @@ static BOX_STYLE_SHAPE: Shape = Shape {
     keep: Some(&[&[b"C", b"W", b"S", b"D"]]),
     nested: &[],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Ein Ressourcenverzeichnis. Seine eigenen Schlüssel beschränkt
@@ -2678,32 +2761,38 @@ static RESOURCES_SHAPE: Shape = Shape {
         (b"ExtGState", &EXT_G_STATE_MAP_SHAPE),
         (b"Shading", &SHADING_MAP_SHAPE),
         (b"Pattern", &PATTERN_MAP_SHAPE),
+        (b"ColorSpace", &COLOUR_SPACE_MAP_SHAPE),
     ],
     each: None,
+    ..Shape::PLAIN
 };
 
 static FONT_MAP_SHAPE: Shape = Shape {
     keep: None,
     nested: &[],
     each: Some(&FONT_SHAPE),
+    ..Shape::PLAIN
 };
 
 static EXT_G_STATE_MAP_SHAPE: Shape = Shape {
     keep: None,
     nested: &[],
     each: Some(&EXT_G_STATE_SHAPE),
+    ..Shape::PLAIN
 };
 
 static SHADING_MAP_SHAPE: Shape = Shape {
     keep: None,
     nested: &[],
     each: Some(&SHADING_SHAPE),
+    ..Shape::PLAIN
 };
 
 static PATTERN_MAP_SHAPE: Shape = Shape {
     keep: None,
     nested: &[],
     each: Some(&PATTERN_SHAPE),
+    ..Shape::PLAIN
 };
 
 /// Eine Schrift — **jede** Art in einer Liste: einfache Schriften
@@ -2739,8 +2828,12 @@ static FONT_SHAPE: Shape = Shape {
         (b"FontDescriptor", &FONT_DESCRIPTOR_SHAPE),
         (b"Encoding", &ENCODING_SHAPE),
         (b"DescendantFonts", &FONT_SHAPE),
+        (b"ToUnicode", &CMAP_STREAM_SHAPE),
+        (b"CIDSystemInfo", &CID_SYSTEM_INFO_SHAPE),
+        (b"CIDToGIDMap", &PLAIN_STREAM_SHAPE),
     ],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Ein Kodierungsverzeichnis (Tabelle 112). Die Glyphennamen in
@@ -2749,6 +2842,8 @@ static ENCODING_SHAPE: Shape = Shape {
     keep: Some(&[&[b"Type", b"BaseEncoding", b"Differences"]]),
     nested: &[],
     each: None,
+    select: Some(encoding_shape),
+    ..Shape::PLAIN
 };
 
 /// Eine Schriftbeschreibung (Tabellen 120 und 124): Name, Maße, Merkmale,
@@ -2790,8 +2885,15 @@ static FONT_DESCRIPTOR_SHAPE: Shape = Shape {
         b"FD",
         b"CIDSet",
     ]]),
-    nested: &[(b"FD", &FONT_DESCRIPTOR_MAP_SHAPE)],
+    nested: &[
+        (b"FD", &FONT_DESCRIPTOR_MAP_SHAPE),
+        (b"FontFile", &FONT_FILE_SHAPE),
+        (b"FontFile2", &FONT_FILE_SHAPE),
+        (b"FontFile3", &FONT_FILE_SHAPE),
+        (b"CIDSet", &PLAIN_STREAM_SHAPE),
+    ],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// `/FD` einer CID-Schriftbeschreibung: je Glyphenklasse eine
@@ -2800,6 +2902,7 @@ static FONT_DESCRIPTOR_MAP_SHAPE: Shape = Shape {
     keep: None,
     nested: &[],
     each: Some(&FONT_DESCRIPTOR_SHAPE),
+    ..Shape::PLAIN
 };
 
 /// Ein Grafikzustand (Tabelle 57) — **alle** Schlüssel der Tabelle, auch die
@@ -2839,6 +2942,7 @@ static EXT_G_STATE_SHAPE: Shape = Shape {
     ]]),
     nested: &[
         (b"Font", &FONT_SHAPE),
+        (b"HT", &HALFTONE_SHAPE),
         (b"SMask", &SOFT_MASK_SHAPE),
         (b"BG", &FUNCTION_SHAPE),
         (b"BG2", &FUNCTION_SHAPE),
@@ -2848,6 +2952,7 @@ static EXT_G_STATE_SHAPE: Shape = Shape {
         (b"TR2", &FUNCTION_SHAPE),
     ],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Eine Softmaske (Tabelle 142). `/G` ist ein Formular und erkennt sich
@@ -2856,6 +2961,7 @@ static SOFT_MASK_SHAPE: Shape = Shape {
     keep: Some(&[&[b"Type", b"S", b"G", b"BC", b"TR"]]),
     nested: &[(b"TR", &FUNCTION_SHAPE)],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Eine Funktion (Tabellen 38–41), als Dictionary oder als Strom.
@@ -2880,6 +2986,7 @@ static FUNCTION_SHAPE: Shape = Shape {
     ]),
     nested: &[(b"Functions", &FUNCTION_SHAPE)],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Ein Shading (Tabellen 77–82), als Dictionary oder als Strom (Typ 4–7).
@@ -2904,8 +3011,12 @@ static SHADING_SHAPE: Shape = Shape {
         ],
         STREAM_KEYS,
     ]),
-    nested: &[(b"Function", &FUNCTION_SHAPE)],
+    nested: &[
+        (b"Function", &FUNCTION_SHAPE),
+        (b"ColorSpace", &COLOUR_SPACE_SHAPE),
+    ],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Ein Muster: Kachel (Tabelle 75, ein Strom) oder Shading-Muster
@@ -2932,6 +3043,7 @@ static PATTERN_SHAPE: Shape = Shape {
         (b"ExtGState", &EXT_G_STATE_SHAPE),
     ],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Ein Bild-XObject (Tabellen 87 und 145).
@@ -2971,8 +3083,12 @@ static IMAGE_SHAPE: Shape = Shape {
         ],
         STREAM_KEYS,
     ]),
-    nested: &[],
+    nested: &[
+        (b"ColorSpace", &COLOUR_SPACE_SHAPE),
+        (b"Alternates", &ALTERNATE_IMAGE_SHAPE),
+    ],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Ein Formular-XObject (Tabelle 93) — auch jedes Erscheinungsbild einer
@@ -3001,6 +3117,7 @@ static FORM_SHAPE: Shape = Shape {
     ]),
     nested: &[(b"Group", &GROUP_SHAPE)],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Eine Ebene (Tabelle 96). `/Name` leert [`clear_optional_content_names`],
@@ -3009,6 +3126,7 @@ static OCG_SHAPE: Shape = Shape {
     keep: Some(&[&[b"Type", b"Name", b"Intent", b"Usage"]]),
     nested: &[],
     each: None,
+    ..Shape::PLAIN
 };
 
 /// Ein Ebenen-Mitgliedschaftsverzeichnis (Tabelle 97).
@@ -3016,7 +3134,275 @@ static OCMD_SHAPE: Shape = Shape {
     keep: Some(&[&[b"Type", b"OCGs", b"P", b"VE"]]),
     nested: &[],
     each: None,
+    ..Shape::PLAIN
 };
+
+// ---------------------------------------------------------------------------
+// Schemata unterhalb der Arten (Prüfrunde „Beiwerk ohne Schema“)
+// ---------------------------------------------------------------------------
+//
+// Bis hierher hatte nur ein Dictionary ein Schema, das sich selbst auswies
+// oder unter einem Schlüssel mit Schema hing. Alles darunter ohne eigenes
+// Schema behielt **jeden** Schlüssel: ein `/Kommentar (Kunde DE89 …)` am
+// ICC-Profil eines Farbraums, ein `/HalftoneName` unter `/HT`, eine `/Notiz`
+// unter dem `/BS` einer Annotation, am Strom eines Schriftprogramms oder einer
+// `/ToUnicode`-Zuordnung — Rückgabewert 0, „Metadaten: nichts zu entfernen“,
+// und `--check-leaks` fand sie (Beleg `zq_b_beiwerk_ohne_schema.rs`). Die
+// Schemata hier schließen diese Ebenen; wie oben bleibt, was die Norm an der
+// Stelle kennt und was zeichnet.
+
+/// Ein Strom, dessen Dictionary nur die Stromschlüssel trägt (`/CIDSet`,
+/// `/CIDToGIDMap`, die Farbtabelle eines `/Indexed`-Farbraums).
+static PLAIN_STREAM_SHAPE: Shape = Shape {
+    keep: Some(&[STREAM_KEYS]),
+    ..Shape::PLAIN
+};
+
+/// Ein Verzeichnis von Farbräumen (`/Resources /ColorSpace`, `/Colorants`).
+static COLOUR_SPACE_MAP_SHAPE: Shape = Shape {
+    each: Some(&COLOUR_SPACE_SHAPE),
+    ..Shape::PLAIN
+};
+
+/// Ein Farbraum (8.6): ein Name oder ein Feld. Was an welcher Stelle des
+/// Felds steht, sagt das erste Glied ([`colour_space_items`]).
+static COLOUR_SPACE_SHAPE: Shape = Shape {
+    items: Some(colour_space_items),
+    ..Shape::PLAIN
+};
+
+/// Das Schema je Stelle eines Farbraumfelds (Tabellen 62–71).
+fn colour_space_items(items: &[Object]) -> Vec<Option<&'static Shape>> {
+    let family = match items.first() {
+        Some(Object::Name(name)) => name.as_slice(),
+        _ => return Vec::new(),
+    };
+    let cs = Some(&COLOUR_SPACE_SHAPE);
+    let function = Some(&FUNCTION_SHAPE);
+    match family {
+        b"ICCBased" => vec![None, Some(&ICC_STREAM_SHAPE)],
+        b"CalGray" | b"CalRGB" | b"Lab" => vec![None, Some(&CIE_SHAPE)],
+        b"Indexed" | b"I" => vec![None, cs, None, Some(&PLAIN_STREAM_SHAPE)],
+        b"Pattern" => vec![None, cs],
+        b"Separation" => vec![None, None, cs, function],
+        b"DeviceN" => vec![None, None, cs, function, Some(&DEVICE_N_ATTRIBUTES_SHAPE)],
+        _ => Vec::new(),
+    }
+}
+
+/// Das Dictionary eines CIE-Farbraums (Tabellen 63–65).
+static CIE_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"WhitePoint", b"BlackPoint", b"Gamma", b"Matrix", b"Range"]]),
+    ..Shape::PLAIN
+};
+
+/// Der Strom eines ICC-Profils (Tabelle 66). `/Metadata` fällt schon vorher
+/// an jedem Objekt.
+static ICC_STREAM_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"N", b"Alternate", b"Range"], STREAM_KEYS]),
+    nested: &[(b"Alternate", &COLOUR_SPACE_SHAPE)],
+    ..Shape::PLAIN
+};
+
+/// Die Attribute eines `/DeviceN`-Farbraums (Tabelle 71).
+static DEVICE_N_ATTRIBUTES_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Subtype", b"Colorants", b"Process", b"MixingHints"]]),
+    nested: &[
+        (b"Colorants", &COLOUR_SPACE_MAP_SHAPE),
+        (b"Process", &DEVICE_N_PROCESS_SHAPE),
+        (b"MixingHints", &DEVICE_N_MIXING_SHAPE),
+    ],
+    ..Shape::PLAIN
+};
+
+/// `/Process` eines `/DeviceN`-Farbraums (Tabelle 72).
+static DEVICE_N_PROCESS_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"ColorSpace", b"Components"]]),
+    nested: &[(b"ColorSpace", &COLOUR_SPACE_SHAPE)],
+    ..Shape::PLAIN
+};
+
+/// `/MixingHints` eines `/DeviceN`-Farbraums (Tabelle 73).
+static DEVICE_N_MIXING_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Solidities", b"PrintingOrder", b"DotGain"]]),
+    nested: &[(b"DotGain", &FUNCTION_MAP_SHAPE)],
+    ..Shape::PLAIN
+};
+
+/// Ein Verzeichnis von Funktionen (`/DotGain`).
+static FUNCTION_MAP_SHAPE: Shape = Shape {
+    each: Some(&FUNCTION_SHAPE),
+    ..Shape::PLAIN
+};
+
+/// Ein Halbton vom Typ 1, 6, 10 oder 16 (Tabellen 128–133), als
+/// Dictionary oder als Strom. `/HalftoneName` fällt, obwohl die Norm es
+/// kennt: frei wählbarer Text, den kein Gerät zum Rastern braucht — dieselbe
+/// Entscheidung wie bei `/CharSet` an der Schriftbeschreibung.
+static HALFTONE_SHAPE: Shape = Shape {
+    keep: Some(&[
+        &[
+            b"Type",
+            b"HalftoneType",
+            b"Frequency",
+            b"Angle",
+            b"SpotFunction",
+            b"AccurateScreens",
+            b"TransferFunction",
+            b"Width",
+            b"Height",
+            b"Width2",
+            b"Height2",
+            b"Xsquare",
+            b"Ysquare",
+        ],
+        STREAM_KEYS,
+    ]),
+    nested: &[
+        (b"SpotFunction", &FUNCTION_SHAPE),
+        (b"TransferFunction", &FUNCTION_SHAPE),
+    ],
+    select: Some(halftone_shape),
+    ..Shape::PLAIN
+};
+
+/// Ein Halbton vom Typ 5 (Tabelle 131): je Farbmittel ein Halbton unter
+/// seinem Namen, dazu `/Default`. Die Farbmittelnamen sind frei, ihre Werte
+/// nicht — was kein Halbton ist, fällt, `/HalftoneName` eingeschlossen.
+static HALFTONE_TYPE5_SHAPE: Shape = Shape {
+    each: Some(&HALFTONE_SHAPE),
+    values: Some(Values::Containers(&[b"Type", b"HalftoneType"])),
+    ..Shape::PLAIN
+};
+
+fn halftone_shape(dict: &Dictionary, _is_stream: bool) -> &'static Shape {
+    match value_of(dict, b"HalftoneType") {
+        Some(Object::Integer(5)) => &HALFTONE_TYPE5_SHAPE,
+        _ => &HALFTONE_SHAPE,
+    }
+}
+
+/// Der Strom eines Schriftprogramms (`/FontFile`, `/FontFile2`,
+/// `/FontFile3`, Tabelle 125). `/Metadata` fällt schon vorher.
+static FONT_FILE_SHAPE: Shape = Shape {
+    keep: Some(&[
+        &[b"Length1", b"Length2", b"Length3", b"Subtype"],
+        STREAM_KEYS,
+    ]),
+    ..Shape::PLAIN
+};
+
+/// Ein CMap-Strom (Tabelle 118) — als `/Encoding` einer Type0-Schrift, als
+/// `/UseCMap` und als `/ToUnicode` (9.10.3).
+static CMAP_STREAM_SHAPE: Shape = Shape {
+    keep: Some(&[
+        &[b"Type", b"CMapName", b"CIDSystemInfo", b"WMode", b"UseCMap"],
+        STREAM_KEYS,
+    ]),
+    nested: &[
+        (b"CIDSystemInfo", &CID_SYSTEM_INFO_SHAPE),
+        (b"UseCMap", &CMAP_STREAM_SHAPE),
+    ],
+    ..Shape::PLAIN
+};
+
+/// `/CIDSystemInfo` (Tabelle 116). Die Werte prüft
+/// [`clean_cid_system_info`].
+static CID_SYSTEM_INFO_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Registry", b"Ordering", b"Supplement"]]),
+    ..Shape::PLAIN
+};
+
+/// `/Encoding` einer Schrift: ein Kodierungsverzeichnis — oder, bei einer
+/// Type0-Schrift, ein CMap-Strom.
+fn encoding_shape(_dict: &Dictionary, is_stream: bool) -> &'static Shape {
+    if is_stream {
+        &CMAP_STREAM_SHAPE
+    } else {
+        &ENCODING_SHAPE
+    }
+}
+
+/// Ein Eintrag in `/Alternates` eines Bildes (Tabelle 91).
+static ALTERNATE_IMAGE_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Image", b"DefaultForPrinting", b"OC"]]),
+    ..Shape::PLAIN
+};
+
+/// Eine Annotation oder ein Feld. Die eigenen Schlüssel beschränkt
+/// [`restrict_carrier`] je Untertyp; hier stehen die Schemata ihrer
+/// Unterverzeichnisse.
+static ANNOTATION_SHAPE: Shape = Shape {
+    nested: &[
+        (b"BS", &BORDER_STYLE_SHAPE),
+        (b"BE", &BORDER_EFFECT_SHAPE),
+        (b"MK", &APPEARANCE_CHARACTERISTICS_SHAPE),
+        (b"AP", &APPEARANCE_SHAPE),
+    ],
+    ..Shape::PLAIN
+};
+
+/// `/BS` (Tabelle 168).
+static BORDER_STYLE_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"Type", b"W", b"S", b"D"]]),
+    ..Shape::PLAIN
+};
+
+/// `/BE` (Tabelle 167).
+static BORDER_EFFECT_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"S", b"I"]]),
+    ..Shape::PLAIN
+};
+
+/// `/MK` (Tabelle 192). Die Beschriftungen leert [`clean_captions`], die
+/// Symbole sind Formulare und erkennen sich selbst.
+static APPEARANCE_CHARACTERISTICS_SHAPE: Shape = Shape {
+    keep: Some(&[&[
+        b"R", b"BC", b"BG", b"CA", b"RC", b"AC", b"I", b"RI", b"IX", b"IF", b"TP",
+    ]]),
+    nested: &[(b"IF", &ICON_FIT_SHAPE)],
+    ..Shape::PLAIN
+};
+
+/// `/IF` (Tabelle 250).
+static ICON_FIT_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"SW", b"S", b"A", b"FB"]]),
+    ..Shape::PLAIN
+};
+
+/// `/AP` (Tabelle 170): normal, beim Überfahren, beim Drücken.
+static APPEARANCE_SHAPE: Shape = Shape {
+    keep: Some(&[&[b"N", b"R", b"D"]]),
+    nested: &[
+        (b"N", &APPEARANCE_ENTRY_SHAPE),
+        (b"R", &APPEARANCE_ENTRY_SHAPE),
+        (b"D", &APPEARANCE_ENTRY_SHAPE),
+    ],
+    ..Shape::PLAIN
+};
+
+/// Ein Eintrag unter `/AP`: ein Erscheinungsbild oder ein Verzeichnis von
+/// Zuständen ([`appearance_entry_shape`]). Allein beschränkt er nichts.
+static APPEARANCE_ENTRY_SHAPE: Shape = Shape {
+    select: Some(appearance_entry_shape),
+    ..Shape::PLAIN
+};
+
+/// Die Zustände eines Erscheinungsbilds (`/On`, `/Off`, …): frei gewählte
+/// Namen, jeder Wert ein Formular. Was kein Strom ist, zeichnet nichts.
+static APPEARANCE_STATES_SHAPE: Shape = Shape {
+    each: Some(&FORM_SHAPE),
+    values: Some(Values::Streams),
+    ..Shape::PLAIN
+};
+
+fn appearance_entry_shape(_dict: &Dictionary, is_stream: bool) -> &'static Shape {
+    if is_stream {
+        &FORM_SHAPE
+    } else {
+        &APPEARANCE_STATES_SHAPE
+    }
+}
 
 /// Das Schema, das ein Dictionary an sich selbst trägt — `None`, wenn es
 /// sich nicht ausweist.
@@ -3025,6 +3411,11 @@ fn marked_shape(dict: &Dictionary, is_stream: bool) -> Option<&'static Shape> {
         Some(Object::Name(name)) => Some(name.as_slice()),
         _ => None,
     };
+    // Eine Annotation oder ein Feld — auch ohne `/Type` oder mit einem
+    // normwidrigen (Register #93).
+    if !is_stream && declares_carrier(dict) {
+        return Some(&ANNOTATION_SHAPE);
+    }
     match name(b"Type") {
         Some(b"Catalog") => return Some(&CATALOG_SHAPE),
         Some(b"Page") => return Some(&PAGE_SHAPE),
@@ -3040,6 +3431,7 @@ fn marked_shape(dict: &Dictionary, is_stream: bool) -> Option<&'static Shape> {
         Some(b"Trans") => return Some(&TRANSITION_SHAPE),
         Some(b"Extensions") => return Some(&EXTENSIONS_SHAPE),
         Some(b"DeveloperExtensions") => return Some(&DEVELOPER_EXTENSIONS_SHAPE),
+        Some(b"Halftone") => return Some(halftone_shape(dict, is_stream)),
         // Ein XObject entscheidet an `/Subtype`, alles ohne `/Type` an seinen
         // Pflichtschlüsseln.
         None | Some(b"XObject") => {}
@@ -3068,11 +3460,17 @@ fn marked_shape(dict: &Dictionary, is_stream: bool) -> Option<&'static Shape> {
 /// beide etwas und nicht dasselbe, gilt keines — siehe Abschnittskopf. Ein
 /// fremder `/Type` widerspricht dem Halter nicht, ein Strom einem Schema ohne
 /// Stromschlüssel schon.
+///
+/// Das Schema des Halters wählt am Dictionary zuerst sein genaueres
+/// ([`Shape::refine`]): ein Halbton vom Typ 5 unter `/HT` widerspricht dem
+/// Halbtonschema nicht, er ist seine zweite Form.
 fn effective_shape(
     context: Option<&'static Shape>,
-    marked: Option<&'static Shape>,
+    dict: &Dictionary,
     is_stream: bool,
 ) -> Option<&'static Shape> {
+    let marked = marked_shape(dict, is_stream);
+    let context = context.map(|shape| shape.refine(dict, is_stream));
     let shape = match (context, marked) {
         (Some(a), Some(b)) if b.is_foreign() => Some(a),
         (Some(a), Some(b)) if !std::ptr::eq(a, b) => None,
@@ -3130,6 +3528,13 @@ fn shape_hints(
                 if marked_at(target).is_some_and(|marked| !marked.is_foreign()) {
                     continue;
                 }
+                // Das genauere Schema schon hier: ein Strom, den `/AP /N`
+                // und ein Symbol in `/MK` zugleich halten, ist beide Male
+                // ein Formular und kein Widerspruch.
+                let context = match doc.objects.get(target).and_then(dict_of) {
+                    Some((dict, is_stream)) => context.refine(dict, is_stream),
+                    None => context,
+                };
                 match hints.get(target) {
                     None => {
                         hints.insert(*target, Some(context));
@@ -3143,13 +3548,14 @@ fn shape_hints(
                 continue;
             }
             if let Object::Array(items) = item {
-                stack.extend(items.iter().map(|inner| (inner, context)));
+                let shapes = Shape::item_shapes(context, items);
+                stack.extend(items.iter().zip(shapes));
                 continue;
             }
             let Some((dict, is_stream)) = dict_of(item) else {
                 continue;
             };
-            let shape = effective_shape(context, marked_shape(dict, is_stream), is_stream);
+            let shape = effective_shape(context, dict, is_stream);
             stack.extend(
                 dict.iter()
                     .map(|(key, value)| (value, Shape::child(shape, key))),
@@ -3168,6 +3574,13 @@ fn shape_hints(
 fn restrict_to_shapes(doc: &mut Document, into: &mut Tally) {
     let reachable = reachable_ids(doc);
     let hints = shape_hints(doc, &reachable);
+    // Welche Objekte Ströme und welche Dictionaries sind — für Verzeichnisse,
+    // die nur eine Art Wert tragen dürfen ([`Values`]).
+    let kinds: BTreeMap<ObjectId, bool> = doc
+        .objects
+        .iter()
+        .filter_map(|(id, object)| dict_of(object).map(|(_, is_stream)| (*id, is_stream)))
+        .collect();
     for (id, object) in doc.objects.iter_mut() {
         // Was niemand erreicht, fällt mit `prune_unreachable` — und zählte
         // hier sonst als Beiwerk.
@@ -3179,19 +3592,20 @@ fn restrict_to_shapes(doc: &mut Document, into: &mut Tally) {
         while let Some((item, context)) = stack.pop() {
             let (dict, is_stream) = match item {
                 Object::Array(items) => {
-                    stack.extend(items.iter_mut().map(|inner| (inner, context)));
+                    let shapes = Shape::item_shapes(context, items);
+                    stack.extend(items.iter_mut().zip(shapes));
                     continue;
                 }
                 Object::Dictionary(dict) => (dict, false),
                 Object::Stream(stream) => (&mut stream.dict, true),
                 _ => continue,
             };
-            let shape = effective_shape(context, marked_shape(dict, is_stream), is_stream);
+            let shape = effective_shape(context, dict, is_stream);
             if let Some(shape) = shape {
                 let fremd: Vec<Vec<u8>> = dict
                     .iter()
+                    .filter(|(key, value)| !shape.allows(key) || !shape.admits(key, value, &kinds))
                     .map(|(key, _)| key.clone())
-                    .filter(|key| !shape.allows(key))
                     .collect();
                 for key in fremd {
                     take(dict, &key, into);

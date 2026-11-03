@@ -369,11 +369,21 @@ impl PdfExtractor {
                     });
                 }
             }
+            // Eine Ligatur (U+FB00–U+FB06) wird in ihre Buchstaben zerlegt,
+            // jeder mit dem Kasten der ganzen Ligatur: Muster und
+            // Buchungsliste sehen „fi“ statt „ﬁ“, und eine Schwärzung, die
+            // einen der Buchstaben trifft, trifft den ganzen Code.
             for ch in item.text.chars() {
-                glyphs.push(Glyph {
-                    ch,
-                    rect: item.rect,
-                });
+                match ligature_letters(ch) {
+                    Some(letters) => glyphs.extend(letters.chars().map(|ch| Glyph {
+                        ch,
+                        rect: item.rect,
+                    })),
+                    None => glyphs.push(Glyph {
+                        ch,
+                        rect: item.rect,
+                    }),
+                }
             }
         }
 
@@ -390,6 +400,24 @@ impl PdfExtractor {
 
         Some(TextRun::new(page, glyphs))
     }
+}
+
+/// Die Buchstaben einer lateinischen Ligatur (U+FB00–U+FB06), sonst `None`.
+///
+/// Bildet eine `/ToUnicode`-Tabelle den Ligatur-Code auf den Codepunkt
+/// U+FB01 ab statt auf „fi“, stand „Identiﬁkationsnummer“ in der Zeile, und
+/// weder das Schlüsselwort der Steuer-ID noch der Buchungslisten-Eintrag
+/// „Max Fischer“ (gegen „Max ﬁscher“) traf — Treffer 0, Rückgabewert 0.
+fn ligature_letters(c: char) -> Option<&'static str> {
+    Some(match c {
+        '\u{FB00}' => "ff",
+        '\u{FB01}' => "fi",
+        '\u{FB02}' => "fl",
+        '\u{FB03}' => "ffi",
+        '\u{FB04}' => "ffl",
+        '\u{FB05}' | '\u{FB06}' => "st",
+        _ => return None,
+    })
 }
 
 /// Ein Zeichen, das ein Betrachter weder zeichnet noch als Trenner kopiert:
@@ -636,13 +664,10 @@ fn fold<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
             match c {
                 c if c.is_whitespace() => {}
                 '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => {}
-                '\u{FB00}' => out.push_str("ff"),
-                '\u{FB01}' => out.push_str("fi"),
-                '\u{FB02}' => out.push_str("fl"),
-                '\u{FB03}' => out.push_str("ffi"),
-                '\u{FB04}' => out.push_str("ffl"),
-                '\u{FB05}' | '\u{FB06}' => out.push_str("st"),
-                c => out.push(c),
+                c => match ligature_letters(c) {
+                    Some(letters) => out.push_str(letters),
+                    None => out.push(c),
+                },
             }
         }
     }

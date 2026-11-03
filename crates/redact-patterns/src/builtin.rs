@@ -52,7 +52,20 @@ macro_rules! mit_kontext {
             $keywords,
             // Ein optionaler Doppelpunkt/Punkt und Zwischenraum zwischen
             // Schlüsselwort und Ziffern — „BLZ: 370 …", „Kto.  123 …".
-            r")[:.]?[ \t]*)?(?<target>",
+            //
+            // Zwischenraum ist **jeder** Leerraum, nicht nur Leerzeichen und
+            // Tabulator: ein geschütztes Leerzeichen hinter „Steuer-ID:"
+            // (U+00A0, wie es Textsatz hinter einen Doppelpunkt setzt) nahm
+            // dem Treffer vorher den Kontext, er fiel auf
+            // `confidence_without_context` und unter die Schwelle — die
+            // Steuer-ID blieb stehen, Rückgabewert 0.
+            //
+            // Leerzeichen und Tabulator bleiben unbegrenzt erlaubt wie bisher;
+            // **anderer** Leerraum (`[^\S \t]`: U+00A0, U+202F, U+2007 …)
+            // höchstens viermal. Die beiden Klassen überschneiden sich nicht,
+            // jede Zerlegung des Zwischenraums ist also eindeutig und der
+            // Aufwand je Position linear (`tests/backtracking.rs`).
+            r")[:.]?[ \t]*(?:[^\S \t][ \t]*){0,4})?(?<target>",
             $target,
             ")"
         )
@@ -153,7 +166,14 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
         // Zeile, siehe `redact_pdf::extract`.)
         def(
             "iban_de",
-            r"(?<![0-9A-Za-z])DE[0-9]{2}(?:\s{0,2}[0-9]){18}(?![0-9A-Za-z])",
+            //
+            // Der Ländercode darf klein geschrieben sein (`de89 …`; der
+            // Validator rechnet ohnehin ohne Groß-/Kleinschreibung) und durch
+            // **ein** Leerzeichen von den Prüfziffern getrennt (`DE 89 …`).
+            // Hinter der IBAN darf ein Buchstabe stehen (`…0130 00EUR` aus
+            // einer Tabelle ohne Spaltenabstand), nur keine Ziffer: die 18
+            // Stellen sind fest, und die Prüfsumme trägt den Rest.
+            r"(?<![0-9A-Za-z])(?i:DE)\s?[0-9]{2}(?:\s{0,2}[0-9]){18}(?![0-9])",
             "Deutsche IBAN (DE + 2 Prüfziffern + 18 Ziffern, optional gruppiert)",
             0.95,
             true,
@@ -197,7 +217,14 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
             // Untergrenze von sechs Zeichen für die nationale Kennung ist die
             // kürzeste im SEPA-Raum vergebene (Frankreich); alles darunter
             // wäre für eine reine Prüfsummen-Absicherung zu wenig Substanz.
-            r"(?<![0-9A-Za-z])[A-Z]{2}[0-9]{2}[0-9A-Z]{3}[0-9A-Z]{6,28}(?![0-9A-Za-z])",
+            //
+            // Ohne Rücksicht auf Groß-/Kleinschreibung (`de98zzz…`); die
+            // Prüfung rechnet ohnehin in Großbuchstaben. Gruppiert
+            // geschrieben wird sie bewusst *nicht* gesucht: ein Trenner nach
+            // jedem Zeichen ließe das gierige Muster in das nächste Wort
+            // laufen, die Prüfsumme scheiterte dann am verlängerten Treffer —
+            // und die ungruppierte ID davor ginge verloren.
+            r"(?<![0-9A-Za-z])(?i:[A-Z]{2}[0-9]{2}[0-9A-Z]{3}[0-9A-Z]{6,28})(?![0-9A-Za-z])",
             "SEPA-Gläubiger-ID (Creditor Identifier, mod-97-geprüft)",
             0.95,
             true,
@@ -220,9 +247,10 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
             // „Nr." darf mit Bindestrich, Leerzeichen oder direkt anschließen,
             // auch hinter der Abkürzung: „Kto.-Nr.:" und „Konto Nr." sind auf
             // Auszügen und Formularen üblich und brachten vorher keinen
-            // Kontextbonus — die Kontonummer daneben blieb stehen.
+            // Kontextbonus — die Kontonummer daneben blieb stehen. Dasselbe
+            // galt für „Konto-Nummer" und „Konto Nummer".
             mit_kontext!(
-                r"(?i:[a-zäöüß]{0,24}konto(?:nummer|[- ]?nr\.?)?|kto\.?(?:-?nr\.?)?)",
+                r"(?i:[a-zäöüß]{0,24}konto(?:nummer|[- ]?(?:nr\.?|nummer))?|kto\.?(?:-?nr\.?)?)",
                 r"(?<![0-9A-Za-z])(?:[0-9]{4,10}(?:\s[0-9]{2,6})+|[0-9]{6,10})(?![0-9A-Za-z])"
             ),
             "Kontonummer (6–10 Ziffern nach einem Schlüsselwort wie „Kto.“)",
@@ -251,14 +279,36 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
             0.25,
             true,
         ),
-        def(
-            "bic",
-            r"\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b",
-            "BIC/SWIFT-Code",
-            0.8,
-            true,
-            Some(Validator::Bic),
-        ),
+        // **Warum mit Kontext?** Die Prüfung der BIC ist schwach: außer der
+        // Länge prüft sie nur den Ländercode an Stelle 5–6. Ein Wort aus acht
+        // oder elf Großbuchstaben besteht sie, sobald dort zufällig ein
+        // Ländercode steht — gemessen an `PRIVATKONTO` (AT), `KREDITKARTE`
+        // (IT), `MUENCHEN` (CH) und `DUESSELDORF` (SE), die alle mit 0.99
+        // geschwärzt wurden.
+        //
+        // Als Kontext zählt deshalb entweder ein Schlüsselwort („BIC",
+        // „SWIFT", „BIC/SWIFT", „SWIFT-Code") oder eine Form, die kein Wort
+        // hat: eine **Ziffer** hinter dem Ländercode (`GENODEF1S01`,
+        // `MARKDEF1100`) oder die Filialkennung `XXX` (`COBADEFFXXX`). Wie
+        // bei `phone_de` wird die Form nur vorausgeschaut. Eine BIC ganz aus
+        // Buchstaben ohne Schlüsselwort davor (`DEUTDEFF`) liegt damit unter
+        // der Schwelle — das ist der Preis.
+        PatternDef {
+            validator: Some(Validator::Bic),
+            ..def_ctx(
+                "bic",
+                mit_kontext!(
+                    r"(?i:bic(?:[ ]?/[ ]?swift)?(?:-?code)?|swift(?:-?code)?)|(?=[A-Z]{6}[A-Z0-9]{0,4}[0-9][A-Z0-9]{0,4}\b|[A-Z]{8}XXX\b)",
+                    r"\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b"
+                ),
+                "BIC/SWIFT-Code (nach „BIC“/„SWIFT“ oder mit Ziffer bzw. „XXX“)",
+                0.8,
+                // Acht oder elf Großbuchstaben ohne Schlüsselwort sind
+                // häufiger ein Wort als eine BIC.
+                0.3,
+                true,
+            )
+        },
         def(
             "amount_eur",
             r"(?<![0-9.,])[0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2} ?(?:€|EUR)(?![A-Za-z])",
@@ -336,7 +386,13 @@ pub fn builtin_patterns() -> Vec<PatternDef> {
             // (mindestens 7, höchstens 16 Ziffern) hält kurze Zahlen fern.
             mit_kontext!(
                 r"(?i:telefonnummer|telefon|tel\.?|mobil|handy|fax|fon)|(?=\+49|0049)",
-                r"(?<![0-9A-Za-z+])(?:\+49[ /-]?|0049[ /-]?|0)[1-9][0-9 /-]{5,14}[0-9](?![0-9A-Za-z])"
+                //
+                // Drei Formen: mit Ländervorwahl, auch mit der eingeklammerten
+                // Null dahinter („+49 (0)30 …"); mit führender Null; und mit
+                // eingeklammerter Ortsvorwahl („(030) 1234567"). Die beiden
+                // Klammerformen sind DIN 5008 nicht gemäß, stehen aber auf
+                // Briefköpfen und Auszügen — und fielen vorher ganz durch.
+                r"(?<![0-9A-Za-z+])(?:(?:\+49|0049)[ /-]?(?:\(0\)[ /-]?)?[1-9][0-9 /-]{5,14}[0-9]|0[1-9][0-9 /-]{5,14}[0-9]|\(0[1-9][0-9]{1,4}\)[ /-]?[0-9][0-9 /-]{3,12}[0-9])(?![0-9A-Za-z])"
             ),
             "Deutsche Telefonnummer",
             0.85,

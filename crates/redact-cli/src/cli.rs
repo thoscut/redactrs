@@ -223,9 +223,11 @@ pub struct Cli {
     ///
     /// Der Wert gilt auch dann, wenn `--action` etwas anderes sagt: in der
     /// Oberfläche lässt sich die Art je Treffer umstellen, und dann soll der
-    /// hier genannte Text erscheinen und nicht die Vorgabe. Die Vorgabe selbst
-    /// steht in [`redact_core::DEFAULT_REPLACEMENT`] — **nicht** als Literal an
-    /// dieser Stelle, denn sonst hätte die Oberfläche wieder eine zweite.
+    /// hier genannte Text erscheinen und nicht die Vorgabe.
+    // Die Vorgabe steht in `redact_core::DEFAULT_REPLACEMENT` — **nicht** als
+    // Literal an dieser Stelle, denn sonst hätte die Oberfläche wieder eine
+    // zweite. (Als `//`, nicht `///`: clap gäbe den Satz sonst als Hilfetext
+    // aus.)
     #[arg(long, value_name = "TEXT", default_value = redact_core::DEFAULT_REPLACEMENT)]
     pub replace_with: String,
 
@@ -233,10 +235,10 @@ pub struct Cli {
     ///
     /// Ohne Angabe gilt der Wert aus der Einstellungsdatei, sonst 1.0.
     ///
-    /// Geprüft wird an der Grenze: `f64` allein nimmt `nan`, `inf` und `1e400`
-    /// an, und jeder dieser Werte macht **jede** Schwärzung wirkungslos. Die
-    /// Regel steht in [`redact_pipeline::check_padding`] — dieselbe, die für
-    /// den Schlüssel `padding` der Einstellungsdatei gilt.
+    /// Werte wie `nan`, `inf` oder `1e400` werden abgelehnt: jeder davon machte
+    /// **jede** Schwärzung wirkungslos. Dieselbe Regel gilt für den Schlüssel
+    /// `padding` der Einstellungsdatei.
+    // Die Regel steht in `redact_pipeline::check_padding`.
     #[arg(long, value_parser = parse_padding)]
     pub padding: Option<f64>,
 
@@ -330,13 +332,13 @@ pub struct Cli {
     pub max_candidates: usize,
 
     /// Grafische Oberfläche starten.
-    ///
-    /// `hide` in einer Fassung ohne das Feature `gui` (Aufgabe #61): der
-    /// musl-Build entsteht mit `--no-default-features` und *hat* keine
-    /// Oberfläche — ein Schalter im Hilfetext, der nur mit einer
-    /// Fehlermeldung enden kann, ist eine Falle. Der Schalter selbst bleibt
-    /// erhalten, damit `--gui` dort weiterhin mit Rückgabewert 2 und einem
-    /// erklärenden Satz endet statt mit „unknown argument“.
+    // `hide` in einer Fassung ohne das Feature `gui` (Aufgabe #61): der
+    // musl-Build entsteht mit `--no-default-features` und *hat* keine
+    // Oberfläche — ein Schalter im Hilfetext, der nur mit einer
+    // Fehlermeldung enden kann, ist eine Falle. Der Schalter selbst bleibt
+    // erhalten, damit `--gui` dort weiterhin mit Rückgabewert 2 und einem
+    // erklärenden Satz endet statt mit „unknown argument“. (Als `//`, nicht
+    // `///`: clap gäbe diesen Absatz sonst als Hilfetext aus.)
     #[arg(long, hide = !cfg!(feature = "gui"))]
     pub gui: bool,
 
@@ -623,7 +625,7 @@ Beispiele:
   redact-rs geschwaerzt.pdf --check-leaks - < begriffe.txt
 
 Einstellungsdatei — Namenszusatz, Muster, abgeschaltete Muster, Mindestvertrauen,
-Polsterung, Thema:
+Polsterung, Thema, Ansicht:
   ~/.config/redact-rs/settings.yaml   bzw.   %APPDATA%\\redact-rs\\settings.yaml
   {} zeigt auf eine andere Datei.
   Rangfolge: Kommandozeile schlägt Datei schlägt Vorgabe.
@@ -658,6 +660,8 @@ Rückgabewerte:
        „NICHT GEPRÜFT: …“ in der Ausgabe. Dasselbe gilt, wo die Objektsicht
        an ihrer Verschachtelungstiefe abbricht. Hier liegt der Unterschied
        zu 0: die Antwort ist nicht „sauber“, sondern unvollständig.
+       Budget und Tiefe sind zwei von sieben Gründen; alle sieben stehen in
+       SECURITY.md und in der Doku (docs/kommandozeile.md, „Rückgabewerte“).
 ",
         redact_pipeline::settings::SETTINGS_ENV,
         EXIT_OK = crate::EXIT_OK,
@@ -804,7 +808,7 @@ mod tests {
         assert!(
             readme.contains(
                 "**oder** eine Stelle konnte nicht geprüft werden \
-                 (fünf Gründe, siehe [`SECURITY.md`](../SECURITY.md)), \
+                 (sieben Gründe, siehe [`SECURITY.md`](../SECURITY.md)), \
                  auch ohne einen einzigen Fund."
             ),
             "die Rückgabewert-Tabelle der Doku nennt den dritten Fall nicht"

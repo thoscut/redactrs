@@ -52,7 +52,7 @@ fn workdir(name: &str) -> PathBuf {
 fn run(args: &[&str]) -> Output {
     Command::new(bin())
         .args(args)
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env_remove("REDACT_RS_PASSWORD")
         .output()
         .expect("Binary startet")

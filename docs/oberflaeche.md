@@ -19,6 +19,12 @@ abgelegten Dateien gewinnt die erste PDF, Nicht-PDFs werden abgelehnt
 damit das ohne Maus prüfbar ist). Gingen dabei von Hand gezogene Rechtecke
 verloren, wird vorher gefragt.
 
+Was auf der Kommandozeile für **ein** Dokument genannt wurde — `-o`,
+`--audit-log`, `--review-out`, `--manual-regions`, `--apply-review` und das
+Passwort —, gilt nur diesem. Wird danach ein anderes Dokument geöffnet, fällt
+es weg, und die Statuszeile sagt, welche Schalter verworfen wurden. Sonst
+schriebe der Export des zweiten Dokuments in das Audit-Log des ersten.
+
 Ist das geöffnete Dokument **verschlüsselt**, erscheint ein Fenster mit
 verdeckter Eingabe. Das ist zugleich der bequemste Weg, ein Passwort *nicht*
 über die Kommandozeile zu geben. Passt es nicht, bleibt die Frage stehen; das
@@ -108,10 +114,10 @@ Vorschau ein und zeigt wenigstens die Lage des Textes.
 
 ## Tastaturbedienung
 
-Die Tabelle nennt die Tasten so, wie sie gedrückt werden: steht kein Strg
-davor, gilt der Eintrag für die Taste **allein**. Was dieselbe Taste mit
-gehaltener Strg tut (Strg+Bild ab, Strg+Entf, Strg+Esc …), ist hier nicht
-zugesagt.
+Die Tabelle nennt die Tasten so, wie sie gedrückt werden. Esc, Entf,
+Bild auf/ab, Pos1 und Ende wirken mit gehaltener Strg genauso wie allein
+(geprüft in `crates/redact-gui/src/zb_tests.rs`); bei den Pfeiltasten macht
+Strg einen Unterschied, siehe unten.
 
 | Taste | Wirkung |
 |---|---|
@@ -120,7 +126,7 @@ zugesagt.
 | Strg+R | Rechteck in der Mitte der gezeigten Seite anlegen und auswählen (wie der Knopf „🔲 Rechteck“) |
 | Strg+Z / Strg+Y | Rückgängig / Wiederholen |
 | Bild auf/ab, Pos1/Ende | blättern |
-| Pfeiltasten | mit Auswahl: das Rechteck um 1 pt verschieben (mit Umschalt 10 pt) — ohne Auswahl: blättern |
+| Pfeiltasten | mit Auswahl: das Rechteck um 1 pt verschieben (mit Umschalt 10 pt) — ohne Auswahl: ← / → blättern (↑ / ↓ blättern nicht) |
 | Strg+Pfeil | mit Auswahl: die Größe um 1 pt ändern (mit Umschalt 10 pt); die linke untere Ecke bleibt stehen. Ohne Auswahl: nichts — dafür genügt der Pfeil allein |
 | Entf | ausgewähltes Rechteck löschen |
 | Esc | Auswahl aufheben |
@@ -135,7 +141,10 @@ Ausweg: dorthin lässt sich nicht blättern.
 
 Unter macOS tritt die Befehlstaste an die Stelle von Strg. **Liegt der Fokus in
 einem Textfeld, gehören alle Tasten dorthin** und nirgendwo sonst hin — sonst
-löschte die Rücktaste im Feld „Ersetzen“ die ausgewählte Region. Ein Knopf mit
+löschte die Rücktaste im Feld „Ersetzen“ die ausgewählte Region. Als Textfeld
+zählt dabei **jedes** Eingabefeld, auch das eintippbare Zahlenfeld des
+Zoomreglers. Steht der Fokus auf der Schiene des Reglers, gehören ihr die
+Pfeiltasten: sie zoomen, statt das Rechteck zu schieben oder zu blättern. Ein Knopf mit
 Fokus (nach einem Druck auf Tabulator) ist dabei kein Textfeld; die Kürzel
 wirken dort weiter (`a_tab_press_does_not_kill_every_shortcut` in
 `crates/redact-gui/src/app.rs`).
@@ -171,7 +180,8 @@ und nennt **bis zu drei davon** beim Namen samt Grund; der Rest wird gezählt
 
 ## Trefferliste
 
-Neben der Miniaturspalte steht die Trefferliste. Ihre Überschrift nennt
+Rechts neben der Seite steht die Trefferliste (in der Ansicht „Fokus“ als
+Karte über der Seite). Ihre Überschrift nennt
 **beide** Zahlen — gefundene Treffer und die, die tatsächlich geschwärzt werden;
 nur die zweite sagt etwas über das Ergebnis. Treffer, die die Konfliktauflösung
 verwirft (blockiert, doppelt), stehen ausgegraut und durchgestrichen statt
