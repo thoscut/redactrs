@@ -34,6 +34,35 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ## Unveröffentlicht
 
+### Behoben
+
+* **⚠ Sicherheit: Die Schrift eines `/ExtGState` wurde übergangen.** `gs`
+  mit `/Font [ref size]` setzt die Schrift wie ein `Tf` (PDF 32000-1,
+  Tabelle 58); Poppler wertet das aus, der Interpreter dekodierte mit der
+  Schrift des letzten `Tf` weiter. Stand die IBAN in der Schrift des `gs`,
+  zeigte der Betrachter sie, die Analyse las andere Zeichen: „Treffer 0“,
+  Rückgabewert 0, und `--check-leaks` meldete „nicht gefunden“, weil es
+  dieselbe Sicht liest. Beleg: `crates/redact-pdf/tests/zq_a_extgstate_schrift.rs`.
+* **⚠ Sicherheit: Type0-Schriften mit gemischten Codelängen** (eingebettete
+  `/Encoding`-CMap mit ein- und zweibytigen Bereichen) wurden zweibytig
+  zerlegt; mit einem `/ToUnicode` daneben blieb das ohne Warnung, die IBAN
+  wurde nicht erkannt, Rückgabewert 0. Die Codes werden jetzt nach dem
+  Codespace zerlegt (9.7.6.2). Eine vordefinierte CMap außer `Identity-H/V`
+  und `Uni…-UCS2/UTF16-…` (etwa `90ms-RKSJ-H`), deren Zerlegung das
+  Werkzeug nicht kennt, ist jetzt eine Deckungslücke (NICHT GEPRÜFT,
+  Rückgabewert 3), sobald mit ihr Text gesetzt wird. Beleg:
+  `crates/redact-pdf/tests/zq_a_gemischter_codespace.rs`.
+* **⚠ Sicherheit: Die eingebaute Kodierung eines eingebetteten
+  Type1-Programms wurde ignoriert.** Ohne `/Encoding` (oder bei
+  `/Differences` ohne `/BaseEncoding`) gilt die Kodierung des Fontprogramms;
+  angenommen wurde WinAnsi. Poppler extrahierte die IBAN, die Analyse nicht —
+  Rückgabewert 0, auch `--check-leaks` sah nichts. Die Tabelle aus dem
+  Klartextteil von `/FontFile` gilt jetzt. Ein CFF-Programm
+  (`/FontFile3 /Subtype /Type1C`) mit eigener Kodierung wird nicht
+  nachgebaut und ist ohne `/ToUnicode` eine Deckungslücke; Standard-14-Schriften,
+  Programme mit Standardkodierung und eingebettete TrueType-Schriften bleiben
+  unverändert. Beleg: `crates/redact-pdf/tests/zq_a_eingebaute_kodierung.rs`.
+
 ### Geändert
 
 * **Die README ist verschlankt.** Sie nennt nur noch Kurzbeschreibung,
