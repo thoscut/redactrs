@@ -19,6 +19,12 @@ abgelegten Dateien gewinnt die erste PDF, Nicht-PDFs werden abgelehnt
 damit das ohne Maus prüfbar ist). Gingen dabei von Hand gezogene Rechtecke
 verloren, wird vorher gefragt.
 
+Was auf der Kommandozeile für **ein** Dokument genannt wurde — `-o`,
+`--audit-log`, `--review-out`, `--manual-regions`, `--apply-review` und das
+Passwort —, gilt nur diesem. Wird danach ein anderes Dokument geöffnet, fällt
+es weg, und die Statuszeile sagt, welche Schalter verworfen wurden. Sonst
+schriebe der Export des zweiten Dokuments in das Audit-Log des ersten.
+
 Ist das geöffnete Dokument **verschlüsselt**, erscheint ein Fenster mit
 verdeckter Eingabe. Das ist zugleich der bequemste Weg, ein Passwort *nicht*
 über die Kommandozeile zu geben. Passt es nicht, bleibt die Frage stehen; das
@@ -135,7 +141,10 @@ Ausweg: dorthin lässt sich nicht blättern.
 
 Unter macOS tritt die Befehlstaste an die Stelle von Strg. **Liegt der Fokus in
 einem Textfeld, gehören alle Tasten dorthin** und nirgendwo sonst hin — sonst
-löschte die Rücktaste im Feld „Ersetzen“ die ausgewählte Region. Ein Knopf mit
+löschte die Rücktaste im Feld „Ersetzen“ die ausgewählte Region. Als Textfeld
+zählt dabei **jedes** Eingabefeld, auch das eintippbare Zahlenfeld des
+Zoomreglers. Steht der Fokus auf der Schiene des Reglers, gehören ihr die
+Pfeiltasten: sie zoomen, statt das Rechteck zu schieben oder zu blättern. Ein Knopf mit
 Fokus (nach einem Druck auf Tabulator) ist dabei kein Textfeld; die Kürzel
 wirken dort weiter (`a_tab_press_does_not_kill_every_shortcut` in
 `crates/redact-gui/src/app.rs`).

@@ -2881,7 +2881,7 @@ impl RedactApp {
                 action == ToolAction::ZoomOut
             }));
             let mut zoom = self.state.zoom;
-            if ui
+            let slider = ui
                 .add_enabled(
                     context.loaded,
                     egui::Slider::new(&mut zoom, MIN_ZOOM..=MAX_ZOOM)
@@ -2896,9 +2896,13 @@ impl RedactApp {
                                 .map(|percent| percent / 100.0)
                         }),
                 )
-                .on_hover_text("Zoom — ziehen, oder den Wert anklicken und eintippen")
-                .changed()
-            {
+                .on_hover_text("Zoom — ziehen, oder den Wert anklicken und eintippen");
+            // Die Pfeiltasten gehören dem fokussierten Regler, nicht dem
+            // Rechteck (siehe [`crate::focus::claim_arrows`]). Das eintippbare
+            // Zahlenfeld ist ein Textfeld und fällt schon unter
+            // [`crate::focus::in_text_field`].
+            crate::focus::claim_arrows(&slider);
+            if slider.changed() {
                 self.state.set_zoom(zoom);
             }
             clicked = clicked.or(tool_buttons(ui, &context, |action| {
@@ -3753,13 +3757,16 @@ impl RedactApp {
     /// bevor diese Zeile ihn abfragt.
     fn read_keys(&self, ctx: &egui::Context) -> KeyState {
         let in_field = crate::focus::in_text_field(ctx);
+        // Ein fokussierter Regler nimmt die Pfeile selbst; sie hier noch
+        // einmal auszuwerten, zoomte **und** schob das Rechteck.
+        let arrows = !crate::focus::arrows_claimed(ctx);
         ctx.input(|i| KeyState {
             delete: i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
             escape: i.key_pressed(Key::Escape),
-            left: i.key_pressed(Key::ArrowLeft),
-            right: i.key_pressed(Key::ArrowRight),
-            up: i.key_pressed(Key::ArrowUp),
-            down: i.key_pressed(Key::ArrowDown),
+            left: arrows && i.key_pressed(Key::ArrowLeft),
+            right: arrows && i.key_pressed(Key::ArrowRight),
+            up: arrows && i.key_pressed(Key::ArrowUp),
+            down: arrows && i.key_pressed(Key::ArrowDown),
             page_up: i.key_pressed(Key::PageUp),
             page_down: i.key_pressed(Key::PageDown),
             home: i.key_pressed(Key::Home),
@@ -3987,6 +3994,12 @@ mod zh2_c_leck_tests;
 #[cfg(test)]
 #[path = "zn_b_schreibweise_tests.rs"]
 mod zn_b_schreibweise_tests;
+
+// Prüfrunde Oberfläche (0.8.1): Tasten am Zoomregler. Kindmodul, weil
+// `view_bar` und `handle_keys` privat sind.
+#[cfg(test)]
+#[path = "zq_ui_tests.rs"]
+mod zq_ui_tests;
 
 // Gegenprüfung R4, Teil 2: der Prüf-Thread selbst — `start_export_check`,
 // der Haken `CheckGate`, die Warnungsliste über mehrere Ausgabedateien.

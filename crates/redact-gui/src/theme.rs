@@ -224,6 +224,30 @@ impl Theme {
         self.palette().on_accent
     }
 
+    /// Schriftfarbe zu einer Trefferfarbe — für Text, der die Trefferart
+    /// trägt (eine schützende Zeile der Negativliste in der Trefferliste).
+    ///
+    /// Die Trefferfarben selbst ([`crate::state::RegionColor::rgb`]) sind für
+    /// Rahmen und Zeichen gemacht (3:1, WCAG 1.4.11). Als Schrift kam das Rot
+    /// gemessen auf 4,12:1 (hell, Bereich) bzw. 3,78:1 (dunkel) und auf der
+    /// dunklen Auswahlzeile auf 2,61:1 — für Text verlangt WCAG 1.4.3 4,5:1.
+    /// Diese Töne erreichen das auf jeder Fläche, auf der Schrift steht (Test
+    /// `region_text_reaches_the_text_contrast_minimum`).
+    pub fn region_text(self, color: crate::state::RegionColor) -> Color32 {
+        use crate::state::RegionColor;
+        let (r, g, b) = match (self, color) {
+            (Theme::Light, RegionColor::AutoPattern) => (29, 78, 216),
+            (Theme::Light, RegionColor::AutoBookingPos) => (21, 110, 52),
+            (Theme::Light, RegionColor::AutoBookingNeg) => (185, 28, 28),
+            (Theme::Light, RegionColor::Manual) => (154, 72, 0),
+            (Theme::Dark, RegionColor::AutoPattern) => (147, 197, 253),
+            (Theme::Dark, RegionColor::AutoBookingPos) => (110, 231, 160),
+            (Theme::Dark, RegionColor::AutoBookingNeg) => (252, 165, 165),
+            (Theme::Dark, RegionColor::Manual) => (253, 186, 116),
+        };
+        Color32::from_rgb(r, g, b)
+    }
+
     /// Fläche der Trefferzahl auf einer Miniatur: neutral, damit Violett
     /// allein Auswahl und Fokus bedeutet.
     pub fn badge_fill(self) -> Color32 {
@@ -281,7 +305,7 @@ impl Theme {
                 muted: Color32::from_rgb(140, 146, 156),
                 accent: Color32::from_rgb(167, 139, 250),
                 on_accent: Color32::from_rgb(24, 16, 48),
-                selection: Color32::from_rgb(64, 42, 120),
+                selection: Color32::from_rgb(46, 33, 86),
                 selection_text: Color32::from_rgb(233, 225, 255),
                 warn: Color32::from_rgb(245, 180, 70),
                 error: Color32::from_rgb(248, 113, 113),
@@ -317,9 +341,14 @@ impl Theme {
     /// Dazu gehört die Fläche um das Blatt ([`Theme::canvas`]): ein Rechteck,
     /// das über den Seitenrand ragt, liegt dort. Der Rest ist aus
     /// [`Theme::visuals`] entnommen statt von Hand notiert — sonst prüfte
-    /// der Kontrasttest Farben, die egui gar nicht benutzt. `faint_bg_color`
-    /// fehlt bewusst: das ist ein additiver, halbdurchsichtiger Wert und keine
-    /// Fläche, gegen die sich ein Kontrast rechnen ließe.
+    /// der Kontrasttest Farben, die egui gar nicht benutzt.
+    ///
+    /// Dazu gehören die **Auswahl-** und die **Hover-Fläche** einer
+    /// Trefferzeile (`selection.bg_fill`, `faint_bg_color`): die Seitenleiste
+    /// malt sie deckend unter das Zeichen der Trefferart
+    /// (`crate::sidebar`, Trefferzeile). Hier stand vorher, `faint_bg_color`
+    /// sei keine Fläche — in diesem Farbsatz ist es eine deckende Farbe, und
+    /// beide Flächen fehlten der Prüfung.
     pub fn backgrounds(self) -> Vec<(u8, u8, u8)> {
         let visuals = self.visuals();
         let mut all = vec![PAPER];
@@ -329,6 +358,8 @@ impl Theme {
             visuals.window_fill,
             visuals.extreme_bg_color,
             visuals.widgets.noninteractive.bg_fill,
+            visuals.faint_bg_color,
+            visuals.selection.bg_fill,
         ] {
             let rgb = (color.r(), color.g(), color.b());
             if !all.contains(&rgb) {
@@ -534,7 +565,53 @@ mod tests {
             v.extreme_bg_color,
             v.faint_bg_color,
             theme.canvas(),
+            // Die ausgewählte Trefferzeile: Seitenzahl, Notiz und abgewählte
+            // Werte stehen dort in der gedämpften Farbe.
+            v.selection.bg_fill,
         ]
+    }
+
+    /// Schrift in Trefferfarbe erreicht 4,5:1 auf jeder Schriftfläche — und
+    /// die Grundtöne selbst täten es nicht (sonst bräuchte es die Varianten
+    /// nicht).
+    #[test]
+    fn region_text_reaches_the_text_contrast_minimum() {
+        use crate::state::REGION_COLORS;
+        for theme in THEMES {
+            for color in REGION_COLORS {
+                for surface in text_surfaces(theme) {
+                    let ratio = contrast(theme.region_text(color), surface);
+                    assert!(
+                        ratio >= 4.5,
+                        "{theme:?}/{color:?} gegen {surface:?} nur {ratio:.2}:1"
+                    );
+                }
+            }
+            let (r, g, b) = crate::state::RegionColor::AutoBookingNeg.rgb();
+            let base = Color32::from_rgb(r, g, b);
+            assert!(
+                text_surfaces(theme)
+                    .into_iter()
+                    .any(|surface| contrast(base, surface) < 4.5),
+                "{theme:?}: der Grundton reichte schon"
+            );
+        }
+    }
+
+    /// Die Flächen der Trefferzeile stehen in der Liste, gegen die die
+    /// Trefferfarben geprüft werden.
+    #[test]
+    fn the_hit_row_surfaces_are_checked_backgrounds() {
+        for theme in THEMES {
+            let v = theme.visuals();
+            let backgrounds = theme.backgrounds();
+            for fill in [v.selection.bg_fill, v.faint_bg_color] {
+                assert!(
+                    backgrounds.contains(&(fill.r(), fill.g(), fill.b())),
+                    "{theme:?}: {fill:?} fehlt"
+                );
+            }
+        }
     }
 
     /// Zurückgenommene Schrift erreicht trotzdem 4,5:1 (WCAG 1.4.3) — auf jeder
