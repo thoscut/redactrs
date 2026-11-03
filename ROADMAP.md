@@ -12,8 +12,12 @@ Stand: 03.11.2026, veröffentlicht ist
 
 ## In Arbeit
 
-* Die Doku als HTML-Buch (mdBook) in jedem Release-Archiv — steht im
-  [`CHANGELOG.md`](CHANGELOG.md) unter „Unveröffentlicht“.
+### 0.9.0
+
+* Veröffentlicht die Korrekturen aus dem Experten-Review
+  ([PR #18](https://github.com/thoscut/redactrs/pull/18)) und die Doku als
+  HTML-Buch in jedem Release-Archiv. Einzelheiten im
+  [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Bekannt, wartet auf andere
 
