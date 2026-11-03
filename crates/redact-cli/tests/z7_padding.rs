@@ -57,12 +57,12 @@ fn demo(dir: &Path) -> PathBuf {
 }
 
 /// Ein Lauf mit einem `--padding`-Wert. Die Einstellungsdatei wird ausdrücklich
-/// auf eine nicht vorhandene Datei gelenkt, damit ein Profil auf dem
+/// abgeschaltet (`REDACT_RS_CONFIG` leer), damit ein Profil auf dem
 /// Testrechner das Ergebnis nicht verschiebt.
 fn run_padding(dir: &Path, input: &Path, wert: &str) -> Output {
     let out = dir.join("out.pdf");
     Command::new(bin())
-        .env("REDACT_RS_CONFIG", dir.join("gibt-es-nicht.yaml"))
+        .env("REDACT_RS_CONFIG", "")
         .args([
             input.to_str().unwrap(),
             "-o",

@@ -34,9 +34,10 @@
 //! | macOS         | wie Linux (`$XDG_CONFIG_HOME`, sonst `~/.config`) |
 //! | Windows       | `%APPDATA%\redact-rs\settings.yaml`         |
 //!
-//! `REDACT_RS_CONFIG` zeigt auf eine andere Datei und schlägt alles davon —
-//! das ist zugleich der Weg, mit dem die Tests ohne echtes Benutzerprofil
-//! auskommen.
+//! `REDACT_RS_CONFIG` zeigt auf eine andere Datei und schlägt alles davon;
+//! fehlt die genannte Datei, ist das ein Fehler. Leer gesetzt
+//! (`REDACT_RS_CONFIG=`) heißt es „keine Einstellungsdatei“ — das ist
+//! zugleich der Weg, mit dem die Tests ohne echtes Benutzerprofil auskommen.
 //!
 //! Ermittelt wird der Pfad aus den Umgebungsvariablen, nicht über eine
 //! zusätzliche Abhängigkeit (`dirs`, `directories`): es sind drei Zeilen, und
@@ -152,10 +153,46 @@ impl Settings {
     /// Eine **vorhandene**, aber fehlerhafte Datei ist ein Fehler und wird
     /// nicht stillschweigend übergangen — sonst arbeitete das Werkzeug mit
     /// anderen Werten als der Nutzer meint, eingestellt zu haben.
+    ///
+    /// ## Fehlen ist nur an der Vorgabestelle kein Fehler
+    ///
+    /// * **`REDACT_RS_CONFIG` gesetzt und nicht leer:** genau diese Datei. Fehlt
+    ///   sie oder ist sie nicht lesbar, endet der Lauf mit einer Meldung.
+    ///   Vorher galten still die Vorgaben — ein Tippfehler im Pfad ließ etwa
+    ///   ein eingeschaltetes `iban_intl` oder eine gesenkte Schwelle
+    ///   wirkungslos, Rückgabewert 0. Wer den Pfad ausdrücklich nennt, meint
+    ///   eine Datei.
+    /// * **`REDACT_RS_CONFIG` gesetzt und leer:** ausdrücklich keine Datei,
+    ///   auch nicht die an der Vorgabestelle — so laufen die Tests ohne das
+    ///   Profil des Rechners.
+    /// * **Nicht gesetzt:** die Datei an der Vorgabestelle; fehlt sie, gelten
+    ///   die Vorgaben. Lässt sie sich aus einem anderen Grund nicht befragen
+    ///   (fehlende Rechte), ist das ein Fehler — `Path::exists` hätte ihn
+    ///   als „nicht vorhanden“ verschluckt.
     pub fn load() -> Result<Self> {
-        match settings_path() {
-            Some(path) if path.exists() => Self::load_from(&path),
-            _ => Ok(Self::default()),
+        if let Some(value) = std::env::var_os(SETTINGS_ENV) {
+            if value.is_empty() {
+                return Ok(Self::default());
+            }
+            let path = PathBuf::from(value);
+            if let Err(e) = std::fs::metadata(&path) {
+                return Err(RedactError::Config(format!(
+                    "Einstellungsdatei {} nicht lesbar: {e}. Der Pfad kommt aus                      {SETTINGS_ENV}; ohne Einstellungsdatei arbeitet ein Lauf mit                      {SETTINGS_ENV}= (leer) oder ohne die Variable.",
+                    redact_core::safe_path(&path)
+                )));
+            }
+            return Self::load_from(&path);
+        }
+        let Some(path) = config_dir().map(|dir| dir.join(SETTINGS_FILE)) else {
+            return Ok(Self::default());
+        };
+        match std::fs::metadata(&path) {
+            Ok(_) => Self::load_from(&path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(RedactError::Config(format!(
+                "Einstellungsdatei {} nicht lesbar: {e}",
+                redact_core::safe_path(&path)
+            ))),
         }
     }
 

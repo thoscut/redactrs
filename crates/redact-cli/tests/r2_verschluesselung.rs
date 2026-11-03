@@ -145,7 +145,7 @@ fn leeres_benutzerpasswort_verschachtelungsbombe_am_binary() {
             "--patterns",
             "iban_de",
         ])
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env_remove("REDACT_RS_PASSWORD")
         .stdin(Stdio::null())
         .output()

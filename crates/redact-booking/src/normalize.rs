@@ -2,14 +2,21 @@
 //!
 //! Buchungslisten enthalten Werte so, wie ein Mensch sie schreibt
 //! (`DE89 3704 0044 0532 0130 00`), im PDF steht derselbe Wert aber oft mit
-//! einer anderen *Menge* an Leerraum — `DE89  3704 0044 …`, gesperrt gesetzt,
-//! oder ganz ohne Leerzeichen. Deshalb wird sowohl der Suchtext (Heuhaufen) als
-//! auch das Muster (Nadel) vor dem Vergleich normalisiert:
+//! einer anderen *Menge* an Leerraum — `DE89  3704 0044 …` oder gesperrt
+//! gesetzt. Deshalb wird sowohl der Suchtext (Heuhaufen) als auch das Muster
+//! (Nadel) vor dem Vergleich normalisiert. Leerraum wird dabei
+//! **zusammengefasst, nicht entfernt**: der Eintrag `DE89 3704 …` trifft
+//! `DE89370400440532013000` *nicht* (festgehalten von
+//! `collapsing_whitespace_is_not_the_same_as_ignoring_it` in
+//! `tests/matcher_tests.rs`); dafür gibt es das Muster `iban_de`.
+//!
+//! Im Einzelnen:
 //!
 //! * alle Zeichen werden klein geschrieben (Vergleich ohne Groß-/Kleinschreibung),
 //! * jede Folge von Leerraum wird zu genau einem Leerzeichen zusammengefasst,
 //! * zerlegte Akzentbuchstaben („u" + U+0308) werden zum fertigen Zeichen
 //!   („ü") zusammengesetzt — für eine kleine Tabelle, siehe `compose`.
+//! * Ligaturen (U+FB00–U+FB06, etwa „ﬁ") zählen als ihre Buchstaben.
 //!
 //! ## Was das *nicht* leistet: Zeilenumbrüche
 //!
@@ -113,6 +120,21 @@ impl Normalized {
                     continue;
                 }
             }
+            // Ligaturen (U+FB00–U+FB06) zählen als ihre Buchstaben, auf
+            // beiden Seiten: „Max ﬁscher“ im Text trifft den Eintrag
+            // „Max Fischer“ und umgekehrt. Alle Bytes zeigen auf die eine
+            // Ligatur im Original. (Der Extraktor zerlegt sie schon beim
+            // Zeilenbau; hier steht die Regel für jeden anderen Lieferanten
+            // eines `TextRun` und für die Einträge selbst.)
+            if let Some(letters) = ligature_letters(ch) {
+                text.push_str(letters);
+                while starts.len() < text.len() {
+                    starts.push(idx);
+                    ends.push(char_end);
+                }
+                basis = None;
+                continue;
+            }
             let pos = text.len();
             let mut lower_iter = ch.to_lowercase();
             // Nur ein Zeichen, das beim Kleinschreiben eins bleibt, kann
@@ -146,6 +168,19 @@ impl Normalized {
         }
         Some((self.starts[start], self.ends[end - 1]))
     }
+}
+
+/// Die Buchstaben einer lateinischen Ligatur (U+FB00–U+FB06), sonst `None`.
+fn ligature_letters(c: char) -> Option<&'static str> {
+    Some(match c {
+        '\u{FB00}' => "ff",
+        '\u{FB01}' => "fi",
+        '\u{FB02}' => "fl",
+        '\u{FB03}' => "ffi",
+        '\u{FB04}' => "ffl",
+        '\u{FB05}' | '\u{FB06}' => "st",
+        _ => return None,
+    })
 }
 
 /// Setzt einen (kleinen) Buchstaben und einen kombinierenden Akzent zu einem
