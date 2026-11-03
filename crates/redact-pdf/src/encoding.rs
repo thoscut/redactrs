@@ -29,10 +29,42 @@ impl CodeWidth {
     }
 }
 
+/// Ein Bereich aus `begincodespacerange`: Codes von `lo.len()` Bytes, deren
+/// Bytes **einzeln** zwischen `lo[i]` und `hi[i]` liegen (PDF 32000-1,
+/// 9.7.6.2 — der Bereich ist ein Quader, kein Intervall).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodespaceRange {
+    pub lo: Vec<u8>,
+    pub hi: Vec<u8>,
+}
+
+impl CodespaceRange {
+    fn matches(&self, bytes: &[u8]) -> bool {
+        bytes.len() == self.lo.len()
+            && bytes
+                .iter()
+                .zip(self.lo.iter().zip(&self.hi))
+                .all(|(b, (lo, hi))| lo <= b && b <= hi)
+    }
+}
+
+/// Höchstens so viele Bereiche werden aus einer CMap übernommen. Die Norm
+/// erlaubt 100 je Block; eine echte CMap hat eine Handvoll. Was darüber
+/// liegt, macht die Zerlegung nicht falsch, nur langsam — und bleibt weg.
+pub const MAX_CODESPACE_RANGES: usize = 256;
+
 /// Zuordnung Zeichencode → Text.
 #[derive(Debug, Clone)]
 pub struct CharMap {
     pub width: CodeWidth,
+    /// Codespace mit **unterschiedlich langen** Codes (etwa `<00>–<7F>` und
+    /// `<8000>–<FFFF>`). Gesetzt, geht er vor [`CharMap::width`]: die Länge
+    /// jedes Codes ergibt sich dann aus seinen ersten Bytes. Bis zur
+    /// Prüfrunde „stille Lecks im Inhalt“ las der Interpreter eine solche
+    /// Schrift stur zweibytig; aus `(DE89…)` wurden Codes wie `0x4445`, die
+    /// das `/ToUnicode` nicht kennt — Ersatzzeichen, kein Treffer,
+    /// Rückgabewert 0, während Poppler die IBAN zeigte.
+    codespace: Option<Box<[CodespaceRange]>>,
     /// Basis-Tabelle für Einbyte-Encodings (Index = Code).
     simple: Option<Box<[Option<char>; 256]>>,
     /// `/Differences`-Einträge, die für mehr als ein Zeichen stehen
@@ -62,6 +94,7 @@ impl CharMap {
         let has_base_table = table.iter().any(Option::is_some);
         Self {
             width: CodeWidth::One,
+            codespace: None,
             simple: Some(Box::new(table)),
             ligatures: BTreeMap::new(),
             to_unicode: BTreeMap::new(),
@@ -74,12 +107,21 @@ impl CharMap {
     pub fn two_byte() -> Self {
         Self {
             width: CodeWidth::Two,
+            codespace: None,
             simple: None,
             ligatures: BTreeMap::new(),
             to_unicode: BTreeMap::new(),
             derived: BTreeMap::new(),
             code_is_unicode: false,
             has_base_table: false,
+        }
+    }
+
+    /// Übernimmt einen Codespace mit gemischten Codelängen (siehe
+    /// [`CharMap::codespace`]). Ein leerer Codespace ändert nichts.
+    pub fn set_codespace(&mut self, ranges: Vec<CodespaceRange>) {
+        if !ranges.is_empty() {
+            self.codespace = Some(ranges.into_boxed_slice());
         }
     }
 
@@ -191,6 +233,18 @@ impl CharMap {
     /// Zerlegt eine PDF-Zeichenkette in (Code, Text, Byte-Anzahl).
     pub fn decode(&self, bytes: &[u8]) -> Vec<(u32, String, usize)> {
         let mut out = Vec::with_capacity(bytes.len());
+        if let Some(ranges) = &self.codespace {
+            let mut i = 0;
+            while i < bytes.len() {
+                let n = code_length(ranges, &bytes[i..]);
+                let code = bytes[i..i + n]
+                    .iter()
+                    .fold(0u32, |acc, b| (acc << 8) | *b as u32);
+                out.push((code, self.text_for(code), n));
+                i += n;
+            }
+            return out;
+        }
         match self.width {
             CodeWidth::One => {
                 for &b in bytes {
@@ -214,6 +268,29 @@ impl CharMap {
         }
         out
     }
+}
+
+/// Wie viele Bytes der Code am Anfang von `rest` belegt (PDF 32000-1,
+/// 9.7.6.2): der kürzeste Bereich, in den die ersten Bytes passen.
+///
+/// Passt keiner, gilt 9.7.6.3 sinngemäß: die Länge des kürzesten Bereichs,
+/// dessen **erstes** Byte passt, sonst die des kürzesten überhaupt — nie mehr,
+/// als noch dasteht, und nie weniger als ein Byte, damit die Zerlegung
+/// vorankommt.
+fn code_length(ranges: &[CodespaceRange], rest: &[u8]) -> usize {
+    let longest = ranges.iter().map(|r| r.lo.len()).max().unwrap_or(1);
+    for n in 1..=longest.min(rest.len()) {
+        if ranges.iter().any(|r| r.matches(&rest[..n])) {
+            return n;
+        }
+    }
+    let first_byte = ranges
+        .iter()
+        .filter(|r| r.lo[0] <= rest[0] && rest[0] <= r.hi[0])
+        .map(|r| r.lo.len())
+        .min();
+    let shortest = ranges.iter().map(|r| r.lo.len()).min().unwrap_or(1);
+    first_byte.unwrap_or(shortest).clamp(1, rest.len())
 }
 
 /// WinAnsiEncoding (im Wesentlichen CP1252).
@@ -409,6 +486,10 @@ pub struct ToUnicode {
     pub map: BTreeMap<u32, String>,
     /// Aus `codespacerange` abgeleitete Code-Breite, falls eindeutig.
     pub code_width: Option<CodeWidth>,
+    /// Alle Bereiche aus `codespacerange` (höchstens
+    /// [`MAX_CODESPACE_RANGES`], Codes von 1 bis 4 Byte). Gebraucht, wenn
+    /// [`ToUnicode::code_width`] nicht eindeutig ist.
+    pub codespace: Vec<CodespaceRange>,
     /// Die Zuordnung hat [`MAX_TO_UNICODE_BYTES`] gesprengt; das Parsen wurde
     /// abgebrochen. Wer das ignoriert, benutzt ein Bruchstück — siehe
     /// [`ToUnicode::map`].
@@ -449,13 +530,27 @@ pub fn parse_to_unicode(data: &[u8]) -> ToUnicode {
         match &tokens[i] {
             Token::Keyword(k) if k == "begincodespacerange" => {
                 i += 1;
-                let mut widths = Vec::new();
+                let mut pending: Option<Vec<u8>> = None;
                 while i < tokens.len() && !tokens[i].is_keyword("endcodespacerange") {
                     if let Token::Hex(h) = &tokens[i] {
-                        widths.push(h.len());
+                        match pending.take() {
+                            None => pending = Some(h.clone()),
+                            Some(lo) => {
+                                if lo.len() == h.len()
+                                    && (1..=4).contains(&lo.len())
+                                    && result.codespace.len() < MAX_CODESPACE_RANGES
+                                {
+                                    result.codespace.push(CodespaceRange { lo, hi: h.clone() });
+                                }
+                            }
+                        }
                     }
                     i += 1;
                 }
+                // Über **alle** Blöcke: eine CMap darf ihren Codespace auf
+                // mehrere `begincodespacerange` verteilen.
+                let widths: Vec<usize> = result.codespace.iter().map(|r| r.lo.len()).collect();
+                result.code_width = None;
                 if !widths.is_empty() && widths.iter().all(|w| *w == widths[0]) {
                     result.code_width = match widths[0] {
                         1 => Some(CodeWidth::One),

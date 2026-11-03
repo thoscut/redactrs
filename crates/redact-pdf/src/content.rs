@@ -2459,6 +2459,9 @@ struct FontDecodeStats {
     /// Fonts **mit** `/ToUnicode`: was ihre Codes ergeben — siehe
     /// [`UniformMapping`].
     mapped: BTreeMap<(Vec<u8>, String), UniformMapping>,
+    /// Fonts, deren Text sich laut [`FontInfo::coverage_note`] nicht
+    /// verlässlich lesen lässt und die auf dieser Seite Text gesetzt haben.
+    noted: BTreeMap<(Vec<u8>, String), String>,
 }
 
 /// Ob ein `/ToUnicode` alle benutzten Codes auf denselben Text abbildet.
@@ -2488,6 +2491,12 @@ const UNIFORM_MAPPING_MIN_CODES: usize = 8;
 
 impl FontDecodeStats {
     fn record(&mut self, font_name: &[u8], font: &FontInfo, code: u32, text: &str) {
+        // Vor allem anderen, auch vor dem `/ToUnicode`: die Notiz sagt
+        // gerade, dass die Zuordnung hier nicht verlässlich greift.
+        if let Some(note) = &font.coverage_note {
+            let key = (font_name.to_vec(), font.base_font.clone());
+            self.noted.entry(key).or_insert_with(|| note.clone());
+        }
         // Fonts mit /ToUnicode sagen selbst, was ihre Codes bedeuten — ob
         // glaubhaft, hält [`UniformMapping`] fest. Leerraum zählt nicht mit:
         // dass mehrere Codes ein Leerzeichen ergeben, ist gewöhnlich.
@@ -2538,6 +2547,19 @@ impl FontDecodeStats {
                 "Font „{name}“ hat kein /ToUnicode; sein Text lässt sich nicht \
                  dekodieren. Muster können darin nicht erkannt werden — diese \
                  Seite wurde möglicherweise nicht vollständig geschwärzt."
+            ));
+        }
+        for ((resource, base_font), note) in &self.noted {
+            let name = if base_font.is_empty() {
+                crate::label(resource)
+            } else {
+                crate::label_text(base_font)
+            };
+            out.push(format!(
+                "Font „{name}“: {note}. Was ein Betrachter aus ihren Zeichencodes \
+                 liest, kann die Analyse nicht verlässlich nachvollziehen; Muster können \
+                 darin übersehen werden — diese Seite wurde möglicherweise nicht \
+                 vollständig geschwärzt."
             ));
         }
         for ((resource, base_font), mapping) in &self.mapped {
@@ -4541,6 +4563,15 @@ fn scan_operations(
                 state.dash_phase = op.operands.get(1).and_then(as_f64).unwrap_or(0.0);
             }
             "gs" => {
+                // Die Schrift eines `/ExtGState` (`/Font [ref size]`, PDF
+                // 32000-1 Tabelle 58) wirkt wie ein `Tf` — **unabhängig**
+                // davon, ob die Senke Grafik will: sie entscheidet, welcher
+                // Text dasteht. Bis hierher wurde sie übergangen; Poppler
+                // dekodierte die IBAN mit der Schrift des `gs`, dieser
+                // Interpreter mit der des letzten `Tf` (oder gar keiner) —
+                // „Treffer 0“, Rückgabewert 0, und die Nachprüfung, die
+                // dieselbe Sicht liest, sah es ebenso wenig.
+                apply_ext_gstate_font(doc, resources, &op.operands, &mut state, budget);
                 if graphics {
                     apply_ext_gstate(doc, resources, &op.operands, &mut state);
                 }
@@ -4833,6 +4864,55 @@ fn scan_soft_mask(
         sink,
     );
     visiting.remove(&group_id);
+}
+
+/// Übernimmt `/Font [ref size]` aus einem `/ExtGState` in den Textzustand —
+/// die Wirkung eines `Tf` (PDF 32000-1, 8.4.5, Tabelle 58).
+///
+/// Die Schrift geht durch [`Budget::font_object`] wie jede Schrift eines
+/// Ressourcenverzeichnisses: einmal geparst je Objekt, gegen dieselben Decken
+/// gebucht. Ihr „Name“ ist der des Grafikzustands, damit eine Warnung über
+/// sie die Stelle nennt, an der sie gesetzt wurde. Ein unbrauchbarer Eintrag
+/// (kein Array, kein Schrift-Dictionary, keine Zahl) ändert nichts — so wie
+/// Poppler ihn übergeht.
+fn apply_ext_gstate_font(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    operands: &[Object],
+    state: &mut GraphicsState,
+    budget: &mut Budget,
+) {
+    let Some(Object::Name(gs_name)) = operands.first() else {
+        return;
+    };
+    let entry = resources
+        .and_then(|r| r.get(b"ExtGState").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(gs_name.as_slice()).ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_dict().ok())
+        .and_then(|d| d.get(b"Font").ok())
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_array().ok());
+    let Some([font, size, ..]) = entry.map(Vec::as_slice) else {
+        return;
+    };
+    let Some(size) = doc.dereference(size).ok().and_then(|(_, o)| as_f64(o)) else {
+        return;
+    };
+    let Ok((id, resolved)) = doc.dereference(font) else {
+        return;
+    };
+    let Ok(dict) = resolved.as_dict() else {
+        return;
+    };
+    let (info, _) = budget.font_object(doc, id, dict);
+    state.text.font = Some(info);
+    let mut name = gs_name.clone();
+    name.extend_from_slice(b" (/ExtGState /Font)");
+    state.text.font_name = name;
+    state.text.font_size = size;
 }
 
 /// Übernimmt die für das Zeichnen relevanten Einträge aus einem `/ExtGState`.
@@ -5460,11 +5540,12 @@ fn show_text(
 }
 
 /// Liefert die Originalbytes eines Codes.
+///
+/// Ein Code hat 1 bis 4 Byte (ein gemischter Codespace,
+/// [`crate::encoding::CodespaceRange`]); `code` hält sie big-endian.
 fn raw_code_bytes(_source: &[u8], _font: &FontInfo, code: u32, nbytes: usize) -> Vec<u8> {
-    match nbytes {
-        2 => vec![(code >> 8) as u8, (code & 0xFF) as u8],
-        _ => vec![(code & 0xFF) as u8],
-    }
+    let n = nbytes.clamp(1, 4);
+    code.to_be_bytes()[4 - n..].to_vec()
 }
 
 /// Rechnet die Grundlinien-Geometrie einer Glyphe in den User-Space.

@@ -41,6 +41,11 @@ pub struct FontInfo {
     /// Wie viele Tabelleneinträge diese Schrift auf dem Haufen hält — siehe
     /// [`FontInfo::weight`].
     table_entries: usize,
+    /// Warum sich der Text dieser Schrift **nicht verlässlich** lesen lässt,
+    /// obwohl Codes und Zeichen scheinbar aufgehen — `None`, wenn nichts
+    /// dagegen spricht. Gesetzt, meldet der Interpreter jede Seite, die mit
+    /// ihr Text setzt, als nicht geprüft (Rückgabewert 3).
+    pub coverage_note: Option<String>,
 }
 
 impl Default for FontInfo {
@@ -54,6 +59,7 @@ impl Default for FontInfo {
             ascent: DEFAULT_ASCENT,
             descent: DEFAULT_DESCENT,
             table_entries: 0,
+            coverage_note: None,
         }
     }
 }
@@ -187,10 +193,11 @@ fn load_font(doc: &Document, font: &Dictionary) -> FontInfo {
         ..Default::default()
     };
 
+    let mut builtin_unread = None;
     if subtype == b"Type0" {
         load_type0(doc, font, &mut info);
     } else {
-        load_simple(doc, font, &mut info);
+        builtin_unread = load_simple(doc, font, &mut info);
     }
 
     // /ToUnicode gilt für alle Font-Typen und hat Vorrang.
@@ -231,6 +238,14 @@ fn load_font(doc: &Document, font: &Dictionary) -> FontInfo {
     // der macht aus den CIDs eines Subsets (ab 1 durchnummeriert) lauter
     // Steuerzeichen. Vorher wird deshalb alles ausgereizt, was das Dokument
     // sonst noch hergibt.
+    // Eine eingebaute Kodierung, die sich nicht lesen ließ, ist nur dann eine
+    // Lücke, wenn auch kein `/ToUnicode` sagt, was die Codes bedeuten.
+    if let Some(note) = builtin_unread {
+        if !info.charmap.has_to_unicode() {
+            info.coverage_note = Some(note);
+        }
+    }
+
     if subtype == b"Type0" && !info.charmap.has_to_unicode() {
         derive_cid_to_unicode(doc, font, &mut info);
     }
@@ -308,6 +323,20 @@ fn derive_cid_to_unicode(doc: &Document, font: &Dictionary, info: &mut FontInfo)
     }
 }
 
+/// Vordefinierte CMaps, deren Codes **sicher** je zwei Byte lang sind.
+///
+/// `Identity-H`/`-V` und die Unicode-CMaps `Uni…-UCS2-…` (die `-UTF16-`
+/// ebenso: ein Surrogatpaar sind zwei Codes zu zwei Byte, beide liegen in
+/// derselben Zerlegung). Jede andere vordefinierte CMap — `90ms-RKSJ-H`,
+/// `GBK-EUC-H`, `UniJIS-UTF8-H`, `UniJIS-UTF32-H` und so weiter — hat
+/// gemischte oder andere Codelängen; die Tabellen dazu liefert dieses
+/// Werkzeug nicht mit. Zweibytig gelesen, verschöbe sich die Zerlegung schon
+/// am ersten ASCII-Zeichen, und ein `/ToUnicode` daneben verdeckte das, weil
+/// die Warnstatistik eine Schrift mit `/ToUnicode` nicht zählt.
+fn predefined_cmap_is_two_byte(name: &[u8]) -> bool {
+    name == b"Identity-H" || name == b"Identity-V" || predefined_cmap_is_unicode(name)
+}
+
 /// Vordefinierte CMaps, deren Codes bereits Unicode sind.
 ///
 /// Adobe benennt sie einheitlich `<Registry>-UCS2-H` bzw. `-UTF16-H`
@@ -368,15 +397,26 @@ fn is_sfnt(data: &[u8]) -> bool {
             || data.starts_with(b"ttcf"))
 }
 
-fn load_simple(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
+/// Lädt eine einfache Schrift. Rückgabe: warum ihre **eingebaute**
+/// Kodierung gälte, aber nicht gelesen werden konnte (siehe
+/// [`builtin_encoding`]) — `None`, wenn das nicht der Fall ist.
+fn load_simple(doc: &Document, font: &Dictionary, info: &mut FontInfo) -> Option<String> {
     // --- Encoding ---
     let mut table = win_ansi_encoding();
     let mut differences: Vec<(u8, String)> = Vec::new();
+    // Nennt die Schrift eine Basiskodierung? Wenn nicht, gilt nach PDF
+    // 32000-1, 9.6.6.1 die **eingebaute** des eingebetteten Fontprogramms —
+    // auch unter einem `/Differences` ohne `/BaseEncoding`.
+    let mut named_base = false;
     match deref(doc, font.get(b"Encoding").ok()) {
-        Some(Object::Name(name)) => table = base_table(name),
+        Some(Object::Name(name)) => {
+            table = base_table(name);
+            named_base = true;
+        }
         Some(Object::Dictionary(enc)) => {
             if let Ok(base) = enc.get(b"BaseEncoding").and_then(Object::as_name) {
                 table = base_table(base);
+                named_base = true;
             }
             if let Some(Object::Array(items)) = deref(doc, enc.get(b"Differences").ok()) {
                 let mut code: i64 = 0;
@@ -398,7 +438,27 @@ fn load_simple(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
         }
         _ => {}
     }
-    let mut charmap = CharMap::one_byte(table);
+    let builtin = if named_base {
+        None
+    } else {
+        builtin_encoding(doc, font)
+    };
+    let mut unread = None;
+    let mut charmap = match builtin {
+        // Die eingebaute Tabelle **ersetzt** die Basis: ein Code, den sie
+        // nicht belegt, ist `.notdef` und kein WinAnsi-Zeichen.
+        Some(Builtin::Custom(entries)) => {
+            info.table_entries = info.table_entries.saturating_add(entries.len());
+            let mut charmap = CharMap::one_byte([None; 256]);
+            charmap.apply_differences(&entries);
+            charmap
+        }
+        Some(Builtin::Unread(why)) => {
+            unread = Some(why);
+            CharMap::one_byte(table)
+        }
+        Some(Builtin::Standard) | None => CharMap::one_byte(table),
+    };
     charmap.apply_differences(&differences);
     info.charmap = charmap;
     info.table_entries = info.table_entries.saturating_add(differences.len());
@@ -436,22 +496,297 @@ fn load_simple(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
     }
 
     load_descriptor(doc, font.get(b"FontDescriptor").ok(), info);
+    unread
+}
+
+// ---------------------------------------------------------------------------
+// Eingebaute Kodierung eines eingebetteten Fontprogramms
+// ---------------------------------------------------------------------------
+
+/// Was das eingebettete Fontprogramm einer einfachen Schrift über seine
+/// eigene Kodierung sagt.
+#[derive(Debug, PartialEq)]
+enum Builtin {
+    /// `StandardEncoding` — für alles, was eine IBAN, eine BLZ oder einen
+    /// Namen ausmacht, deckungsgleich mit der WinAnsi-Basis, die ohnehin gilt.
+    Standard,
+    /// Eine eigene Tabelle (`dup N /name put`), Code → Glyphname.
+    Custom(Vec<(u8, String)>),
+    /// Eine eigene Kodierung, die hier nicht gelesen wird — der Grund.
+    Unread(String),
+}
+
+/// Höchstens so viele Bytes des Klartextteils eines Type1-Programms werden
+/// nach der Kodierung durchsucht. Die Kodierung steht im Kopf; ein Kopf von
+/// mehr als 64 kB entsteht nicht durch ein echtes Fontprogramm.
+const MAX_TYPE1_CLEARTEXT: usize = 64 * 1024;
+
+/// Die eingebaute Kodierung des eingebetteten Fontprogramms, soweit sie
+/// gilt — `None`, wenn keins eingebettet ist oder seine Kodierung den Text
+/// nicht bestimmt.
+///
+/// **Warum.** Ohne `/Encoding` (oder mit `/Differences` ohne
+/// `/BaseEncoding`) gilt die Kodierung des Fontprogramms. Poppler liest sie
+/// und extrahiert danach; dieser Interpreter nahm WinAnsi an. Eine
+/// Type1-Schrift, deren Kodierung `a` auf `D` legt, zeigte und kopierte im
+/// Betrachter die IBAN, die Analyse las `abkl …` — Treffer 0, Rückgabewert 0,
+/// und das Orakel, das dieselbe Sicht liest, sagte „nicht gefunden“.
+///
+/// * `/FontFile` (Type1): der Klartextteil wird gelesen, `dup N /name put`.
+/// * `/FontFile3 /Subtype /Type1C` (CFF): nur das `Encoding`-Feld des Top
+///   DICT. Standard (fehlend oder 0) ist unbedenklich; eine eigene Tabelle
+///   oder `ExpertEncoding` wird **nicht** nachgebaut (das bräuchte Charset
+///   und die 391 Standardnamen des CFF) und ist eine Lücke — es sei denn, ein
+///   `/ToUnicode` sagt, was die Codes bedeuten (siehe [`load_font`]).
+/// * `/FontFile2` (TrueType) und OpenType: keine Änderung. Bei TrueType
+///   bestimmt die Norm (9.6.6.4) den Text über die Glyphnamen der
+///   Basiskodierung; eine eingebaute Kodierung im Sinne von Type1 gibt es
+///   nicht, und Poppler extrahiert dort dieselben ASCII-Zeichen wie WinAnsi.
+fn builtin_encoding(doc: &Document, font: &Dictionary) -> Option<Builtin> {
+    let descriptor = deref(doc, font.get(b"FontDescriptor").ok())?
+        .as_dict()
+        .ok()?;
+    if let Some(Object::Stream(stream)) = deref(doc, descriptor.get(b"FontFile").ok()) {
+        let cleartext_len = stream
+            .dict
+            .get(b"Length1")
+            .ok()
+            .and_then(|o| deref(doc, Some(o)))
+            .and_then(|o| o.as_i64().ok())
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(MAX_TYPE1_CLEARTEXT)
+            .min(MAX_TYPE1_CLEARTEXT);
+        let data = if stream.dict.has(b"Filter") {
+            stream.decompressed_content().ok()?
+        } else {
+            stream.content.clone()
+        };
+        return Some(type1_builtin(&data, cleartext_len));
+    }
+    if let Some(Object::Stream(stream)) = deref(doc, descriptor.get(b"FontFile3").ok()) {
+        let subtype = stream.dict.get(b"Subtype").and_then(Object::as_name).ok();
+        if subtype != Some(&b"Type1C"[..]) {
+            return None;
+        }
+        let data = stream
+            .decompressed_content()
+            .or_else(|_| stream.get_plain_content())
+            .ok()?;
+        return Some(match cff_encoding_offset(&data) {
+            Some(0) => Builtin::Standard,
+            Some(_) => Builtin::Unread(
+                "ihr eingebettetes CFF-Programm bringt eine eigene Kodierung mit, und weder \
+                 /Encoding noch /ToUnicode sagen, welche Zeichen ihre Codes sind"
+                    .to_string(),
+            ),
+            None => Builtin::Unread(
+                "ihr eingebettetes CFF-Programm lässt sich nicht lesen, und weder /Encoding \
+                 noch /ToUnicode sagen, welche Zeichen ihre Codes sind"
+                    .to_string(),
+            ),
+        });
+    }
+    None
+}
+
+/// Die Kodierung im Klartextteil eines Type1-Programms (PFA, oder PFB mit
+/// Segmentkopf). `cleartext_len` ist `/Length1`, gedeckelt.
+fn type1_builtin(data: &[u8], cleartext_len: usize) -> Builtin {
+    // PFB: 0x80 0x01 und vier Byte Länge vor dem Klartext.
+    let data = match data {
+        [0x80, 0x01, a, b, c, d, rest @ ..] => {
+            let n = u32::from_le_bytes([*a, *b, *c, *d]) as usize;
+            &rest[..n.min(rest.len())]
+        }
+        _ => data,
+    };
+    let mut clear = &data[..cleartext_len.min(data.len())];
+    if let Some(pos) = find(clear, b"eexec") {
+        clear = &clear[..pos];
+    }
+    let Some(start) = find(clear, b"/Encoding") else {
+        return Builtin::Unread(
+            "ihr eingebettetes Type1-Programm nennt im Klartext keine Kodierung, und \
+             weder /Encoding noch /ToUnicode sagen, welche Zeichen ihre Codes sind"
+                .to_string(),
+        );
+    };
+    let rest = &clear[start + b"/Encoding".len()..];
+    let tokens: Vec<&[u8]> = rest
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.first() == Some(&&b"StandardEncoding"[..]) {
+        return Builtin::Standard;
+    }
+    let mut entries = Vec::new();
+    let mut i = 0;
+    while i + 3 < tokens.len() {
+        if tokens[i] == b"dup" && tokens[i + 3] == b"put" {
+            if let (Some(code), Some(name)) = (
+                std::str::from_utf8(tokens[i + 1])
+                    .ok()
+                    .and_then(|n| n.parse::<u8>().ok()),
+                tokens[i + 2].strip_prefix(b"/"),
+            ) {
+                entries.push((code, String::from_utf8_lossy(name).into_owned()));
+                i += 4;
+                continue;
+            }
+        }
+        // Das Ende der Tabelle: `readonly def` bzw. `def`.
+        if tokens[i] == b"def" {
+            break;
+        }
+        i += 1;
+    }
+    if entries.is_empty() {
+        return Builtin::Unread(
+            "ihr eingebettetes Type1-Programm nennt eine Kodierung, die sich nicht lesen \
+             lässt, und weder /Encoding noch /ToUnicode sagen, welche Zeichen ihre Codes sind"
+                .to_string(),
+        );
+    }
+    Builtin::Custom(entries)
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Das `Encoding`-Feld (Operator 16) im ersten Top DICT eines CFF-Programms;
+/// fehlt es, ist es 0 (Standard). `None`, wenn das Programm nicht bis dorthin
+/// lesbar ist.
+fn cff_encoding_offset(data: &[u8]) -> Option<u64> {
+    let header_size = *data.get(2)? as usize;
+    let (_, after_names) = cff_index(data, header_size)?;
+    let (top, _) = cff_index(data, after_names)?;
+    let dict = top?;
+    let mut operands: Vec<i64> = Vec::new();
+    let mut i = 0;
+    while i < dict.len() {
+        let b0 = dict[i];
+        match b0 {
+            0..=21 => {
+                let op = if b0 == 12 {
+                    i += 1;
+                    1200 + *dict.get(i)? as u32
+                } else {
+                    b0 as u32
+                };
+                if op == 16 {
+                    return u64::try_from(*operands.last()?).ok();
+                }
+                operands.clear();
+                i += 1;
+            }
+            28 => {
+                let v = i16::from_be_bytes([*dict.get(i + 1)?, *dict.get(i + 2)?]);
+                operands.push(v as i64);
+                i += 3;
+            }
+            29 => {
+                let v = i32::from_be_bytes([
+                    *dict.get(i + 1)?,
+                    *dict.get(i + 2)?,
+                    *dict.get(i + 3)?,
+                    *dict.get(i + 4)?,
+                ]);
+                operands.push(v as i64);
+                i += 5;
+            }
+            30 => {
+                // Reelle Zahl in Halbbytes bis zum Endzeichen 0xF; der Wert
+                // spielt für das Encoding-Feld keine Rolle.
+                i += 1;
+                loop {
+                    let b = *dict.get(i)?;
+                    i += 1;
+                    if b >> 4 == 0xF || b & 0xF == 0xF {
+                        break;
+                    }
+                }
+                operands.push(0);
+            }
+            32..=246 => {
+                operands.push(b0 as i64 - 139);
+                i += 1;
+            }
+            247..=250 => {
+                operands.push((b0 as i64 - 247) * 256 + *dict.get(i + 1)? as i64 + 108);
+                i += 2;
+            }
+            251..=254 => {
+                operands.push(-(b0 as i64 - 251) * 256 - *dict.get(i + 1)? as i64 - 108);
+                i += 2;
+            }
+            _ => return None,
+        }
+    }
+    Some(0)
+}
+
+/// Ein CFF-INDEX ab `pos`: sein erster Eintrag (falls vorhanden) und die
+/// Stelle danach.
+fn cff_index(data: &[u8], pos: usize) -> Option<(Option<&[u8]>, usize)> {
+    let count = u16::from_be_bytes([*data.get(pos)?, *data.get(pos + 1)?]) as usize;
+    if count == 0 {
+        return Some((None, pos + 2));
+    }
+    let off_size = *data.get(pos + 2)? as usize;
+    if !(1..=4).contains(&off_size) {
+        return None;
+    }
+    let offset = |k: usize| -> Option<usize> {
+        let at = pos + 3 + k * off_size;
+        let bytes = data.get(at..at + off_size)?;
+        Some(bytes.iter().fold(0usize, |acc, b| (acc << 8) | *b as usize))
+    };
+    let data_start = pos + 3 + (count + 1) * off_size - 1;
+    let first = data.get(data_start + offset(0)?..data_start + offset(1)?)?;
+    let end = data_start + offset(count)?;
+    Some((Some(first), end))
 }
 
 fn load_type0(doc: &Document, font: &Dictionary, info: &mut FontInfo) {
     // CID-Fonts benutzen praktisch immer Zweibyte-Codes (Identity-H & Co.).
     let mut charmap = CharMap::two_byte();
-    if let Some(Object::Stream(stream)) = deref(doc, font.get(b"Encoding").ok()) {
-        if let Ok(data) = stream
-            .decompressed_content()
-            .or_else(|_| stream.get_plain_content())
-        {
-            if let Some(width) = parse_to_unicode(&data).code_width {
-                if width == CodeWidth::One {
-                    charmap = CharMap::one_byte([None; 256]);
+    match deref(doc, font.get(b"Encoding").ok()) {
+        Some(Object::Stream(stream)) => {
+            if let Ok(data) = stream
+                .decompressed_content()
+                .or_else(|_| stream.get_plain_content())
+            {
+                let parsed = parse_to_unicode(&data);
+                match parsed.code_width {
+                    Some(CodeWidth::One) => charmap = CharMap::one_byte([None; 256]),
+                    Some(CodeWidth::Two) => {}
+                    // Gemischte Codelängen (oder Codes über zwei Byte): die
+                    // Länge jedes Codes ergibt sich aus seinen ersten Bytes,
+                    // PDF 32000-1, 9.7.6.2. Siehe [`CharMap::set_codespace`].
+                    None if !parsed.codespace.is_empty() => {
+                        charmap.set_codespace(parsed.codespace);
+                    }
+                    // Gar kein eigener Codespace: die CMap erbt ihn per
+                    // `usecmap` von einer vordefinierten, die hier nicht
+                    // vorliegt. Zweibytig gelesen ist das geraten.
+                    None => {
+                        info.coverage_note = Some(
+                            "ihre eingebettete /Encoding-CMap nennt keinen eigenen Codespace"
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }
+        Some(Object::Name(name)) if !predefined_cmap_is_two_byte(name) => {
+            info.coverage_note = Some(format!(
+                "ihre vordefinierte CMap „{}“ zerlegt Zeichenketten nicht in Codes zu \
+                 je zwei Byte, und eine andere Zerlegung kennt die Analyse nicht",
+                crate::label(name)
+            ));
+        }
+        _ => {}
     }
     info.charmap = charmap;
 
