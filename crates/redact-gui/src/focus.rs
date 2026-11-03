@@ -13,8 +13,11 @@
 //! Tastaturbedienung war damit praktisch nicht durchführbar.
 //!
 //! Deshalb tragen die drei Textfelder dieser Oberfläche feste Kennungen, und
-//! gefragt wird nach **ihnen**. Ein neues Textfeld gehört in [`TEXT_FIELDS`];
-//! ein Widget, das keins ist, bekommt hier nichts.
+//! gefragt wird nach **ihnen** — und zusätzlich danach, ob am fokussierten
+//! Widget ein `egui::TextEdit` hängt (das Zahlenfeld des Zoomreglers hat keine
+//! eigene Kennung, siehe [`in_text_field`]). Ein Widget, das kein Textfeld
+//! ist, bekommt hier nichts; nimmt es die Pfeiltasten selbst (die Schiene des
+//! Reglers), meldet es das mit [`claim_arrows`].
 //!
 //! ## Escape ist ein Sonderfall
 //!
@@ -47,9 +50,43 @@ pub fn is_text_field(focused: Option<Id>) -> bool {
     focused.is_some_and(|focused| TEXT_FIELDS.iter().any(|name| id(name) == focused))
 }
 
-/// Liegt der Fokus **jetzt** in einem der Textfelder?
+/// Liegt der Fokus **jetzt** in einem Textfeld?
+///
+/// Die Namensliste [`TEXT_FIELDS`] allein reichte nicht: das eintippbare
+/// Zahlenfeld des Zoomreglers (`egui::Slider` mit `DragValue`) ist ebenfalls
+/// ein `egui::TextEdit`, trägt aber eine Kennung, die egui selbst vergibt.
+/// Eine Rücktaste beim Korrigieren der Zoomzahl löschte deshalb das
+/// ausgewählte Rechteck, und die Pfeiltasten verschoben es. Gefragt wird
+/// darum zusätzlich, ob am fokussierten Widget ein `TextEditState` hängt —
+/// den hat jedes Textfeld, und ein Knopf nie (sonst wäre die Tastatur nach
+/// einem Tab wieder tot, siehe oben).
 pub fn in_text_field(ctx: &Context) -> bool {
-    is_text_field(ctx.memory(|m| m.focused()))
+    let focused = ctx.memory(|m| m.focused());
+    is_text_field(focused)
+        || focused.is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some())
+}
+
+/// Schlüssel, unter dem [`claim_arrows`] sein Bild ablegt.
+const ARROW_CLAIM: &str = "redact_pfeile_vergeben";
+
+/// Meldet: dieses Widget hat den Fokus und nimmt die **Pfeiltasten** selbst.
+///
+/// Für die Schiene des Zoomreglers. egui verstellt einen fokussierten Regler
+/// mit Pfeil links/rechts; ohne diese Meldung schob derselbe Anschlag
+/// zusätzlich das ausgewählte Rechteck oder blätterte. Gilt nur für das Bild,
+/// in dem sie abgegeben wird — aufzurufen **vor** dem Lesen der Tasten.
+pub fn claim_arrows(response: &egui::Response) {
+    if response.has_focus() {
+        let ctx = &response.ctx;
+        let pass = ctx.cumulative_pass_nr();
+        ctx.data_mut(|d| d.insert_temp(Id::new(ARROW_CLAIM), pass));
+    }
+}
+
+/// Hat in **diesem** Bild ein Widget die Pfeiltasten beansprucht?
+pub fn arrows_claimed(ctx: &Context) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<u64>(Id::new(ARROW_CLAIM))) == Some(pass)
 }
 
 /// Der Fokusstand über die Bildgrenze hinweg.

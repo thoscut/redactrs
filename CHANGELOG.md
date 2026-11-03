@@ -45,6 +45,37 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
   mdBook, die CI prüft dabei jeden Verweis (`scripts/check-doku.py`), und
   jedes Release-Archiv enthält das Buch unter `doku/` (Einstieg
   `doku/index.html`, ohne Netzzugang lesbar).
+* **Farben der Oberfläche.** Blau, Grün und Orange der Trefferarten sind eine
+  Spur verschoben, die Auswahlzeile im dunklen Thema ist dunkler. Der Grund
+  steht unter *Behoben*.
+
+### Behoben
+
+* **⚠ Sicherheit — Rücktaste im Zoomfeld löschte das ausgewählte Rechteck.**
+  Das eintippbare Zahlenfeld des Zoomreglers galt der Tastatursperre nicht als
+  Textfeld: Rücktaste oder Entf beim Korrigieren der Zoomzahl löschten das
+  ausgewählte Schwärzungsrechteck, die Pfeiltasten verschoben es. Als
+  Textfeld zählt jetzt jedes fokussierte egui-Textfeld, nicht nur die drei
+  benannten. Auf der fokussierten Schiene des Reglers zoomt ein Pfeil nur
+  noch, statt zusätzlich das Rechteck zu schieben oder zu blättern.
+* **⚠ Sicherheit — der Export eines zweiten Dokuments überschrieb das
+  Audit-Log des ersten.** Beim Öffnen eines anderen Dokuments verwarf die
+  Oberfläche nur `-o`. `--audit-log` galt weiter, und weil der Export ohne
+  zweite Rückfrage schreibt, stand danach im Log des ersten Dokuments das
+  zweite. Ebenso blieben `--review-out` (Vorschlag mit dem Namen des ersten),
+  `--manual-regions` (Rechtecke des ersten im zweiten, bzw. bei einer
+  Review-Datei: jede Analyse des zweiten scheiterte), `--apply-review` und
+  das Passwort des ersten Dokuments (ein anderes verschlüsseltes Dokument
+  öffnete ohne Rückfrage). All das gilt jetzt nur dem Dokument, für das es
+  genannt wurde; beim Wechsel steht in der Statuszeile, was verworfen wurde.
+* **Kontrast.** Schrift in Trefferfarbe (eine schützende Zeile der
+  Negativliste) erreichte 3,78–4,12:1 statt 4,5:1, auf der dunklen
+  Auswahlzeile 2,61:1; die gedämpfte Schrift der ausgewählten Zeile im dunklen
+  Thema 3,68:1, die Trefferzeichen dort bis hinunter auf 2,30:1. Schrift
+  bekommt eigene Töne je Thema, und die Kontrastprüfung rechnet die Auswahl-
+  und die Hover-Fläche der Trefferliste jetzt mit.
+* Der Hinweis zur Polsterung sprach vom „schwarzen Balken … auf jeder Seite“;
+  die Polsterung gilt für jede Schwärzungsart und an jeder Kante.
 
 ---
 
