@@ -62,6 +62,16 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
   nachgebaut und ist ohne `/ToUnicode` eine Deckungslücke; Standard-14-Schriften,
   Programme mit Standardkodierung und eingebettete TrueType-Schriften bleiben
   unverändert. Beleg: `crates/redact-pdf/tests/zq_a_eingebaute_kodierung.rs`.
+* **Mit Chrome gedruckte PDFs werden nicht mehr als „nicht geprüft“
+  abgelehnt.** Chrome schreibt das Leerzeichen seiner Type3-Schriften als
+  Glyphprozedur, die nur `d1` enthält. Der Inhaltsparser (lopdf) liest als
+  Operator nur Buchstaben und machte aus `d1` den Operator `d` mit einem
+  übrig bleibenden Operanden; die Prozedur galt als nicht vollständig lesbar,
+  und jede solche Datei endete mit NICHT GEPRÜFT und Rückgabewert 3. `d0` und
+  `d1` werden jetzt als ganze Operatoren gelesen (außerhalb von
+  Zeichenketten, Namen und Kommentaren); eine wirklich abgeschnittene
+  Glyphprozedur bleibt gemeldet. Beleg:
+  `crates/redact-pdf/tests/zq_a_type3_glyphmetrik.rs`.
 
 ### Geändert
 

@@ -61,6 +61,7 @@ Prosa.
 | Textzustand außerhalb von `Tf`: die Schrift aus `/ExtGState /Font [ref size]` (`gs`) wird übergangen, dekodiert wird mit der Schrift des letzten `Tf` oder gar keiner | A | Prüfrunde „Inhalt“ | `crates/redact-pdf/tests/zq_a_extgstate_schrift.rs` |
 | Code-Zerlegung: eine Type0-CMap mit gemischten Codelängen (`<00>–<7F>` und `<8000>–<FFFF>`) wird stur zweibytig gelesen; eine vordefinierte CMap ohne Tabelle (`90ms-RKSJ-H`) still als zweibytig angenommen | A | Prüfrunde „Inhalt“ | `crates/redact-pdf/tests/zq_a_gemischter_codespace.rs` |
 | Eingebaute Kodierung des Fontprogramms: ohne genannte Basiskodierung gilt die von `/FontFile` (`dup N /name put`) bzw. des CFF, nicht WinAnsi | A | Prüfrunde „Inhalt“ | `crates/redact-pdf/tests/zq_a_eingebaute_kodierung.rs` |
+| Abgelehnte gewöhnliche Datei: eine Type3-Glyphprozedur nur aus `d0`/`d1` (Chromes Leerzeichen) galt als unlesbar, weil lopdf `d1` als `d` plus Operand liest — NICHT GEPRÜFT, Rückgabewert 3 bei jedem Chrome-PDF | A | Prüfrunde „Inhalt“ | `crates/redact-pdf/tests/zq_a_type3_glyphmetrik.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung
 prüft ihren positiven Zweig allein im Job „Build (windows-2025)“.
