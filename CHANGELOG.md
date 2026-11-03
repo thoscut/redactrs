@@ -34,7 +34,54 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ## Unveröffentlicht
 
+### Behoben
+
+* **⚠ Sicherheit: Ein geschütztes Leerzeichen hinter dem Schlüsselwort
+  verhinderte die Erkennung.** Zwischen „Steuer-ID:“, „BLZ:“, „Kto.-Nr.:“
+  oder „Telefon:“ und dem Wert galten nur Leerzeichen und Tabulator; mit
+  U+00A0 oder U+202F dahinter (wie es Textsatz hinter einen Doppelpunkt
+  setzt) griff der Kontext nicht, der Treffer fiel unter die Schwelle.
+  Gemessen: `Treffer gesamt: 0`, Rückgabewert 0, alle Werte in der Ausgabe.
+  Jetzt zählt jeder Leerraum (Leerzeichen und Tabulator wie bisher
+  beliebig viele, anderer bis zu vier Zeichen;
+  `redact-cli/tests/zq_c_erkennung_am_binary.rs`,
+  `redact-patterns/tests/zq_c_erkennung_schreibweisen.rs`).
+* **⚠ Sicherheit: Ligaturen als Codepunkt verbargen Schlüsselwort und
+  Buchungslisten-Eintrag.** Bildet `/ToUnicode` einen Code auf U+FB01 („ﬁ“)
+  ab, stand „Identiﬁkationsnummer“ bzw. „Max ﬁscher“ in der Zeile — die
+  Steuer-ID und der Eintrag „Max Fischer“ trafen nicht, Rückgabewert 0. Der
+  Extraktor zerlegt U+FB00–U+FB06 jetzt beim Zeilenbau in ihre Buchstaben,
+  jeden mit dem Kasten der ganzen Ligatur; die Schwärzung trifft damit den
+  ganzen Code. Die Buchungsliste behandelt Ligaturen auch in ihren Einträgen
+  und in jedem anderen Text als ihre Buchstaben.
+* Erkennung: „Konto-Nummer“/„Konto Nummer“ als Schlüsselwort von
+  `konto_nr`; Telefonnummern als „+49 (0)30 …“ und „(030) …“; IBAN klein
+  geschrieben (`de89 …`), mit Leerzeichen hinter dem Ländercode
+  (`DE 89 …`) oder direkt vor Buchstaben (`…0130 00EUR`); Gläubiger-ID
+  klein geschrieben. Vorher jeweils `Treffer gesamt: 0`.
+* **Ein ausdrücklich gesetztes `REDACT_RS_CONFIG` auf eine fehlende oder
+  unlesbare Datei ist ein Fehler** (Rückgabewert 2) statt still der
+  Vorgaben. Leer gesetzt (`REDACT_RS_CONFIG=`) heißt es „keine
+  Einstellungsdatei“. Auch an der Vorgabestelle wird ein Zugriffsfehler
+  gemeldet statt als „nicht vorhanden“ übergangen.
+
 ### Geändert
+
+* **`bic` braucht Kontext.** Acht oder elf Großbuchstaben mit einem
+  Ländercode an Stelle 5–6 bestanden die Prüfung und wurden mit 0.99
+  geschwärzt — gemessen an „PRIVATKONTO“, „KREDITKARTE“, „MUENCHEN“,
+  „DUESSELDORF“. Als Kontext zählt jetzt ein Schlüsselwort („BIC“, „SWIFT“,
+  „BIC/SWIFT“, „SWIFT-Code“) oder eine Ziffer bzw. die Endung `XXX` in der
+  BIC selbst; ohne beides 0.30, also unter der Schwelle. **Eine BIC nur aus
+  Buchstaben ohne Schlüsselwort davor (`DEUTDEFF`) wird nicht mehr
+  geschwärzt.**
+* **Eine bestandene Prüfsumme hebt einen Treffer ohne Kontext nicht mehr auf
+  0.99.** `confidence_without_context` war bei einem Muster mit Validator
+  bisher wirkungslos; das betrifft auch eigene Muster aus
+  `--patterns-config`, die beides setzen.
+* `REDACT_RS_CONFIG` auf einen nicht vorhandenen Pfad beendet den Lauf
+  (siehe *Behoben*). Wer die Variable bisher so benutzte, um die
+  Einstellungsdatei abzuschalten, setzt sie leer.
 
 * **Die README ist verschlankt.** Sie nennt nur noch Kurzbeschreibung,
   Installation, Schnellstart und die Verweise; alle Einzelheiten stehen mit

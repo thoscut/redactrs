@@ -38,7 +38,7 @@ fn run(args: &[&str]) -> Output {
     Command::new(bin())
         .args(args)
         // Damit eine Einstellungsdatei des Systems den Lauf nicht verändert.
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env_remove("REDACT_RS_PASSWORD")
         .output()
         .expect("Binary startbar")
@@ -116,7 +116,7 @@ fn the_environment_variable_works_just_as_well() {
             "--patterns",
             "iban_de",
         ])
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env("REDACT_RS_PASSWORD", ENCRYPTED_PDF_PASSWORD)
         .output()
         .expect("Binary startbar");

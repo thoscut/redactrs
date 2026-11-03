@@ -60,7 +60,7 @@ fn workdir(name: &str) -> PathBuf {
 }
 
 fn run(args: &[&str]) -> Output {
-    run_with_settings("/nicht/vorhanden.yaml", args)
+    run_with_settings("", args)
 }
 
 fn run_with_settings(settings: &str, args: &[&str]) -> Output {
@@ -821,7 +821,7 @@ fn run_within(seconds: u64, args: &[&str]) -> Option<Output> {
 
     let mut child = Command::new(bin())
         .args(args)
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env_remove("REDACT_RS_PASSWORD")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

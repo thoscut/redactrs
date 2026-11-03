@@ -33,7 +33,7 @@ fn run_in(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_redact-rs"))
         .args(args)
         .current_dir(dir)
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env_remove("REDACT_RS_PASSWORD")
         .stdin(Stdio::null())
         .output()

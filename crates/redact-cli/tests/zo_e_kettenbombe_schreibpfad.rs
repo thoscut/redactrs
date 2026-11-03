@@ -164,7 +164,7 @@ fn run_with_address_limit(kib: u64, args: &[&str]) -> Option<Output> {
     Command::new("bash")
         .arg("-c")
         .arg(line)
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env_remove("REDACT_RS_PASSWORD")
         .output()
         .ok()

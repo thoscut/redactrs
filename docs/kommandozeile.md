@@ -279,6 +279,10 @@ Was man nicht bei jedem Aufruf tippen will, steht in einer kleinen YAML-Datei:
 | Windows | `%APPDATA%\redact-rs\settings.yaml` |
 
 `REDACT_RS_CONFIG` zeigt auf eine andere Datei und schlägt alles davon.
+Fehlt die so genannte Datei oder ist sie nicht lesbar, endet der Lauf mit
+einer Meldung und Rückgabewert 2 — ein Tippfehler im Pfad ließe sonst jede
+Einstellung still wirkungslos. **Leer gesetzt** (`REDACT_RS_CONFIG=`) heißt
+die Variable „keine Einstellungsdatei“, auch nicht die an der Vorgabestelle.
 
 ```yaml
 # Alle Schlüssel sind freiwillig; was fehlt, behält seine Vorgabe.
@@ -307,7 +311,8 @@ Standardwert mehr anzeigen. Geprüft wird die Reihenfolge in
 
 Ein unbekannter Schlüssel (Tippfehler) und ein unbekanntes Thema beenden den
 Lauf mit einer Meldung. Eine Einstellung, die stillschweigend nicht wirkt, wäre
-das schlechtere Verhalten. Eine **fehlende** Datei ist dagegen kein Fehler.
+das schlechtere Verhalten. Eine **fehlende** Datei an der Vorgabestelle ist
+dagegen kein Fehler; eine, die `REDACT_RS_CONFIG` nennt, schon (siehe oben).
 
 **Gelesen wird die Datei nur von `redact-rs` (bzw. `redact-rs.exe`).** Dort
 wird sie beim Bauen von `redact_pipeline::Config` angewendet — und weil
@@ -334,21 +339,32 @@ danebensteht. Genau dieselbe Tabelle liefert `redact-rs --list-patterns`.
 
 | ID | Beschreibung | mit Kt. | ohne | Standard |
 |----|--------------|---------|------|----------|
-| `iban_de` | Deutsche IBAN (DE + 2 Prüfziffern + 18 Ziffern), mod-97-geprüft | 0.95 | – | **an** |
+| `iban_de` | Deutsche IBAN (DE + 2 Prüfziffern + 18 Ziffern; gruppiert, ungruppiert, auch „de89 …“ und „DE 89 …“), mod-97-geprüft | 0.95 | – | **an** |
 | `iban_intl` | Internationale IBAN (zu unspezifisch) | 0.90 | – | aus |
-| `glaeubiger_id` | SEPA-Gläubiger-ID (Creditor Identifier), mod-97-geprüft | 0.95 | – | **an** |
-| `konto_nr` | Kontonummer (6–10 Ziffern nach „Kto.“, „Kto.-Nr.“, „Konto Nr.“ o. ä.) | 0.85 | 0.30 | **an** |
+| `glaeubiger_id` | SEPA-Gläubiger-ID (Creditor Identifier, auch klein geschrieben, nicht gruppiert), mod-97-geprüft | 0.95 | – | **an** |
+| `konto_nr` | Kontonummer (6–10 Ziffern nach „Kto.“, „Kto.-Nr.“, „Konto Nr.“, „Konto-Nummer“ o. ä.) | 0.85 | 0.30 | **an** |
 | `blz` | Bankleitzahl (8 Ziffern, auch als „370 400 44“, nach „BLZ“/„Bankleitzahl“) | 0.80 | 0.25 | **an** |
-| `bic` | BIC/SWIFT mit Länderkennung-Prüfung | 0.80 | – | **an** |
+| `bic` | BIC/SWIFT mit Länderkennung-Prüfung; als Kontext zählt „BIC“/„SWIFT“ davor oder eine Ziffer bzw. „XXX“ in der BIC selbst | 0.80 | 0.30 | **an** |
 | `amount_eur` | Geldbetrag in Euro | 0.70 | – | aus |
 | `date_de` | Datum TT.MM.JJJJ | 0.60 | – | aus |
 | `credit_card` | Kreditkartennummer (13–19 Ziffern am Stück, 4-4-4-4[-3], 4-6-5 oder 4-6-4), Luhn-geprüft | 0.90 | – | **an** |
 | `steuer_id` | Steuerliche Identifikationsnummer (11 Ziffern, auch als „12 345 678 903“, nach „Steuer-ID“/„Identifikationsnummer“) | 0.90 | 0.25 | **an** |
 | `email` | E-Mail-Adresse | 0.90 | – | **an** |
-| `phone_de` | Deutsche Telefonnummer | 0.85 | 0.35 | **an** |
+| `phone_de` | Deutsche Telefonnummer (auch „+49 (0)30 …“ und „(030) …“; Kontext: Schlüsselwort oder Ländervorwahl) | 0.85 | 0.35 | **an** |
 
 Muster mit Prüfsumme (IBAN, Gläubiger-ID, BIC, Kreditkarte) verwerfen Treffer,
-die die Prüfung nicht bestehen — das drückt die Fehlalarmquote deutlich.
+die die Prüfung nicht bestehen — das drückt die Fehlalarmquote deutlich. Eine
+bestandene Prüfung hebt die Konfidenz auf 0.99, aber **nicht** bei einem
+Treffer ohne Kontext: der behält den Wert der Spalte „ohne“. Das gilt auch für
+eigene Muster aus `--patterns-config`, die Validator und
+`confidence_without_context` zugleich setzen.
+
+Zwischen Schlüsselwort und Wert darf jeder Leerraum stehen, auch ein
+geschütztes oder schmales Leerzeichen — „Steuer-ID:“ mit U+00A0 dahinter.
+Leerzeichen und Tabulator beliebig viele, anderer Leerraum bis zu vier
+Zeichen. Ligaturen im Text (U+FB00–U+FB06, etwa „ﬁ“ in
+„Identiﬁkationsnummer“) liest die Analyse als ihre Buchstaben, für Muster und
+Buchungsliste gleichermaßen.
 Ausgeschaltete Muster lassen sich mit `--patterns amount_eur` gezielt aktivieren.
 
 **Was sich an den Vorgaben geändert hat** — und warum:

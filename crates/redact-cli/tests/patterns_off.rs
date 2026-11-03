@@ -42,7 +42,7 @@ fn run_with(settings: Option<&Path>, args: &[&str]) -> Output {
     let mut command = Command::new(bin());
     command.args(args).env_remove("REDACT_RS_PASSWORD");
     match settings {
-        None => command.env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml"),
+        None => command.env("REDACT_RS_CONFIG", ""),
         Some(path) => command.env("REDACT_RS_CONFIG", path),
     };
     command.output().expect("Binary startbar")

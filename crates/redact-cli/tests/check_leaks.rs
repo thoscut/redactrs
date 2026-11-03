@@ -48,7 +48,7 @@ fn workdir(name: &str) -> PathBuf {
 fn run(args: &[&str]) -> Output {
     Command::new(bin())
         .args(args)
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env_remove("REDACT_RS_PASSWORD")
         .stdin(Stdio::null())
         .output()
@@ -60,7 +60,7 @@ fn run_with_stdin(args: &[&str], input: &str) -> Output {
     use std::io::Write;
     let mut child = Command::new(bin())
         .args(args)
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env_remove("REDACT_RS_PASSWORD")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

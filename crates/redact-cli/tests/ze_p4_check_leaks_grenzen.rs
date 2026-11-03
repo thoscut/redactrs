@@ -43,7 +43,7 @@ fn run_in(dir: &Path, args: &[&str], stdin: Option<&str>) -> Output {
     let mut cmd = Command::new(bin());
     cmd.args(args)
         .current_dir(dir)
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env_remove("REDACT_RS_PASSWORD");
     match stdin {
         None => {

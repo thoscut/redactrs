@@ -28,7 +28,7 @@ fn workdir(name: &str) -> PathBuf {
 fn run(args: &[&str]) -> Output {
     Command::new(bin())
         .args(args)
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .env_remove("REDACT_RS_PASSWORD")
         .output()
         .expect("Binary startbar")
@@ -149,7 +149,7 @@ fn nicht_utf8_namen_bekommen_je_eine_ausgabe() {
         let out = Command::new(bin())
             .arg("--write-demo")
             .arg(p.as_os_str())
-            .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+            .env("REDACT_RS_CONFIG", "")
             .output()
             .unwrap();
         assert!(
@@ -161,7 +161,7 @@ fn nicht_utf8_namen_bekommen_je_eine_ausgabe() {
     let out = Command::new(bin())
         .arg(dir.as_os_str())
         .arg("--force")
-        .env("REDACT_RS_CONFIG", "/nicht/vorhanden.yaml")
+        .env("REDACT_RS_CONFIG", "")
         .output()
         .unwrap();
     let outputs: Vec<_> = std::fs::read_dir(&dir)
