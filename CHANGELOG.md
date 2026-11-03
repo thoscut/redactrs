@@ -32,7 +32,19 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ---
 
-## Unveröffentlicht
+## 0.9.0 — 2026-11-03
+
+Bereich: `git log v0.8.0..v0.9.0`.
+
+Korrekturen aus dem Experten-Review (PR #18): mehrere Lecks über Schriften,
+Grafikzustand und Ligaturen, zwei Fehler der Oberfläche (die Rücktaste im
+Zoomfeld löschte die Auswahl, ein zweiter Export überschrieb das Audit-Log
+des ersten) und ein Datenverlust im Stapel.
+**Wer 0.8.0 einsetzt, aktualisiert** — mehrere Einträge unter *Sicherheit*
+ließen Geheimnisse in der Ausgabe stehen. Dazu die Doku als HTML-Buch in
+jedem Release-Archiv. Zwei Verhaltensänderungen stehen unter *Geändert*:
+**`bic` braucht jetzt Kontext**, und `REDACT_RS_CONFIG` auf einen fehlenden
+Pfad beendet den Lauf.
 
 ### Sicherheit
 
