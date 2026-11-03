@@ -571,13 +571,19 @@ jobs:
           # lief bisher in tote Verweise. CHANGELOG.md aus demselben Grund:
           # wer eine aeltere Fassung ersetzt, muss ohne Netzzugang sehen
           # koennen, welche Lecks dazwischen geschlossen wurden.
-          for f in README.md SECURITY.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE LICENSE; do
+          # CONTRIBUTING.md, ROADMAP.md und PRUEFLISTE.md, weil README,
+          # CHANGELOG und der Pruefverlauf darauf verweisen.
+          for f in README.md SECURITY.md CHANGELOG.md CONTRIBUTING.md ROADMAP.md \
+                   PRUEFLISTE.md LICENSE-MIT LICENSE-APACHE LICENSE; do
             if [ -f "$f" ]; then cp "$f" staging/; fi
           done
           # Die Doku unter docs/: die README verweist fuer alle Einzelheiten
           # dorthin, CHANGELOG.md auf den Pruefverlauf zu 0.7.0 - sonst
-          # liefen diese Verweise im Archiv ins Leere.
-          for f in docs/*.md; do
+          # liefen diese Verweise im Archiv ins Leere. Alle Dateien, nicht nur
+          # *.md: README und docs/vorher-nachher.md zeigen die Belege
+          # (*.png, *.gif, *.txt). docs/ ist flach und klein (rund 440 kB,
+          # davon rund 120 kB Bilder); nur regulaere Dateien der obersten Ebene.
+          for f in docs/*; do
             if [ -f "$f" ]; then mkdir -p staging/docs && cp "$f" staging/docs/; fi
           done
           # SIL Open Font License 1.1. Die egui-Standardschriften

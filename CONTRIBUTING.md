@@ -161,7 +161,7 @@ Startseite einen Stand, den der Code nicht mehr hat:
 
 ```bash
 ./scripts/make-preview.sh          # erzeugt docs/*.png, *.gif, *.txt neu
-python3 scripts/check-preview.py docs   # prüft sie (36 Prüfungen, ~0,8 s)
+python3 scripts/check-preview.py docs   # prüft sie (Zahl: docs/entwicklung.md)
 git status --short docs/           # hat sich etwas bewegt?
 ```
 

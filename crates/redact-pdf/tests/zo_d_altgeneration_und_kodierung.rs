@@ -13,12 +13,14 @@
 //!    „die Historie inkrementeller Updates“ lesen. Das gilt für Rohbytes und
 //!    Flate — und sonst? ([`zo_d1_altgeneration_kontrollen`] grün,
 //!    [`zo_d2_altgeneration_stroeme_stilles_leck`] und
-//!    [`zo_d3_altgeneration_zeichenketten_stilles_leck`] **ABSICHTLICH ROT**.)
+//!    [`zo_d3_altgeneration_zeichenketten_stilles_leck`] waren als Befund
+//!    rot; inzwischen grün und im Gate.)
 //! 3. **PDFDocEncoding.** Der Modulkopf liest Zeichenketten „als
 //!    PDFDocEncoding, das im hier interessanten Bereich mit Latin-1
 //!    zusammenfällt“. Im Bereich 0x80–0xA0 fällt es nicht zusammen: dort
 //!    stehen `€` (0xA0), `–` (0x85), `‘’“”` (0x8F–0x8E), `…` (0x83), `•` (0x80).
-//!    ([`zo_d4_pdfdoc_zeichen_stilles_leck`] **ABSICHTLICH ROT**.)
+//!    ([`zo_d4_pdfdoc_zeichen_stilles_leck`] war als Befund rot; inzwischen
+//!    grün und im Gate. Ebenso [`zo_d6_tiff_praediktor_stilles_leck`].)
 //!
 //! Was „stilles Leck des Orakels“ hier heißt: der Suchbegriff steht in der
 //! Datei, `findings` ist leer **und** `unchecked` ist leer — an der
@@ -430,7 +432,7 @@ fn zo_d1_altgeneration_kontrollen() {
     }
 }
 
-/// **ABSICHTLICH ROT — BEFUND ZO-D2.** Ein Strom der Altgeneration unter
+/// **Befund ZO-D2, geschlossen (bis dahin absichtlich rot).** Ein Strom der Altgeneration unter
 /// `/LZWDecode`, `/ASCII85Decode`, `/RunLengthDecode`, `/ASCIIHexDecode` mit
 /// Zeilenumbrüchen oder `/FlateDecode` mit PNG-Prädiktor: die Rohsicht
 /// (Sicht 2) versucht an jedem Block nur zlib und rohes Deflate; das
@@ -523,7 +525,7 @@ fn pdf_stream_copy(pdf: &[u8]) -> Vec<u8> {
     pdf[start..end].to_vec()
 }
 
-/// **ABSICHTLICH ROT — BEFUND ZO-D3.** Eine Zeichenkette der Altgeneration
+/// **Befund ZO-D3, geschlossen (bis dahin absichtlich rot).** Eine Zeichenkette der Altgeneration
 /// mit oktalen Escapes (`\104\105…`, auch UTF-16BE so maskiert, wie pdfTeX
 /// es schreibt), als Hex-String mit Leerraum
 /// (`<4445 3839 …>`) oder mit Zeilenfortsetzung (`\` + Zeilenumbruch):
@@ -585,7 +587,7 @@ fn zo_d3_altgeneration_zeichenketten_stilles_leck() {
 // 3. PDFDocEncoding und TIFF-Prädiktor in der aktuellen Revision
 // ---------------------------------------------------------------------------
 
-/// **ABSICHTLICH ROT — BEFUND ZO-D4.** Zeichenketten-Objekte in
+/// **Befund ZO-D4, geschlossen (bis dahin absichtlich rot).** Zeichenketten-Objekte in
 /// PDFDocEncoding (PDF 32000-1, Anhang D.2) mit einem Zeichen aus 0x80–0xA0:
 /// `€` ist 0xA0, `–` ist 0x85, `’` ist 0x90. `decode_pdf_string` liest jedes
 /// Byte als Latin-1 (0xA0 → U+00A0, 0x85 → U+0085); die Byte-Muster des
@@ -662,14 +664,19 @@ fn zo_d5_name_mit_hash_maskierung_wird_gefunden() {
     assert!(!c.findings[0].is_empty(), "{:#?}", c.unchecked);
 }
 
-/// **ABSICHTLICH ROT — BEFUND ZO-D6 (Randfall).** `/Predictor 2` (TIFF) ist
-/// ein gültiger Prädiktor für Flate und LZW (PDF 32000-1, 7.4.4.4); der
-/// Dekoder kennt nur 10–15 und lässt die Differenzbytes stehen. Der Text steht
+/// **Befund ZO-D6 (Randfall), geschlossen.** `/Predictor 2` (TIFF) ist ein
+/// gültiger Prädiktor für Flate und LZW (PDF 32000-1, 7.4.4.4). Der Dekoder
+/// kannte nur 10–15 und ließ die Differenzbytes stehen: der Text stand
 /// dekodierbar in der aktuellen Revision, kein Fund, keine Meldung. Randfall,
 /// weil kein bekannter Erzeuger Text so schreibt — er steht hier, weil die
 /// Runde nach jedem Filter fragt, unter dem das Orakel schweigt.
+///
+/// Im Register der zweite Teil von #82 (der erste, die Vorprüfung am
+/// ASCII85-Bild, steht in `PRUEFLISTE.md`). Der Test war `#[ignore]` mit dem
+/// Grund „absichtlich rot“ — und blieb es noch, als `filters.rs` den
+/// TIFF-Prädiktor längst anwendete (CHANGELOG 0.7.2) und er grün war. Ein
+/// Rückfall wäre damit unbemerkt geblieben; jetzt läuft er im Gate mit.
 #[test]
-#[ignore = "offen: Register #82 TIFF-Praediktor 2 — Spur-A-Runde 1, Beleg absichtlich rot"]
 fn zo_d6_tiff_praediktor_stilles_leck() {
     let content = content_with_secret();
     let mut objects = skeleton();
@@ -686,5 +693,14 @@ fn zo_d6_tiff_praediktor_stilles_leck() {
     assert!(
         !ist_still(&c),
         "stilles Leck des Orakels: TIFF-Prädiktor 2 — kein Fund, keine NICHT-GEPRÜFT-Zeile"
+    );
+    // Nicht nur „nicht still“: seit der Dekoder den Prädiktor anwendet, ist der
+    // Text ein **Fund**. Ohne diese Zeile bliebe der Test grün, wenn
+    // `undo_tiff` wieder fehlte — dann meldet nur noch Sicht 7 die Seite als
+    // nicht lesbar (nachgemessen mit zurückgenommenem `undo_tiff`).
+    assert!(
+        !c.findings[0].is_empty(),
+        "TIFF-Prädiktor 2 wird nicht mehr angewandt — der Text ist kein Fund: {:#?}",
+        c.unchecked
     );
 }

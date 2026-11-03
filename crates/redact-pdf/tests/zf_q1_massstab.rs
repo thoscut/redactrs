@@ -11,7 +11,8 @@
 //! Verweis, den noch etwas anderes hält, fällt nur der Schlüssel: der Bericht
 //! meldet die Entfernung, `--check-leaks` findet den Text.
 //!
-//! `#[ignore]`, weil rot: der Beleg.
+//! Die beiden Prüfungen waren zunächst `#[ignore]` und rot; seit der Korrektur
+//! laufen sie im Gate. Ignoriert ist nur noch die Messung `mess_q1_2_…`.
 
 mod common;
 

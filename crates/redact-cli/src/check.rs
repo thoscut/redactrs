@@ -461,7 +461,7 @@ impl<W: Write> Write for PipeSafe<W> {
 /// Fix-Runde 6 (Meldung von Agent A): der Schalter hilft auch dort nicht, wo
 /// die Filterkette an einem **unbekannten Filternamen** stehen blieb. Wer die
 /// Ursachen aufzählt, zählt sie vollständig auf — sonst schickt der Satz an
-/// zwei von drei Stellen an den falschen Schalter. Alle fünf Gründe stehen in
+/// zwei von drei Stellen an den falschen Schalter. Alle sieben Gründe stehen in
 /// `SECURITY.md`.
 ///
 /// Fix-Runde 7 (Befund R2-B): die Zahl ist die der **Stellen**

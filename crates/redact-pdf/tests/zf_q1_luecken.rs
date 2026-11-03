@@ -18,8 +18,10 @@
 //!    dieser Runde), erkennt es als Nicht-Träger, lässt es stehen — und der
 //!    Verweis hält es über `prune_unreachable` hinweg am Leben, samt `/Alt`.
 //!
-//! Alle vier enden mit Rückgabewert 0 und leerem bzw. schweigendem Bericht.
-//! Deshalb sind diese Tests `#[ignore]` und rot; sie sind der Beleg.
+//! Alle vier endeten mit Rückgabewert 0 und leerem bzw. schweigendem Bericht.
+//! Die Tests waren deshalb zunächst `#[ignore]` und rot. Seit der Korrektur
+//! laufen sie im Gate und verlangen, dass jeder der vier Klartexte fällt
+//! (`muss_fallen`); die Namen sagen das Verhalten, das gilt.
 
 mod common;
 
@@ -50,7 +52,7 @@ fn muss_fallen(bytes: &[u8], was: &str) {
 
 /// Befund Q1-1a: `/Movie /F`.
 #[test]
-fn der_dateiname_einer_movie_annotation_bleibt() {
+fn der_dateiname_einer_movie_annotation_faellt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let a = d.add(Object::Dictionary(dictionary! {
         "Type" => "Annot",
@@ -67,7 +69,7 @@ fn der_dateiname_einer_movie_annotation_bleibt() {
 
 /// Befund Q1-1b: `/Measure /X /U`.
 #[test]
-fn die_einheitenbeschriftung_einer_vermessung_bleibt() {
+fn die_einheitenbeschriftung_einer_vermessung_faellt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let a = d.add(Object::Dictionary(dictionary! {
         "Type" => "Annot",
@@ -89,7 +91,7 @@ fn die_einheitenbeschriftung_einer_vermessung_bleibt() {
 
 /// Befund Q1-1c: eine eingebettete Datei unter `/RichMediaContent /Assets`.
 #[test]
-fn eine_eingebettete_datei_an_einer_richmedia_annotation_bleibt() {
+fn eine_eingebettete_datei_an_einer_richmedia_annotation_faellt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let strom = d.add(Object::Stream(Stream::new(
         dictionary! { "Type" => "EmbeddedFile" },
@@ -120,7 +122,7 @@ fn eine_eingebettete_datei_an_einer_richmedia_annotation_bleibt() {
 /// Befund Q1-1d: `/IRT` hält ein Struktur-Element samt `/Alt` am Leben,
 /// obwohl `/StructTreeRoot` fällt — der `/K`-Baum „verwaist“ eben nicht.
 #[test]
-fn ein_strukturelement_hinter_irt_behaelt_seinen_alt_text() {
+fn der_alt_text_eines_strukturelements_hinter_irt_faellt() {
     let mut d: Doc = page(&["Rechnung 4711"]);
     let elem = d.add(Object::Dictionary(dictionary! {
         "Type" => "StructElem",

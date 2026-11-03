@@ -39,12 +39,42 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 * **Die README ist verschlankt.** Sie nennt nur noch Kurzbeschreibung,
   Installation, Schnellstart und die Verweise; alle Einzelheiten stehen mit
   unverändertem Wortlaut unter `docs/` (Übersicht in der README unter
-  „Dokumentation“). Jedes Release-Archiv enthält dafür jetzt alle `docs/*.md`,
-  damit die Verweise auch ohne Netzzugang tragen.
+  „Dokumentation“).
+* **Das Release-Archiv ist vollständiger.** Es enthält jetzt das ganze
+  Verzeichnis `docs/` — auch die Belege `*.png`, `*.gif` und `*.txt`, auf die
+  README und `docs/vorher-nachher.md` verweisen — sowie `CONTRIBUTING.md`,
+  `ROADMAP.md` und `PRUEFLISTE.md`. Bis 0.8.0 lagen von `docs/` nur die
+  `*.md` bei, und diese Verweise zeigten im Archiv ins Leere.
 * **Die Doku gibt es als HTML-Buch.** `scripts/build-doku.sh` baut sie mit
   mdBook, die CI prüft dabei jeden Verweis (`scripts/check-doku.py`), und
   jedes Release-Archiv enthält das Buch unter `doku/` (Einstieg
   `doku/index.html`, ohne Netzzugang lesbar).
+* **`redact-rs --help` zeigt keinen Entwicklertext mehr.** Bei `--gui`,
+  `--replace-with` und `--padding` standen Begründungen für Entwickler und
+  Rustdoc-Verweise (`[redact_core::DEFAULT_REPLACEMENT]`) im Hilfetext. Die
+  Liste der Einstellungen im Hilfetext nennt jetzt auch die Ansicht
+  (`layout`), und der Abschnitt zu Rückgabewert 3 verweist für alle sieben
+  Gründe von „NICHT GEPRÜFT“ auf die Doku.
+
+### Doku
+
+* Korrigiert, was der Code nicht mehr hielt: `ROADMAP.md` nannte 0.7.2 als
+  veröffentlicht und 0.8.0 als „in Arbeit“; `docs/kommandozeile.md` sprach
+  von fünf statt sieben Gründen für `NICHT GEPRÜFT`, ließ `layout` bei den
+  Einstellungen aus, nannte für macOS kein `$XDG_CONFIG_HOME` und behauptete
+  eine mit `--list-patterns` wörtlich gleiche Mustertabelle; die
+  Rückgabewerte haben einen eigenen Anker. `docs/oberflaeche.md`: Esc, Entf,
+  Bild auf/ab, Pos1 und Ende wirken auch mit Strg; ohne Auswahl blättern nur
+  ← und →; die Trefferliste steht rechts. Das Audit-Log-Beispiel in
+  `docs/review-und-audit.md` stammt jetzt aus einem echten Lauf mit 0.8.0
+  (vorher Fassung 0.3.0 mit Feldern späterer Fassungen). `CONTRIBUTING.md`
+  nannte „36 Prüfungen“ für `check-preview.py` (es sind 54) und verweist
+  jetzt auf `docs/entwicklung.md`.
+* Zwei Tests liefen nicht im Gate, obwohl ihr Befund längst geschlossen war
+  (`zo_d6_tiff_praediktor_stilles_leck`, TIFF-Prädiktor 2 im Orakel, und
+  `gedrehtes_bild_behaelt_seinen_ersatztext_an_der_leeren_huellenecke`):
+  `#[ignore]` mit dem Grund „offener Befund“ bzw. „absichtlich rot“, aber
+  grün. Ein Rückfall wäre unbemerkt geblieben; beide laufen jetzt mit.
 
 ---
 

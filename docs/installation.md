@@ -27,9 +27,12 @@ Trennung nicht; dort startet `redact-rs` ohne Argumente die Oberfläche.
 Dazu liegt in **jedem** der drei Archive (nachgesehen in
 `.github/workflows/release.yml`):
 
-* die `README.md`, die Doku unter `docs/` (alle `*.md`) und
-  [`SECURITY.md`](../SECURITY.md) — sonst liefen die Verweise in beiden
-  Richtungen ins Leere,
+* die `README.md`, das ganze Verzeichnis `docs/` (alle `*.md` samt den
+  Belegen `*.png`, `*.gif`, `*.txt`), [`SECURITY.md`](../SECURITY.md),
+  `CONTRIBUTING.md`, `ROADMAP.md` und `PRUEFLISTE.md` — sonst liefen die
+  Verweise in beiden Richtungen ins Leere. Bis einschließlich 0.8.0 lagen von
+  `docs/` nur die `*.md` bei; die Bilder der README und die drei
+  Projektdateien fehlten, und ihre Verweise zeigten im Archiv ins Leere,
 * dieselbe Doku als **HTML-Buch** im Verzeichnis `doku/` — Einstieg
   `doku/index.html`, mit Suche und ohne Netzzugang lesbar (gebaut mit
   mdBook, siehe [Entwicklung](entwicklung.md#die-doku-als-buch-bauen)),
@@ -90,7 +93,7 @@ ersten beiden ausgeliefert werden:
 |---|---|---|
 | `redact-rs` | `crates/redact-cli/src/main.rs` | die Konsolenfassung, im Release enthalten |
 | `redact-rs-gui` | `crates/redact-cli/src/bin/redact-rs-gui.rs` | die Fensterfassung, im Windows-Archiv enthalten |
-| `redact-gui` | `crates/redact-gui/src/main.rs` | Nebenprodukt des GUI-Crates, **nicht** im Release und nirgends dokumentiert außer hier. Es öffnet dasselbe Fenster wie `redact-rs-gui`, kennt aber `-h`/`-V` und weist unbekannte Optionen zurück (`redact-rs-gui` übergeht sie, weil es unter Windows ohne Konsole nichts melden könnte). Beim Entwickeln praktisch, weil es ohne `redact-cli` gebaut wird. Für den Einsatz ist `redact-rs` bzw. `redact-rs-gui` gemeint. |
+| `redact-gui` | `crates/redact-gui/src/main.rs` | Nebenprodukt des GUI-Crates, **nicht** im Release; außer hier nur in [Kommandozeile](kommandozeile.md#einstellungsdatei) als Entwickler-Binary erwähnt. Es öffnet dasselbe Fenster wie `redact-rs-gui`, kennt aber `-h`/`-V` und weist unbekannte Optionen zurück (`redact-rs-gui` übergeht sie, weil es unter Windows ohne Konsole nichts melden könnte). Beim Entwickeln praktisch, weil es ohne `redact-cli` gebaut wird. Für den Einsatz ist `redact-rs` bzw. `redact-rs-gui` gemeint. |
 
 Voraussetzungen zum Bauen der GUI unter Linux:
 

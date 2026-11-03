@@ -92,6 +92,7 @@ Schalter, der eine Prüfung aufhebt: siehe [Review-Workflow](review-und-audit.md
 `--allow-undecodable-images` ist der einzige Schalter, der die Sicherheit
 *senkt*: siehe [Bilder werden wirklich geschwärzt](bilder.md#bilder).
 
+<a id="rueckgabewerte"></a>
 Rückgabewerte:
 
 | Wert | Bedeutung |
@@ -99,7 +100,7 @@ Rückgabewerte:
 | `0` | Erfolg — und nichts blieb ungeprüft |
 | `1` | Verarbeitungsfehler. Im Stapelbetrieb: mindestens eine Datei ist gescheitert |
 | `2` | Bedienfehler (Argumente, Einstellungsdatei, Prüfsummen, `--max-candidates`) |
-| `3` | **Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.** Beim Schwärzen: es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. Bei [`--check-leaks`](pruefen.md#pruefen): mindestens einer der Suchbegriffe steht noch in der Datei — **oder** eine Stelle konnte nicht geprüft werden (fünf Gründe, siehe [`SECURITY.md`](../SECURITY.md)), auch ohne einen einzigen Fund. |
+| `3` | **Der Lauf ist gelungen, das Ergebnis ist es nicht — sieh hin.** Beim Schwärzen: es ist eine Ausgabedatei entstanden, aber mindestens eine Stelle des Dokuments **konnte** die Analyse nicht durchsuchen — ein XObject ohne bekanntes `/Subtype` etwa, oder ein Bild, das sich nicht dekodieren lässt. Was dort steht, kann nicht geschwärzt worden sein. Der Lauf sagt auf stderr, welche Stellen das waren: sie stehen dort mit `NICHT GEPRÜFT` statt `Warnung`, und am Ende steht ihre Zahl. Bei [`--check-leaks`](pruefen.md#pruefen): mindestens einer der Suchbegriffe steht noch in der Datei — **oder** eine Stelle konnte nicht geprüft werden (sieben Gründe, siehe [`SECURITY.md`](../SECURITY.md)), auch ohne einen einzigen Fund. |
 
 `3` ist kein Fehler und kein „alles gut“ — es ist die Aufforderung, genau diese
 Stellen anzusehen. In einem Skript gehört er behandelt wie ein Fehler, solange
@@ -210,7 +211,7 @@ hielte eine riesige Datei den Stapel auf, ohne dass ihr Name irgendwo stünde:
 auch für die Dateien, deren Text niemand gelesen hatte: wer zwanzig Auszüge
 laufen ließ, bekam „20 verarbeitet, 0 fehlgeschlagen“ und Rückgabewert 0,
 obwohl in einer davon eine Kontonummer unberührt stand. Die mittlere Zahl steht
-deshalb für sich — es sind die Dateien mit [Rückgabewert 3](#kommandozeile), und
+deshalb für sich — es sind die Dateien mit [Rückgabewert 3](#rueckgabewerte), und
 keine Datei zählt in zweien mit.
 
 So sieht ein Stapel aus, in dem eine Datei nur zum Teil geprüft werden konnte
@@ -275,7 +276,7 @@ Was man nicht bei jedem Aufruf tippen will, steht in einer kleinen YAML-Datei:
 | System | Pfad |
 |---|---|
 | Linux, BSD | `$XDG_CONFIG_HOME/redact-rs/settings.yaml`, sonst `~/.config/redact-rs/settings.yaml` |
-| macOS | `~/.config/redact-rs/settings.yaml` |
+| macOS | wie Linux: `$XDG_CONFIG_HOME/redact-rs/settings.yaml`, sonst `~/.config/redact-rs/settings.yaml` (nicht `~/Library/…`) |
 | Windows | `%APPDATA%\redact-rs\settings.yaml` |
 
 `REDACT_RS_CONFIG` zeigt auf eine andere Datei und schlägt alles davon.
@@ -305,14 +306,14 @@ nicht angegeben wurde, überschreibt die Datei nicht — das ist der Grund, waru
 Standardwert mehr anzeigen. Geprüft wird die Reihenfolge in
 `crates/redact-cli/tests/settings.rs`.
 
-Ein unbekannter Schlüssel (Tippfehler) und ein unbekanntes Thema beenden den
-Lauf mit einer Meldung. Eine Einstellung, die stillschweigend nicht wirkt, wäre
-das schlechtere Verhalten. Eine **fehlende** Datei ist dagegen kein Fehler.
+Ein unbekannter Schlüssel (Tippfehler), ein unbekanntes Thema und eine
+unbekannte Ansicht beenden den Lauf mit einer Meldung. Eine Einstellung, die
+stillschweigend nicht wirkt, wäre das schlechtere Verhalten. Eine **fehlende** Datei ist dagegen kein Fehler.
 
 **Gelesen wird die Datei nur von `redact-rs` (bzw. `redact-rs.exe`).** Dort
 wird sie beim Bauen von `redact_pipeline::Config` angewendet — und weil
 `redact-rs --gui` dieselbe `Config` an die Oberfläche weiterreicht, gelten
-Namenszusatz, Muster, Schwelle, Polsterung und Thema auch dort.
+Namenszusatz, Muster, Schwelle, Polsterung, Thema und Ansicht auch dort.
 
 Die Fensterfassung zum Doppelklicken (`redact-rs-gui.exe`) liest sie
 **nicht**: sie baut ein `Config::default()` und ruft `Settings::load()` nie
@@ -330,7 +331,8 @@ Die Spalten „mit Kt.“ und „ohne“ sind die Konfidenz **mit** bzw. **ohne*
 passendes Schlüsselwort daneben. Alles unterhalb von `--min-confidence`
 (Vorgabe **0.50**) wird verworfen — ein Muster, dessen Wert in der Spalte
 „ohne“ darunter liegt, findet also nichts, solange kein Schlüsselwort
-danebensteht. Genau dieselbe Tabelle liefert `redact-rs --list-patterns`.
+danebensteht. Dieselben IDs und Werte (mit kürzeren Beschreibungen) liefert
+`redact-rs --list-patterns`.
 
 | ID | Beschreibung | mit Kt. | ohne | Standard |
 |----|--------------|---------|------|----------|
@@ -483,7 +485,7 @@ Was **nicht** geschieht: der Rückgabewert bleibt `0`. Eine abgeschaltete
 Erkennung ist eine Anweisung des Aufrufenden und kein Befund an der Datei — die
 Analyse hat das Dokument vollständig gelesen und auf Geheiß nach weniger
 gesucht. Rückgabewert `3` ist der Frage „hat das Werkzeug alles *gesehen*?“
-vorbehalten (siehe [Kommandozeile](#kommandozeile)); spränge er auch bei jedem
+vorbehalten (siehe [Rückgabewerte](#rueckgabewerte)); spränge er auch bei jedem
 `--no-patterns` an, wäre er für die Fälle wertlos, für die es ihn gibt. Die
 Begründung im Einzelnen steht in `crates/redact-pipeline/src/coverage.rs`.
 

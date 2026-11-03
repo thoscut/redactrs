@@ -108,10 +108,10 @@ Vorschau ein und zeigt wenigstens die Lage des Textes.
 
 ## Tastaturbedienung
 
-Die Tabelle nennt die Tasten so, wie sie gedrückt werden: steht kein Strg
-davor, gilt der Eintrag für die Taste **allein**. Was dieselbe Taste mit
-gehaltener Strg tut (Strg+Bild ab, Strg+Entf, Strg+Esc …), ist hier nicht
-zugesagt.
+Die Tabelle nennt die Tasten so, wie sie gedrückt werden. Esc, Entf,
+Bild auf/ab, Pos1 und Ende wirken mit gehaltener Strg genauso wie allein
+(geprüft in `crates/redact-gui/src/zb_tests.rs`); bei den Pfeiltasten macht
+Strg einen Unterschied, siehe unten.
 
 | Taste | Wirkung |
 |---|---|
@@ -120,7 +120,7 @@ zugesagt.
 | Strg+R | Rechteck in der Mitte der gezeigten Seite anlegen und auswählen (wie der Knopf „🔲 Rechteck“) |
 | Strg+Z / Strg+Y | Rückgängig / Wiederholen |
 | Bild auf/ab, Pos1/Ende | blättern |
-| Pfeiltasten | mit Auswahl: das Rechteck um 1 pt verschieben (mit Umschalt 10 pt) — ohne Auswahl: blättern |
+| Pfeiltasten | mit Auswahl: das Rechteck um 1 pt verschieben (mit Umschalt 10 pt) — ohne Auswahl: ← / → blättern (↑ / ↓ blättern nicht) |
 | Strg+Pfeil | mit Auswahl: die Größe um 1 pt ändern (mit Umschalt 10 pt); die linke untere Ecke bleibt stehen. Ohne Auswahl: nichts — dafür genügt der Pfeil allein |
 | Entf | ausgewähltes Rechteck löschen |
 | Esc | Auswahl aufheben |
@@ -171,7 +171,8 @@ und nennt **bis zu drei davon** beim Namen samt Grund; der Rest wird gezählt
 
 ## Trefferliste
 
-Neben der Miniaturspalte steht die Trefferliste. Ihre Überschrift nennt
+Rechts neben der Seite steht die Trefferliste (in der Ansicht „Fokus“ als
+Karte über der Seite). Ihre Überschrift nennt
 **beide** Zahlen — gefundene Treffer und die, die tatsächlich geschwärzt werden;
 nur die zweite sagt etwas über das Ergebnis. Treffer, die die Konfliktauflösung
 verwirft (blockiert, doppelt), stehen ausgegraut und durchgestrichen statt

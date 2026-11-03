@@ -31,7 +31,7 @@
 //! | System        | Pfad                                        |
 //! |---------------|---------------------------------------------|
 //! | Linux, BSD    | `$XDG_CONFIG_HOME/redact-rs/settings.yaml` bzw. `~/.config/redact-rs/settings.yaml` |
-//! | macOS         | `~/.config/redact-rs/settings.yaml`         |
+//! | macOS         | wie Linux (`$XDG_CONFIG_HOME`, sonst `~/.config`) |
 //! | Windows       | `%APPDATA%\redact-rs\settings.yaml`         |
 //!
 //! `REDACT_RS_CONFIG` zeigt auf eine andere Datei und schlägt alles davon —
