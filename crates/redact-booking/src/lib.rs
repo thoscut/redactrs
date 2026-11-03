@@ -30,9 +30,11 @@
 //!
 //! ## Einschränkung: `is_regex`
 //!
-//! Dieses Crate ist bewusst **abhängigkeitsfrei** (keine Regex-Engine) — das
-//! hält die sicherheitskritische Buchungslisten-Logik klein und auditierbar.
-//! Deshalb gilt:
+//! Dieses Crate hat bewusst **keine Regex-Engine** — das hält die
+//! sicherheitskritische Buchungslisten-Logik klein und auditierbar. Gesucht
+//! wird mit einem einzigen Aho-Corasick-Automaten über alle Einträge
+//! (`aho-corasick`, reine Literalsuche), damit eine lange Liste jede Zeile nur
+//! einmal liest. Deshalb gilt:
 //!
 //! * `is_regex = true` mit einem Muster **ohne** Regex-Metazeichen
 //!   (`\ . * + ? ( ) [ ] { } | ^ $`) wird wie ein normales Literal behandelt.

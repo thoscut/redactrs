@@ -10,5 +10,6 @@ publish.workspace = true
 
 [dependencies]
 redact-core.workspace = true
+aho-corasick.workspace = true
 csv.workspace = true
 serde.workspace = true
