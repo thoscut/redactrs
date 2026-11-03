@@ -62,6 +62,14 @@ Die CI führt dieselben aus, nur zusätzlich mit `--locked` (Job `test` in
 Ausprobieren nicht sofort gegen die Wand läuft. Wer `Cargo.lock` anfasst,
 nimmt `--locked` dazu.
 
+`cargo update` löst MSRV-bewusst auf: `.cargo/config.toml` setzt
+`[resolver] incompatible-rust-versions = "fallback"`, damit ein Update keine
+Fassung zieht, die mehr verlangt als die `rust-version` aus `Cargo.toml`
+(ohne die Zeile zog ein volles Update serde-saphyr 1.3.0 und uuid 1.29.0,
+beide 1.89 — der Job „msrv“ wäre rot). Eine zurückgezogene Fassung
+(`cargo deny` meldet `error[yanked]`) wird gezielt angehoben,
+`cargo update -p <crate>`, nicht der ganze Baum.
+
 Dazu kommt in der CI:
 
 ```bash

@@ -2783,7 +2783,8 @@ pub fn write_file(path: &Path, bytes: &[u8], options: &WriteOptions) -> Result<(
         use std::os::unix::fs::OpenOptionsExt;
         // Review-Datei und Audit-Log enthalten die gefundenen Geheimnisse im
         // Klartext. Sie dürfen nie mit den Vorgaberechten entstehen.
-        open.mode(if options.private { 0o600 } else { 0o644 });
+        let base = if options.private { 0o600 } else { 0o644 };
+        open.mode(replacement_mode(&full, base));
     }
 
     let write = (|| -> std::io::Result<()> {
@@ -2799,6 +2800,22 @@ pub fn write_file(path: &Path, bytes: &[u8], options: &WriteOptions) -> Result<(
         return Err(RedactError::Io(e));
     }
     Ok(())
+}
+
+/// Die Rechte der neuen Datei: die Vorgabe, aber nie mehr als die einer
+/// Datei, die sie (mit `force`) ersetzt.
+///
+/// `rename` nimmt die alte Datei samt ihrem Modus weg. Vorher wurde so aus
+/// einem mit `chmod 600` geschützten Ergebnis beim nächsten Lauf
+/// stillschweigend wieder ein für alle lesbares 0644. Ein 0666 der alten
+/// Datei erweitert dagegen nichts — die Vorgabe ist die Obergrenze.
+#[cfg(unix)]
+fn replacement_mode(full: &Path, base: u32) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::symlink_metadata(full) {
+        Ok(meta) if meta.file_type().is_file() => base & meta.permissions().mode(),
+        _ => base,
+    }
 }
 
 fn next_temp_counter() -> u64 {

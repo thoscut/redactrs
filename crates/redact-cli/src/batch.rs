@@ -38,6 +38,7 @@
 //! [`redact_core::safe_path`]. Für `--json` braucht es das nicht: `serde_json`
 //! schreibt Steuerzeichen selbst als ``.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -197,6 +198,48 @@ fn reject_shared_targets(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> 
     Ok(())
 }
 
+/// Ein Ergebnis, das auf eine **andere** Eingabe desselben Stapels fiele.
+///
+/// `redact-rs x.pdf x_geschwaerzt.pdf --force`, wobei `x_geschwaerzt.pdf` ein
+/// eigenes Original ist: die erste Datei schrieb ihr Ergebnis auf die zweite,
+/// bevor die an der Reihe war. Das Original war weg, verarbeitet wurde danach
+/// das frische Ergebnis, die Zusammenfassung zählte zwei Erfolge und der
+/// Rückgabewert war 0. Der Schutz im Schreibpfad (`WriteOptions::protect`)
+/// kennt nur die **eigene** Eingabe des Laufs; die übrigen Eingaben des
+/// Stapels kennt nur der Stapel. Deshalb wird es hier geprüft, vor der ersten
+/// Datei, und der ganze Stapel abgelehnt — auch mit `--force`.
+///
+/// Verglichen wird über [`redact_pdf::document::same_file`] (Dateiidentität,
+/// ersatzweise kanonisierter Pfad), damit `./b.pdf`, `dir/../b.pdf` und ein
+/// Hardlink nicht daran vorbeikommen.
+fn reject_output_on_other_input(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> Result<()> {
+    for input in inputs {
+        let config = cli.config_for(settings, input);
+        // Was der Lauf dieser Datei schreibt: im Review-Modus nur die
+        // Review-Datei (`--review-out` ist im Stapel verboten), sonst die PDF.
+        let output = if config.review {
+            redact_core::sibling_path(&config.input, redact_core::REVIEW_SUFFIX, "json")
+        } else {
+            redact_pipeline::output_path(&config)
+        };
+        let victim = inputs.iter().find(|other| {
+            !redact_pdf::document::same_file(other, input)
+                && redact_pdf::document::same_file(&output, other)
+        });
+        if let Some(victim) = victim {
+            return Err(RedactError::Config(format!(
+                "das Ergebnis von {} wäre {} — und das ist selbst eine Eingabe \
+                 dieses Stapels. Sie würde überschrieben, bevor sie an der Reihe \
+                 ist; das lässt auch --force nicht zu. Bitte die Datei umbenennen oder \
+                 einzeln verarbeiten.",
+                safe_path(input),
+                safe_path(victim)
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Arbeitet den Stapel ab.
 ///
 /// Der Rückgabewert ist die Antwort auf „ist alles gut gegangen?“, und
@@ -206,6 +249,7 @@ fn reject_shared_targets(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> 
 pub fn run(cli: &Cli, settings: &Settings, inputs: &[PathBuf]) -> Result<ExitCode> {
     reject_single_target_switches(cli)?;
     reject_shared_targets(cli, settings, inputs)?;
+    reject_output_on_other_input(cli, settings, inputs)?;
 
     let mut entries = Vec::with_capacity(inputs.len());
     let total = inputs.len();
@@ -278,8 +322,9 @@ fn exit_code(entries: &[Entry]) -> ExitCode {
 
 /// Die Zusammenfassung am Ende.
 fn report(cli: &Cli, entries: &[Entry]) -> Result<()> {
+    let mut out = crate::stdout();
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(entries)?);
+        writeln!(out, "{}", serde_json::to_string_pretty(entries)?)?;
         return Ok(());
     }
     if cli.quiet {
@@ -291,7 +336,8 @@ fn report(cli: &Cli, entries: &[Entry]) -> Result<()> {
             continue;
         };
         let target = outcome.output.as_deref().or(outcome.review_out.as_deref());
-        println!(
+        writeln!(
+            out,
             "{} → {} ({} Schwärzung(en)){}",
             safe_text(&entry.input),
             target.map(safe_text).unwrap_or_else(|| "—".to_string()),
@@ -301,7 +347,7 @@ fn report(cli: &Cli, entries: &[Entry]) -> Result<()> {
             } else {
                 ""
             }
-        );
+        )?;
     }
 
     // Drei Zahlen, drei verschiedene Aussagen — und keine Datei zählt in
@@ -312,20 +358,22 @@ fn report(cli: &Cli, entries: &[Entry]) -> Result<()> {
     // Zahl jetzt für sich.
     let failed = entries.iter().filter(|e| e.failed()).count();
     let incomplete = entries.iter().filter(|e| e.incomplete).count();
-    println!(
+    writeln!(
+        out,
         "\n{} Datei(en): {} vollständig geprüft, {incomplete} verarbeitet (aber nicht \
          vollständig geprüft), {failed} fehlgeschlagen.",
         entries.len(),
         entries.len() - failed - incomplete
-    );
+    )?;
     if incomplete > 0 {
-        println!(
+        writeln!(
+            out,
             "\nBei {incomplete} Datei(en) blieb ein Teil des Dokuments ungelesen — was \
              dort steht, kann nicht geschwärzt worden sein. Die Stellen stehen oben \
              auf stderr; bitte diese Ergebnisse von Hand prüfen. \
              (Rückgabewert {}.)",
             crate::EXIT_INCOMPLETE
-        );
+        )?;
     }
     Ok(())
 }

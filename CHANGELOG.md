@@ -34,7 +34,39 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ## Unveröffentlicht
 
+### Behoben
+
+* **⚠ Datenverlust: im Stapel überschrieb ein Ergebnis eine andere
+  Eingabe.** `redact-rs x.pdf x_geschwaerzt.pdf --force`, wobei
+  `x_geschwaerzt.pdf` ein eigenes Original ist: die erste Datei schrieb ihr
+  Ergebnis auf die zweite, bevor die an der Reihe war, die Zusammenfassung
+  zählte zwei Erfolge, Rückgabewert 0 — das Original war weg. Jetzt wird ein
+  solcher Stapel vor der ersten Datei mit Rückgabewert 2 abgelehnt, auch mit
+  `--force`; verglichen wird über die Dateiidentität, `./` oder `dir/..`
+  kommen nicht vorbei.
+* **Kein Absturz mehr bei einem Schreibfehler auf stdout.** `redact-rs
+  --list-patterns | head -1` und `redact-rs a.pdf > /dev/full` endeten mit
+  einer Panik und Rückgabewert 101. Eine geschlossene Pipe beendet die Ausgabe
+  jetzt still, jeder andere Schreibfehler ist ein IO-Fehler mit Rückgabewert 1
+  — wie bei `--check-leaks` schon bisher.
+* **Die CI ist wieder grün.** `async-executor` 1.14.0 und `clipboard-win` 5.4.1
+  wurden auf crates.io zurückgezogen, `cargo deny` brach deshalb ab; gezielt
+  angehoben auf 1.14.1 bzw. 5.4.3, sonst ändert sich in `Cargo.lock` nichts.
+  `cargo update` wählt künftig nur Fassungen, die zur zugesagten Rust-Version
+  1.88 passen (`.cargo/config.toml`).
+* `scripts/make-preview.sh` verschluckt einen Fehler von redact-rs nicht mehr.
+
 ### Geändert
+
+* **`--force` behält engere Rechte des Ziels.** Die neue Datei entstand immer
+  mit 0644 und ersetzte die alte samt ihrem Modus: aus einem mit `chmod 600`
+  geschützten Ergebnis wurde nach dem nächsten Lauf wieder ein für alle
+  lesbares. Jetzt bekommt sie unter Unix höchstens die Rechte der alten Datei
+  (und nie mehr als die Vorgabe 0644 bzw. 0600 für Review-Datei und
+  Audit-Log).
+* In den Workflows hält `actions/checkout` das Token nicht mehr in der
+  git-Konfiguration fest (`persist-credentials: false`); nur die
+  Versionsprüfung des Releases, die `git fetch` braucht, behält es.
 
 * **Die README ist verschlankt.** Sie nennt nur noch Kurzbeschreibung,
   Installation, Schnellstart und die Verweise; alle Einzelheiten stehen mit

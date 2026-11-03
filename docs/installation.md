@@ -92,8 +92,13 @@ ersten beiden ausgeliefert werden:
 | `redact-rs-gui` | `crates/redact-cli/src/bin/redact-rs-gui.rs` | die Fensterfassung, im Windows-Archiv enthalten |
 | `redact-gui` | `crates/redact-gui/src/main.rs` | Nebenprodukt des GUI-Crates, **nicht** im Release und nirgends dokumentiert außer hier. Es öffnet dasselbe Fenster wie `redact-rs-gui`, kennt aber `-h`/`-V` und weist unbekannte Optionen zurück (`redact-rs-gui` übergeht sie, weil es unter Windows ohne Konsole nichts melden könnte). Beim Entwickeln praktisch, weil es ohne `redact-cli` gebaut wird. Für den Einsatz ist `redact-rs` bzw. `redact-rs-gui` gemeint. |
 
-Voraussetzungen zum Bauen der GUI unter Linux:
+Voraussetzungen zum Bauen der GUI unter Linux — dieselbe Liste, die die CI
+installiert (Job `test` in `.github/workflows/ci.yml`). GTK gehört nicht dazu:
+der Dateidialog spricht das XDG-Portal über D-Bus an.
 
 ```bash
-sudo apt-get install libgtk-3-dev libxkbcommon-dev libwayland-dev
+sudo apt-get install -y --no-install-recommends \
+    pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+    libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+    libgl1-mesa-dev libegl1-mesa-dev libfontconfig1-dev
 ```

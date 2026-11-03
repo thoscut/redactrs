@@ -127,8 +127,17 @@ for index in "${!SCHRITTE[@]}"; do
   datei="schritt$index.pdf"
   echo "--- $datei   (redact-rs kontoauszug.pdf $opts)"
   # Wortaufspaltung ist hier gewollt: SCHRITTE enthaelt fertige Schalterfolgen.
+  #
+  # Erst laufen lassen, dann filtern: `"$cli" … | grep … || true` hat einen
+  # Fehler von redact-rs mit verschluckt (das `|| true` gilt der ganzen
+  # Pipeline), und aufgefallen waere er erst beim GIF an der fehlenden Datei.
   # shellcheck disable=SC2086
-  "$cli" kontoauszug.pdf -o "$datei" $opts 2>&1 | grep -E 'Schwärzungen|Deck-Rechtecke' || true
+  if ! ausgabe="$("$cli" kontoauszug.pdf -o "$datei" $opts 2>&1)"; then
+    printf '%s\n' "$ausgabe" >&2
+    echo "Fehler: redact-rs ist fuer $datei gescheitert" >&2
+    exit 1
+  fi
+  printf '%s\n' "$ausgabe" | grep -E 'Schwärzungen|Deck-Rechtecke' || true
   schritt_dateien+=("$datei")
 done
 

@@ -38,3 +38,17 @@ rustflags = [
     # mitgelieferte libgcc_s_seh-1.dll / libwinpthread-1.dll laeuft.
     "-C", "link-args=-static-libgcc -static-libstdc++ -Wl,-Bstatic -lpthread -Wl,-Bdynamic",
 ]
+
+# ---------------------------------------------------------------------------
+# MSRV-bewusste Auflösung
+#
+# Der Workspace steht auf `resolver = "2"`; der wählt bei `cargo update`
+# stur die neueste semver-verträgliche Fassung, auch wenn sie eine höhere
+# `rust-version` verlangt als die zugesagte (Cargo.toml, derzeit 1.88).
+# Nachgemessen am Stand 0.8.0: ein volles `cargo update` zog
+# serde-saphyr 1.3.0 und uuid 1.29.0 (beide rust-version 1.89) - der Job
+# "msrv" wäre rot geworden. Mit "fallback" nimmt cargo die neueste Fassung,
+# die zur `rust-version` passt, und nur wenn es keine gibt, eine neuere.
+# Stabil seit cargo 1.84; die MSRV-Toolchain 1.88 versteht den Schlüssel.
+[resolver]
+incompatible-rust-versions = "fallback"
