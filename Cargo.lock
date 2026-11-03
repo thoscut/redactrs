@@ -2755,6 +2755,7 @@ dependencies = [
 name = "redact-booking"
 version = "0.8.0"
 dependencies = [
+ "aho-corasick",
  "csv",
  "redact-core",
  "serde",

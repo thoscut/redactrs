@@ -106,6 +106,24 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 * Der Hinweis zur Polsterung sprach vom „schwarzen Balken … auf jeder Seite“;
   die Polsterung gilt für jede Schwärzungsart und an jeder Kante.
 
+* **Dienstverweigerung über die Buchungsliste.** Zwei Wachstumsformen, die
+  nicht linear waren, gemessen am Release-Binary:
+  * *Quadratisch in der Zeilenlänge:* jede Fundstelle zählte ihr Rechteck ab
+    der ersten Glyphe der Zeile. Ein `Tj` mit 40 000 IBANs, also eine
+    Eingabedatei von 2 899 Byte, lief mit einem einzigen Eintrag 128 s. Jetzt
+    nutzt die Buchungsliste den Glyphenzeiger, den die Muster schon hatten:
+    7,8 s, so viel wie dieselben Treffer über die eingebauten Muster.
+  * *Einträge × Text:* jeder Eintrag durchsuchte jede Zeile für sich.
+    2 000 Seiten mit 16 000 Einträgen ohne Treffer kosteten 89 s mehr als
+    ohne Liste. Jetzt liest ein Aho-Corasick-Automat über alle Einträge jede
+    Zeile einmal, und die Liste kostet 1,5 s.
+
+  Die Treffer bleiben dieselben, auch in derselben Reihenfolge: zuerst die
+  Negativliste, je Liste in Dateireihenfolge, je Eintrag überlappungsfrei und
+  mit derselben Kontextprüfung. Das hält ein Vergleich gegen die alte Suche
+  über 3 000 Zufallsfälle fest. Die Messreihen stehen in
+  `redact-booking/tests/zq_d_skalierung.rs`.
+
 ### Doku
 
 * Korrigiert, was der Code nicht mehr hielt: `ROADMAP.md` nannte 0.7.2 als
