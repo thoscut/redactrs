@@ -34,6 +34,25 @@ in [`docs/pruefverlauf-0.7.0.md`](docs/pruefverlauf-0.7.0.md).
 
 ## Unveröffentlicht
 
+### Sicherheit
+
+* **⚠ Sicherheit: Klartext unterhalb der Arten mit Schema überstand den
+  Lauf.** Seit der Prüfrunde 2 behalten Schrift, Grafikzustand, Bild,
+  Formular … nur die Schlüssel ihrer Normtabelle — was **darunter** ohne
+  eigenes Schema hing, behielt jeden Schlüssel. Ein Kommentar am ICC-Profil
+  eines Farbraums, ein `/HalftoneName` unter `/HT`, eine Notiz unter dem
+  `/BS` einer Annotation standen nach der Schwärzung in der Ausgabe;
+  Rückgabewert 0, „Metadaten: nichts zu entfernen“, und `--check-leaks`
+  fand sie. Behoben: eigene Schemata für ICC-Profile, CIE-Farbräume, die
+  Attribute eines `/DeviceN` (die Stellen eines Farbraumfelds werden
+  einzeln zugeordnet), Halbtöne (Typ 1, 5, 6, 10, 16; `/HalftoneName` fällt),
+  `/BS`, `/BE`, `/MK`, `/AP` samt Zustandsverzeichnis (nur Ströme bleiben),
+  die Ströme von `/FontFile*`, `/ToUnicode` und Type0-CMaps sowie die
+  Einträge in `/Alternates` eines Bildes. Was fällt, steht im Bericht als
+  Beiwerk. Ein Erscheinungsstrom ohne `/Subtype` gilt jetzt als Formular und
+  verliert, was das Formularschema nicht kennt. Beleg
+  `crates/redact-pdf/tests/zq_b_beiwerk_ohne_schema.rs`.
+
 ### Geändert
 
 * **Die README ist verschlankt.** Sie nennt nur noch Kurzbeschreibung,

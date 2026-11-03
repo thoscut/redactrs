@@ -58,6 +58,7 @@ Prosa.
 | Dienstverweigerung des Orakels: Arbeit je rohem Block über ein festes Fenster statt je Byte (Rückwärtssuche, Dekoderbau, Suche je Objekt) | A | Spur-A-Runde 2 (#100) | `crates/redact-pdf/tests/zp_d_rueckwaertssuche.rs` |
 | Ressourcenname nur beim Aufrufer auflösbar: `/Font`, `/XObject`, `/ExtGState`, `/Pattern` aus einem Formular mit eigenem `/Resources` (Poppler zeichnet) | A | Spur-A-Runde 2 (#88) | `crates/redact-pdf/tests/zp_c_ressourcen_beim_aufrufer.rs` |
 | Vervielfachung über Seiten: ein `/Annots`, das sich Seiten teilen, je Seite gelesen, kopiert und nach Rechtecken gefragt | A | Spur-A-Runde 2 (#94) | `crates/redact-pdf/tests/zp_b_geteiltes_annots.rs` |
+| Beiwerk unterhalb der Arten mit Schema: ICC-Profil, `/DeviceN`-Attribute (Feldpositionen im Farbraum), Halbton unter `/HT` samt `/HalftoneName` und Typ 5, `/BS`, `/BE`, `/MK`, `/AP` samt Zuständen, Ströme von `/FontFile*`, `/ToUnicode` und CMap, Einträge in `/Alternates` | A | Prüfrunde „Metadaten“ (Beiwerk ohne Schema) | `crates/redact-pdf/tests/zq_b_beiwerk_ohne_schema.rs` |
 
 Was nur die CI sehen kann, steht dabei: die Zeile zur Groß-/Kleinschreibung
 prüft ihren positiven Zweig allein im Job „Build (windows-2025)“.
